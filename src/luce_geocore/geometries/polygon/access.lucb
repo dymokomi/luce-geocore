@@ -286,6 +286,11 @@ pub func edge_span(mesh: const Mesh*) -> const i32[]!:
 pub func corner_edge_span(mesh: const Mesh*) -> const i32[]!:
     return (try mesh.edge_arrays()).1
 
+## The face of `mesh` nearest `point` if it is closer than `bound`, else
+## -1 (the spatial index is built on first use).
+pub func nearest_face_within(mesh: const Mesh*, point: Vector3, bound: f64) -> i64!:
+    return (try mesh.query_index()).nearest_within(point.subtract(mesh.origin), bound).face
+
 ## Attribute `index` of `mesh`, for Base readers.
 pub func attribute_entry(mesh: const Mesh*, index: i64) -> const Attribute*!:
     try checked(index, mesh.attributes.count())

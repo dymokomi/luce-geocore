@@ -147,7 +147,12 @@ transform, and joining two SDFs makes their union. Every op keeps the field
     meshes, concave edges and saddle vertices included; an L-shaped prism in
     `tests/field_checks.lucb` checks every band voxel.
   - Voxels beyond the band take a neighbour's side. A region no band voxel
-    reaches asks the BVH once, and so does a leaf too dense to rasterize.
+    reaches asks the BVH once.
+  - A mesh with more triangles than band voxels (a dense, finely tessellated
+    one) is answered by a BVH query per voxel instead. Leaves and 4×4×4
+    blocks beyond the band take one query at their center. A voxel beside
+    one that is a voxel beyond the band needs no query, since the distance
+    changes by at most a voxel.
 - **Points to level set** (`points_level_set`): a union of spheres. Each
   point writes only the voxels within its reach.
 - **Surface nets** (`surface_mesh`):
@@ -327,7 +332,7 @@ save and reads the values back.
 | Surface nets: that level set (faces) | 107.7 ms | 848,874 |
 | Surface nets projected onto the SDF (faces) | 165.4 ms | 848,874 |
 | Mesh to SDF: a 64-segment sphere, voxel 0.01 (active voxels) | 57.4 ms (750.3 ms per-voxel BVH) | 751,940 |
-| Mesh to SDF: the 837×837 grid, 256 voxels across (active voxels) | 1,130.8 ms | 340,573 |
+| Mesh to SDF: the 837×837 grid, 256 voxels across (active voxels) | 369.1 ms (511 ms before) | 340,573 |
 | Volume from Points: 100k points, radius 0.02, voxel 0.01 (active voxels) | 105.2 ms | 3,044,352 |
 
 luced-3d's headless benchmark (`tests/bench/run.py`, `--native --opt 2`)
@@ -340,7 +345,8 @@ saves and loads cooked results:
 
 Mesh to SDF at 256 voxels across the bounds (luced-3d headless benchmark):
 
-| Case | Rasterized, pseudo-normals | Per-voxel BVH (before) |
+| Case | Now (pseudo-normal signs) | Before (per-voxel BVH, face-normal signs) |
 |---|---:|---:|
-| 700k-face grid (an open plane of tiny quads) | 1,595 ms | 691 ms |
-| camera.step, tessellated | 2,538 ms | 41,636 ms |
+| 700k-face grid (an open plane of tiny quads; BVH path) | 461 ms | 691 ms |
+| camera.step, tessellated (rasterized) | 2,798 ms | 41,636 ms |
+| 64-segment sphere, voxel 0.01 (rasterized, geocore bench) | 57 ms | 750 ms |

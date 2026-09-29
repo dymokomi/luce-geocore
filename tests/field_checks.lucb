@@ -116,6 +116,25 @@ pub func saddle() -> !:
                 assert((value < 0.0) == inside_l(p))
                 checked += 1
         assert(checked > 10000)
+    # A 64-segment sphere has about 4,000 triangles against 400 band voxels
+    # at voxel 0.4, so it takes the BVH path: distances within the
+    # tessellation's error of the analytic sphere's (it rests on the ground).
+    let ball = try MeshPrimitives.sphere(1.0, 64)
+    defer ball.release()
+    let queried = try mesh_level_set(ball.value(), 0.4, 2.0, "surface")
+    defer release_grid(queried)
+    var compared: usize = 0
+    let ball_keys = queried.keys.view()
+    for leaf in 0..<ball_keys.length:
+        let (lx, ly, lz) = key_leaf(ball_keys[leaf])
+        for at in 0..<(usize)512:
+            let value = (f64)queried.values.view()[leaf * 512 + at]
+            let p = Vector3((f64)(lx * 8 + (i64)(at & 7)) * 0.4, (f64)(ly * 8 + (i64)((at >> 3) & 7)) * 0.4, (f64)(lz * 8 + (i64)(at >> 6)) * 0.4)
+            let exact = p.subtract(Vector3(0.0, 1.0, 0.0)).length() - 1.0
+            if math.abs(exact) > 0.7: continue
+            assert(math.abs(value - exact) < 0.01)
+            compared += 1
+    assert(compared > 100)
     # The concave corner's own voxels: just inside and just outside.
     let fine = try mesh_level_set(mesh.value(), 0.05, 3.0, "surface")
     defer release_grid(fine)

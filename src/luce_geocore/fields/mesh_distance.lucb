@@ -20,22 +20,30 @@
 ## no band voxel reaches asks the mesh's BVH once.
 ##
 ## A voxel visit first tests the triangle's box against the voxel's best
-## distance so far, so dense tiny triangles mostly cost a box test. Only a
-## leaf whose triangles would cover more than `raster_budget` visits asks
-## the BVH per voxel instead.
+## distance so far. A mesh with more than `dense_triangles` triangles per
+## band voxel (triangles far smaller than voxels) is cheaper by a BVH query
+## per voxel instead. Leaves, then their 4×4×4 blocks, beyond the band are
+## filled from one query at their center, and a voxel beside one a voxel
+## beyond the band needs none.
 
-## Voxel visits above which a leaf queries the BVH per voxel (16k visits a
-## voxel: measured on a 700k-quad plane and on camera.step, rasterizing
-## stays faster well past this).
-let raster_budget: usize = 8388608
+## Triangles per band voxel above which the BVH answers each voxel. The
+## 700k-quad plane at 256 voxels has about 3 (queries: 0.46 s, rasterizing
+## 1.6 s); camera.step's tessellation about 1.2 and a 64-segment sphere 0.01
+## at 0.01 voxels (rasterizing: 2.8 s and 57 ms).
+let dense_triangles: f64 = 2.0
 
 ## The signed distance of `mesh` as a level set of voxels `voxel` apart,
 ## `band` voxels each side.
 pub func mesh_level_set(mesh: const Mesh*, voxel: f64, band: f64, name: str) -> SparseGrid*!:
     try check_voxel(voxel, band)
     if mesh.face_count() == 0: error(errors.invalid, "the mesh has no faces")
+    let dense = (f64)(offset_span(mesh)[mesh.face_count()] - (i32)(mesh.face_count() * 2)) > dense_triangles * (try band_voxels(mesh, voxel, band))
+    # A dense mesh is answered by BVH queries: its index is built first, in
+    # parallel (built inside a pool item it would build serially).
+    if dense: try mesh.prepare_queries()
     var shape = try MeshShape.of(mesh)
     defer shape.close()
+    if dense: return try queried_level_set(mesh, &shape, voxel, band, name)
     let reach = band * voxel
     let triangles = shape.corners.count // 3
     # Leaves each triangle's grown box touches: count, then list.
@@ -70,6 +78,83 @@ pub func mesh_level_set(mesh: const Mesh*, voxel: f64, band: f64, name: str) -> 
     try starts.push(total)
     var fill = RasterWork(mesh, &shape, voxel, band, pair_triangles, starts.view())
     return try grid_of_leaves(name, GridClass.level_set, (f32)reach, voxel_transform(voxel), leaves.view(), fill_raster_leaf, (void*)&fill)
+
+## About how many voxels the band holds: the surface's area in voxel faces
+## times the band's thickness (face areas summed in parallel chunks).
+func band_voxels(mesh: const Mesh*, voxel: f64, band: f64) -> f64!:
+    let faces = (usize)mesh.face_count()
+    var parts: f64[64] = ---
+    for at in 0..<(usize)64: parts[at] = 0.0
+    var work = AreaWork(face_normal_span(mesh), offset_span(mesh), corner_span(mesh), point_span(mesh), (faces + 63) // 64, parts)
+    parallel.run(64, sum_areas, (void*)&work)
+    var area = 0.0
+    for part in work.parts: area += part
+    return area / (voxel * voxel) * (2.0 * band + 1.0)
+
+struct AreaWork:
+    let normals: const Float3[]
+    let offsets: const i32[]
+    let corners: const i32[]
+    let points: const Float3[]
+    let chunk: usize
+    var parts: f64[64]
+
+## Polygon areas (Newell's vector along the face normal), a chunk each.
+func sum_areas(context: void*?, index: usize):
+    let work = (AreaWork*)(context else return)
+    let faces = work.offsets.length - 1
+    let first = index * work.chunk
+    let end = first + work.chunk if first + work.chunk < faces else faces
+    var area = 0.0
+    for face in first..<end:
+        let start = (usize)work.offsets[face]
+        let size = (usize)work.offsets[face + 1] - start
+        var sum = Vector3()
+        for at in 0..<size:
+            sum = sum.add(work.points[(usize)work.corners[start + at]].vector().cross(work.points[(usize)work.corners[start + (at + 1) % size]].vector()))
+        area += math.abs(sum.dot(work.normals[face].vector())) * 0.5
+    work.parts[index] = area
+
+## The level set by a BVH query per voxel of the leaves the triangles'
+## grown boxes touch (for triangles far smaller than voxels).
+func queried_level_set(mesh: const Mesh*, shape: const MeshShape*, voxel: f64, band: f64, name: str) -> SparseGrid*!:
+    let reach = band * voxel
+    let size = voxel * 8.0
+    let triangles = shape.corners.count // 3
+    # The leaves the triangles' grown boxes touch. Neighbouring triangles
+    # of a dense mesh touch the same leaves: a triangle whose leaf box is its
+    # predecessor's lists none.
+    let counts = try alloc usize[triangles + 1] in memory.heap
+    defer free(counts) in memory.heap
+    var count_work = BinWork(shape, voxel, reach, counts, empty_u64(), empty_u64(), 3)
+    parallel.parallel_for(triangles, 4096, bin_triangles, (void*)&count_work)
+    var total: usize = 0
+    for triangle in 0..<triangles:
+        let count = counts[triangle]
+        counts[triangle] = total
+        total += count
+    counts[triangles] = total
+    if total > 400000000: error(errors.limit, "the voxels are too small for this mesh")
+    let listed = try alloc u64[total] in memory.heap
+    defer free(listed) in memory.heap
+    var list_work = BinWork(shape, voxel, reach, counts, listed, empty_u64(), 4)
+    parallel.parallel_for(triangles, 4096, bin_triangles, (void*)&list_work)
+    try sort_keys(listed)
+    var keys = Growing[u64]()
+    defer keys.close()
+    try keys.assign(listed[..<unique_keys(listed)])
+    var fill = RasterWork(mesh, shape, voxel, band, empty_u64(), empty_usize())
+    return try grid_of_leaves(name, GridClass.level_set, (f32)reach, voxel_transform(voxel), keys.view(), fill_query_leaf, (void*)&fill)
+
+func empty_usize() -> usize[]:
+    var empty: usize[]
+    return empty
+
+func fill_query_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[]):
+    let work = (RasterWork*)(context else return)
+    discard(leaf)
+    let (lx, ly, lz) = key_leaf(key)
+    query_leaf(work, lx, ly, lz, work.band * work.voxel, values, mask)
 
 func empty_u64() -> u64[]:
     var empty: u64[]
@@ -224,21 +309,27 @@ struct BinWork:
     let counts: usize[]
     let keys: u64[]
     let triangles: u64[]
-    ## 0 count, 1 list.
+    ## 0 count, 1 list keys and triangles; 3 count and 4 list keys only,
+    ## none for a triangle whose leaf box is its predecessor's.
     let pass: u8
+
+## Triangle `triangle`'s grown box in leaf coordinates.
+func leaf_box(work: const BinWork*, triangle: usize) -> (i64, i64, i64, i64, i64, i64):
+    let size = work.voxel * 8.0
+    let (low, high) = triangle_box(work.shape, triangle)
+    return ((i64)math.floor((low.x - work.reach) / size), (i64)math.floor((low.y - work.reach) / size), (i64)math.floor((low.z - work.reach) / size),
+            (i64)math.floor((high.x + work.reach) / size), (i64)math.floor((high.y + work.reach) / size), (i64)math.floor((high.z + work.reach) / size))
 
 func bin_triangles(context: void*?, first: usize, end: usize):
     let work = (BinWork*)(context else return)
-    let size = work.voxel * 8.0
     for triangle in first..<end:
-        let (low, high) = triangle_box(work.shape, triangle)
-        let lx = (i64)math.floor((low.x - work.reach) / size)
-        let ly = (i64)math.floor((low.y - work.reach) / size)
-        let lz = (i64)math.floor((low.z - work.reach) / size)
-        let hx = (i64)math.floor((high.x + work.reach) / size)
-        let hy = (i64)math.floor((high.y + work.reach) / size)
-        let hz = (i64)math.floor((high.z + work.reach) / size)
-        if work.pass == 0:
+        let (lx, ly, lz, hx, hy, hz) = leaf_box(work, triangle)
+        if work.pass >= 3 and triangle > 0:
+            let (px, py, pz, qx, qy, qz) = leaf_box(work, triangle - 1)
+            if px == lx and py == ly and pz == lz and qx == hx and qy == hy and qz == hz:
+                if work.pass == 3: work.counts[triangle] = 0
+                continue
+        if work.pass == 0 or work.pass == 3:
             work.counts[triangle] = (usize)((hx - lx + 1) * (hy - ly + 1) * (hz - lz + 1))
             continue
         var at = work.counts[triangle]
@@ -246,7 +337,7 @@ func bin_triangles(context: void*?, first: usize, end: usize):
             for y in ly..=hy:
                 for x in lx..=hx:
                     work.keys[at] = leaf_key(x, y, z)
-                    work.triangles[at] = (u64)triangle
+                    if work.pass == 1: work.triangles[at] = (u64)triangle
                     at += 1
 
 ## The distance from `p` to the box low..high (0 inside).
@@ -281,9 +372,6 @@ func fill_raster_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mas
     for at in 0..<leaf_voxels:
         best[at] = limit
         side[at] = 0
-    if raster_cost(work, leaf, lx, ly, lz, limit) > raster_budget:
-        query_leaf(work, lx, ly, lz, limit, values, mask)
-        return
     for pair in work.starts[leaf]..<work.starts[leaf + 1]:
         let triangle = (usize)work.pair_triangles[pair]
         let (low, high) = triangle_box(work.shape, triangle)
@@ -324,32 +412,53 @@ func fill_raster_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mas
         values[at] = (f32)(-d if side[at] == 2 else d)
         if d < limit: mask[at >> 6] = mask[at >> 6] | ((u64)1 << (u64)(at & 63))
 
-## Voxel visits rasterizing leaf `leaf`'s triangles would take.
-func raster_cost(work: const RasterWork*, leaf: usize, lx: i64, ly: i64, lz: i64, limit: f64) -> usize:
-    var cost: usize = 0
-    for pair in work.starts[leaf]..<work.starts[leaf + 1]:
-        let triangle = (usize)work.pair_triangles[pair]
-        let (low, high) = triangle_box(work.shape, triangle)
-        let x = math.imin(7, (i64)math.floor((high.x + limit) / work.voxel) - lx * 8) - math.imax(0, (i64)math.ceil((low.x - limit) / work.voxel) - lx * 8) + 1
-        let y = math.imin(7, (i64)math.floor((high.y + limit) / work.voxel) - ly * 8) - math.imax(0, (i64)math.ceil((low.y - limit) / work.voxel) - ly * 8) + 1
-        let z = math.imin(7, (i64)math.floor((high.z + limit) / work.voxel) - lz * 8) - math.imax(0, (i64)math.ceil((low.z - limit) / work.voxel) - lz * 8) + 1
-        if x > 0 and y > 0 and z > 0: cost += (usize)(x * y * z)
-        if cost > raster_budget: return cost
-    return cost
-
-## Every voxel of a leaf by a BVH query: the exact signed distance.
+## Every voxel of a leaf by a BVH query: the exact signed distance. The
+## leaf, then each of its eight 4×4×4 blocks, is first asked at its center:
+## one farther from the surface than its half diagonal plus the band holds
+## no band voxel and takes that one side and the clamped value. A voxel
+## beside one at least a voxel beyond the band is beyond it too, on the same
+## side (the distance changes by at most a voxel), and needs no query.
 func query_leaf(work: const RasterWork*, lx: i64, ly: i64, lz: i64, limit: f64, values: f32[], mask: u64[]):
     for at in 0..<mask_words: mask[at] = 0
-    # A leaf whose center is farther than its half diagonal plus the band
-    # holds no band voxel: one side, one clamped value.
+    let root3 = 1.7320508075688772
     let middle = Vector3(((f64)(lx * 8) + 3.5) * work.voxel, ((f64)(ly * 8) + 3.5) * work.voxel, ((f64)(lz * 8) + 3.5) * work.voxel)
     let middle_distance = exact_signed(work, middle)
-    if math.abs(middle_distance) > 3.5 * 1.7320508075688772 * work.voxel + limit:
+    if math.abs(middle_distance) > 3.5 * root3 * work.voxel + limit:
         for at in 0..<leaf_voxels: values[at] = (f32)(limit if middle_distance > 0.0 else -limit)
         return
+    # A lower bound of each voxel's distance, with its sign.
+    var raw: f64[512] = ---
+    var far: bool[8] = ---
+    var sides: f64[8] = ---
+    for block in 0..<(usize)8:
+        let bx = (i64)(block & 1) * 4
+        let by = (i64)((block >> 1) & 1) * 4
+        let bz = (i64)(block >> 2) * 4
+        let block_center = Vector3(((f64)(lx * 8 + bx) + 1.5) * work.voxel, ((f64)(ly * 8 + by) + 1.5) * work.voxel, ((f64)(lz * 8 + bz) + 1.5) * work.voxel)
+        let center_distance = exact_signed(work, block_center)
+        let bound = math.abs(center_distance) - 1.5 * root3 * work.voxel
+        far[block] = bound > limit
+        sides[block] = bound if center_distance > 0.0 else -bound
+    let beyond = limit + work.voxel
     for at in 0..<leaf_voxels:
-        let p = Vector3((f64)(lx * 8 + (i64)(at & 7)) * work.voxel, (f64)(ly * 8 + (i64)((at >> 3) & 7)) * work.voxel, (f64)(lz * 8 + (i64)(at >> 6)) * work.voxel)
-        let d = exact_signed(work, p)
+        let x = (i64)(at & 7)
+        let y = (i64)((at >> 3) & 7)
+        let z = (i64)(at >> 6)
+        let block = (usize)(x >> 2) + (usize)(y >> 2) * 2 + (usize)(z >> 2) * 4
+        if far[block]:
+            raw[at] = sides[block]
+            continue
+        var known = 0.0
+        if x > 0 and math.abs(raw[at - 1]) >= beyond: known = raw[at - 1]
+        elif y > 0 and math.abs(raw[at - 8]) >= beyond: known = raw[at - 8]
+        elif z > 0 and math.abs(raw[at - 64]) >= beyond: known = raw[at - 64]
+        if known != 0.0:
+            raw[at] = known - work.voxel if known > 0.0 else known + work.voxel
+            continue
+        let p = Vector3((f64)(lx * 8 + x) * work.voxel, (f64)(ly * 8 + y) * work.voxel, (f64)(lz * 8 + z) * work.voxel)
+        raw[at] = exact_signed(work, p)
+    for at in 0..<leaf_voxels:
+        let d = raw[at]
         values[at] = (f32)math.clamp(d, -limit, limit)
         if math.abs(d) < limit: mask[at >> 6] = mask[at >> 6] | ((u64)1 << (u64)(at & 63))
 
@@ -382,14 +491,18 @@ func exact_inside(work: const RasterWork*, p: Vector3) -> bool:
 ## BVH, the nearest point over its triangles, the side of that point's
 ## feature's pseudo-normal.
 func exact_signed(work: const RasterWork*, p: Vector3) -> f64:
-    let face = work.mesh.closest_face(p) catch failure: return 1.0e30
+    let face = nearest_face_within(work.mesh, p, 1.0e150) catch failure: return 1.0e30
     if face < 0: return 1.0e30
+    return face_signed(work, (usize)face, p)
+
+## The signed distance from `p` to face `face`: over its triangles, the
+## side of the nearest point's feature's pseudo-normal.
+func face_signed(work: const RasterWork*, face: usize, p: Vector3) -> f64:
     # Face f's triangles follow those of the faces before it.
     let offsets = offset_span(work.mesh)
-    let f = (usize)face
     var best = 1.0e300
     var inside = false
-    for triangle in (usize)offsets[f] - f * 2..<(usize)offsets[f + 1] - (f + 1) * 2:
+    for triangle in (usize)offsets[face] - face * 2..<(usize)offsets[face + 1] - (face + 1) * 2:
         let found = closest_feature(p, work.shape.vertex(triangle, 0), work.shape.vertex(triangle, 1), work.shape.vertex(triangle, 2))
         let d = found.point.subtract(p).length()
         if d < best:

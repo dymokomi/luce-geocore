@@ -125,8 +125,13 @@ pub struct TriangleIndex:
         return self.nearest(point).distance
 
     pub func nearest(point: Vector3) -> RayHit:
+        return self.nearest_within(point, 1.0e150)
+
+    ## The nearest face closer than `bound`, or face -1: a caller that knows
+    ## a face at `bound` (a neighbouring query's) prunes most of the tree.
+    pub func nearest_within(point: Vector3, bound: f64) -> RayHit:
         if self.nodes.length == 0: return RayHit()
-        var best: f64 = 1.0e300
+        var best: f64 = bound * bound
         var face: i64 = -1
         var stack: u32[64]
         var count: usize = 1
@@ -150,7 +155,7 @@ pub struct TriangleIndex:
                     if distance < best:
                         best = distance
                         face = self.face_of(triangle)
-        return RayHit(face, math.sqrt(best))
+        return RayHit(face, math.sqrt(best) if face >= 0 else -1.0)
 
     pub mutating func close():
         free(self.order) in memory.heap
