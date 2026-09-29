@@ -9,8 +9,10 @@
 ## On a worker each item runs in its own runtime context (entered before,
 ## finished after), so it may create ARC temporaries but must release all it
 ## creates and touch none of the caller's objects: only raw data crosses back.
-## Items the caller runs share its context. Workers have deep stacks: B-rep
-## tessellation runs whole faces as items.
+## Items the caller runs share its context. A batch started inside an item on
+## a worker runs inline there, in that item's context (an item's objects never
+## reach another thread's context, and nesting never waits on a busy pool).
+## Workers have deep stacks: B-rep tessellation runs whole faces as items.
 import os
 import sync
 import thread
@@ -52,8 +54,10 @@ var last_job: Job*? = none
 var started: bool = false
 var worker_count: usize = 0
 
-## How many threads a batch can have at once: the pool's workers and the caller.
+## How many threads a batch can have at once: the pool's workers and the
+## caller (1 inside an item on a worker, where batches run inline).
 pub func width() -> usize:
+    if on_worker: return 1
     lock.lock()
     ensure_workers()
     let count = worker_count
@@ -66,7 +70,7 @@ pub func width() -> usize:
 pub func run(count: usize, entry: func(void*?, usize) -> unit, context: void*?, limit: usize = 0):
     if count == 0:
         return
-    if count == 1 or limit == 1:
+    if count == 1 or limit == 1 or on_worker:
         for index in 0..<count:
             entry(context, index)
         return
@@ -97,6 +101,14 @@ func meet(context: void*?, index: usize):
 ## them) and return at once; `finished` tells when it is done and `wait`
 ## collects it. With no worker to be had it runs here before returning.
 pub func start(job: Job*, count: usize, entry: func(void*?, usize) -> unit, context: void*?, limit: usize = 0):
+    if on_worker:
+        enqueue(job, 0, entry, context, limit)
+        job.count = count
+        job.next.store(count, .relaxed)
+        for index in 0..<count:
+            entry(context, index)
+            discard(job.finished.add(1, .acq_rel))
+        return
     enqueue(job, count, entry, context, limit)
     lock.lock()
     let alone = worker_count == 0
