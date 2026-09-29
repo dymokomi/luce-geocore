@@ -42,16 +42,16 @@ extend Mesh:
     ## An authored N is dropped unless `keep_normals`: after an arbitrary edit
     ## the derived normals are right and the old ones stale.
     func transfer_attributes(output: Mesh*, point_parents: const i32[], face_parents: const i32[], corner_parents: const i32[], keep_normals: bool) -> !:
-        var edge_parents: i32[]
+        var edge_map: i32[]
         defer:
-            if edge_parents.length > 0: free(edge_parents) in memory.heap
+            if edge_map.length > 0: free(edge_map) in memory.heap
         for index in 0..<self.attributes.count():
             let entry = self.attributes.entry(index)
             if entry.name() == "N" and not keep_normals:
                 continue
-            if entry.domain == Domain.edge and edge_parents.length == 0 and corner_parents.length > 0:
-                edge_parents = try self.edge_parents_of(output, corner_parents)
-            let parents = point_parents if entry.domain == Domain.point else (corner_parents if entry.domain == Domain.corner else (edge_parents if entry.domain == Domain.edge else face_parents))
+            if entry.domain == Domain.edge and edge_map.length == 0 and corner_parents.length > 0:
+                edge_map = try self.edge_parents_of(output, corner_parents)
+            let parents = point_parents if entry.domain == Domain.point else (corner_parents if entry.domain == Domain.corner else (edge_map if entry.domain == Domain.edge else face_parents))
             try output.attributes.put(try attribute_ops.remapped(entry, parents, (try output.domain_size(entry.domain))))
 
     ## The old edge each of `output`'s edges continues, or -1 for a new edge.

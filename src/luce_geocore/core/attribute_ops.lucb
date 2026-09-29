@@ -156,7 +156,8 @@ func concatenate_text(result: Attribute*, pieces: const Piece[]) -> !:
             output[base + element] = mapping[(usize)index] if index >= 0 and (usize)index < mapping.length else -1
     result.table = try table.finish()
 
-func write_number(bytes: u8[], kind: DataType, index: usize, value: f64):
+## Write `value` as element `index` of a column of `kind`.
+pub func write_number(bytes: u8[], kind: DataType, index: usize, value: f64):
     match kind:
         .boolean:
             if value != 0.0: bytes[index // 8] = bytes[index // 8] | ((u8)1 << (u8)(index % 8))

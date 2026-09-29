@@ -19,6 +19,16 @@ pub func strict_conversion(source: Domain, destination: Domain) -> bool:
     if destination == Domain.face: return true
     return destination == Domain.edge and source == Domain.point
 
+## The domain an expression's names and attributes live on (Houdini's
+## "guess from group"): that of its first named group or attribute, the edge
+## domain for edge forms, else `fallback`.
+pub func guess_domain(mesh: const Mesh*, text: str, fallback: Domain) -> Domain!:
+    var program = try GroupProgram.parse(text)
+    defer program.close()
+    var report = GroupReport()
+    let run = Evaluation(&program, mesh, none, &report)
+    return run.guess(program.top_first, program.top_count, fallback)
+
 pub func evaluate(program: const GroupProgram*, mesh: const Mesh*, target: Domain, report: GroupReport*) -> BitsBuilder!:
     var run = Evaluation(program, mesh, none, report)
     return try run.terms(program.top_first, program.top_count, target)

@@ -1,0 +1,191 @@
+## Verbs that move points and keep the topology: Transform (move, rotate,
+## scale about a pivot), Smooth, Mountain (noise), Peak (along normals),
+## Flatten and Snap. They copy the positions once, write the group's points
+## in parallel, and share the topology, its caches, the triangles and every
+## attribute; the output selection is the input's group.
+
+let transform_parms: ParmSpec[5] = [
+    ParmSpec("Translate", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "Moves the group, after rotating and scaling."),
+    ParmSpec("Rotate", ParmKind.vector, 0.0, -360000.0, 360000.0, 3, "", "Rotation about X, then Y, then Z, in degrees, about the pivot."),
+    ParmSpec("Scale", ParmKind.vector, 1.0, -100000.0, 100000.0, 3, "", "Scale along each axis about the pivot."),
+    ParmSpec("Pivot", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Centroid|Origin|Custom", "Rotate and scale about the group's centroid, the origin or the custom point."),
+    ParmSpec("Custom pivot", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "The point rotation and scale happen about when Pivot is Custom.")]
+
+pub func transform_verb() -> Verb:
+    return Verb("Transform Components", "Deform", "Move, rotate and scale components about a pivot", Domain.point, true, transform_parms, false, cook_transform)
+
+let smooth_parms: ParmSpec[2] = [
+    ParmSpec("Amount", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "How far each point moves toward the average of its neighbours."),
+    ParmSpec("Iterations", ParmKind.integer, 1.0, 1.0, 100.0, 1, "", "Rounds of smoothing.")]
+
+pub func smooth_verb() -> Verb:
+    return Verb("Smooth", "Deform", "Laplacian relaxation of the group's points", Domain.point, true, smooth_parms, false, cook_smooth)
+
+let mountain_parms: ParmSpec[2] = [
+    ParmSpec("Height", ParmKind.number, 0.2, 0.0, 100000.0, 1, "", "Largest displacement of the noise.", 2.0),
+    ParmSpec("Seed", ParmKind.integer, 0.0, 0.0, 100000.0, 1, "", "Another seed gives other noise.")]
+
+pub func mountain_verb() -> Verb:
+    return Verb("Mountain", "Deform", "Deterministic noise displacement", Domain.point, true, mountain_parms, false, cook_mountain)
+
+let peak_parms: ParmSpec[1] = [ParmSpec("Distance", ParmKind.number, 0.2, -100000.0, 100000.0, 1, "", "Distance along the averaged normals.", 2.0)]
+
+pub func peak_verb() -> Verb:
+    return Verb("Peak", "Deform", "Move points along their normals", Domain.point, true, peak_parms, false, cook_peak)
+
+let flatten_parms: ParmSpec[1] = [ParmSpec("Axis", ParmKind.menu, 1.0, 0.0, 2.0, 1, "X|Y|Z", "The axis flattened to the group's centroid.")]
+
+pub func flatten_verb() -> Verb:
+    return Verb("Flatten", "Deform", "Flatten the group onto a plane through its centroid", Domain.point, true, flatten_parms, false, cook_flatten)
+
+let snap_parms: ParmSpec[1] = [ParmSpec("Spacing", ParmKind.number, 0.1, 0.000001, 100000.0, 1, "", "Grid spacing points snap to.")]
+
+pub func snap_verb() -> Verb:
+    return Verb("Snap", "Deform", "Snap points to a grid", Domain.point, true, snap_parms, false, cook_snap)
+
+## Positions of the input (relative to its origin), written copy-on-write,
+## and the group's points in ascending order.
+struct Points:
+    var positions: Column[Float3]
+    var selected: Growing[u32]
+
+func begin_points(input: const VerbInput*, output: VerbOutput*) -> const u32[]!:
+    output.positions = mesh_positions(input.mesh)
+    discard(try output.positions.writable())
+    try output.moved.reserve(input.group.population())
+    for word in 0..<input.group.words.length:
+        var pending = input.group.words[word]
+        while pending != 0:
+            output.moved.items[output.moved.count] = (u32)(word * 64 + (usize)trailing_zeros(pending))
+            output.moved.count += 1
+            pending = pending & (pending - 1)
+    output.selection = try BitsBuilder.copy_of(input.group)
+    output.selection_domain = Domain.point
+    return output.moved.view()
+
+## The centroid of the group's points (relative to the origin).
+func centroid(points: const Float3[], moved: const u32[]) -> Vector3:
+    var sum = Vector3()
+    for point in moved: sum = sum.add(points[(usize)point].vector())
+    return sum.multiply_scalar(1.0 / (f64)(moved.length if moved.length > 0 else 1))
+
+## Apply `matrix` about `pivot` to the listed points, in parallel.
+struct PlaceWork:
+    let positions: Float3[]
+    let moved: const u32[]
+    let matrix: Matrix4
+    let pivot: Vector3
+
+func place_points(context: void*?, first: usize, end: usize):
+    let work = (PlaceWork*)(context else return)
+    for at in first..<end:
+        let point = (usize)work.moved[at]
+        let p = work.positions[point].vector().subtract(work.pivot)
+        work.positions[point] = Float3.of(work.matrix.transform_point(p).add(work.pivot))
+
+func cook_transform(input: const VerbInput*, output: VerbOutput*) -> !:
+    let moved = try begin_points(input, output)
+    let p = input.parms
+    let degrees = 0.017453292519943295
+    let translation = Vector3(p.at(0), p.at(1), p.at(2))
+    let rotation = Vector3(p.at(3) * degrees, p.at(4) * degrees, p.at(5) * degrees)
+    let scale = Vector3(p.at(6), p.at(7), p.at(8))
+    if not translation.is_finite() or not rotation.is_finite() or not scale.is_finite():
+        error(errors.invalid, "transform values must be finite")
+    let positions = output.positions.span()
+    let origin = mesh_origin(input.mesh)
+    let mode = (i64)p.at(9)
+    let pivot = centroid(positions, moved) if mode == 0 else (origin.multiply_scalar(-1.0) if mode == 1 else Vector3(p.at(10), p.at(11), p.at(12)).subtract(origin))
+    let linear = Matrix4.compose(Vector3(), rotation, scale)
+    let matrix = Matrix4(linear.x, linear.y, linear.z, translation)
+    var work = PlaceWork(positions, moved, matrix, pivot)
+    parallel.parallel_for(moved.length, 16384, place_points, (void*)&work)
+
+## Neighbour averages over the edges, `iterations` rounds.
+func cook_smooth(input: const VerbInput*, output: VerbOutput*) -> !:
+    let moved = try begin_points(input, output)
+    let amount = input.parms.at(0)
+    let rounds = (usize)math.max(1.0, math.min(100.0, input.parms.at(1)))
+    if not (amount >= 0.0 and amount <= 1.0): error(errors.invalid, "Smooth amount must be in 0..1")
+    let edges = try edge_span(input.mesh)
+    let around = try point_edge_span(input.mesh)
+    let positions = output.positions.span()
+    let next = try alloc Float3[moved.length] in memory.heap
+    defer free(next) in memory.heap
+    for _ in 0..<rounds:
+        var work = SmoothWork(positions, moved, edges, around.0, around.1, next, amount)
+        parallel.parallel_for(moved.length, 4096, smooth_points, (void*)&work)
+        for at in 0..<moved.length: positions[(usize)moved[at]] = next[at]
+
+struct SmoothWork:
+    let positions: const Float3[]
+    let moved: const u32[]
+    let edges: const i32[]
+    let offsets: const i32[]
+    let point_edges: const i32[]
+    let next: Float3[]
+    let amount: f64
+
+func smooth_points(context: void*?, first: usize, end: usize):
+    let work = (SmoothWork*)(context else return)
+    for at in first..<end:
+        let point = (usize)work.moved[at]
+        let p = work.positions[point].vector()
+        var sum = Vector3()
+        var count = 0.0
+        for slot in (usize)work.offsets[point]..<(usize)work.offsets[point + 1]:
+            let edge = (usize)work.point_edges[slot]
+            let a = (usize)work.edges[edge * 2]
+            let other = (usize)work.edges[edge * 2 + 1] if a == point else a
+            sum = sum.add(work.positions[other].vector())
+            count += 1.0
+        work.next[at] = Float3.of(p.add(sum.multiply_scalar(1.0 / count).subtract(p).multiply_scalar(work.amount))) if count > 0.0 else work.positions[point]
+
+func noise(seed: f64) -> f64:
+    let value = math.sin(seed * 12.9898) * 43758.5453
+    return (value - math.floor(value)) * 2.0 - 1.0
+
+func cook_mountain(input: const VerbInput*, output: VerbOutput*) -> !:
+    let moved = try begin_points(input, output)
+    let height = input.parms.at(0)
+    let seed = input.parms.at(1)
+    let positions = output.positions.span()
+    for point in moved:
+        let base = (f64)point + seed * 131.0
+        let offset = Vector3(noise(base + 1.0), noise(base + 17.0), noise(base + 43.0)).multiply_scalar(height)
+        positions[(usize)point] = Float3.of(positions[(usize)point].vector().add(offset))
+
+## Along each point's averaged face normals.
+func cook_peak(input: const VerbInput*, output: VerbOutput*) -> !:
+    let moved = try begin_points(input, output)
+    let distance = input.parms.at(0)
+    let around = try point_face_span(input.mesh)
+    let normals = face_normal_span(input.mesh)
+    let positions = output.positions.span()
+    for point in moved:
+        var sum = Vector3()
+        for slot in (usize)around.0[(usize)point]..<(usize)around.0[(usize)point + 1]:
+            sum = sum.add(normals[(usize)around.1[slot]].vector())
+        let length = sum.length()
+        if length > 0.000001:
+            positions[(usize)point] = Float3.of(positions[(usize)point].vector().add(sum.multiply_scalar(distance / length)))
+
+func cook_flatten(input: const VerbInput*, output: VerbOutput*) -> !:
+    let moved = try begin_points(input, output)
+    let positions = output.positions.span()
+    let center = centroid(positions, moved)
+    let axis = (i64)input.parms.at(0)
+    for point in moved:
+        let p = positions[(usize)point]
+        positions[(usize)point] = Float3(p.x if axis != 0 else (f32)center.x, p.y if axis != 1 else (f32)center.y, p.z if axis != 2 else (f32)center.z)
+
+func cook_snap(input: const VerbInput*, output: VerbOutput*) -> !:
+    let moved = try begin_points(input, output)
+    let spacing = input.parms.at(0)
+    if not (spacing > 0.000001): error(errors.invalid, "Snap spacing must be positive")
+    let origin = mesh_origin(input.mesh)
+    let positions = output.positions.span()
+    for point in moved:
+        let p = positions[(usize)point].vector().add(origin)
+        let snapped = Vector3(math.floor(p.x / spacing + 0.5), math.floor(p.y / spacing + 0.5), math.floor(p.z / spacing + 0.5)).multiply_scalar(spacing)
+        positions[(usize)point] = Float3.of(snapped.subtract(origin))

@@ -1,0 +1,143 @@
+## The verb registry and how Luce runs verbs. The node catalog is generated
+## from it: each verb is a node kind whose parameters are the verb's, plus
+## Group and Group Type.
+
+let verb_total: usize = 19
+
+## Verb `index` in menu order.
+pub func verb_at(index: usize) -> Verb:
+    match index:
+        0: return transform_verb()
+        1: return smooth_verb()
+        2: return mountain_verb()
+        3: return peak_verb()
+        4: return flatten_verb()
+        5: return snap_verb()
+        6: return delete_verb()
+        7: return reverse_verb()
+        8: return triangulate_verb()
+        9: return duplicate_verb()
+        10: return split_verb()
+        11: return inset_faces_verb()
+        12: return extrude_verb()
+        13: return subdivide_verb()
+        14: return fuse_verb()
+        15: return clean_verb()
+        16: return chamfer_verb()
+        17: return fill_verb()
+        18: return dissolve_verb()
+        _: return transform_verb()
+
+pub func verb_count() -> usize:
+    return verb_total
+
+pub func find_verb(name: str) -> Verb?:
+    for index in 0..<verb_count():
+        let verb = verb_at(index)
+        if verb.name == name: return verb
+    return none
+
+## Luce's view of the verbs: their descriptions (for the node catalog) and
+## running one.
+pub struct Verbs:
+    let reserved: u8 = 0
+
+    pub static func count() -> i64:
+        return (i64)verb_count()
+
+    pub static func index_of(name: str) -> i64:
+        for index in 0..<verb_count():
+            if verb_at(index).name == name: return (i64)index
+        return -1
+
+    pub static func name(index: i64) -> str:
+        return verb_at(checked(index)).name
+
+    pub static func category(index: i64) -> str:
+        return verb_at(checked(index)).category
+
+    pub static func description(index: i64) -> str:
+        return verb_at(checked(index)).description
+
+    ## The domain its kernel works on (0 points, 1 corners, 2 faces, 4 edges).
+    pub static func domain(index: i64) -> i64:
+        return (i64)(u8)verb_at(checked(index)).domain
+
+    pub static func changes_topology(index: i64) -> bool:
+        return verb_at(checked(index)).changes_topology
+
+    pub static func parm_count(index: i64) -> i64:
+        return (i64)verb_at(checked(index)).parms.length
+
+    pub static func parm_label(index: i64, parm: i64) -> str:
+        return parm_of(index, parm).label
+
+    ## 0 number, 1 integer, 2 toggle, 3 vector, 4 menu.
+    pub static func parm_kind(index: i64, parm: i64) -> i64:
+        return (i64)(u8)parm_of(index, parm).kind
+
+    pub static func parm_initial(index: i64, parm: i64) -> f64:
+        return parm_of(index, parm).initial
+
+    pub static func parm_minimum(index: i64, parm: i64) -> f64:
+        return parm_of(index, parm).minimum
+
+    pub static func parm_maximum(index: i64, parm: i64) -> f64:
+        return parm_of(index, parm).maximum
+
+    pub static func parm_soft(index: i64, parm: i64) -> f64:
+        return parm_of(index, parm).soft
+
+    pub static func parm_components(index: i64, parm: i64) -> i64:
+        return (i64)parm_of(index, parm).components
+
+    pub static func parm_choices(index: i64, parm: i64) -> str:
+        return parm_of(index, parm).choices
+
+    pub static func parm_doc(index: i64, parm: i64) -> str:
+        return parm_of(index, parm).doc
+
+    ## Run verb `name` on `mesh`: `group` (empty: everything) read on
+    ## `group_type`'s domain (0 guess, 1 points, 2 edges, 3 faces,
+    ## 4 corners), the parameter values in order.
+    pub static func run(name: str, mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[VerbResult]!:
+        let verb = find_verb(name) else error(errors.invalid, "unknown operation")
+        var product = try run_verb(&verb, try mesh.get(), group, group_type, numbers)
+        let storage = alloc VerbResult[1] in memory.heap catch failure:
+            product.close()
+            error(failure.code, failure.message)
+        storage[0] = VerbResult(product)
+        return try interop.Reference[VerbResult].adopt(storage.data, verb_result_type, memory.heap)
+
+func checked(index: i64) -> usize:
+    if index < 0 or (usize)index >= verb_count(): trap("verb index out of range")
+    return (usize)index
+
+func parm_of(index: i64, parm: i64) -> ParmSpec:
+    let verb = verb_at(checked(index))
+    if parm < 0 or (usize)parm >= verb.parms.length: trap("verb parameter out of range")
+    return verb.parms[(usize)parm]
+
+## What a run made: its mesh, its output selection and its warning.
+pub struct VerbResult:
+    var run: VerbRun
+
+    pub func mesh() -> interop.Reference[Mesh]!:
+        return try mesh_adopt(try mesh_share(self.run.mesh))
+
+    ## The components the verb made or moved, on the output mesh.
+    pub func selection() -> interop.Reference[Selection]!:
+        let guard = (u64)self.run.mesh.topology_hash()
+        return try adopt_selection(self.run.selection.share(), self.run.selection_count, self.run.selection_domain, guard, GroupReport())
+
+    pub func warning() -> str:
+        return self.run.warning
+
+    ## Numbers in the group that named no element.
+    pub func misses() -> i64:
+        return (i64)self.run.misses
+
+    pub mutating func close():
+        self.run.close()
+
+pub let verb_result_type: interop.Type[VerbResult] = interop.Type[VerbResult]("VerbResult", VerbResult.close, closeable = true)

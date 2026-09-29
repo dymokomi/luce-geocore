@@ -1,0 +1,152 @@
+## Subdivide: every face of n corners becomes n quads through its edge
+## midpoints and its center; Catmull-Clark then moves the points (Linear
+## keeps the shape). Edge and face points mix their parents' attributes, and
+## each new corner mixes the corners it lies between, so UVs interpolate
+## within faces. Edges used by more than two faces act as creases.
+
+let subdivide_parms: ParmSpec[2] = [
+    ParmSpec("Levels", ParmKind.integer, 1.0, 1.0, 4.0, 1, "", "Each level splits every face into quads."),
+    ParmSpec("Method", ParmKind.menu, 1.0, 0.0, 1.0, 1, "Linear|Catmull-Clark", "Catmull-Clark smooths as it splits; Linear keeps the shape.")]
+
+pub func subdivide_verb() -> Verb:
+    return Verb("Subdivide", "Modeling", "Split faces into quads, optionally with Catmull-Clark smoothing", Domain.face, true, subdivide_parms, true, cook_subdivide)
+
+func cook_subdivide(input: const VerbInput*, output: VerbOutput*) -> !:
+    let levels = (usize)math.max(1.0, math.min(4.0, input.parms.at(0)))
+    let smooth = input.parms.at(1) != 0.0
+    if input.group.population() != input.group.count:
+        output.warning = "Subdivide works on the whole mesh; the group is ignored"
+    var current = try mesh_share(input.mesh)
+    for _ in 0..<levels:
+        var level = TopologyBuilder()
+        defer level.close()
+        subdivide_level(current, smooth, &level) catch failure:
+            mesh_dispose(current)
+            error(failure.code, failure.message)
+        let next = level.finish(current) catch failure:
+            mesh_dispose(current)
+            error(failure.code, failure.message)
+        mesh_dispose(current)
+        current = next
+    output.mesh = current
+    output.selection = try BitsBuilder.ones((usize)current.face_count())
+    output.selection_domain = Domain.face
+
+func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*) -> !:
+    let topology = try Topology.of(mesh)
+    let offsets = topology.offsets
+    let corners = topology.corners
+    let points = topology.points
+    let edges = topology.edges()
+    let faces = topology.faces()
+    if points + edges + faces > 8388608: error(errors.limit, "subdivision would exceed 8M points")
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    # Face points: centroids.
+    let centers = try alloc Vector3[faces] in memory.heap
+    defer free(centers) in memory.heap
+    for face in 0..<faces:
+        var sum = Vector3()
+        let start = (usize)offsets[face]
+        let size = (usize)offsets[face + 1] - start
+        for at in 0..<size: sum = sum.add(builder.position(corners[start + at]))
+        centers[face] = sum.multiply_scalar(1.0 / (f64)size)
+    # Edge points: midpoints, or with Catmull-Clark the average of the ends
+    # and the two face points of an interior edge.
+    var parents: i32[256]
+    var weights: f32[256]
+    for edge in 0..<edges:
+        let a = topology.edge_points[edge * 2]
+        let b = topology.edge_points[edge * 2 + 1]
+        var position = builder.position(a).add(builder.position(b)).multiply_scalar(0.5)
+        let first = (usize)topology.edge_corner_offsets[edge]
+        let end = (usize)topology.edge_corner_offsets[edge + 1]
+        if smooth and end - first == 2:
+            let f1 = centers[(usize)topology.corner_faces[(usize)topology.edge_corners[first]]]
+            let f2 = centers[(usize)topology.corner_faces[(usize)topology.edge_corners[first + 1]]]
+            position = builder.position(a).add(builder.position(b)).add(f1).add(f2).multiply_scalar(0.25)
+        parents[0] = a
+        parents[1] = b
+        weights[0] = 0.5
+        weights[1] = 0.5
+        discard(try builder.mixed_point(position, parents[..<2], weights[..<2]))
+    for face in 0..<faces:
+        let start = (usize)offsets[face]
+        let size = (usize)offsets[face + 1] - start
+        for at in 0..<size:
+            parents[at] = corners[start + at]
+            weights[at] = (f32)(1.0 / (f64)size)
+        discard(try builder.mixed_point(centers[face], parents[..<size], weights[..<size]))
+    if smooth: try catmull_clark_points(&topology, builder, centers)
+    # n quads per face.
+    let edge_base = (i32)points
+    let face_base = (i32)(points + edges)
+    var mixed_parents: i32[256]
+    var mixed_weights: f32[256]
+    for face in 0..<faces:
+        let start = (usize)offsets[face]
+        let size = (usize)offsets[face + 1] - start
+        for at in 0..<size:
+            mixed_parents[at] = (i32)(start + at)
+            mixed_weights[at] = (f32)(1.0 / (f64)size)
+        for at in 0..<size:
+            let corner = start + at
+            let next = start + (at + 1) % size
+            let previous = start + (at + size - 1) % size
+            try builder.face((i32)face)
+            try builder.corner(corners[corner], (i32)corner)
+            let pair: i32[2] = [(i32)corner, (i32)next]
+            let half: f32[2] = [0.5, 0.5]
+            try builder.mixed_corner(edge_base + topology.corner_edges[corner], pair, half)
+            try builder.mixed_corner(face_base + (i32)face, mixed_parents[..<size], mixed_weights[..<size])
+            let back: i32[2] = [(i32)previous, (i32)corner]
+            try builder.mixed_corner(edge_base + topology.corner_edges[previous], back, half)
+            try builder.end_face()
+
+## Catmull-Clark positions of the original points: interior (F + 2R + (n-3)P)/n
+## over n faces, boundary 3/4 P + 1/8 each boundary neighbour; points on
+## creases or other irregular boundaries stay.
+func catmull_clark_points(topology: const Topology*, builder: TopologyBuilder*, centers: const Vector3[]) -> !:
+    let point_faces = try alloc Vector3[topology.points] in memory.heap
+    defer free(point_faces) in memory.heap
+    let face_counts = try alloc u32[topology.points] in memory.heap
+    defer free(face_counts) in memory.heap
+    for at in 0..<topology.points:
+        point_faces[at] = Vector3()
+        face_counts[at] = 0
+    for corner in 0..<topology.corners.length:
+        let point = (usize)topology.corners[corner]
+        point_faces[point] = point_faces[point].add(centers[(usize)topology.corner_faces[corner]])
+        face_counts[point] += 1
+    let moved = try alloc Vector3[topology.points] in memory.heap
+    defer free(moved) in memory.heap
+    for point in 0..<topology.points:
+        let p = builder.position((i32)point)
+        moved[point] = p
+        let first = (usize)topology.point_edge_offsets[point]
+        let end = (usize)topology.point_edge_offsets[point + 1]
+        var mids = Vector3()
+        var boundary = Vector3()
+        var boundary_count = 0
+        var irregular = false
+        for slot in first..<end:
+            let edge = (usize)topology.point_edges[slot]
+            let a = topology.edge_points[edge * 2]
+            let other = topology.edge_points[edge * 2 + 1] if (usize)a == point else a
+            let q = builder.position(other)
+            mids = mids.add(p.add(q).multiply_scalar(0.5))
+            let uses = topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge]
+            if uses == 1:
+                boundary = boundary.add(q)
+                boundary_count += 1
+            elif uses > 2:
+                irregular = true
+        let n = (f64)(end - first)
+        if irregular or n == 0.0: continue
+        if boundary_count == 2:
+            moved[point] = p.multiply_scalar(0.75).add(boundary.multiply_scalar(0.125))
+        elif boundary_count == 0 and face_counts[point] > 0:
+            let faces = point_faces[point].multiply_scalar(1.0 / (f64)face_counts[point])
+            let edges = mids.multiply_scalar(1.0 / n)
+            moved[point] = faces.add(edges.multiply_scalar(2.0)).add(p.multiply_scalar(n - 3.0)).multiply_scalar(1.0 / n)
+    for point in 0..<topology.points: builder.move_point((i32)point, moved[point])

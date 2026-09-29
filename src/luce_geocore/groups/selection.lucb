@@ -199,7 +199,7 @@ pub struct Selection:
 pub let selection_type: interop.Type[Selection] = interop.Type[Selection]("Selection", Selection.close, closeable = true)
 
 ## A selection owning `column` (taken, released on failure).
-func adopt_selection(column: Column[u64], elements: usize, domain: Domain, topology: u64, report: GroupReport) -> interop.Reference[Selection]!:
+pub func adopt_selection(column: Column[u64], elements: usize, domain: Domain, topology: u64, report: GroupReport) -> interop.Reference[Selection]!:
     var owned = column
     let storage = alloc Selection[1] in memory.heap catch failure:
         owned.release()

@@ -1,0 +1,79 @@
+## Carrying attributes and groups through a verb, one column at a time: an
+## element with one parent copies it; an interpolated element mixes its
+## weighted parents (floats average, normals renormalize, integers and text
+## take the heaviest parent, a group keeps the element only when every parent
+## with weight is a member); a new element is zero, empty, not a member.
+## Edges continue old edges by corner adjacency (Mesh.edge_parents).
+
+pub func propagate(source: const Mesh*, output: Mesh*, point_parents: const i32[], face_parents: const i32[], corner_parents: const i32[], point_mix: const Mix*, corner_mix: const Mix*) -> !:
+    var edge_map: i32[]
+    defer:
+        if edge_map.length > 0: free(edge_map) in memory.heap
+    for index in 0..<(usize)source.attribute_count():
+        let entry = try attribute_entry(source, (i64)index)
+        # Authored normals are stale where topology changed; the derived ones
+        # take over.
+        if entry.role == Role.normal and entry.domain != Domain.detail: continue
+        if entry.domain == Domain.edge and edge_map.length == 0:
+            let representatives = try alloc i32[corner_parents.length] in memory.heap
+            defer free(representatives) in memory.heap
+            for at in 0..<corner_parents.length:
+                representatives[at] = corner_parents[at] if corner_parents[at] >= 0 else -1
+            edge_map = try edge_parents(source, output, representatives)
+        try put_attribute(output, try carried(entry, point_parents, face_parents, corner_parents, edge_map, point_mix, corner_mix))
+
+func carried(entry: const Attribute*, point_parents: const i32[], face_parents: const i32[], corner_parents: const i32[], edge_map: const i32[], point_mix: const Mix*, corner_mix: const Mix*) -> Attribute!:
+    match entry.domain:
+        .point: return try mixed(entry, point_parents, point_mix)
+        .corner: return try mixed(entry, corner_parents, corner_mix)
+        .face: return try attribute_ops.remapped(entry, face_parents, face_parents.length)
+        .edge: return try attribute_ops.remapped(entry, edge_map, edge_map.length)
+        _: return entry.share()
+
+## `source` over elements taking parents[i] (>= 0), nothing (-1), or mix entry
+## -2 - parents[i].
+func mixed(source: const Attribute*, parents: const i32[], mix: const Mix*) -> Attribute!:
+    var direct = try alloc i32[parents.length] in memory.heap
+    defer free(direct) in memory.heap
+    var any = false
+    for at in 0..<parents.length:
+        direct[at] = parents[at] if parents[at] >= -1 else -1
+        any = any or parents[at] < -1
+    var result = try attribute_ops.remapped(source, direct, parents.length)
+    if not any or source.storage == Storage.single: return result
+    errdefer result.release()
+    let bytes = try result.data.writable()
+    for element in 0..<parents.length:
+        let code = parents[element]
+        if code >= -1: continue
+        let entry = (usize)(-2 - code)
+        let first = (usize)mix.offsets.items[entry]
+        let end = (usize)mix.offsets.items[entry + 1]
+        match source.kind:
+            .float32, .float64:
+                var values: f64[4]
+                for component in 0..<source.width:
+                    var sum = 0.0
+                    for at in first..<end:
+                        sum += source.number((usize)mix.parents.items[at], component) * (f64)mix.weights.items[at]
+                    values[component] = sum
+                if source.role == Role.normal and source.width == 3:
+                    let length = math.sqrt(values[0] * values[0] + values[1] * values[1] + values[2] * values[2])
+                    if length > 0.000000001:
+                        for component in 0..<(usize)3: values[component] = values[component] / length
+                for component in 0..<source.width:
+                    attribute_ops.write_number(bytes, source.kind, element * source.width + component, values[component])
+            .boolean:
+                var member = end > first
+                for at in first..<end:
+                    if mix.weights.items[at] > 0.0 and source.number((usize)mix.parents.items[at], 0) == 0.0: member = false
+                if member: attribute_ops.write_number(bytes, source.kind, element, 1.0)
+            _:
+                # Integers and text: the heaviest parent (the first on ties).
+                var best = first
+                for at in first..<end:
+                    if mix.weights.items[at] > mix.weights.items[best]: best = at
+                let parent = (usize)mix.parents.items[best]
+                for component in 0..<source.width:
+                    attribute_ops.write_number(bytes, source.kind, element * source.width + component, source.number(parent, component))
+    return result

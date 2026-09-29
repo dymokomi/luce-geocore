@@ -1,0 +1,88 @@
+## PolyExtrude of a face region: the group's points are duplicated once and
+## moved along their averaged face normals, the caps keep their face ids
+## (and triangles), and walls join the old and new points along the region's
+## boundary only, never between selected faces. The caps are the output
+## selection (Houdini's front group).
+
+let extrude_parms: ParmSpec[1] = [ParmSpec("Distance", ParmKind.number, 0.2, -100000.0, 100000.0, 1, "", "Extrusion distance along the averaged face normals.", 2.0)]
+
+pub func extrude_verb() -> Verb:
+    return Verb("PolyExtrude", "Modeling", "Extrude a face region along its normals", Domain.face, true, extrude_parms, true, cook_extrude)
+
+func cook_extrude(input: const VerbInput*, output: VerbOutput*) -> !:
+    let distance = input.parms.at(0)
+    if not input.group.any() or not math.is_finite(distance) or math.abs(distance) < 0.000001:
+        error(errors.invalid, "extrusion needs selected faces and a finite nonzero distance")
+    let mesh = input.mesh
+    let offsets = offset_span(mesh)
+    let corners = corner_span(mesh)
+    let normals = face_normal_span(mesh)
+    let corner_edges = try corner_edge_span(mesh)
+    let edge_count = (try edge_span(mesh)).length // 2
+    let faces = offsets.length - 1
+    let points = (usize)mesh.point_count()
+    # How often each edge borders a selected face, and each point's
+    # direction: the sum of its selected faces' normals.
+    let uses = try alloc u8[edge_count] in memory.heap
+    defer free(uses) in memory.heap
+    memory.set(uses, 0)
+    let directions = try alloc Vector3[points] in memory.heap
+    defer free(directions) in memory.heap
+    let mapping = try alloc i32[points] in memory.heap
+    defer free(mapping) in memory.heap
+    for at in 0..<points:
+        directions[at] = Vector3()
+        mapping[at] = -1
+    var walls: usize = 0
+    for face in 0..<faces:
+        if not input.group.get(face): continue
+        for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
+            let edge = (usize)corner_edges[corner]
+            if uses[edge] == 2: error(errors.invalid, "cannot extrude a nonmanifold region")
+            uses[edge] += 1
+            let point = (usize)corners[corner]
+            mapping[point] = 0
+            directions[point] = directions[point].add(normals[face].vector())
+    for face in 0..<faces:
+        if not input.group.get(face): continue
+        for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
+            if uses[(usize)corner_edges[corner]] == 1: walls += 1
+    if walls == 0: error(errors.invalid, "extrude a face region with a boundary, not an entire closed surface")
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    for point in 0..<points:
+        if mapping[point] < 0: continue
+        let direction = try directions[point].normalized()
+        mapping[point] = try builder.point(builder.position((i32)point).add(direction.multiply_scalar(distance)), (i32)point)
+    output.selection = try BitsBuilder.zeros(faces + walls)
+    output.selection_domain = Domain.face
+    # Every face in order; the caps use the moved points.
+    var run: usize = 0
+    for face in 0..<faces:
+        if not input.group.get(face): continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        output.selection.set(face)
+        try builder.face((i32)face, true)
+        for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
+            try builder.corner(mapping[(usize)corners[corner]], (i32)corner)
+        try builder.end_face()
+    try builder.copy_faces(mesh, run, faces)
+    # Walls along the boundary, in face and corner order.
+    for face in 0..<faces:
+        if not input.group.get(face): continue
+        let start = (usize)offsets[face]
+        let end = (usize)offsets[face + 1]
+        for corner in start..<end:
+            if uses[(usize)corner_edges[corner]] != 1: continue
+            let next = corner + 1 if corner + 1 < end else start
+            let a = corners[corner]
+            let b = corners[next]
+            try builder.face((i32)face)
+            try builder.corner(a, (i32)corner)
+            try builder.corner(b, (i32)next)
+            try builder.corner(mapping[(usize)b], (i32)next)
+            try builder.corner(mapping[(usize)a], (i32)corner)
+            try builder.end_face()

@@ -17,6 +17,7 @@ import luce_geocore.geometries.dissolve_workspace as dissolve_workspace
 import luce_geocore.geometries.attribute_kernels as attribute_kernels
 import luce_geocore.geometry_set as geometry_set
 import luce_geocore.groups as groups
+import luce_geocore.verbs as verbs
 import luce_geocore.errors as errors
 
 pub type Vector3 = vector.Vector3
@@ -42,6 +43,8 @@ pub type GeometrySet = geometry_set.GeometrySet
 pub let geometry_set_type = geometry_set.geometry_set_type
 pub type Selection = groups.Selection
 pub type Groups = groups.Groups
+pub type Verbs = verbs.Verbs
+pub type VerbResult = verbs.VerbResult
 pub let invalid: ErrorCode = errors.invalid
 pub let busy: ErrorCode = errors.busy
 pub let limit: ErrorCode = errors.limit

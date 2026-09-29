@@ -160,3 +160,21 @@ pub func mesh_adopt(storage: Mesh*) -> interop.Reference[Mesh]!:
 ## Mesh.transfer_attributes); for kernels outside this module.
 pub func transfer_attributes(source: const Mesh*, output: Mesh*, point_parents: const i32[], face_parents: const i32[], corner_parents: const i32[], keep_normals: bool) -> !:
     try source.transfer_attributes(output, point_parents, face_parents, corner_parents, keep_normals)
+
+## For verbs: `source`'s old edge each of `output`'s edges continues (see
+## Mesh.edge_parents_of); the caller frees the list.
+pub func edge_parents(source: const Mesh*, output: const Mesh*, corner_parents: const i32[]) -> i32[]!:
+    return try source.edge_parents_of(output, corner_parents)
+
+## `source` with new positions (relative to its origin) where `moved` points
+## changed: topology, triangles and attributes shared (see repositioned).
+pub func moved_storage(source: const Mesh*, positions: Column[Float3], moved: const u32[]) -> Mesh*!:
+    return try source.repositioned_storage(positions, source.origin, moved, false)
+
+## Add or replace an attribute of a mesh being built (taking its share).
+pub func put_attribute(mesh: Mesh*, attribute: Attribute) -> !:
+    try mesh.attributes.put(attribute)
+
+## A precise mesh's f64 points; empty otherwise.
+pub func precise_span(mesh: const Mesh*) -> const Vector3[]:
+    return mesh.precise.view()

@@ -1,0 +1,185 @@
+## Verbs over faces that keep the rest of the mesh as it is: Delete (Blast),
+## Reverse, Triangulate, Duplicate, Split and individual Inset. Faces outside
+## the group are copied with their triangles; the output selection is what
+## the verb made (the kept, reversed, new or inner faces).
+
+let delete_parms: ParmSpec[1] = [ParmSpec("Keep group", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "On: keep only the group. Off: delete it.")]
+
+pub func delete_verb() -> Verb:
+    return Verb("Delete", "Modeling", "Remove the group's faces (points delete every face using them) and the points left unused", Domain.face, true, delete_parms, true, cook_delete, true)
+
+## Verbs without parameters take an empty slice of this.
+let placeholder_parms: ParmSpec[1] = [ParmSpec("", ParmKind.number, 0.0, 0.0, 0.0)]
+
+pub func reverse_verb() -> Verb:
+    return Verb("Reverse", "Modeling", "Flip the winding of the group's faces", Domain.face, true, placeholder_parms[..<0], true, cook_reverse)
+
+pub func triangulate_verb() -> Verb:
+    return Verb("Triangulate", "Modeling", "Split the group's faces into their triangles", Domain.face, true, placeholder_parms[..<0], true, cook_triangulate)
+
+let duplicate_parms: ParmSpec[1] = [ParmSpec("Offset", ParmKind.number, 0.2, -100000.0, 100000.0, 1, "", "Distance of the copies along their face normals.", 2.0)]
+
+pub func duplicate_verb() -> Verb:
+    return Verb("Duplicate", "Modeling", "Copy the group's faces, offset along their normals", Domain.face, true, duplicate_parms, true, cook_duplicate)
+
+pub func split_verb() -> Verb:
+    return Verb("Split", "Modeling", "Detach the group's faces: they get their own points", Domain.face, true, placeholder_parms[..<0], true, cook_split)
+
+let inset_parms: ParmSpec[1] = [ParmSpec("Fraction", ParmKind.number, 0.2, 0.001, 0.99, 1, "", "How far each face's corners move toward its center.")]
+
+pub func inset_faces_verb() -> Verb:
+    return Verb("Inset", "Modeling", "Inset each face of the group by a fraction toward its center", Domain.face, true, inset_parms, true, cook_inset_faces)
+
+func cook_delete(input: const VerbInput*, output: VerbOutput*) -> !:
+    var keep = try BitsBuilder.copy_of(input.group)
+    defer keep.close()
+    if input.parms.at(0) == 0.0: keep.invert()
+    let result = try kept_faces(input.mesh, keep.view())
+    defer result.release()
+    output.mesh = try mesh_share(result.value())
+    output.selection_domain = Domain.face
+
+## Copy every face; the group's go through `edit` instead.
+func each_face(input: const VerbInput*, output: VerbOutput*, edit: func(const VerbInput*, TopologyBuilder*, usize, BitsBuilder*) -> unit!) -> !:
+    try output.builder.begin(input.mesh)
+    try output.builder.copy_points(input.mesh)
+    output.built = true
+    let faces = (usize)input.mesh.face_count()
+    # Runs of faces outside the group are copied whole.
+    var run: usize = 0
+    for face in 0..<faces:
+        if not input.group.get(face): continue
+        try output.builder.copy_faces(input.mesh, run, face)
+        try edit(input, &output.builder, face, &output.selection)
+        run = face + 1
+    try output.builder.copy_faces(input.mesh, run, faces)
+
+## Start the output selection over the faces the builder will have: every
+## face of the input plus `extra`.
+func begin_selection(output: VerbOutput*, faces: usize) -> !:
+    output.selection = try BitsBuilder.zeros(faces)
+    output.selection_domain = Domain.face
+
+func cook_reverse(input: const VerbInput*, output: VerbOutput*) -> !:
+    try begin_selection(output, (usize)input.mesh.face_count())
+    try each_face(input, output, reverse_face)
+
+func reverse_face(input: const VerbInput*, builder: TopologyBuilder*, face: usize, selection: BitsBuilder*) -> !:
+    let offsets = offset_span(input.mesh)
+    let corners = corner_span(input.mesh)
+    let start = (usize)offsets[face]
+    let end = (usize)offsets[face + 1]
+    selection.set(builder.face_count())
+    try builder.face((i32)face, false, true)
+    for at in 0..<end - start:
+        let corner = end - 1 - at
+        try builder.corner(corners[corner], (i32)corner)
+    try builder.end_face()
+
+## Each group face becomes its display triangles (faces in order, so the
+## selection counts them as they come).
+func cook_triangulate(input: const VerbInput*, output: VerbOutput*) -> !:
+    let offsets = offset_span(input.mesh)
+    var extra: usize = 0
+    for face in 0..<(usize)input.mesh.face_count():
+        if input.group.get(face): extra += (usize)(offsets[face + 1] - offsets[face]) - 3
+    try begin_selection(output, (usize)input.mesh.face_count() + extra)
+    try each_face(input, output, triangulate_face)
+
+func triangulate_face(input: const VerbInput*, builder: TopologyBuilder*, face: usize, selection: BitsBuilder*) -> !:
+    let offsets = offset_span(input.mesh)
+    let corners = corner_span(input.mesh)
+    let triangles = triangle_span(input.mesh)
+    let start = (usize)offsets[face]
+    let size = (usize)offsets[face + 1] - start
+    let first = (start - face * 2) * 3
+    for triangle in 0..<size - 2:
+        selection.set(builder.face_count())
+        try builder.face((i32)face)
+        for side in 0..<(usize)3:
+            let corner = (usize)triangles[first + triangle * 3 + side]
+            try builder.corner(corners[corner], (i32)corner)
+        try builder.end_face()
+
+func cook_duplicate(input: const VerbInput*, output: VerbOutput*) -> !:
+    try begin_selection(output, (usize)input.mesh.face_count() + input.group.population())
+    try output.builder.begin(input.mesh)
+    try output.builder.copy_points(input.mesh)
+    output.built = true
+    let faces = (usize)input.mesh.face_count()
+    try output.builder.copy_faces(input.mesh, 0, faces)
+    let offsets = offset_span(input.mesh)
+    let corners = corner_span(input.mesh)
+    let normals = face_normal_span(input.mesh)
+    let distance = input.parms.at(0)
+    for face in 0..<faces:
+        if not input.group.get(face): continue
+        let offset = normals[face].vector().multiply_scalar(distance)
+        output.selection.set(output.builder.face_count())
+        var points: i32[256]
+        let start = (usize)offsets[face]
+        let size = (usize)offsets[face + 1] - start
+        for at in 0..<size:
+            let point = corners[start + at]
+            points[at] = try output.builder.point(output.builder.position(point).add(offset), point)
+        try output.builder.face((i32)face, true)
+        for at in 0..<size: try output.builder.corner(points[at], (i32)(start + at))
+        try output.builder.end_face()
+
+## The group's faces get their own points, so they separate from the rest.
+func cook_split(input: const VerbInput*, output: VerbOutput*) -> !:
+    try begin_selection(output, (usize)input.mesh.face_count())
+    try each_face(input, output, split_face)
+
+func split_face(input: const VerbInput*, builder: TopologyBuilder*, face: usize, selection: BitsBuilder*) -> !:
+    let offsets = offset_span(input.mesh)
+    let corners = corner_span(input.mesh)
+    let start = (usize)offsets[face]
+    let size = (usize)offsets[face + 1] - start
+    var points: i32[256]
+    for at in 0..<size:
+        let point = corners[start + at]
+        points[at] = try builder.point(builder.position(point), point)
+    selection.set(builder.face_count())
+    try builder.face((i32)face, true)
+    for at in 0..<size: try builder.corner(points[at], (i32)(start + at))
+    try builder.end_face()
+
+## Each group face: an inner face (its corners moved toward the center by
+## the fraction) and a quad on each side. The inner faces are selected.
+func cook_inset_faces(input: const VerbInput*, output: VerbOutput*) -> !:
+    let fraction = input.parms.at(0)
+    if not (fraction > 0.0 and fraction < 1.0): error(errors.invalid, "Inset fraction must be between 0 and 1")
+    let offsets = offset_span(input.mesh)
+    var extra: usize = 0
+    for face in 0..<(usize)input.mesh.face_count():
+        if input.group.get(face): extra += (usize)(offsets[face + 1] - offsets[face])
+    try begin_selection(output, (usize)input.mesh.face_count() + extra)
+    try each_face(input, output, inset_face)
+
+func inset_face(input: const VerbInput*, builder: TopologyBuilder*, face: usize, selection: BitsBuilder*) -> !:
+    let offsets = offset_span(input.mesh)
+    let corners = corner_span(input.mesh)
+    let start = (usize)offsets[face]
+    let size = (usize)offsets[face + 1] - start
+    var center = Vector3()
+    for at in 0..<size: center = center.add(builder.position(corners[start + at]))
+    center = center.multiply_scalar(1.0 / (f64)size)
+    let fraction = input.parms.at(0)
+    var inner: i32[256]
+    for at in 0..<size:
+        let point = corners[start + at]
+        let p = builder.position(point)
+        inner[at] = try builder.point(p.add(center.subtract(p).multiply_scalar(fraction)), point)
+    selection.set(builder.face_count())
+    try builder.face((i32)face, true)
+    for at in 0..<size: try builder.corner(inner[at], (i32)(start + at))
+    try builder.end_face()
+    for at in 0..<size:
+        let next = (at + 1) % size
+        try builder.face((i32)face)
+        try builder.corner(corners[start + at], (i32)(start + at))
+        try builder.corner(corners[start + next], (i32)(start + next))
+        try builder.corner(inner[next], (i32)(start + next))
+        try builder.corner(inner[at], (i32)(start + at))
+        try builder.end_face()

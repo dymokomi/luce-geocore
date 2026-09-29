@@ -1,0 +1,111 @@
+## Fuse (merge the group's points closer than a distance) and Clean (drop
+## unused points). Faces keep their corner order; a face whose corners
+## collapse below three disappears. Fuse selects the points that absorbed
+## others.
+
+let fuse_parms: ParmSpec[1] = [ParmSpec("Distance", ParmKind.number, 0.001, 0.000001, 100000.0, 1, "", "Points of the group closer than this merge into the first of them.")]
+
+pub func fuse_verb() -> Verb:
+    return Verb("Fuse", "Modeling", "Merge nearby points of the group", Domain.point, true, fuse_parms, true, cook_fuse)
+
+pub func clean_verb() -> Verb:
+    return Verb("Clean", "Modeling", "Remove points no face uses", Domain.point, true, placeholder_parms[..<0], true, cook_clean)
+
+## Spatial hash of cells `distance` wide: each group point joins the lowest
+## numbered earlier point within `distance` in its cell or a neighbour.
+func cook_fuse(input: const VerbInput*, output: VerbOutput*) -> !:
+    let distance = input.parms.at(0)
+    if not (distance >= 0.000001 and distance <= 100000.0): error(errors.invalid, "Fuse distance must be in 1e-6..1e5")
+    let mesh = input.mesh
+    let points = (usize)mesh.point_count()
+    let positions = point_span(mesh)
+    let target = try alloc i32[points] in memory.heap
+    defer free(target) in memory.heap
+    let buckets: usize = 65536
+    let heads = try alloc i32[buckets] in memory.heap
+    defer free(heads) in memory.heap
+    let next = try alloc i32[points] in memory.heap
+    defer free(next) in memory.heap
+    for at in 0..<buckets: heads[at] = -1
+    for point in 0..<points:
+        target[point] = (i32)point
+        next[point] = -1
+        if not input.group.get(point): continue
+        let p = positions[point].vector()
+        let x = (i64)math.floor(p.x / distance)
+        let y = (i64)math.floor(p.y / distance)
+        let z = (i64)math.floor(p.z / distance)
+        var found: i32 = -1
+        for dx in (i64)-1..<(i64)2:
+            for dy in (i64)-1..<(i64)2:
+                for dz in (i64)-1..<(i64)2:
+                    var candidate = heads[cell(x + dx, y + dy, z + dz, buckets)]
+                    while candidate >= 0:
+                        if positions[(usize)candidate].vector().subtract(p).length() <= distance and (found < 0 or candidate < found):
+                            found = candidate
+                        candidate = next[(usize)candidate]
+        if found >= 0:
+            target[point] = found
+        else:
+            let bucket = cell(x, y, z, buckets)
+            next[point] = heads[bucket]
+            heads[bucket] = (i32)point
+    try rebuild(input, output, target)
+    output.selection_domain = Domain.point
+
+func cell(x: i64, y: i64, z: i64, buckets: usize) -> usize:
+    let value = (x *% 73856093) ^ (y *% 19349663) ^ (z *% 83492791)
+    return (usize)(value & 0x7FFFFFFF) % buckets
+
+func cook_clean(input: const VerbInput*, output: VerbOutput*) -> !:
+    let points = (usize)input.mesh.point_count()
+    let target = try alloc i32[points] in memory.heap
+    defer free(target) in memory.heap
+    for at in 0..<points: target[at] = (i32)at
+    try rebuild(input, output, target)
+    output.selection_domain = Domain.point
+
+## Faces over points mapped through `target` (each point to the one it
+## merges into), keeping only points some face uses. Merged-into points are
+## selected.
+func rebuild(input: const VerbInput*, output: VerbOutput*, target: const i32[]) -> !:
+    let mesh = input.mesh
+    let offsets = offset_span(mesh)
+    let corners = corner_span(mesh)
+    let points = target.length
+    let used = try alloc i32[points] in memory.heap
+    defer free(used) in memory.heap
+    for at in 0..<points: used[at] = -1
+    for corner in corners: used[(usize)target[(usize)corner]] = 0
+    var builder = &output.builder
+    try builder.begin(mesh)
+    output.built = true
+    for point in 0..<points:
+        if used[point] == 0: used[point] = try builder.point(builder_position(mesh, point), (i32)point)
+    output.selection = try BitsBuilder.zeros(builder.point_count())
+    for point in 0..<points:
+        if target[point] != (i32)point and used[(usize)target[point]] >= 0: output.selection.set((usize)used[(usize)target[point]])
+    var ids: i32[256]
+    var parents: i32[256]
+    for face in 0..<offsets.length - 1:
+        let start = (usize)offsets[face]
+        let end = (usize)offsets[face + 1]
+        var count: usize = 0
+        var moved = false
+        for corner in start..<end:
+            let point = used[(usize)target[(usize)corners[corner]]]
+            moved = moved or target[(usize)corners[corner]] != corners[corner]
+            if count == 0 or point != ids[count - 1]:
+                ids[count] = point
+                parents[count] = (i32)corner
+                count += 1
+        if count > 1 and ids[0] == ids[count - 1]: count -= 1
+        if count < 3: continue
+        try builder.face((i32)face, not moved)
+        for at in 0..<count: try builder.corner(ids[at], parents[at])
+        try builder.end_face()
+
+func builder_position(mesh: const Mesh*, point: usize) -> Vector3:
+    let exact = precise_span(mesh)
+    if exact.length > 0: return exact[point]
+    return point_span(mesh)[point].vector().add(mesh_origin(mesh))

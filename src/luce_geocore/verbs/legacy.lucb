@@ -1,0 +1,59 @@
+## Verbs over the older topology kernels, until their rewrites (G5): Bevel
+## chamfers every edge of a closed manifold, Fill caps one boundary loop,
+## Dissolve joins the faces across up to 128 edges. They rebuild through
+## MeshBuilder and return no output selection.
+
+let chamfer_parms: ParmSpec[1] = [ParmSpec("Chamfer", ParmKind.number, 0.15, 0.001, 0.89, 1, "", "Chamfer width as a fraction of each edge, on every edge of a closed mesh.")]
+
+pub func chamfer_verb() -> Verb:
+    return Verb("Bevel", "Modeling", "Chamfer every edge of a closed manifold mesh", Domain.edge, true, chamfer_parms, true, cook_chamfer)
+
+pub func fill_verb() -> Verb:
+    return Verb("Fill", "Modeling", "Cap a boundary loop of the group's edges", Domain.edge, true, placeholder_parms[..<0], true, cook_fill)
+
+pub func dissolve_verb() -> Verb:
+    return Verb("Dissolve", "Modeling", "Join the faces across the group's edges", Domain.edge, true, placeholder_parms[..<0], true, cook_dissolve)
+
+## A Luce-style owner of the input for the older kernels (shares columns).
+func owned(input: const VerbInput*) -> interop.Reference[Mesh]!:
+    return try mesh_adopt(try mesh_share(input.mesh))
+
+func members(bits: Bits, out: Growing[i64]*) -> !:
+    try out.reserve(bits.population())
+    for word in 0..<bits.words.length:
+        var pending = bits.words[word]
+        while pending != 0:
+            out.items[out.count] = (i64)(word * 64 + (usize)trailing_zeros(pending))
+            out.count += 1
+            pending = pending & (pending - 1)
+
+func cook_chamfer(input: const VerbInput*, output: VerbOutput*) -> !:
+    if input.group.population() != input.group.count:
+        output.warning = "Bevel chamfers every edge; the group is ignored"
+    let source = try owned(input)
+    defer source.release()
+    let result = try TopologyTools.bevel(source, input.parms.at(0))
+    defer result.release()
+    output.mesh = try mesh_share(result.value())
+
+func cook_fill(input: const VerbInput*, output: VerbOutput*) -> !:
+    var edges = Growing[i64]()
+    defer edges.close()
+    try members(input.group, &edges)
+    let source = try owned(input)
+    defer source.release()
+    let result = try TopologyTools.fill(source, edges.view())
+    defer result.release()
+    output.mesh = try mesh_share(result.value())
+
+func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
+    var edges = Growing[i64]()
+    defer edges.close()
+    try members(input.group, &edges)
+    if edges.count == 0 or edges.count > 128: error(errors.invalid, "Dissolve joins faces across 1..128 selected edges")
+    var workspace = try DissolveWorkspace(input.mesh, edges.count)
+    defer workspace.close()
+    for edge in edges.view(): try workspace.dissolve(edge)
+    let result = try workspace.finish()
+    defer result.release()
+    output.mesh = try mesh_share(result.value())

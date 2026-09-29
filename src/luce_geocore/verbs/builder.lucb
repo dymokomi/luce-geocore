@@ -1,0 +1,227 @@
+## The topology a verb builds: points, faces and corners with their parents
+## in the input, from which every attribute and group is carried (see
+## propagate.lucb). A parent of -1 is a new element (zero, empty, not a
+## member); interpolated points and corners name weighted parents (a Mix).
+## Faces copied with their corners in order keep the input's triangles, so
+## CAD cut cells survive; other faces are ear clipped in parallel.
+
+pub struct TopologyBuilder:
+    ## Points in f64, measured from the input's origin.
+    var positions: Growing[Vector3]
+    var offsets: Growing[i32]
+    var corners: Growing[i32]
+    var point_parents: Growing[i32]
+    var face_parents: Growing[i32]
+    var corner_parents: Growing[i32]
+    ## Per face: 1 when its corners are its parent's, in order, 2 when in
+    ## reverse order; 0 when it is ear clipped.
+    var copied: Growing[u8]
+    var point_mix: Mix
+    var corner_mix: Mix
+    var origin: Vector3
+
+    pub func init():
+        self.positions = Growing[Vector3]()
+        self.offsets = Growing[i32]()
+        self.corners = Growing[i32]()
+        self.point_parents = Growing[i32]()
+        self.face_parents = Growing[i32]()
+        self.corner_parents = Growing[i32]()
+        self.copied = Growing[u8]()
+        self.point_mix = Mix()
+        self.corner_mix = Mix()
+        self.origin = Vector3()
+
+    ## Start from `source`'s frame (its origin).
+    pub mutating func begin(source: const Mesh*) -> !:
+        self.origin = mesh_origin(source)
+        try self.offsets.push(0)
+        try self.point_mix.offsets.push(0)
+        try self.corner_mix.offsets.push(0)
+
+    pub func point_count() -> usize:
+        return self.positions.count
+
+    pub func face_count() -> usize:
+        return self.face_parents.count
+
+    pub func corner_count() -> usize:
+        return self.corners.count
+
+    ## A point at `position` (world) with one parent (-1: new).
+    pub mutating func point(position: Vector3, parent: i32) -> i32!:
+        try self.positions.push(position.subtract(self.origin))
+        try self.point_parents.push(parent)
+        return (i32)(self.positions.count - 1)
+
+    ## A point interpolated from weighted parents.
+    pub mutating func mixed_point(position: Vector3, parents: const i32[], weights: const f32[]) -> i32!:
+        try self.positions.push(position.subtract(self.origin))
+        try self.point_parents.push(try mix_entry(&self.point_mix, parents, weights))
+        return (i32)(self.positions.count - 1)
+
+    ## Every point of `source`, each its own parent, in one pass.
+    pub mutating func copy_points(source: const Mesh*) -> !:
+        let positions = point_span(source)
+        let exact = precise_span(source)
+        let first = self.positions.count
+        try self.positions.reserve(first + positions.length)
+        try self.point_parents.reserve(first + positions.length)
+        for at in 0..<positions.length:
+            self.positions.items[first + at] = exact[at].subtract(self.origin) if exact.length > 0 else positions[at].vector()
+            self.point_parents.items[first + at] = (i32)at
+        self.positions.count += positions.length
+        self.point_parents.count += positions.length
+
+    ## Set point `index`'s position (world).
+    pub mutating func move_point(index: i32, position: Vector3):
+        self.positions.items[(usize)index] = position.subtract(self.origin)
+
+    pub func position(index: i32) -> Vector3:
+        return self.positions.items[(usize)index].add(self.origin)
+
+    ## Start a face whose parent is `parent`; `copied` when its corners will
+    ## be its parent's, in order (its triangles are then kept), `reversed`
+    ## when they will be its parent's in reverse order.
+    pub mutating func face(parent: i32, copied: bool = false, reversed: bool = false) -> !:
+        try self.face_parents.push(parent)
+        try self.copied.push(2 if reversed else (1 if copied else 0))
+
+    pub mutating func corner(point: i32, parent: i32) -> !:
+        try self.corners.push(point)
+        try self.corner_parents.push(parent)
+
+    pub mutating func mixed_corner(point: i32, parents: const i32[], weights: const f32[]) -> !:
+        try self.corners.push(point)
+        try self.corner_parents.push(try mix_entry(&self.corner_mix, parents, weights))
+
+    ## Close the face begun last; faces need 3..256 corners.
+    pub mutating func end_face() -> !:
+        let size = (i64)self.corners.count - (i64)self.offsets.items[self.offsets.count - 1]
+        if size < 3 or size > 256: error(errors.invalid, "an operation made a face with fewer than 3 or more than 256 corners")
+        try self.offsets.push((i32)self.corners.count)
+
+    ## Faces first..<end of `source` unchanged (points numbered as in the
+    ## input: after `copy_points`), in one tight pass.
+    pub mutating func copy_faces(source: const Mesh*, first: usize, end: usize) -> !:
+        if end <= first: return
+        let offsets = offset_span(source)
+        let corners = corner_span(source)
+        let from_corner = (usize)offsets[first]
+        let to_corner = (usize)offsets[end]
+        let count = to_corner - from_corner
+        let faces = end - first
+        try self.corners.reserve(self.corners.count + count)
+        try self.corner_parents.reserve(self.corner_parents.count + count)
+        try self.offsets.reserve(self.offsets.count + faces)
+        try self.face_parents.reserve(self.face_parents.count + faces)
+        try self.copied.reserve(self.copied.count + faces)
+        let shift = (i32)self.corners.count - (i32)from_corner
+        memory.copy(self.corners.items[self.corners.count..], corners[from_corner..<to_corner], count)
+        for at in 0..<count: self.corner_parents.items[self.corner_parents.count + at] = (i32)(from_corner + at)
+        for at in 0..<faces:
+            self.offsets.items[self.offsets.count + at] = offsets[first + at + 1] + shift
+            self.face_parents.items[self.face_parents.count + at] = (i32)(first + at)
+            self.copied.items[self.copied.count + at] = 1
+        self.corners.count += count
+        self.corner_parents.count += count
+        self.offsets.count += faces
+        self.face_parents.count += faces
+        self.copied.count += faces
+
+    ## Face `face` of `source` unchanged: its corners (with this builder's
+    ## point numbers `points`, or its own when empty) and its triangles.
+    pub mutating func copy_face(source: const Mesh*, face: usize, points: const i32[]) -> !:
+        let offsets = offset_span(source)
+        let corners = corner_span(source)
+        try self.face((i32)face, true)
+        for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
+            let point = corners[corner]
+            try self.corner(points[(usize)point] if points.length > 0 else point, (i32)corner)
+        try self.end_face()
+
+    ## The mesh: positions, faces, triangles (kept or clipped), normals, and
+    ## every attribute of `source` through the parents.
+    pub mutating func finish(source: const Mesh*) -> Mesh*!:
+        let points = self.positions.count
+        let faces = self.face_parents.count
+        let corner_total = self.corners.count
+        if points > 8388608 or faces > 8388608 or corner_total > 33554432: error(errors.limit, "an operation exceeds 8M points or faces or 32M corners")
+        var positions = try Column[Float3].allocate(points)
+        defer positions.release()
+        let placed = positions.span()
+        for at in 0..<points: placed[at] = Float3.of(self.positions.items[at])
+        var exact: Column[Vector3]
+        defer exact.release()
+        if precise_span(source).length > 0:
+            exact = try Column[Vector3].allocate(points)
+            let out = exact.span()
+            for at in 0..<points: out[at] = self.positions.items[at].add(self.origin)
+        var offsets = try Column[i32].copy_of(self.offsets.view())
+        defer offsets.release()
+        var corners = try Column[i32].copy_of(self.corners.view())
+        defer corners.release()
+        var triangles = try Column[i32].allocate((corner_total - faces * 2) * 3)
+        defer triangles.release()
+        var work = TriangleWork(offset_span(source), triangle_span(source), self.offsets.view(), self.face_parents.view(), self.copied.view(), triangles.span())
+        parallel.parallel_for(faces, 4096, copy_triangles, (void*)&work)
+        var normals: Column[Float3]
+        let storage = try assembled(positions.take(), self.origin, offsets.take(), corners.take(), triangles.take(), normals, exact.take())
+        errdefer mesh_dispose(storage)
+        try propagate(source, storage, self.point_parents.view(), self.face_parents.view(), self.corner_parents.view(), &self.point_mix, &self.corner_mix)
+        return storage
+
+    pub mutating func close():
+        self.positions.close()
+        self.offsets.close()
+        self.corners.close()
+        self.point_parents.close()
+        self.face_parents.close()
+        self.corner_parents.close()
+        self.copied.close()
+        self.point_mix.close()
+        self.corner_mix.close()
+
+## A mix entry for `parents`/`weights`: its parent code (-2 - entry). One
+## parent of full weight is that parent itself.
+func mix_entry(mix: Mix*, parents: const i32[], weights: const f32[]) -> i32!:
+    if parents.length == 1: return parents[0]
+    let entry = mix.offsets.count - 1
+    for at in 0..<parents.length:
+        try mix.parents.push(parents[at])
+        try mix.weights.push(weights[at])
+    try mix.offsets.push((i32)mix.parents.count)
+    return -2 - (i32)entry
+
+struct TriangleWork:
+    let source_offsets: const i32[]
+    let source_triangles: const i32[]
+    let offsets: const i32[]
+    let parents: const i32[]
+    let copied: const u8[]
+    let triangles: i32[]
+
+## Copied faces take their parent's triangles, shifted to their corners;
+## the rest are marked for ear clipping.
+func copy_triangles(context: void*?, first: usize, end: usize):
+    let work = (TriangleWork*)(context else return)
+    for face in first..<end:
+        let start = (usize)work.offsets[face]
+        let size = (usize)work.offsets[face + 1] - start
+        let target = (start - face * 2) * 3
+        if work.copied[face] == 0:
+            work.triangles[target] = -1
+            continue
+        let parent = (usize)work.parents[face]
+        let old_start = (usize)work.source_offsets[parent]
+        let from_triangle = (old_start - parent * 2) * 3
+        let shift = (i32)start - (i32)old_start
+        if work.copied[face] == 1:
+            for at in 0..<(size - 2) * 3:
+                work.triangles[target + at] = work.source_triangles[from_triangle + at] + shift
+            continue
+        # Reversed: corner k is the old corner size - 1 - k, winding flipped.
+        for triangle in 0..<size - 2:
+            for side in 0..<(usize)3:
+                let old = work.source_triangles[from_triangle + triangle * 3 + 2 - side] - (i32)old_start
+                work.triangles[target + triangle * 3 + side] = (i32)start + (i32)size - 1 - old

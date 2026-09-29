@@ -185,3 +185,26 @@ exactly its members, and edges as chained point pairs (`p3-4-5`), all read back
 to the same bits. `Groups.with_group` makes a flagged group from an
 expression, `Groups.count` counts one, and `Groups.check` returns a syntax
 error or "".
+
+## Verbs
+
+Every modeling operation is a verb (after Houdini's SOP verbs): a Base kernel
+that takes the input mesh, its group as bits on the verb's domain and the
+parameter values, and returns new positions (Transform Components, Smooth,
+Mountain, Peak, Flatten, Snap: topology, triangles and attributes shared), a
+topology built with parents (`TopologyBuilder`), or a finished mesh. `Verbs.run`
+resolves the group (empty: everything; Group Type 0 guesses the domain from
+the expression's named groups), converts it to the verb's domain, cooks, and
+carries every attribute and group through the parents (`propagate.lucb`:
+copy one parent; mix weighted parents, AND for groups; zero for new elements;
+edges by corner adjacency). The result (`VerbResult`) has the mesh, the output
+selection and a warning. `Verbs.count`, `name`, `category`, `description`,
+`domain` and `parm_*` describe the verbs, and luced-3d generates its node
+catalog from them.
+
+Faces a builder copies keep their triangles (CAD cut cells survive); runs of
+untouched faces copy in one pass (`copy_faces`), and only new faces are ear
+clipped. On the 700k-face grid: Transform Components of 1k faces 12 ms,
+PolyExtrude 46 ms, Inset 27 ms, Delete 10 ms, Reverse 24 ms, Duplicate 23 ms,
+Smooth (everything) 45 ms, Triangulate (half) 71 ms, Subdivide to 2.8M faces
+0.73 s.
