@@ -147,3 +147,42 @@ pub type SetVerb = set_verbs.SetVerb
 pub type SetVerbOutput = set_verbs.SetVerbOutput
 pub let run_set_verb = set_verbs.run_set_verb
 pub let find_set_verb = set_verbs.find_set_verb
+
+## The geometry codec: saving and loading sets as prism crates, and the
+## registry through which other packages' families (luce-cad's B-rep) add
+## their encoders and decoders.
+import luce_geocore.io as io
+pub type GeometryWriter = io.GeometryWriter
+pub type GeometryReader = io.GeometryReader
+pub type PropertyHeader = io.PropertyHeader
+pub type CrateWriter = io.CrateWriter
+pub type CrateReader = io.CrateReader
+pub let register_codec = io.register_codec
+pub let encode_set = io.encode_set
+pub let save_geometry = io.save_geometry
+pub let load_geometry = io.load_geometry
+pub let geometry_key = io.geometry_key
+pub let set_component_count = geometry_set.set_component_count
+pub let set_component = geometry_set.set_component
+pub let cloud_positions = geometry_set.cloud_positions
+pub let cloud_origin = geometry_set.cloud_origin
+pub let cloud_store = geometry_set.cloud_store
+pub let cloud_assembled = geometry_set.cloud_assembled
+pub let curves_knots = curves.curves_knots
+pub let curves_knot_offsets = curves.curves_knot_offsets
+pub let point_span = polygon.point_span
+pub let offset_span = polygon.offset_span
+pub let corner_span = polygon.corner_span
+pub let triangle_span = polygon.triangle_span
+pub let face_normal_span = polygon.face_normal_span
+pub let mesh_origin = polygon.mesh_origin
+pub let attribute_entry = polygon.attribute_entry
+## Prism wire dtypes, for codecs' columns.
+pub let dtype_int8 = io.dtype_int8
+pub let dtype_int32 = io.dtype_int32
+pub let dtype_int64 = io.dtype_int64
+pub let dtype_uint8 = io.dtype_uint8
+pub let dtype_uint64 = io.dtype_uint64
+pub let dtype_float32 = io.dtype_float32
+pub let dtype_float64 = io.dtype_float64
+pub let dtype_str = io.dtype_str

@@ -182,6 +182,14 @@ func integer_of(store: const AttributeStore*, name: str, curve: usize, fallback:
 func clamp_integer(value: i64, low: i64, high: i64) -> i64:
     return low if value < low else (high if value > high else value)
 
+## Every curve's custom knots, and where each curve's start (empty when
+## no curve has custom knots): the codec writes them as they are.
+pub func curves_knots(curves: const Curves*) -> const f32[]:
+    return curves.knots.view()
+
+pub func curves_knot_offsets(curves: const Curves*) -> const i32[]:
+    return curves.knot_offsets.view()
+
 ## The origin positions (and handles) are measured from.
 pub func curves_origin(curves: const Curves*) -> Vector3:
     return curves.origin

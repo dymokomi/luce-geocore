@@ -1,7 +1,8 @@
 # Geometry families beyond meshes
 
 A `GeometrySet` holds one component per family. Meshes, points and instances
-are described in [API.md](API.md). This file covers curves and the set verbs.
+are described in [API.md](API.md). This file covers curves, the set verbs
+and the geometry codec.
 
 ## Curves
 
@@ -131,6 +132,70 @@ The curve verbs:
   become poly curves. Pass-through points join chains, and closed chains
   become cyclic.
 
+## Geometry files (.prism)
+
+`GeometryFile.save(geometry, path, key)` writes a whole set as a prism v4
+binary crate (PRSMC, luce-prism's format), and `GeometryFile.load(path)` reads
+it back. `GeometryFile.key(path)` reads only the key recorded at the root.
+Everything is written:
+
+- every component, every attribute and group, every flag;
+- nested instance sets.
+
+The round trip is exact: floats are written bit for bit.
+
+The document is a tree of elements:
+
+```
+/geometry              geometry    int64 version, int64 key
+  /geometry/mesh       mesh        float64[3] origin, float32[n,3] P, int32 face_offsets,
+                                   int32 corner_points, int32 triangles, [float64[n,3] precise]
+    /geometry/mesh/a0  attribute   str name, domain, type; int64 width, single, flags, role,
+                                   elements; [uint8 table]; typed value
+  /geometry/points     points      origin, P
+  /geometry/curves     curves      origin, P, offsets, [knots, knot_offsets]
+  /geometry/instances  instances   int64 count
+    .../i0             instance    translation, rotation, scale, visible
+      .../i0/geometry  geometry    (a nested set)
+```
+
+Derived caches are never written: normals, edges, evaluated curves, BVHs.
+
+The writer (`io/crate.lucb`) streams:
+
+- It collects the element tree and the string table first.
+- Each column's payload then goes straight from its block to the file,
+  through a temporary file that is renamed over the destination.
+- The reader reads each payload straight into the new column that will hold
+  it.
+
+Neither copies the data. luce-prism's in-memory document engine caps a file
+at 256 MiB, so a column above 256 MiB is written as several properties:
+`<name>_chunks` holds the count and rows, then `<name>_0`, `<name>_1`, and so
+on. Files under 256 MiB open in luce-prism as ordinary documents; luced-3d's
+tests check this.
+
+Each family has a codec. Mesh, points, curves and instances are built in.
+Another package registers its own once, before saving or loading:
+
+```luce
+from geocore_kernel import register_codec, GeometryWriter, GeometryReader
+
+register_codec(my_component_type(), encode, decode)
+## encode(data: const void*, writer: GeometryWriter*, path: str) -> !
+##   writer.crate.element(path, "<family name>"), then properties:
+##   writer.crate.integer/number/triple/text/copied_array, writer.column(name,
+##   dtype, rows, columns, bytes) for columns (chunked as needed), and
+##   writer.attributes(path, store) for an AttributeStore's children.
+## decode(reader: GeometryReader*, path: str) -> void*!
+##   reader.next_property() until none, reading each with integer/triple/
+##   text/column[T](header); then reader.attributes(path, &store) and
+##   reader.next_child(path) for child elements; returns the component data.
+```
+
+The element kind of a component is its family name. The loader finds the
+codec by that name, and fails clearly when a family has none.
+
 ## Benchmarks
 
 `tests/bench/run.py --base <luce-base>` also runs `tests/bench/geometry.lucb`
@@ -146,3 +211,13 @@ The curve verbs:
 | Curve to Mesh: 1k Catmull-Rom curves, 12-point circle | 82.1 ms | 4,466,000 |
 | Mesh to Curve: the 837×837 grid's boundary | 51.9 ms | 3,348 |
 | Mesh to Curve: every edge of the 837×837 grid | 345.9 ms | 1,402,808 |
+| Save: the 837×837 grid with uv to .prism (bytes) | 8.0 ms | 84,089,051 |
+| Load: that .prism back (faces) | 19.3 ms | 700,569 |
+
+luced-3d's headless benchmark (`tests/bench/run.py`, `--native --opt 2`)
+saves and loads cooked results:
+
+| Case | Save | Load | File |
+|---|---:|---:|---:|
+| 700k-face grid (OBJ) | 3.8 ms | 17.0 ms | 39 MB |
+| camera.step, tessellated (707k points, 655k faces, 9 attributes) | 11.8 ms | 25.5 ms | 122 MB |

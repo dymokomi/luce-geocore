@@ -1,0 +1,287 @@
+## The geometry codec: a whole GeometrySet as a prism crate (.prism), every
+## component, attribute and group, exactly. Cooked geometry is written only
+## by a Cache/Freeze node or an export; projects keep recipes.
+##
+##   /geometry            geometry   int64 version, int64 key
+##     /geometry/mesh     mesh       origin, P, face_offsets, corner_points,
+##                                   triangles, [precise]
+##       /geometry/mesh/a0  attribute  name, domain, type, width, storage,
+##                                     flags, role, elements, [table], value
+##     /geometry/points   points     origin, P
+##     /geometry/curves   curves     origin, P, offsets, knots, knot_offsets
+##     /geometry/instances  instances  count
+##       .../i0           instance   translation, rotation, scale, visible
+##         .../i0/geometry  geometry  (a nested set)
+##
+## Each family is a codec (encode, decode) found by its component name;
+## the built-in families are here, and other packages register theirs
+## (luce-cad's B-rep). Columns are written as typed arrays straight from
+## their blocks and read straight into new blocks. A column over 256 MiB is
+## several properties (`<name>_chunks`: count and rows, then `<name>_0`…).
+## Derived caches (normals, edges, evaluated curves, BVHs) are never written.
+
+## What a family's codec does: write a component's properties and children
+## under its element, and read them back into new component data.
+pub struct ComponentCodec:
+    pub let name: str
+    pub let kind: const ComponentType*
+    pub let encode: func(const void*, GeometryWriter*, str) -> unit!
+    pub let decode: func(GeometryReader*, str) -> void*!
+
+var codec_lock: sync.Mutex
+var codecs: (ComponentCodec?)[64]
+var codec_count: usize = 0
+
+## Register the codec of a family (once, before its components are saved
+## or loaded; registering again replaces it).
+pub func register_codec(kind: const ComponentType*, encode: func(const void*, GeometryWriter*, str) -> unit!, decode: func(GeometryReader*, str) -> void*!) -> !:
+    try register(kind)
+    codec_lock.lock()
+    defer codec_lock.unlock()
+    for at in 0..<codec_count:
+        let known = codecs[at] else continue
+        if known.name == kind.name:
+            codecs[at] = ComponentCodec(kind.name, kind, encode, decode)
+            return
+    if codec_count == codecs.length: error(errors.limit, "at most 64 geometry codecs")
+    codecs[codec_count] = ComponentCodec(kind.name, kind, encode, decode)
+    codec_count += 1
+
+## The codec of the family called `name`: a built-in one, else a registered one.
+func codec_of(name: str) -> ComponentCodec?:
+    if name == "mesh": return ComponentCodec(name, mesh_component_type(), encode_mesh, decode_mesh)
+    if name == "points": return ComponentCodec(name, points_component_type(), encode_points, decode_points)
+    if name == "curves": return ComponentCodec(name, curves_type(), encode_curves, decode_curves)
+    if name == "instances": return ComponentCodec(name, instances_component_type(), encode_instances, decode_instances)
+    codec_lock.lock()
+    defer codec_lock.unlock()
+    for at in 0..<codec_count:
+        let known = codecs[at] else continue
+        if known.name == name: return known
+    return none
+
+func mesh_component_type() -> const ComponentType*:
+    return &mesh_component
+
+func points_component_type() -> const ComponentType*:
+    return &points_component
+
+func instances_component_type() -> const ComponentType*:
+    return &instances_component
+
+# mark: Writing
+
+## Where codecs write: element and property calls on the crate being built,
+## with the column helpers geometry needs.
+pub struct GeometryWriter:
+    pub var crate: CrateWriter
+    ## Path text built while nesting.
+    var scratch: Growing[u8]
+    ## The most bytes a property holds before a column is chunked.
+    pub var chunk: usize = chunk_bytes
+
+    pub func init():
+        self.crate = CrateWriter()
+        self.scratch = Growing[u8]()
+        self.chunk = chunk_bytes
+
+    pub mutating func close():
+        self.crate.close()
+        self.scratch.close()
+
+    ## `parent` + "/" + `name`, valid until the next call.
+    pub mutating func child(parent: str, name: str) -> str!:
+        try self.scratch.assign(parent.bytes)
+        try self.scratch.push(47)
+        for byte in name.bytes: try self.scratch.push(byte)
+        return (str)self.scratch.view()
+
+    ## A typed column of `rows` × `columns` components, chunked above 256 MiB.
+    pub mutating func column(name: str, dtype: u8, rows: usize, columns: usize, bytes: const u8[]) -> !:
+        if bytes.length <= self.chunk or rows <= 1:
+            try self.crate.array(name, dtype, rows, columns, bytes)
+            return
+        let row_bytes = bytes.length // rows
+        let per_chunk = math.max(1.0, (f64)(self.chunk // row_bytes))
+        let chunk_rows = (usize)per_chunk
+        let chunks = (rows + chunk_rows - 1) // chunk_rows
+        var header: i64[2] = [(i64)chunks, (i64)rows]
+        var label = Growing[u8]()
+        defer label.close()
+        try append_name(&label, name, "_chunks")
+        try self.crate.copied_array((str)label.view(), dtype_int64, 2, u8[]((u8*)&header[0], 16))
+        for chunk in 0..<chunks:
+            let first = chunk * chunk_rows
+            let end = first + chunk_rows if first + chunk_rows < rows else rows
+            label.clear()
+            try append_name(&label, name, "_")
+            try append_number(&label, chunk)
+            try self.crate.array((str)label.view(), dtype, end - first, columns, bytes[first * row_bytes..<end * row_bytes])
+
+    ## Every attribute of `store` as children of `parent` (a0, a1, …).
+    pub mutating func attributes(parent: str, store: const AttributeStore*) -> !:
+        var entries = Growing[const Attribute*]()
+        defer entries.close()
+        for index in 0..<store.count(): try entries.push(store.entry(index))
+        try self.attribute_list(parent, entries.view())
+
+    ## The attributes listed, as children of `parent`.
+    pub mutating func attribute_list(parent: str, entries: const (const Attribute*)[]) -> !:
+        let base = try copied_text(parent)
+        defer free(base) in memory.heap
+        for index in 0..<entries.length:
+            let entry = entries[index]
+            var name = Growing[u8]()
+            defer name.close()
+            try append_text(&name, "a")
+            try append_number(&name, index)
+            let path = try self.child((str)base, (str)name.view())
+            try self.crate.element(path, "attribute")
+            try self.crate.text("name", entry.name())
+            try self.crate.text("domain", domain_name(entry.domain))
+            try self.crate.text("type", type_name(entry.kind))
+            try self.crate.integer("width", (i64)entry.width)
+            try self.crate.integer("single", 1 if entry.storage == Storage.single else 0)
+            try self.crate.integer("flags", (i64)entry.flags)
+            try self.crate.integer("role", (i64)(u8)entry.role)
+            try self.crate.integer("elements", (i64)entry.elements)
+            if entry.kind == DataType.text: try self.column("table", dtype_uint8, entry.table.count(), 1, entry.table.view())
+            let data = entry.data.view()
+            match entry.kind:
+                .boolean: try self.column("value", dtype_uint64, data.length // 8, 1, data)
+                .int8: try self.column("value", dtype_int8, data.length // entry.width, entry.width, data)
+                .int32, .text: try self.column("value", dtype_int32, data.length // (4 * entry.width), entry.width, data)
+                .int64: try self.column("value", dtype_int64, data.length // (8 * entry.width), entry.width, data)
+                .float32: try self.column("value", dtype_float32, data.length // (4 * entry.width), entry.width, data)
+                _: try self.column("value", dtype_float64, data.length // (8 * entry.width), entry.width, data)
+
+func append_name(out: Growing[u8]*, name: str, suffix: str) -> !:
+    try append_text(out, name)
+    try append_text(out, suffix)
+
+func float3_bytes(values: const Float3[]) -> const u8[]:
+    return u8[]((u8*)values.data, values.length * 12)
+
+func i32_bytes(values: const i32[]) -> const u8[]:
+    return u8[]((u8*)values.data, values.length * 4)
+
+func f32_bytes(values: const f32[]) -> const u8[]:
+    return u8[]((u8*)values.data, values.length * 4)
+
+## `set` under element `path` (kind "geometry"), its components as
+## children; the root also records the format version and `key`.
+pub func encode_set(writer: GeometryWriter*, set: const GeometrySet*, path: str, root: bool = false, key: i64 = 0) -> !:
+    try writer.crate.element(path, "geometry")
+    if root:
+        try writer.crate.integer("version", 1)
+        try writer.crate.integer("key", key)
+    let base = try copied_text(path)
+    defer free(base) in memory.heap
+    for index in 0..<set_component_count(set):
+        let component = set_component(set, index)
+        let codec = codec_of(component.kind.name) else error(errors.invalid, "this geometry family cannot be saved yet (no codec)")
+        let child = try copied_text(try writer.child((str)base, component.kind.name))
+        defer free(child) in memory.heap
+        let encode = codec.encode
+        try encode(component.data, writer, (str)child)
+
+## A copy of `text` the caller frees (paths outlive the writer's scratch).
+func copied_text(text: str) -> u8[]!:
+    let copy = try alloc u8[text.length] in memory.heap
+    if text.length > 0: memory.copy(copy, text.bytes, text.length)
+    return copy
+
+func encode_mesh(data: const void*, writer: GeometryWriter*, path: str) -> !:
+    let mesh = (const Mesh*)data
+    try writer.crate.element(path, "mesh")
+    let origin = mesh_origin(mesh)
+    try writer.crate.triple("origin", origin.x, origin.y, origin.z)
+    let points = point_span(mesh)
+    try writer.column("P", dtype_float32, points.length, 3, float3_bytes(points))
+    let offsets = offset_span(mesh)
+    try writer.column("face_offsets", dtype_int32, offsets.length, 1, i32_bytes(offsets))
+    let corners = corner_span(mesh)
+    try writer.column("corner_points", dtype_int32, corners.length, 1, i32_bytes(corners))
+    let triangles = triangle_span(mesh)
+    try writer.column("triangles", dtype_int32, triangles.length, 1, i32_bytes(triangles))
+    let precise = precise_span(mesh)
+    if precise.length > 0: try writer.column("precise", dtype_float64, precise.length, 3, u8[]((u8*)precise.data, precise.length * 24))
+    var entries = Growing[const Attribute*]()
+    defer entries.close()
+    for index in 0..<(usize)mesh.attribute_count(): try entries.push(try attribute_entry(mesh, (i64)index))
+    try writer.attribute_list(path, entries.view())
+
+func encode_points(data: const void*, writer: GeometryWriter*, path: str) -> !:
+    let cloud = (const PointCloud*)data
+    try writer.crate.element(path, "points")
+    let origin = cloud_origin(cloud)
+    try writer.crate.triple("origin", origin.x, origin.y, origin.z)
+    let points = cloud_positions(cloud)
+    try writer.column("P", dtype_float32, points.length, 3, float3_bytes(points))
+    try writer.attributes(path, cloud_store(cloud))
+
+func encode_curves(data: const void*, writer: GeometryWriter*, path: str) -> !:
+    let curves = (const Curves*)data
+    try writer.crate.element(path, "curves")
+    let origin = curves_origin(curves)
+    try writer.crate.triple("origin", origin.x, origin.y, origin.z)
+    let points = curves.position_span()
+    try writer.column("P", dtype_float32, points.length, 3, float3_bytes(points))
+    let offsets = curves.offset_span()
+    try writer.column("offsets", dtype_int32, offsets.length, 1, i32_bytes(offsets))
+    let knots = curves_knots(curves)
+    if knots.length > 0:
+        try writer.column("knots", dtype_float32, knots.length, 1, f32_bytes(knots))
+        let starts = curves_knot_offsets(curves)
+        try writer.column("knot_offsets", dtype_int32, starts.length, 1, i32_bytes(starts))
+    try writer.attributes(path, curves.store())
+
+func encode_instances(data: const void*, writer: GeometryWriter*, path: str) -> !:
+    let instances = (const Instances*)data
+    try writer.crate.element(path, "instances")
+    try writer.crate.integer("count", (i64)instances.count())
+    let base = try copied_text(path)
+    defer free(base) in memory.heap
+    for index in 0..<instances.count():
+        let item = instances.item(index)
+        var name = Growing[u8]()
+        defer name.close()
+        try append_text(&name, "i")
+        try append_number(&name, index)
+        let child = try copied_text(try writer.child((str)base, (str)name.view()))
+        defer free(child) in memory.heap
+        try writer.crate.element((str)child, "instance")
+        try writer.crate.triple("translation", item.translation.x, item.translation.y, item.translation.z)
+        try writer.crate.triple("rotation", item.rotation.x, item.rotation.y, item.rotation.z)
+        try writer.crate.triple("scale", item.scale.x, item.scale.y, item.scale.z)
+        try writer.crate.integer("visible", 1 if item.visible else 0)
+        let nested = try copied_text(try writer.child((str)child, "geometry"))
+        defer free(nested) in memory.heap
+        try encode_set(writer, item.set, (str)nested)
+
+## Save `set` to `path` as a prism crate, `key` in its root (the Cache
+## node keeps its stamp there); the bytes written.
+pub func save_geometry(set: const GeometrySet*, path: str, key: i64, chunk: usize = chunk_bytes) -> usize!:
+    var writer = GeometryWriter()
+    defer writer.close()
+    writer.chunk = chunk
+    try encode_set(&writer, set, "/geometry", true, key)
+    return try writer.crate.save(path)
+
+func domain_name(domain: Domain) -> str:
+    match domain:
+        .point: return "point"
+        .corner: return "corner"
+        .face: return "face"
+        .edge: return "edge"
+        _: return "detail"
+
+func type_name(kind: DataType) -> str:
+    match kind:
+        .boolean: return "boolean"
+        .int8: return "int8"
+        .int32: return "int32"
+        .int64: return "int64"
+        .float32: return "float32"
+        .float64: return "float64"
+        _: return "text"

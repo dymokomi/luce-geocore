@@ -9,7 +9,9 @@ import memory
 import geocore
 import geocore_kernel
 from geocore import Vector3, Mesh, MeshPrimitives, GeometrySet
-from geocore_kernel import Curves, CurvesBuilder, CurveType, evaluated_positions, evaluated_frames, curves_dispose, curves_type, set_curves, empty_set, set_put, dispose_set, adopt_set, run_set_verb, find_set_verb
+from geocore_kernel import Curves, CurvesBuilder, CurveType, evaluated_positions, evaluated_frames, curves_dispose, curves_type, set_curves, empty_set, set_put, dispose_set, adopt_set, run_set_verb, find_set_verb, save_geometry, load_geometry
+from geocore_growing import Growing
+from io import path
 import geocore_parallel
 
 func row(name: str, started: u64, count: usize):
@@ -100,6 +102,22 @@ pub func main(arguments: str[]) -> i32!:
     let outline = try verb("Mesh to Curve", sheet.value(), [1.0])
     row("Mesh to Curve: the 837x837 grid's boundary", started, (set_curves(outline.value()) else trap("curves")).point_count())
     outline.release()
+    # The codec: the grid with uv, saved to a .prism crate and loaded back.
+    let mapped = try geocore.AttributeKernels.uv_project(grid, 1.0)
+    defer mapped.release()
+    let textured = try GeometrySet.of_mesh(mapped)
+    defer textured.release()
+    var file = Growing[u8]()
+    defer file.close()
+    try file.assign(path.temp().bytes)
+    for byte in "/luce-geocore-bench.prism".bytes: try file.push(byte)
+    started = time.now()
+    let saved = try save_geometry(textured.value(), (str)file.view(), 1, 268435456)
+    row("Save: the 837x837 grid with uv to .prism", started, saved)
+    started = time.now()
+    let loaded = try adopt_set(try load_geometry((str)file.view()))
+    row("Load: that .prism back", started, (usize)((try loaded.value().mesh()) else trap("mesh")).value().face_count())
+    loaded.release()
     started = time.now()
     let wires = try verb("Mesh to Curve", sheet.value(), [0.0])
     row("Mesh to Curve: every edge of the 837x837 grid", started, (set_curves(wires.value()) else trap("curves")).curve_count())

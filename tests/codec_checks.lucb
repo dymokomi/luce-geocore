@@ -1,0 +1,166 @@
+## The geometry codec: a set with a mesh (attributes of every type, groups,
+## text, single storage, corner uv), a point cloud, curves (handles, custom
+## knots) and nested instances saves and loads back byte for byte, also
+## with every column chunked; the root key reads alone; bad files fail.
+import geocore
+import geocore_kernel
+import interop
+import math
+import memory
+import strings
+import files
+import c
+from io import path
+from geocore import Vector3, Mesh, MeshPrimitives, GeometrySet, AttributeKernels
+from geocore_kernel import Curves, CurvesBuilder, CurveType, Attribute, AttributeStore, Domain, DataType, set_curves, curves_type, set_put, empty_set, dispose_set, adopt_set, save_geometry, load_geometry, geometry_key, arc_curves, set_mesh, set_find, points_component, instances_component, Instances, PointCloud, cloud_positions, cloud_store, set_component_count, set_component, curves_knots, evaluated_positions, curves_dispose, point_span, offset_span, corner_span, triangle_span, face_normal_span, mesh_origin, attribute_entry
+from geocore_growing import Growing
+
+pub func exercise() -> !:
+    let set = try sample_set()
+    defer set.release()
+    var file = Growing[u8]()
+    defer file.close()
+    try temporary(&file, "luce-geocore-codec.prism")
+    let saved = try save_geometry(set.value(), (str)file.view(), 42, 268435456)
+    assert(saved > 0 and (try geometry_key((str)file.view())) == 42)
+    let storage = try load_geometry((str)file.view())
+    let loaded = try adopt_set(storage)
+    defer loaded.release()
+    try same_sets(set.value(), loaded.value())
+    # Every column in chunks of at most 64 bytes.
+    let chunked = try save_geometry(set.value(), (str)file.view(), 7, 64)
+    assert(chunked > saved and (try geometry_key((str)file.view())) == 7)
+    let again = try adopt_set(try load_geometry((str)file.view()))
+    defer again.release()
+    try same_sets(set.value(), again.value())
+    # A file that is not a crate fails; a missing one has no key.
+    var bad = Growing[u8]()
+    defer bad.close()
+    try temporary(&bad, "luce-geocore-codec-bad.prism")
+    let native = try strings.copy((str)bad.view())
+    defer strings.release(native)
+    try files.write((c.str)native, "not a crate at all".bytes)
+    assert(not (try loads((str)bad.view())) and (try geometry_key((str)bad.view())) == 0)
+
+## Whether the file at `name` loads as geometry.
+func loads(name: str) -> bool!:
+    let storage = load_geometry(name) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
+        return false
+    dispose_set(storage)
+    return true
+
+## A file name in the temporary directory.
+func temporary(out: Growing[u8]*, name: str) -> !:
+    try out.assign(path.temp().bytes)
+    try out.push(47)
+    for byte in name.bytes: try out.push(byte)
+
+## Mesh with attributes of every kind, a cloud of its points, curves and
+## nested instances.
+func sample_set() -> interop.Reference[GeometrySet]!:
+    let grid = try MeshPrimitives.grid(2.0, 3)
+    defer grid.release()
+    let weights = try grid.value().with_attribute("weight", 0, 1, [0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5, 13.5, 14.5, 15.5], false, true)
+    defer weights.release()
+    let material = try weights.value().with_attribute("material", 2, 1, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0], true)
+    defer material.release()
+    let wide = try material.value().with_attribute("big", 2, 1, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10000000000.0], true)
+    defer wide.release()
+    let grouped = try wide.value().with_group("top", 2, [0, 4, 8])
+    defer grouped.release()
+    let named = try grouped.value().with_text_values("path", 2, "a\nb/c", [0, 1, 0, 1, 0, 1, 0, 1, -1])
+    defer named.release()
+    let single = try named.value().with_single_attribute("scale", 3, [2.0, 3.0])
+    defer single.release()
+    let mapped = try AttributeKernels.uv_project(single, 0.5)
+    defer mapped.release()
+    let base = try GeometrySet.of_mesh(mapped)
+    defer base.release()
+    let clouded = try base.value().with_cloud_of(mapped)
+    defer clouded.release()
+    # Curves with handles and an exact NURBS circle (custom knots).
+    var builder = CurvesBuilder()
+    defer builder.close()
+    try builder.begin(CurveType.bezier, true, 6)
+    try builder.point(Vector3(0.0, 0.0, 0.0))
+    builder.handles(Vector3(-0.2, 0.0, 0.0), Vector3(0.2, 0.1, 0.0))
+    try builder.point(Vector3(1.0, 1.0, 0.0))
+    builder.handles(Vector3(0.8, 1.0, 0.0), Vector3(1.2, 1.0, 0.3))
+    try builder.point(Vector3(2.0, 0.0, 0.5))
+    let bezier = try set_of(try builder.finish())
+    defer bezier.release()
+    let circle = try set_of(try arc_curves(1.0, 0.0, 360.0, 4, 2, 0, 8))
+    defer circle.release()
+    let curvy = try bezier.value().merged(circle)
+    defer curvy.release()
+    let full = try clouded.value().merged(curvy)
+    defer full.release()
+    let child = try GeometrySet.of_mesh(grid)
+    defer child.release()
+    let nested = try child.value().with_instance(child, Vector3(1.0, 2.0, 3.0), Vector3(0.1, 0.2, 0.3), Vector3(1.0, 2.0, 1.0), false)
+    defer nested.release()
+    return try full.value().with_instance(nested, Vector3(5.0, 0.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+
+## A set of `curves` (taken, even on failure).
+func set_of(curves: Curves*) -> interop.Reference[GeometrySet]!:
+    let storage = empty_set() catch failure:
+        curves_dispose(curves)
+        error(failure.code, failure.message)
+    set_put(storage, curves_type(), (void*)curves) catch failure:
+        dispose_set(storage)
+        error(failure.code, failure.message)
+    return try adopt_set(storage)
+
+# mark: Comparison
+
+func same_bytes(a: const u8[], b: const u8[]):
+    assert(a.length == b.length)
+    for at in 0..<a.length: assert(a[at] == b[at])
+
+func bytes_of[T](values: const T[]) -> const u8[]:
+    return u8[]((u8*)values.data, values.length * sizeof(T))
+
+func same_attribute(a: const Attribute*, b: const Attribute*):
+    assert(a.name() == b.name() and a.domain == b.domain and a.kind == b.kind and a.width == b.width)
+    assert(a.storage == b.storage and a.flags == b.flags and a.role == b.role and a.elements == b.elements)
+    same_bytes(a.data.view(), b.data.view())
+    same_bytes(a.table.view(), b.table.view())
+
+func same_store(a: const AttributeStore*, b: const AttributeStore*):
+    assert(a.count() == b.count())
+    for index in 0..<a.count(): same_attribute(a.entry(index), b.entry(index))
+
+func same_sets(a: const GeometrySet*, b: const GeometrySet*) -> !:
+    assert(set_component_count(a) == set_component_count(b))
+    for index in 0..<set_component_count(a):
+        assert(set_component(a, index).kind.name == set_component(b, index).kind.name)
+    if let x = set_mesh(a):
+        let y = set_mesh(b) else trap("mesh")
+        same_bytes(bytes_of(point_span(x)), bytes_of(point_span(y)))
+        same_bytes(bytes_of(offset_span(x)), bytes_of(offset_span(y)))
+        same_bytes(bytes_of(corner_span(x)), bytes_of(corner_span(y)))
+        same_bytes(bytes_of(triangle_span(x)), bytes_of(triangle_span(y)))
+        same_bytes(bytes_of(face_normal_span(x)), bytes_of(face_normal_span(y)))
+        assert(mesh_origin(x) == mesh_origin(y) and x.attribute_count() == y.attribute_count())
+        for index in 0..<x.attribute_count(): same_attribute(try attribute_entry(x, index), try attribute_entry(y, index))
+    if let x = set_curves(a):
+        let y = set_curves(b) else trap("curves")
+        same_bytes(bytes_of(x.position_span()), bytes_of(y.position_span()))
+        same_bytes(bytes_of(x.offset_span()), bytes_of(y.offset_span()))
+        same_bytes(bytes_of(curves_knots(x)), bytes_of(curves_knots(y)))
+        same_store(x.store(), y.store())
+        same_bytes(bytes_of(try evaluated_positions(x)), bytes_of(try evaluated_positions(y)))
+    if let found = set_find(a, points_component()):
+        let other = set_find(b, points_component()) else trap("points")
+        same_bytes(bytes_of(cloud_positions((const PointCloud*)found)), bytes_of(cloud_positions((const PointCloud*)other)))
+        same_store(cloud_store((const PointCloud*)found), cloud_store((const PointCloud*)other))
+    if let found = set_find(a, instances_component()):
+        let x = (const Instances*)found
+        let y = (const Instances*)(set_find(b, instances_component()) else trap("instances"))
+        assert(x.count() == y.count())
+        for index in 0..<x.count():
+            let p = x.item(index)
+            let q = y.item(index)
+            assert(p.translation == q.translation and p.rotation == q.rotation and p.scale == q.scale and p.visible == q.visible)
+            try same_sets(p.set, q.set)

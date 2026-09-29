@@ -1,0 +1,325 @@
+## Reading geometry crates back: a reader with one element of lookahead, so
+## a codec reads its element's properties, then its children (elements whose
+## path continues its own), and stops at the first element that does not.
+## Columns are allocated at their final size and read straight into.
+
+pub struct GeometryReader:
+    var crate: CrateReader
+    var peeked: (str, str)?
+    var ended: bool = false
+
+    pub mutating func close():
+        self.crate.close()
+
+    ## The next element, consuming it.
+    pub mutating func next_element() -> (str, str)?!:
+        if let found = self.peeked:
+            self.peeked = none
+            return found
+        if self.ended: return none
+        let found = try self.crate.next_element()
+        if found == none: self.ended = true
+        return found
+
+    ## The next element, left for the next `next_element`. The current
+    ## element's unread properties are skipped.
+    pub mutating func peek_element() -> (str, str)?!:
+        if self.peeked == none and not self.ended:
+            self.peeked = try self.crate.next_element()
+            if self.peeked == none: self.ended = true
+        return self.peeked
+
+    ## The next child of `parent`, consuming it; none when the next element
+    ## is not one.
+    pub mutating func next_child(parent: str) -> (str, str)?!:
+        let found = (try self.peek_element()) else return none
+        if not is_child(found.0, parent): return none
+        return try self.next_element()
+
+    pub mutating func next_property() -> PropertyHeader?!:
+        return try self.crate.next_property()
+
+    ## An int64 (or other integer) scalar.
+    pub mutating func integer(header: PropertyHeader) -> i64!:
+        var bytes: u8[8] = [0, 0, 0, 0, 0, 0, 0, 0]
+        let width = dtype_width(header.dtype)
+        if header.rank != 0 or width == 0 or width > 8 or header.dtype == dtype_float32 or header.dtype == dtype_float64: error(errors.invalid, "expected an integer property")
+        try self.crate.read_payload(bytes[..<width])
+        return memory.read[i64]((void*)&bytes[0])
+
+    ## Three f64 components.
+    pub mutating func triple(header: PropertyHeader) -> Vector3!:
+        if header.dtype != dtype_float64 or header.bytes != 24: error(errors.invalid, "expected three float64 components")
+        var values: f64[3] = [0.0, 0.0, 0.0]
+        try self.crate.read_payload(u8[]((u8*)&values[0], 24))
+        return Vector3(values[0], values[1], values[2])
+
+    ## A str scalar, into `out`.
+    pub mutating func text(header: PropertyHeader, out: Growing[u8]*) -> !:
+        if header.dtype != dtype_str: error(errors.invalid, "expected a text property")
+        try self.crate.read_text(out)
+
+    ## A typed array as a new column of T: one property, or `<name>_chunks`
+    ## followed by its chunks.
+    pub mutating func column[T](header: PropertyHeader) -> Column[T]!:
+        if not ends_with(header.name, "_chunks"):
+            if header.bytes % sizeof(T) != 0: error(errors.invalid, "a geometry column has the wrong element size")
+            var column = try Column[T].allocate(header.bytes // sizeof(T))
+            errdefer column.release()
+            try self.crate.read_payload(bytes_of(&column))
+            return column
+        var info: i64[2] = [0, 0]
+        try self.crate.read_payload(u8[]((u8*)&info[0], 16))
+        let chunks = (usize)info[0]
+        let rows = (usize)info[1]
+        let first = (try self.next_property()) else error(errors.invalid, "a chunked column ends early")
+        let rows_first = (usize)first.dims[0]
+        if rows_first == 0 or chunks == 0: error(errors.invalid, "a chunked column is empty")
+        let row_bytes = first.bytes // rows_first
+        if (rows * row_bytes) % sizeof(T) != 0: error(errors.invalid, "a geometry column has the wrong element size")
+        var column = try Column[T].allocate(rows * row_bytes // sizeof(T))
+        errdefer column.release()
+        let bytes = bytes_of(&column)
+        var at = first.bytes
+        try self.crate.read_payload(bytes[..<at])
+        for chunk in 1..<chunks:
+            let next = (try self.next_property()) else error(errors.invalid, "a chunked column ends early")
+            if at + next.bytes > bytes.length: error(errors.invalid, "a chunked column overflows")
+            try self.crate.read_payload(bytes[at..<at + next.bytes])
+            at += next.bytes
+        if at != bytes.length: error(errors.invalid, "a chunked column is short")
+        return column
+
+    ## The attribute children of `parent`, into `store`.
+    pub mutating func attributes(parent: str, store: AttributeStore*) -> !:
+        while true:
+            let found = (try self.peek_element()) else return
+            if not is_child(found.0, parent) or found.1 != "attribute": return
+            discard(try self.next_element())
+            try store.put(try self.attribute())
+
+    ## One attribute element's properties.
+    mutating func attribute() -> Attribute!:
+        var name = Growing[u8]()
+        defer name.close()
+        var domain = Growing[u8]()
+        defer domain.close()
+        var kind = Growing[u8]()
+        defer kind.close()
+        var width: i64 = 1
+        var single: i64 = 0
+        var flags: i64 = 0
+        var role: i64 = 0
+        var elements: i64 = 0
+        var table: Column[u8]
+        defer table.release()
+        var data: Column[u8]
+        defer data.release()
+        while let header = try self.next_property():
+            let label = header.name
+            if label == "name": try self.text(header, &name)
+            elif label == "domain": try self.text(header, &domain)
+            elif label == "type": try self.text(header, &kind)
+            elif label == "width": width = try self.integer(header)
+            elif label == "single": single = try self.integer(header)
+            elif label == "flags": flags = try self.integer(header)
+            elif label == "role": role = try self.integer(header)
+            elif label == "elements": elements = try self.integer(header)
+            elif label == "table" or label == "table_chunks":
+                table.release()
+                table = try self.column[u8](header)
+            elif label == "value" or label == "value_chunks":
+                data.release()
+                data = try self.column[u8](header)
+        let data_type = try type_of((str)kind.view())
+        let storage = Storage.single if single != 0 else Storage.array
+        var attribute = try Attribute.create((str)name.view(), try domain_of((str)domain.view()), data_type, (usize)width, (usize)elements, storage)
+        errdefer attribute.release()
+        if data.count() != attribute.data.count(): error(errors.invalid, "an attribute's values do not match its size")
+        attribute.data.release()
+        attribute.data = data.take()
+        attribute.flags = (u8)flags
+        attribute.role = Role((u8)role)
+        attribute.table.release()
+        attribute.table = table.take()
+        return attribute
+
+## Load a geometry crate as a new set.
+pub func load_geometry(path: str) -> GeometrySet*!:
+    var reader = GeometryReader(try CrateReader.open(path), none, false)
+    defer reader.close()
+    let root = (try reader.next_element()) else error(errors.invalid, "an empty geometry file")
+    if root.0 != "/geometry" or root.1 != "geometry": error(errors.invalid, "not a geometry file")
+    return try decode_set(&reader, "/geometry")
+
+## The key a geometry file was saved with, or 0 when it is missing or not a
+## geometry file. Only running out of memory is an error.
+pub func geometry_key(path: str) -> i64!:
+    return read_key(path) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
+        recover 0
+
+func read_key(path: str) -> i64!:
+    var crate = try CrateReader.open(path)
+    defer crate.close()
+    let root = (try crate.next_element()) else return 0
+    if root.0 != "/geometry" or root.1 != "geometry": return 0
+    while let header = try crate.next_property():
+        if header.name == "key" and header.dtype == dtype_int64 and header.rank == 0:
+            var bytes: u8[8] = [0, 0, 0, 0, 0, 0, 0, 0]
+            try crate.read_payload(bytes[..<8])
+            return memory.read[i64]((void*)&bytes[0])
+    return 0
+
+## The set under the current element `path` (its properties unread).
+func decode_set(reader: GeometryReader*, path: str) -> GeometrySet*!:
+    let storage = try empty_storage()
+    errdefer dispose_set(storage)
+    while let header = try reader.next_property():
+        if header.name == "version" and (try reader.integer(header)) != 1: error(errors.invalid, "this geometry file is from another format version")
+    while let found = try reader.next_child(path):
+        let child = found.0
+        let codec = codec_of(found.1) else error(errors.invalid, "the file holds a geometry family with no codec here")
+        let decode = codec.decode
+        let data = try decode(reader, child)
+        try set_put(storage, codec.kind, data)
+    return storage
+
+func decode_mesh(reader: GeometryReader*, path: str) -> void*!:
+    var origin = Vector3()
+    var positions: Column[Float3]
+    errdefer positions.release()
+    var offsets: Column[i32]
+    errdefer offsets.release()
+    var corners: Column[i32]
+    errdefer corners.release()
+    var triangles: Column[i32]
+    errdefer triangles.release()
+    var precise: Column[Vector3]
+    errdefer precise.release()
+    while let header = try reader.next_property():
+        let label = header.name
+        if label == "origin": origin = try reader.triple(header)
+        elif label == "P" or label == "P_chunks": positions = try reader.column[Float3](header)
+        elif label == "face_offsets" or label == "face_offsets_chunks": offsets = try reader.column[i32](header)
+        elif label == "corner_points" or label == "corner_points_chunks": corners = try reader.column[i32](header)
+        elif label == "triangles" or label == "triangles_chunks": triangles = try reader.column[i32](header)
+        elif label == "precise" or label == "precise_chunks": precise = try reader.column[Vector3](header)
+    try check_topology(offsets.view(), corners.view(), positions.count())
+    var attributes = AttributeStore()
+    defer attributes.close()
+    try reader.attributes(path, &attributes)
+    var empty_normals: Column[Float3]
+    let mesh = try assembled(positions.take(), origin, offsets.take(), corners.take(), triangles.take(), empty_normals, precise.take())
+    errdefer mesh_dispose(mesh)
+    for index in 0..<attributes.count(): try put_attribute(mesh, attributes.entry(index).share())
+    return (void*)mesh
+
+## Offsets that rise from 0 to the corners, and corners naming points: what
+## assembly trusts without checking.
+func check_topology(offsets: const i32[], corners: const i32[], points: usize) -> !:
+    if offsets.length == 0 or offsets[0] != 0 or (usize)offsets[offsets.length - 1] != corners.length: error(errors.invalid, "a saved mesh has inconsistent face offsets")
+    for at in 1..<offsets.length:
+        let size = offsets[at] - offsets[at - 1]
+        if size < 3 or size > 256: error(errors.invalid, "a saved mesh has a face of fewer than 3 or more than 256 corners")
+    for corner in corners:
+        if corner < 0 or (usize)corner >= points: error(errors.invalid, "a saved mesh names a missing point")
+
+func decode_points(reader: GeometryReader*, path: str) -> void*!:
+    var origin = Vector3()
+    var positions: Column[Float3]
+    defer positions.release()
+    while let header = try reader.next_property():
+        if header.name == "origin": origin = try reader.triple(header)
+        elif header.name == "P" or header.name == "P_chunks": positions = try reader.column[Float3](header)
+    var attributes = AttributeStore()
+    defer attributes.close()
+    try reader.attributes(path, &attributes)
+    # Share the store before taking the columns: nothing leaks if it fails.
+    let store = try attributes.shared()
+    return (void*)(try cloud_assembled(positions.share(), origin, store))
+
+func decode_curves(reader: GeometryReader*, path: str) -> void*!:
+    var origin = Vector3()
+    var positions: Column[Float3]
+    errdefer positions.release()
+    var offsets: Column[i32]
+    errdefer offsets.release()
+    var knots: Column[f32]
+    errdefer knots.release()
+    var knot_offsets: Column[i32]
+    errdefer knot_offsets.release()
+    while let header = try reader.next_property():
+        let label = header.name
+        if label == "origin": origin = try reader.triple(header)
+        elif label == "P" or label == "P_chunks": positions = try reader.column[Float3](header)
+        elif label == "offsets" or label == "offsets_chunks": offsets = try reader.column[i32](header)
+        elif label == "knots" or label == "knots_chunks": knots = try reader.column[f32](header)
+        elif label == "knot_offsets" or label == "knot_offsets_chunks": knot_offsets = try reader.column[i32](header)
+    let starts = offsets.view()
+    if starts.length == 0 or starts[0] != 0 or (usize)starts[starts.length - 1] != positions.count(): error(errors.invalid, "saved curves have inconsistent offsets")
+    for at in 1..<starts.length:
+        if starts[at] < starts[at - 1]: error(errors.invalid, "saved curves have inconsistent offsets")
+    var attributes = AttributeStore()
+    defer attributes.close()
+    try reader.attributes(path, &attributes)
+    let store = try attributes.shared()
+    return (void*)(try curves_assembled(positions.take(), origin, offsets.take(), knots.take(), knot_offsets.take(), store))
+
+func decode_instances(reader: GeometryReader*, path: str) -> void*!:
+    while let header = try reader.next_property(): discard(header)
+    let instances = try new_instances()
+    errdefer close_instances_data((void*)instances)
+    while let found = try reader.next_child(path):
+        let child = found.0
+        if found.1 != "instance": error(errors.invalid, "instances hold instance elements")
+        var translation = Vector3()
+        var rotation = Vector3()
+        var scale = Vector3(1.0, 1.0, 1.0)
+        var visible = true
+        while let header = try reader.next_property():
+            if header.name == "translation": translation = try reader.triple(header)
+            elif header.name == "rotation": rotation = try reader.triple(header)
+            elif header.name == "scale": scale = try reader.triple(header)
+            elif header.name == "visible": visible = (try reader.integer(header)) != 0
+        let base = try copied_text(child)
+        defer free(base) in memory.heap
+        let nested = (try reader.next_child((str)base)) else error(errors.invalid, "an instance has no geometry")
+        if nested.1 != "geometry": error(errors.invalid, "an instance holds a geometry element")
+        let set = try decode_set(reader, nested.0)
+        let placement = Placement.compose(translation, rotation, scale)
+        try instances.add(set, &placement, visible)
+    return (void*)instances
+
+func close_instances_data(data: void*):
+    let close = instances_component.close
+    close(data)
+
+## Whether `path` is a direct or deeper child of `parent`.
+func is_child(path: str, parent: str) -> bool:
+    return path.length > parent.length + 1 and (str)path.bytes[..<parent.length] == parent and path.bytes[parent.length] == 47
+
+func ends_with(text: str, suffix: str) -> bool:
+    return text.length >= suffix.length and (str)text.bytes[text.length - suffix.length..] == suffix
+
+func bytes_of[T](column: Column[T]*) -> u8[]:
+    let span = column.span()
+    return u8[]((u8*)span.data, span.length * sizeof(T))
+
+func domain_of(name: str) -> Domain!:
+    if name == "point": return Domain.point
+    if name == "corner": return Domain.corner
+    if name == "face": return Domain.face
+    if name == "edge": return Domain.edge
+    if name == "detail": return Domain.detail
+    error(errors.invalid, "an unknown attribute domain")
+
+func type_of(name: str) -> DataType!:
+    if name == "boolean": return DataType.boolean
+    if name == "int8": return DataType.int8
+    if name == "int32": return DataType.int32
+    if name == "int64": return DataType.int64
+    if name == "float32": return DataType.float32
+    if name == "float64": return DataType.float64
+    if name == "text": return DataType.text
+    error(errors.invalid, "an unknown attribute type")

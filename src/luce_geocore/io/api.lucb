@@ -1,0 +1,17 @@
+## Luce's view of geometry files: save a set, load one, read a file's key.
+
+pub struct GeometryFile:
+    let reserved: u8 = 0
+
+    ## Save `geometry` to `path` (a .prism crate), recording `key`; the bytes
+    ## written. The file is replaced atomically.
+    pub static func save(geometry: interop.Reference[GeometrySet], path: str, key: i64 = 0) -> i64!:
+        return (i64)(try save_geometry(try geometry.get(), path, key))
+
+    ## The set saved at `path`.
+    pub static func load(path: str) -> interop.Reference[GeometrySet]!:
+        return try adopt_set(try load_geometry(path))
+
+    ## The key `path` was saved with; 0 when it is missing or unreadable.
+    pub static func key(path: str) -> i64!:
+        return try geometry_key(path)

@@ -17,6 +17,7 @@ import luce_geocore.geometry_set as geometry_set
 import luce_geocore.groups as groups
 import luce_geocore.verbs as verbs
 import luce_geocore.set_verbs as set_verbs
+import luce_geocore.io as io
 import luce_geocore.errors as errors
 
 pub type Vector3 = vector.Vector3
@@ -48,6 +49,8 @@ pub type VerbResult = verbs.VerbResult
 pub type GeometryVerbs = set_verbs.GeometryVerbs
 pub type SetVerbResult = set_verbs.SetVerbResult
 pub type VerbCatalog = set_verbs.VerbCatalog
+## Geometry files: a whole set as a .prism crate.
+pub type GeometryFile = io.GeometryFile
 pub let invalid: ErrorCode = errors.invalid
 pub let busy: ErrorCode = errors.busy
 pub let limit: ErrorCode = errors.limit

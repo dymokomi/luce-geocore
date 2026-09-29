@@ -205,6 +205,13 @@ pub func set_remove(set: GeometrySet*, kind: const ComponentType*):
 pub func set_storage(set: const GeometrySet*) -> GeometrySet*!:
     return try set.storage()
 
+## The set's components, for Base walkers (the codec): how many, and each.
+pub func set_component_count(set: const GeometrySet*) -> usize:
+    return set.entries.count
+
+pub func set_component(set: const GeometrySet*, index: usize) -> const Component*:
+    return set.component(index)
+
 pub let geometry_set_type: interop.Type[GeometrySet] = interop.Type[GeometrySet]("GeometrySet", GeometrySet.close, GeometrySet.trace, closeable = true)
 
 ## Adopt heap storage as a Luce-visible set (disposing it on failure).

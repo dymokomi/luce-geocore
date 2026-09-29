@@ -25,6 +25,28 @@ pub struct PointCloud:
         self.positions.release()
         self.attributes.close()
 
+## A cloud's columns, for Base readers (the codec): its positions
+## (relative to its origin), its origin and its attributes.
+pub func cloud_positions(cloud: const PointCloud*) -> const Float3[]:
+    return cloud.positions.view()
+
+pub func cloud_origin(cloud: const PointCloud*) -> Vector3:
+    return cloud.origin
+
+pub func cloud_store(cloud: const PointCloud*) -> const AttributeStore*:
+    return &cloud.attributes
+
+## A heap cloud owning these columns (taken, even on failure).
+pub func cloud_assembled(positions: Column[Float3], origin: Vector3, attributes: AttributeStore) -> PointCloud*!:
+    var owned_positions = positions
+    var owned_attributes = attributes
+    let storage = alloc PointCloud[1] in memory.heap catch failure:
+        owned_positions.release()
+        owned_attributes.close()
+        error(failure.code, failure.message)
+    storage[0] = PointCloud(owned_positions, origin, owned_attributes)
+    return storage.data
+
 ## A point cloud of `mesh`'s points: its positions and point attributes,
 ## shared.
 pub func cloud_of_mesh(mesh: const Mesh*) -> PointCloud*!:
