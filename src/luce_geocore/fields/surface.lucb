@@ -1,0 +1,298 @@
+## Isosurfaces of grids as meshes, by surface nets: one vertex in every cell
+## (eight voxels) the surface crosses, at the mean of its edge crossings, and
+## one quad around every voxel edge it crosses, joining the four cells that
+## share the edge. Three parallel passes over leaves: crossing cells (a
+## 512-bit mask per leaf), then quads (which read neighbour leaves' masks,
+## complete by then), then filling both. A cell's vertex number is its
+## leaf's first plus its rank among the leaf's crossing cells. An analytic
+## SDF can pull the vertices onto its exact surface afterwards.
+
+## A mesh of the surface where `grid` crosses `iso`: level sets are inside
+## below it, fog volumes above. With `exact`, vertices move onto that SDF.
+## A level set stores only a band of leaves, so its missing leaves have no
+## known side: cells touching one make no surface (the band keeps every
+## cell the real surface crosses whole). A fog volume's missing leaves are
+## empty space, its background.
+pub func surface_mesh(grid: const SparseGrid*, iso: f64, exact: const Sdf*?) -> Mesh*!:
+    let leaves = grid.leaf_count()
+    let sign = 1.0 if grid.class == GridClass.level_set else -1.0
+    var masks = try Column[u64].allocate(leaves * mask_words)
+    defer masks.release()
+    let vertex_counts = try alloc usize[leaves + 1] in memory.heap
+    defer free(vertex_counts) in memory.heap
+    let quad_counts = try alloc usize[leaves + 1] in memory.heap
+    defer free(quad_counts) in memory.heap
+    var cells = NetsWork(grid, iso, sign, masks.span(), vertex_counts, quad_counts, empty_float3(), empty_i32(), 0)
+    parallel.parallel_for(leaves, 4, count_leaves, (void*)&cells)
+    var count = NetsWork(grid, iso, sign, masks.span(), vertex_counts, quad_counts, empty_float3(), empty_i32(), 1)
+    parallel.parallel_for(leaves, 4, count_leaves, (void*)&count)
+    # Counts to firsts.
+    var vertices: usize = 0
+    var quads: usize = 0
+    for leaf in 0..<leaves:
+        let v = vertex_counts[leaf]
+        let q = quad_counts[leaf]
+        vertex_counts[leaf] = vertices
+        quad_counts[leaf] = quads
+        vertices += v
+        quads += q
+    vertex_counts[leaves] = vertices
+    quad_counts[leaves] = quads
+    if vertices > 8388608 or quads * 4 > 33554432: error(errors.limit, "the surface exceeds 8M points or 32M corners; use larger voxels")
+    var positions = try Column[Float3].allocate(vertices)
+    errdefer positions.release()
+    var corners = try Column[i32].allocate(quads * 4)
+    errdefer corners.release()
+    var fill = NetsWork(grid, iso, sign, masks.span(), vertex_counts, quad_counts, positions.span(), corners.span(), 2)
+    parallel.parallel_for(leaves, 4, fill_leaves_mesh, (void*)&fill)
+    if let field = exact:
+        var project = ProjectWork(field, positions.span())
+        parallel.parallel_for(vertices, 4096, project_points, (void*)&project)
+    return try quads_mesh(positions.take(), corners.take())
+
+struct NetsWork:
+    let grid: const SparseGrid*
+    let iso: f64
+    let sign: f64
+    let masks: u64[]
+    let vertex_counts: usize[]
+    let quad_counts: usize[]
+    let positions: Float3[]
+    let corners: i32[]
+    ## 0 crossing cells, 1 quads, 2 fill.
+    let pass: u8
+
+func empty_float3() -> Float3[]:
+    var empty: Float3[]
+    return empty
+
+func empty_i32() -> i32[]:
+    var empty: i32[]
+    return empty
+
+func count_leaves(context: void*?, first: usize, end: usize):
+    let work = (NetsWork*)(context else return)
+    for leaf in first..<end: net_leaf(work, leaf)
+
+func fill_leaves_mesh(context: void*?, first: usize, end: usize):
+    let work = (NetsWork*)(context else return)
+    for leaf in first..<end: net_leaf(work, leaf)
+
+## A leaf with what its cells read: the 27 leaves around it (their indices,
+## -1 where none), the 9×9×9 voxels from its origin (made negative inside,
+## and whether each is stored), and in the fill pass the crossing-cell rank
+## before each mask word of the 8 leaves at or below it.
+struct Neighbourhood:
+    var leaves: i64[27]
+    var values: f64[729]
+    var stored: bool[729]
+    var ranks: usize[64]
+
+func neighbour_slot(dx: i64, dy: i64, dz: i64) -> usize:
+    return (usize)((dx + 1) + (dy + 1) * 3 + (dz + 1) * 9)
+
+func gather(work: const NetsWork*, lx: i64, ly: i64, lz: i64, near: Neighbourhood*):
+    for dz in -1..=(i64)1:
+        for dy in -1..=(i64)1:
+            for dx in -1..=(i64)1:
+                near.leaves[neighbour_slot(dx, dy, dz)] = work.grid.find(leaf_key(lx + dx, ly + dy, lz + dz))
+    let values = work.grid.values.view()
+    let fog = work.grid.class == GridClass.fog
+    for z in 0..<(usize)9:
+        for y in 0..<(usize)9:
+            for x in 0..<(usize)9:
+                let leaf = near.leaves[neighbour_slot((i64)(x >> 3), (i64)(y >> 3), (i64)(z >> 3))]
+                let at = x + y * 9 + z * 81
+                var value = (f64)work.grid.background
+                if leaf >= 0: value = (f64)values[(usize)leaf * leaf_voxels + (x & 7) + (y & 7) * 8 + (z & 7) * 64]
+                near.values[at] = (value - work.iso) * work.sign
+                near.stored[at] = leaf >= 0 or fog
+    if work.pass != 2: return
+    # Ranks of crossing cells in the leaves cells around an edge can be in.
+    for corner in 0..<(usize)8:
+        let leaf = near.leaves[neighbour_slot(-(i64)(corner & 1), -(i64)((corner >> 1) & 1), -(i64)(corner >> 2))]
+        var total: usize = 0
+        for word in 0..<mask_words:
+            near.ranks[corner * 8 + word] = total
+            if leaf >= 0: total += (usize)popcount(work.masks[(usize)leaf * mask_words + word])
+
+func net_leaf(work: NetsWork*, leaf: usize):
+    let key = work.grid.keys.view()[leaf]
+    let (lx, ly, lz) = key_leaf(key)
+    var near = Neighbourhood()
+    gather(work, lx, ly, lz, &near)
+    let words = work.masks[leaf * mask_words..<(leaf + 1) * mask_words]
+    var vertex = work.vertex_counts[leaf]
+    var quad = work.quad_counts[leaf]
+    var vertices: usize = 0
+    var quads: usize = 0
+    if work.pass == 0:
+        for at in 0..<mask_words: words[at] = 0
+    for voxel_at in 0..<leaf_voxels:
+        let x = voxel_at & 7
+        let y = (voxel_at >> 3) & 7
+        let z = voxel_at >> 6
+        var corner_values: f64[8] = ---
+        var inside: u32 = 0
+        var whole = true
+        for c in 0..<(usize)8:
+            let at = x + (c & 1) + (y + ((c >> 1) & 1)) * 9 + (z + (c >> 2)) * 81
+            corner_values[c] = near.values[at]
+            whole = whole and near.stored[at]
+            if corner_values[c] < 0.0: inside = inside | ((u32)1 << (u32)c)
+        if inside != 0 and inside != 255 and whole:
+            if work.pass == 0:
+                words[voxel_at >> 6] = words[voxel_at >> 6] | ((u64)1 << (u64)(voxel_at & 63))
+                vertices += 1
+            elif work.pass == 2:
+                let i = lx * 8 + (i64)x
+                let j = ly * 8 + (i64)y
+                let k = lz * 8 + (i64)z
+                work.positions[vertex] = Float3.of(work.grid.transform.transform_point(cell_point(i, j, k, corner_values)))
+                vertex += 1
+        if work.pass == 0: continue
+        # Quads around this voxel's three forward edges.
+        let here = corner_values[0]
+        for axis in 0..<(usize)3:
+            let there = corner_values[1 << axis]
+            if (here < 0.0) == (there < 0.0): continue
+            var cells: i64[4] = ---
+            if not quad_cells(work, &near, (i64)x, (i64)y, (i64)z, axis, &cells): continue
+            if work.pass == 1:
+                quads += 1
+                continue
+            let at = quad * 4
+            if here < 0.0:
+                for c in 0..<(usize)4: work.corners[at + c] = (i32)cells[c]
+            else:
+                for c in 0..<(usize)4: work.corners[at + c] = (i32)cells[3 - c]
+            quad += 1
+    if work.pass == 0: work.vertex_counts[leaf] = vertices
+    if work.pass == 1: work.quad_counts[leaf] = quads
+
+## The vertex of cell (i, j, k): the mean of the points where its twelve
+## edges cross zero, in index space.
+func cell_point(i: i64, j: i64, k: i64, values: const f64[8]) -> Vector3:
+    var sum = Vector3()
+    var count = 0.0
+    for edge in 0..<(usize)12:
+        let (a, b) = cell_edge(edge)
+        let va = values[a]
+        let vb = values[b]
+        if (va < 0.0) == (vb < 0.0): continue
+        let t = va / (va - vb)
+        let pa = Vector3((f64)(a & 1), (f64)((a >> 1) & 1), (f64)(a >> 2))
+        let pb = Vector3((f64)(b & 1), (f64)((b >> 1) & 1), (f64)(b >> 2))
+        sum = sum.add(pa.add(pb.subtract(pa).multiply_scalar(t)))
+        count += 1.0
+    let middle = sum.multiply_scalar(1.0 / count) if count > 0.0 else Vector3(0.5, 0.5, 0.5)
+    return Vector3((f64)i + middle.x, (f64)j + middle.y, (f64)k + middle.z)
+
+## The two corners (bits x, y, z) of cell edge `edge`.
+func cell_edge(edge: usize) -> (usize, usize):
+    let axis = edge >> 2
+    let rest = edge & 3
+    # The other two axes' bits of the edge's start.
+    var start: usize = 0
+    if axis == 0: start = ((rest & 1) << 1) | ((rest >> 1) << 2)
+    elif axis == 1: start = (rest & 1) | ((rest >> 1) << 2)
+    else: start = (rest & 1) | ((rest >> 1) << 1)
+    return (start, start | (1 << axis))
+
+## The vertex numbers of the four cells around the edge along `axis` of
+## voxel (x, y, z) of the leaf (local, 0..7), counterclockwise seen from
+## that axis; false when one of those cells is not a crossing cell.
+func quad_cells(work: const NetsWork*, near: const Neighbourhood*, x: i64, y: i64, z: i64, axis: usize, out: i64[4]*) -> bool:
+    var offsets: i64[12] = ---
+    if axis == 0:
+        offsets = [0, 0, 0, 0, -1, 0, 0, -1, -1, 0, 0, -1]
+    elif axis == 1:
+        offsets = [0, 0, 0, 0, 0, -1, -1, 0, -1, -1, 0, 0]
+    else:
+        offsets = [0, 0, 0, -1, 0, 0, -1, -1, 0, 0, -1, 0]
+    for c in 0..<(usize)4:
+        let cx = x + offsets[c * 3]
+        let cy = y + offsets[c * 3 + 1]
+        let cz = z + offsets[c * 3 + 2]
+        # Which leaf (at or below this one on each axis) holds the cell.
+        let dx = -1 if cx < 0 else 0
+        let dy = -1 if cy < 0 else 0
+        let dz = -1 if cz < 0 else 0
+        let leaf = near.leaves[neighbour_slot(dx, dy, dz)]
+        if leaf < 0: return false
+        let cell = (usize)(cx & 7) + (usize)(cy & 7) * 8 + (usize)(cz & 7) * 64
+        let words = work.masks[(usize)leaf * mask_words..<((usize)leaf + 1) * mask_words]
+        if (words[cell >> 6] >> (u64)(cell & 63)) & 1 == 0: return false
+        if work.pass == 2:
+            let corner = (usize)(-dx) | ((usize)(-dy) << 1) | ((usize)(-dz) << 2)
+            let rank = near.ranks[corner * 8 + (cell >> 6)] + (usize)popcount(words[cell >> 6] & (((u64)1 << (u64)(cell & 63)) - 1))
+            (*out)[c] = (i64)(work.vertex_counts[(usize)leaf] + rank)
+    return true
+
+struct ProjectWork:
+    let field: const Sdf*
+    let positions: Float3[]
+
+## Two Newton steps onto the SDF's zero set, by its central-difference
+## gradient.
+func project_points(context: void*?, first: usize, end: usize):
+    let work = (ProjectWork*)(context else return)
+    for at in first..<end:
+        var p = work.positions[at].vector()
+        for step in 0..<(usize)2:
+            let d = work.field.distance(p)
+            let h = 0.0005
+            let gradient = Vector3(work.field.distance(p.add(Vector3(h, 0.0, 0.0))) - work.field.distance(p.subtract(Vector3(h, 0.0, 0.0))),
+                                   work.field.distance(p.add(Vector3(0.0, h, 0.0))) - work.field.distance(p.subtract(Vector3(0.0, h, 0.0))),
+                                   work.field.distance(p.add(Vector3(0.0, 0.0, h))) - work.field.distance(p.subtract(Vector3(0.0, 0.0, h))))
+            let length = gradient.length()
+            if length < 0.0000001: break
+            p = p.subtract(gradient.multiply_scalar(d / length))
+        work.positions[at] = Float3.of(p)
+
+## A mesh of quads (corner ids into `positions`, world coordinates), with
+## face normals from their diagonals and two triangles each.
+pub func quads_mesh(positions: Column[Float3], corners: Column[i32]) -> Mesh*!:
+    var owned_positions = positions
+    errdefer owned_positions.release()
+    var owned_corners = corners
+    errdefer owned_corners.release()
+    let quads = owned_corners.count() // 4
+    var offsets = try Column[i32].allocate(quads + 1)
+    errdefer offsets.release()
+    var triangles = try Column[i32].allocate(quads * 6)
+    errdefer triangles.release()
+    var normals = try Column[Float3].allocate(quads)
+    errdefer normals.release()
+    var work = QuadWork(owned_positions.view(), owned_corners.view(), offsets.span(), triangles.span(), normals.span())
+    parallel.parallel_for(quads, 4096, finish_quads, (void*)&work)
+    offsets.span()[quads] = (i32)(quads * 4)
+    var empty: Column[Vector3]
+    return try assembled(owned_positions.take(), Vector3(), offsets.take(), owned_corners.take(), triangles.take(), normals.take(), empty)
+
+struct QuadWork:
+    let positions: const Float3[]
+    let corners: const i32[]
+    let offsets: i32[]
+    let triangles: i32[]
+    let normals: Float3[]
+
+func finish_quads(context: void*?, first: usize, end: usize):
+    let work = (QuadWork*)(context else return)
+    for quad in first..<end:
+        let c = (i32)(quad * 4)
+        work.offsets[quad] = c
+        let t = quad * 6
+        work.triangles[t] = c
+        work.triangles[t + 1] = c + 1
+        work.triangles[t + 2] = c + 2
+        work.triangles[t + 3] = c
+        work.triangles[t + 4] = c + 2
+        work.triangles[t + 5] = c + 3
+        let a = work.positions[(usize)work.corners[quad * 4]].vector()
+        let b = work.positions[(usize)work.corners[quad * 4 + 1]].vector()
+        let d = work.positions[(usize)work.corners[quad * 4 + 2]].vector()
+        let e = work.positions[(usize)work.corners[quad * 4 + 3]].vector()
+        let normal = d.subtract(a).cross(e.subtract(b))
+        let length = normal.length()
+        work.normals[quad] = Float3.of(normal.multiply_scalar(1.0 / length)) if length > 1.0e-30 else Float3(0.0, 1.0, 0.0)

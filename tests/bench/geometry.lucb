@@ -11,6 +11,7 @@ import geocore_kernel
 from geocore import Vector3, Mesh, MeshPrimitives, GeometrySet
 from geocore_kernel import Curves, CurvesBuilder, CurveType, evaluated_positions, evaluated_frames, curves_dispose, curves_type, set_curves, empty_set, set_put, dispose_set, adopt_set, run_set_verb, find_set_verb, save_geometry, load_geometry
 from geocore_growing import Growing
+from geocore_kernel import SdfOp, primitive_sdf, combined_sdf, release_sdf, sampled_sdf, surface_mesh, release_grid, mesh_level_set, points_level_set, mesh_dispose
 from io import path
 import geocore_parallel
 
@@ -122,4 +123,41 @@ pub func main(arguments: str[]) -> i32!:
     let wires = try verb("Mesh to Curve", sheet.value(), [0.0])
     row("Mesh to Curve: every edge of the 837x837 grid", started, (set_curves(wires.value()) else trap("curves")).curve_count())
     wires.release()
+    try fields()
     return 0
+
+## Volumes and SDFs: sampling, surface nets, a mesh's and points' level sets.
+func fields() -> !:
+    let ball = try primitive_sdf(SdfOp.sphere, [0.0, 0.0, 0.0, 1.0])
+    defer release_sdf(ball)
+    let block = try primitive_sdf(SdfOp.rounded_box, [0.8, 0.0, 0.0, 0.6, 0.6, 0.6, 0.1])
+    defer release_sdf(block)
+    let shape = try combined_sdf(ball, block, SdfOp.smooth_unite, 0.3)
+    defer release_sdf(shape)
+    var started = time.now()
+    let grid = try sampled_sdf(shape, 0.005, 3.0, "surface")
+    defer release_grid(grid)
+    row("SDF to Volume: a smooth union, voxel 1/400 of its size", started, grid.active_count())
+    started = time.now()
+    let surface = try surface_mesh(grid, 0.0, none)
+    row("Surface nets: that level set", started, (usize)surface.face_count())
+    mesh_dispose(surface)
+    started = time.now()
+    let exact = try surface_mesh(grid, 0.0, shape)
+    row("Surface nets projected onto the SDF", started, (usize)exact.face_count())
+    mesh_dispose(exact)
+    let sphere = try MeshPrimitives.sphere(1.0, 64)
+    defer sphere.release()
+    started = time.now()
+    let solid = try mesh_level_set(sphere.value(), 0.01, 3.0, "surface")
+    row("Mesh to SDF: a 64-segment sphere, voxel 0.01", started, solid.active_count())
+    release_grid(solid)
+    var points = Growing[Vector3]()
+    defer points.close()
+    for at in 0..<(usize)100000:
+        let t = (f64)at * 0.001
+        try points.push(Vector3(math.cos(t * 7.0) * (1.0 + 0.1 * math.sin(t)), t * 0.01, math.sin(t * 7.0)))
+    started = time.now()
+    let blobs = try points_level_set(points.view(), 0.02, 0.01, 3.0, "surface")
+    row("Volume from Points: 100k points, radius 0.02, voxel 0.01", started, blobs.active_count())
+    release_grid(blobs)

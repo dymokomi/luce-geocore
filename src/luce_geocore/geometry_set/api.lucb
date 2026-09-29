@@ -93,7 +93,7 @@ extend GeometrySet:
     pub func instance_visible(index: i64) -> bool!:
         return (try self.instance_item(index)).visible
 
-    func instance_item(index: i64) -> const Instance*!:
+    func instance_item(index: i64) -> Instance!:
         let data = self.find(&instances_component) else error(errors.invalid, "the geometry has no instances")
         let instances = (const Instances*)data
         if index < 0 or (usize)index >= instances.count(): error(errors.invalid, "instance index out of range")

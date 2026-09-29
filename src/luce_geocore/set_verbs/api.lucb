@@ -4,7 +4,7 @@
 ## VerbCatalog alone, so both kinds get the same rows, Group handling,
 ## categories and descriptions.
 
-let set_verb_total: usize = 11
+let set_verb_total: usize = 23
 
 ## Set verb `index` in menu order.
 pub func set_verb_at(index: usize) -> SetVerb:
@@ -20,6 +20,18 @@ pub func set_verb_at(index: usize) -> SetVerb:
         8: return set_type_verb()
         9: return curve_to_mesh_verb()
         10: return mesh_to_curve_verb()
+        11: return sdf_sphere_verb()
+        12: return sdf_box_verb()
+        13: return sdf_torus_verb()
+        14: return sdf_capsule_verb()
+        15: return sdf_cylinder_verb()
+        16: return sdf_boolean_verb()
+        17: return sdf_modify_verb()
+        18: return sdf_to_volume_verb()
+        19: return mesh_to_sdf_verb()
+        20: return volume_from_points_verb()
+        21: return convert_to_mesh_verb()
+        22: return volume_slice_verb()
         _: return line_verb()
 
 pub func set_verb_count() -> usize:

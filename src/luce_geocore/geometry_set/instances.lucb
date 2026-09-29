@@ -1,9 +1,16 @@
 ## The instances family: other sets placed by a transform, without copying
 ## them (Houdini's packed primitives, Blender's instances). Groups and
-## assemblies produce them; the viewport draws each reference under its
-## transform, and `realized` bakes them into one mesh only when a node
-## needs polygons. The component is immutable and shared by count.
+## assemblies produce them; the viewport draws each prototype under its
+## instances' transforms, and `realized` bakes them into one mesh only when
+## a node needs polygons.
+##
+## Prototypes are the distinct sets instanced; each instance is a row of one
+## shared column (its prototype and placement). A share of the component
+## shares that column (O(1), the same ids) and makes its own share of every
+## prototype (O(prototypes)): each owner then traces exactly the prototypes'
+## Luce objects it owns (see ComponentType.share).
 
+## One instance, as `item` reads it: its prototype set and placement.
 pub struct Instance:
     pub let set: GeometrySet*
     pub let translation: Vector3
@@ -15,62 +22,119 @@ pub struct Instance:
     pub func matrix() -> Matrix4:
         return Matrix4.compose(self.translation, self.rotation, self.scale)
 
+## One instance as stored: its prototype and placement.
+pub struct InstanceRow:
+    pub let prototype: i32
+    pub let visible: bool
+    pub let translation: Vector3
+    pub let rotation: Vector3
+    pub let scale: Vector3
+
 pub struct Instances:
-    var users: @usize
-    var items: Growing[Instance]
+    var prototypes: Growing[GeometrySet*]
+    ## Rows 0..<count are instances; the column may hold spare rows while a
+    ## builder appends.
+    var rows: Column[InstanceRow]
+    var size: usize
 
     pub func count() -> usize:
-        return self.items.count
+        return self.size
 
-    pub func item(index: usize) -> const Instance*:
-        return &self.items.items[index]
+    pub func prototype_count() -> usize:
+        return self.prototypes.count
 
-    ## Add an instance owning `set` (closed on failure).
-    pub mutating func add(set: GeometrySet*, placement: const Placement*, visible: bool) -> !:
-        self.items.push(Instance(set, placement.translation, placement.rotation, placement.scale, visible)) catch failure:
+    pub func prototype(index: usize) -> const GeometrySet*:
+        return self.prototypes.items[index]
+
+    pub func row(index: usize) -> InstanceRow:
+        return self.rows.view()[index]
+
+    ## The change id of the instance rows (a share keeps it).
+    pub func rows_id() -> u64:
+        return self.rows.id()
+
+    pub func item(index: usize) -> Instance:
+        let row = self.rows.view()[index]
+        return Instance(self.prototypes.items[(usize)row.prototype], row.translation, row.rotation, row.scale, row.visible)
+
+    ## Add prototype `set` (taken, even on failure); its index.
+    pub mutating func add_prototype(set: GeometrySet*) -> usize!:
+        self.prototypes.push(set) catch failure:
             dispose_set(set)
             error(failure.code, failure.message)
+        return self.prototypes.count - 1
 
-    ## Add a share of every instance of `other`.
+    ## Add an instance of prototype `prototype`.
+    pub mutating func add_instance(prototype: usize, placement: const Placement*, visible: bool) -> !:
+        if prototype >= self.prototypes.count: error(errors.invalid, "instance prototype out of range")
+        if self.size == self.rows.count():
+            # Grow by doubling: appends are amortized O(1).
+            var grown = try Column[InstanceRow].allocate(self.size * 2 if self.size > 0 else 4)
+            memory.copy(grown.span()[..<self.size], self.rows.view()[..<self.size], self.size)
+            self.rows.release()
+            self.rows = grown.take()
+        let out = try self.rows.writable()
+        out[self.size] = InstanceRow((i32)prototype, visible, placement.translation, placement.rotation, placement.scale)
+        self.size += 1
+
+    ## Add an instance of its own prototype `set` (taken, even on failure).
+    pub mutating func add(set: GeometrySet*, placement: const Placement*, visible: bool) -> !:
+        let prototype = try self.add_prototype(set)
+        try self.add_instance(prototype, placement, visible)
+
+    ## Add every instance of `other`, sharing its prototypes; into an empty
+    ## component its rows are shared as they are.
     pub mutating func add_all(other: const Instances*) -> !:
-        for item in other.items.view():
-            let copy = try item.set.storage()
-            let placement = Placement(item.translation, item.rotation, item.scale, item.matrix())
-            try self.add(copy, &placement, item.visible)
+        let base = self.prototypes.count
+        for at in 0..<other.prototypes.count: discard(try self.add_prototype(try other.prototypes.items[at].storage()))
+        if self.size == 0 and base == 0:
+            self.rows.release()
+            self.rows = other.rows.share()
+            self.size = other.size
+            return
+        for at in 0..<other.size:
+            let row = other.rows.view()[at]
+            let placement = Placement(row.translation, row.rotation, row.scale, Matrix4.compose(row.translation, row.rotation, row.scale))
+            try self.add_instance(base + (usize)row.prototype, &placement, row.visible)
 
-## A new, empty instances component (one user).
+## A new, empty instances component.
 pub func new_instances() -> Instances*!:
     let storage = try alloc Instances[1] in memory.heap
-    storage[0].users.store(1, .relaxed)
-    storage[0].items = Growing[Instance]()
+    storage[0] = Instances(Growing[GeometrySet*](), Column[InstanceRow](), 0)
     return storage.data
 
 pub let instances_component: ComponentType = ComponentType("instances", share_instances, close_instances, instances_size, instances_bytes, instances_bounds, place_instances, join_instances, instance_paths, filter_instances, describe_instances, "", trace_instances)
 
+## Another owner: the rows shared, each prototype shared anew (see the top).
 func share_instances(data: const void*) -> void*!:
-    let instances = (Instances*)data
-    discard(instances.users.add(1, .relaxed))
-    return (void*)instances
+    let copy = try new_instances()
+    copy.add_all((const Instances*)data) catch failure:
+        close_instances((void*)copy)
+        error(failure.code, failure.message)
+    return (void*)copy
 
 func close_instances(data: void*):
     let instances = (Instances*)data
-    if instances.users.sub(1, .acq_rel) != 1: return
-    for item in instances.items.view(): dispose_set(item.set)
-    instances.items.close()
+    for set in instances.prototypes.view(): dispose_set(set)
+    instances.prototypes.close()
+    instances.rows.release()
     free(Instances[](instances, 1)) in memory.heap
 
 func instances_size(data: const void*) -> usize:
     return ((const Instances*)data).count()
 
 func instances_bytes(data: const void*, ids: IdSet*) -> usize!:
-    var total: usize = 64
-    for item in ((const Instances*)data).items.view():
-        total += 96 + (try set_bytes(item.set, ids))
+    let instances = (const Instances*)data
+    # The rows in use, not a builder's spare capacity.
+    var total: usize = 64 + (try ids.charge(instances.rows.id(), instances.size * sizeof(InstanceRow)))
+    for set in instances.prototypes.view(): total += try set_bytes(set, ids)
     return total
 
 func instances_bounds(data: const void*, matrix: Matrix4, out: Bounds*) -> bool!:
+    let instances = (const Instances*)data
     var found = false
-    for item in ((const Instances*)data).items.view():
+    for at in 0..<instances.count():
+        let item = instances.item(at)
         var box = Bounds(Vector3(), Vector3())
         if not (try set_bounds(item.set, matrix.multiply(item.matrix()), &box)): continue
         *out = union_box(*out, box) if found else box
@@ -100,21 +164,24 @@ func join_instances(first: const void*, second: const void*) -> void*!:
     return (void*)joined
 
 func instance_paths(data: const void*, out: TableBuilder*) -> !:
-    for item in ((const Instances*)data).items.view(): try set_paths(item.set, out)
+    for set in ((const Instances*)data).prototypes.view(): try set_paths(set, out)
 
-## Each instance filtered in turn; instances left empty stay, empty.
+## Each prototype filtered once; instances keep their rows, and those of
+## prototypes left empty stay, empty.
 func filter_instances(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
+    let source = (const Instances*)data
     let result = try new_instances()
     errdefer close_instances((void*)result)
-    for item in ((const Instances*)data).items.view():
-        let filtered = try set_filtered(item.set, filter, keep)
-        let placement = Placement(item.translation, item.rotation, item.scale, item.matrix())
-        try result.add(filtered, &placement, item.visible)
+    for set in source.prototypes.view(): discard(try result.add_prototype(try set_filtered(set, filter, keep)))
+    result.rows.release()
+    result.rows = source.rows.share()
+    result.size = source.size
     return (void*)result
 
 func describe_instances(data: const void*, out: Growing[u8]*) -> !:
     try append_number(out, ((const Instances*)data).count())
     try append_text(out, " scene branches")
 
+## Each prototype once: the Luce objects this owner holds.
 func trace_instances(data: const void*, visit: func(ownership.Object*, void*) -> unit, context: void*):
-    for item in ((const Instances*)data).items.view(): item.set.trace(visit, context)
+    for set in ((const Instances*)data).prototypes.view(): set.trace(visit, context)

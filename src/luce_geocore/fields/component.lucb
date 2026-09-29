@@ -1,0 +1,218 @@
+## Volumes and SDFs in a geometry set. A volume holds named sparse grids,
+## each shared by count; an SDF is one analytic program. Both place (an SDF
+## wraps its program in a transform, a grid composes its transform), join
+## (grids side by side; SDF programs as a union), describe themselves and
+## have no polygons. Their display is a surface preview built once and kept
+## with the component: an SDF's zero set sampled at 1/128 of its extent and
+## pulled onto the exact surface; a level set's zero set; a fog volume's
+## half-maximum density.
+
+pub struct Volume:
+    pub var users: @usize
+    var grids: Growing[SparseGrid*]
+    var lock: sync.Mutex
+    var preview: Mesh*? = none
+    var previewed: bool = false
+
+    pub func grid_count() -> usize:
+        return self.grids.count
+
+    pub func grid(index: usize) -> const SparseGrid*:
+        return self.grids.items[index]
+
+    mutating func close():
+        for grid in self.grids.view(): release_grid(grid)
+        self.grids.close()
+        if let mesh = self.preview: mesh_dispose(mesh)
+        self.preview = none
+
+## A new volume of no grids.
+pub func new_volume() -> Volume*!:
+    let storage = try alloc Volume[1] in memory.heap
+    let volume = storage.data
+    volume.users.store(1, .relaxed)
+    volume.grids = Growing[SparseGrid*]()
+    volume.lock = sync.Mutex()
+    volume.preview = none
+    volume.previewed = false
+    return volume
+
+## Add `grid` (taken, even on failure) to a volume being built.
+pub func add_grid(volume: Volume*, grid: SparseGrid*) -> !:
+    volume.grids.push(grid) catch failure:
+        release_grid(grid)
+        error(failure.code, failure.message)
+
+pub func release_volume(volume: Volume*):
+    if volume.users.sub(1, .acq_rel) != 1: return
+    volume.close()
+    free(Volume[](volume, 1)) in memory.heap
+
+pub let volume_component: ComponentType = ComponentType("volume", share_volume, close_volume, volume_size, volume_bytes, volume_bounds, place_volume, join_volumes, no_field_paths, keep_volume, describe_volume, "", no_trace)
+pub let sdf_component: ComponentType = ComponentType("sdf", share_sdf_data, close_sdf, sdf_size, sdf_bytes, sdf_bounds, place_sdf, join_sdfs, no_field_paths, keep_sdf, describe_sdf, "", no_trace)
+
+pub func volume_type() -> const ComponentType*:
+    return &volume_component
+
+pub func sdf_type() -> const ComponentType*:
+    return &sdf_component
+
+pub func set_volume(set: const GeometrySet*) -> const Volume*?:
+    let data = set_find(set, &volume_component) else return none
+    return (const Volume*)data
+
+pub func set_sdf(set: const GeometrySet*) -> const Sdf*?:
+    let data = set_find(set, &sdf_component) else return none
+    return (const Sdf*)data
+
+func share_volume(data: const void*) -> void*!:
+    let volume = (Volume*)data
+    discard(volume.users.add(1, .relaxed))
+    return (void*)volume
+
+func close_volume(data: void*):
+    release_volume((Volume*)data)
+
+func volume_size(data: const void*) -> usize:
+    return ((const Volume*)data).grid_count()
+
+func volume_bytes(data: const void*, ids: IdSet*) -> usize!:
+    var total: usize = 64
+    for grid in ((const Volume*)data).grids.view():
+        total += 256 + (try ids.charge(grid.keys.id(), grid.keys.bytes())) + (try ids.charge(grid.values.id(), grid.values.bytes())) + (try ids.charge(grid.masks.id(), grid.masks.bytes()))
+    return total
+
+func volume_bounds(data: const void*, matrix: Matrix4, out: Bounds*) -> bool!:
+    var found = false
+    for grid in ((const Volume*)data).grids.view():
+        let box = grid.bounds() else continue
+        let placed = placed_box(box, matrix)
+        *out = union_box(*out, placed) if found else placed
+        found = true
+    return found
+
+func place_volume(data: const void*, placement: const Placement*) -> void*!:
+    let volume = try new_volume()
+    errdefer release_volume(volume)
+    for grid in ((const Volume*)data).grids.view(): try add_grid(volume, try grid.placed(placement.matrix))
+    return (void*)volume
+
+func join_volumes(first: const void*, second: const void*) -> void*!:
+    let volume = try new_volume()
+    errdefer release_volume(volume)
+    for grid in ((const Volume*)first).grids.view(): try add_grid(volume, share_grid(grid))
+    for grid in ((const Volume*)second).grids.view(): try add_grid(volume, share_grid(grid))
+    return (void*)volume
+
+func no_field_paths(data: const void*, out: TableBuilder*) -> !:
+    discard(data)
+    discard(out)
+
+func keep_volume(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
+    if filter.is_empty() == keep: return try share_volume(data)
+    return (void*)(try new_volume())
+
+func describe_volume(data: const void*, out: Growing[u8]*) -> !:
+    let volume = (const Volume*)data
+    var active: usize = 0
+    for grid in volume.grids.view(): active += grid.active_count()
+    try append_number(out, volume.grid_count())
+    try append_text(out, " volume grids / ")
+    try append_number(out, active)
+    try append_text(out, " active voxels")
+
+func share_sdf_data(data: const void*) -> void*!:
+    return (void*)share_sdf((Sdf*)data)
+
+func close_sdf(data: void*):
+    release_sdf((Sdf*)data)
+
+func sdf_size(data: const void*) -> usize:
+    return ((const Sdf*)data).op_count()
+
+func sdf_bytes(data: const void*, ids: IdSet*) -> usize!:
+    let sdf = (const Sdf*)data
+    return 64 + (try ids.charge(sdf.ops.id(), sdf.ops.bytes())) + (try ids.charge(sdf.params.id(), sdf.params.bytes()))
+
+func sdf_bounds(data: const void*, matrix: Matrix4, out: Bounds*) -> bool!:
+    *out = placed_box(((const Sdf*)data).bounds(), matrix)
+    return true
+
+func place_sdf(data: const void*, placement: const Placement*) -> void*!:
+    return (void*)(try placed_sdf((const Sdf*)data, placement.matrix))
+
+func join_sdfs(first: const void*, second: const void*) -> void*!:
+    return (void*)(try combined_sdf((const Sdf*)first, (const Sdf*)second, SdfOp.unite, 0.0))
+
+func keep_sdf(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
+    if filter.is_empty() == keep: return try share_sdf_data(data)
+    # An SDF that is nowhere: a point sphere far away is not empty, so an
+    # emptied SDF drops out of the set (size 0 is removed on put).
+    return (void*)(try empty_sdf())
+
+func describe_sdf(data: const void*, out: Growing[u8]*) -> !:
+    try append_text(out, "SDF of ")
+    try append_number(out, ((const Sdf*)data).op_count())
+    try append_text(out, " ops")
+
+# mark: Previews
+
+## Voxels across an SDF's longest side in its preview.
+let preview_voxels: f64 = 128.0
+
+## The SDF's surface preview, built on first use and kept.
+pub func sdf_preview(sdf: const Sdf*) -> const Mesh*?!:
+    let cache = (Sdf*)sdf
+    cache.lock.lock()
+    defer cache.lock.unlock()
+    if let made = cache.preview: return made
+    let box = sdf.bounds()
+    let size = box.maximum.subtract(box.minimum)
+    let longest = math.max(size.x, math.max(size.y, size.z))
+    if not (longest > 0.0 and math.is_finite(longest)): return none
+    let voxel = longest / preview_voxels
+    let grid = try sampled_sdf(sdf, voxel, 2.0, "preview")
+    defer release_grid(grid)
+    if grid.leaf_count() == 0: return none
+    let mesh = try surface_mesh(grid, 0.0, sdf)
+    cache.preview = mesh
+    cache.preview_voxel = voxel
+    return mesh
+
+## The volume's surface preview, built on first use and kept.
+pub func volume_preview(volume: const Volume*) -> const Mesh*?!:
+    let cache = (Volume*)volume
+    cache.lock.lock()
+    defer cache.lock.unlock()
+    if cache.previewed: return cache.preview
+    var parts = Growing[Mesh*]()
+    defer:
+        for part in parts.view(): mesh_dispose(part)
+        parts.close()
+    for grid in volume.grids.view():
+        if grid.leaf_count() == 0: continue
+        var iso = 0.0
+        if grid.class == GridClass.fog:
+            var highest = 0.0
+            for value in grid.values.view(): highest = math.max(highest, (f64)value)
+            if highest <= 0.0: continue
+            iso = highest * 0.5
+        try push_mesh(&parts, try surface_mesh(grid, iso, none))
+    if parts.count == 1:
+        cache.preview = parts.items[0]
+        parts.count = 0
+    elif parts.count > 1:
+        var pieces = Growing[MeshPart]()
+        defer pieces.close()
+        for part in parts.view(): try pieces.push(MeshPart(part, Matrix4()))
+        let joined = try concatenated(pieces.view())
+        defer joined.release()
+        cache.preview = try mesh_share(joined.value())
+    cache.previewed = true
+    return cache.preview
+
+## Keep `mesh` (taken, even on failure) in `parts`.
+pub func push_mesh(parts: Growing[Mesh*]*, mesh: Mesh*) -> !:
+    parts.push(mesh) catch failure:
+        mesh_dispose(mesh)
+        error(failure.code, failure.message)

@@ -1,0 +1,320 @@
+## Signed distance fields as analytic programs: a postfix column of ops with
+## 16 f32 parameters each. Primitives push a distance; booleans combine the
+## top two (hard or smooth, Inigo Quilez's polynomial smooth min); a
+## transform pushes the evaluation point mapped into voxel_at space and its end
+## pops it, scaling the distance back; round and shell change the top one.
+## Programs compose by concatenation, so a boolean of two SDFs or a placed
+## SDF shares no evaluation state and costs nothing to build.
+##
+## Every op keeps the field 1-Lipschitz (a distance or a lower bound of one),
+## which is what sampling's pruning relies on: a block whose center is
+## farther from the surface than its half diagonal holds no surface.
+
+pub enum SdfOp as u8:
+    ## center xyz, radius
+    sphere = 0
+    ## center xyz, half size xyz, rounding
+    rounded_box = 1
+    ## center xyz, major, minor (in the ZX plane)
+    torus = 2
+    ## center xyz, half height, radius (along Y)
+    capsule = 3
+    ## center xyz, radius, half height (along Y)
+    cylinder = 4
+    unite = 16
+    subtract = 17
+    intersect = 18
+    ## smoothness k
+    smooth_unite = 19
+    smooth_subtract = 20
+    smooth_intersect = 21
+    ## the inverse matrix (12: x, y, z columns, translation) and the scale
+    ## that turns a voxel_at distance into a world one
+    transform = 32
+    end_transform = 33
+    ## amount
+    round = 48
+    shell = 49
+
+pub let sdf_stride: usize = 16
+let most_depth: usize = 64
+
+pub struct Sdf:
+    pub var users: @usize
+    var ops: Column[u8]
+    var params: Column[f32]
+    ## The surface preview (surface nets), built on first display.
+    var lock: sync.Mutex
+    var preview: Mesh*? = none
+    var preview_voxel: f64 = 0.0
+
+    pub func op_count() -> usize:
+        return self.ops.count()
+
+    pub func op_span() -> const u8[]:
+        return self.ops.view()
+
+    pub func param_span() -> const f32[]:
+        return self.params.view()
+
+    ## The distance at world point `point`.
+    pub func distance(point: Vector3) -> f64:
+        return evaluate(self.ops.view(), self.params.view(), point)
+
+    ## A world box around the surface (conservative).
+    pub func bounds() -> Bounds:
+        return program_bounds(self.ops.view(), self.params.view())
+
+    mutating func close():
+        self.ops.release()
+        self.params.release()
+        if let mesh = self.preview: mesh_dispose(mesh)
+        self.preview = none
+
+## A heap SDF owning these columns (taken, even on failure); the program is
+## checked to leave exactly one distance.
+pub func new_sdf(ops: Column[u8], params: Column[f32]) -> Sdf*!:
+    var owned_ops = ops
+    errdefer owned_ops.release()
+    var owned_params = params
+    errdefer owned_params.release()
+    try check_program(owned_ops.view(), owned_params.view())
+    let storage = try empty_sdf()
+    storage.ops = owned_ops
+    storage.params = owned_params
+    return storage
+
+## An SDF of no ops (what an emptied component holds before it is dropped).
+func empty_sdf() -> Sdf*!:
+    let storage = try alloc Sdf[1] in memory.heap
+    let sdf = storage.data
+    sdf.users.store(1, .relaxed)
+    sdf.ops = Column[u8]()
+    sdf.params = Column[f32]()
+    sdf.lock = sync.Mutex()
+    sdf.preview = none
+    sdf.preview_voxel = 0.0
+    return sdf
+
+pub func share_sdf(sdf: Sdf*) -> Sdf*:
+    discard(sdf.users.add(1, .relaxed))
+    return sdf
+
+pub func release_sdf(sdf: Sdf*):
+    if sdf.users.sub(1, .acq_rel) != 1: return
+    sdf.close()
+    free(Sdf[](sdf, 1)) in memory.heap
+
+func check_program(ops: const u8[], params: const f32[]) -> !:
+    if params.length != ops.length * sdf_stride: error(errors.invalid, "an SDF needs 16 parameters an op")
+    var distances: usize = 0
+    var points: usize = 0
+    for op in ops:
+        match op:
+            0, 1, 2, 3, 4: distances += 1
+            16, 17, 18, 19, 20, 21:
+                if distances < 2: error(errors.invalid, "an SDF boolean needs two operands")
+                distances -= 1
+            32: points += 1
+            33:
+                if points == 0 or distances == 0: error(errors.invalid, "an SDF transform ends without starting")
+                points -= 1
+            48, 49:
+                if distances == 0: error(errors.invalid, "an SDF modifier needs an operand")
+            _: error(errors.invalid, "an unknown SDF op")
+        if distances > most_depth or points > most_depth: error(errors.limit, "an SDF nests more than 64 deep")
+    if distances != 1 or points != 0: error(errors.invalid, "an SDF program must leave one distance")
+
+## The program's distance at `point`.
+pub func evaluate(ops: const u8[], params: const f32[], point: Vector3) -> f64:
+    var distances: f64[64] = ---
+    var points: Vector3[65] = ---
+    var scales: f64[65] = ---
+    var top: usize = 0
+    var depth: usize = 0
+    points[0] = point
+    scales[0] = 1.0
+    for at in 0..<ops.length:
+        let p = params[at * sdf_stride..<(at + 1) * sdf_stride]
+        let here = points[depth]
+        match ops[at]:
+            0:
+                distances[top] = here.subtract(center(p)).length() - (f64)p[3]
+                top += 1
+            1:
+                distances[top] = box_distance(here.subtract(center(p)), Vector3((f64)p[3], (f64)p[4], (f64)p[5]), (f64)p[6])
+                top += 1
+            2:
+                let q = here.subtract(center(p))
+                let ring = math.hypot(q.x, q.z) - (f64)p[3]
+                distances[top] = math.hypot(ring, q.y) - (f64)p[4]
+                top += 1
+            3:
+                let q = here.subtract(center(p))
+                let y = math.clamp(q.y, -(f64)p[3], (f64)p[3])
+                distances[top] = Vector3(q.x, q.y - y, q.z).length() - (f64)p[4]
+                top += 1
+            4:
+                let q = here.subtract(center(p))
+                let dx = math.hypot(q.x, q.z) - (f64)p[3]
+                let dy = math.abs(q.y) - (f64)p[4]
+                distances[top] = math.min(math.max(dx, dy), 0.0) + math.hypot(math.max(dx, 0.0), math.max(dy, 0.0))
+                top += 1
+            16, 17, 18, 19, 20, 21:
+                let b = distances[top - 1]
+                let a = distances[top - 2]
+                top -= 1
+                distances[top - 1] = combined(ops[at], a, b, (f64)p[0])
+            32:
+                let m = Matrix4(Vector3((f64)p[0], (f64)p[1], (f64)p[2]), Vector3((f64)p[3], (f64)p[4], (f64)p[5]),
+                                Vector3((f64)p[6], (f64)p[7], (f64)p[8]), Vector3((f64)p[9], (f64)p[10], (f64)p[11]))
+                points[depth + 1] = m.transform_point(here)
+                scales[depth + 1] = (f64)p[12]
+                depth += 1
+            33:
+                distances[top - 1] *= scales[depth]
+                depth -= 1
+            48: distances[top - 1] -= (f64)p[0]
+            _: distances[top - 1] = math.abs(distances[top - 1]) - (f64)p[0]
+    return distances[0]
+
+func center(p: const f32[]) -> Vector3:
+    return Vector3((f64)p[0], (f64)p[1], (f64)p[2])
+
+## A box of half size `half`, its edges rounded by `rounding`.
+func box_distance(q: Vector3, half: Vector3, rounding: f64) -> f64:
+    let dx = math.abs(q.x) - half.x + rounding
+    let dy = math.abs(q.y) - half.y + rounding
+    let dz = math.abs(q.z) - half.z + rounding
+    let outside = Vector3(math.max(dx, 0.0), math.max(dy, 0.0), math.max(dz, 0.0)).length()
+    return outside + math.min(math.max(dx, math.max(dy, dz)), 0.0) - rounding
+
+## Booleans; the smooth ones blend over `k` (0 is hard).
+func combined(op: u8, a: f64, b: f64, k: f64) -> f64:
+    match op:
+        16: return math.min(a, b)
+        17: return math.max(a, -b)
+        18: return math.max(a, b)
+        19: return smooth_min(a, b, k)
+        20: return -smooth_min(-a, b, k)
+        _: return -smooth_min(-a, -b, k)
+
+func smooth_min(a: f64, b: f64, k: f64) -> f64:
+    if k <= 0.0: return math.min(a, b)
+    let h = math.max(k - math.abs(a - b), 0.0) / k
+    return math.min(a, b) - h * h * k * 0.25
+
+## A conservative world box of the surface, by the same stack.
+pub func program_bounds(ops: const u8[], params: const f32[]) -> Bounds:
+    var boxes: Bounds[64] = ---
+    var matrices: Matrix4[65] = ---
+    var top: usize = 0
+    var depth: usize = 0
+    matrices[0] = Matrix4()
+    for at in 0..<ops.length:
+        let p = params[at * sdf_stride..<(at + 1) * sdf_stride]
+        let world = matrices[depth]
+        match ops[at]:
+            0, 1, 2, 3, 4:
+                let c = center(p)
+                var half = Vector3((f64)p[3], (f64)p[3], (f64)p[3])
+                if ops[at] == 1: half = Vector3((f64)p[3], (f64)p[4], (f64)p[5])
+                elif ops[at] == 2: half = Vector3((f64)p[3] + (f64)p[4], (f64)p[4], (f64)p[3] + (f64)p[4])
+                elif ops[at] == 3: half = Vector3((f64)p[4], (f64)p[3] + (f64)p[4], (f64)p[4])
+                elif ops[at] == 4: half = Vector3((f64)p[3], (f64)p[4], (f64)p[3])
+                boxes[top] = placed_box(Bounds(c.subtract(half), c.add(half)), world)
+                top += 1
+            16, 19:
+                let grow = (f64)p[0] * 0.25 if ops[at] == 19 else 0.0
+                boxes[top - 2] = grown(union_box(boxes[top - 2], boxes[top - 1]), grow)
+                top -= 1
+            17, 20:
+                boxes[top - 2] = grown(boxes[top - 2], (f64)p[0] * 0.25 if ops[at] == 20 else 0.0)
+                top -= 1
+            _:
+                if ops[at] == 18 or ops[at] == 21:
+                    let a = boxes[top - 2]
+                    let b = boxes[top - 1]
+                    boxes[top - 2] = Bounds(Vector3(math.max(a.minimum.x, b.minimum.x), math.max(a.minimum.y, b.minimum.y), math.max(a.minimum.z, b.minimum.z)),
+                                            Vector3(math.min(a.maximum.x, b.maximum.x), math.min(a.maximum.y, b.maximum.y), math.min(a.maximum.z, b.maximum.z)))
+                    top -= 1
+                elif ops[at] == 32:
+                    let inverse = Matrix4(Vector3((f64)p[0], (f64)p[1], (f64)p[2]), Vector3((f64)p[3], (f64)p[4], (f64)p[5]),
+                                          Vector3((f64)p[6], (f64)p[7], (f64)p[8]), Vector3((f64)p[9], (f64)p[10], (f64)p[11]))
+                    matrices[depth + 1] = world.multiply(affine_inverse(inverse) catch failure: recover Matrix4())
+                    depth += 1
+                elif ops[at] == 33:
+                    depth -= 1
+                elif ops[at] == 48:
+                    boxes[top - 1] = grown(boxes[top - 1], math.max((f64)p[0], 0.0))
+                else:
+                    boxes[top - 1] = grown(boxes[top - 1], math.abs((f64)p[0]))
+    return boxes[0]
+
+func grown(box: Bounds, amount: f64) -> Bounds:
+    let d = Vector3(amount, amount, amount)
+    return Bounds(box.minimum.subtract(d), box.maximum.add(d))
+
+# mark: Building programs
+
+## A one-op program of primitive `op` with `values` (up to 16).
+pub func primitive_sdf(op: SdfOp, values: const f64[]) -> Sdf*!:
+    var ops = try Column[u8].filled(1, (u8)op)
+    errdefer ops.release()
+    var params = try Column[f32].filled(sdf_stride, 0.0)
+    errdefer params.release()
+    let out = params.span()
+    for at in 0..<values.length: out[at] = (f32)values[at]
+    return try new_sdf(ops.take(), params.take())
+
+## `a` then `b` combined by boolean `op` with smoothness `k`.
+pub func combined_sdf(a: const Sdf*, b: const Sdf*, op: SdfOp, k: f64) -> Sdf*!:
+    let count = a.op_count() + b.op_count() + 1
+    var ops = try Column[u8].allocate(count)
+    errdefer ops.release()
+    var params = try Column[f32].filled(count * sdf_stride, 0.0)
+    errdefer params.release()
+    let out_ops = ops.span()
+    let out = params.span()
+    memory.copy(out_ops[..<a.op_count()], a.op_span(), a.op_count())
+    memory.copy(out_ops[a.op_count()..<a.op_count() + b.op_count()], b.op_span(), b.op_count())
+    out_ops[count - 1] = (u8)op
+    memory.copy(out[..<a.param_span().length], a.param_span(), a.param_span().length)
+    memory.copy(out[a.param_span().length..<a.param_span().length + b.param_span().length], b.param_span(), b.param_span().length)
+    out[(count - 1) * sdf_stride] = (f32)k
+    return try new_sdf(ops.take(), params.take())
+
+## `a` with modifier `op` (round or shell) of `amount`.
+pub func modified_sdf(a: const Sdf*, op: SdfOp, amount: f64) -> Sdf*!:
+    let count = a.op_count() + 1
+    var ops = try Column[u8].allocate(count)
+    errdefer ops.release()
+    var params = try Column[f32].filled(count * sdf_stride, 0.0)
+    errdefer params.release()
+    memory.copy(ops.span()[..<a.op_count()], a.op_span(), a.op_count())
+    ops.span()[count - 1] = (u8)op
+    memory.copy(params.span()[..<a.param_span().length], a.param_span(), a.param_span().length)
+    params.span()[(count - 1) * sdf_stride] = (f32)amount
+    return try new_sdf(ops.take(), params.take())
+
+## `a` placed by `matrix`: its points map back through the inverse; the
+## distance scales by the smallest axis scale (a lower bound under a
+## non-uniform scale, so the field stays 1-Lipschitz).
+pub func placed_sdf(a: const Sdf*, matrix: Matrix4) -> Sdf*!:
+    let inverse = try affine_inverse(matrix)
+    let scale = math.min(matrix.x.length(), math.min(matrix.y.length(), matrix.z.length()))
+    let count = a.op_count() + 2
+    var ops = try Column[u8].allocate(count)
+    errdefer ops.release()
+    var params = try Column[f32].filled(count * sdf_stride, 0.0)
+    errdefer params.release()
+    let out_ops = ops.span()
+    let out = params.span()
+    out_ops[0] = (u8)SdfOp.transform
+    let values: f64[13] = [inverse.x.x, inverse.x.y, inverse.x.z, inverse.y.x, inverse.y.y, inverse.y.z, inverse.z.x, inverse.z.y, inverse.z.z,
+                           inverse.translation.x, inverse.translation.y, inverse.translation.z, scale]
+    for at in 0..<(usize)13: out[at] = (f32)values[at]
+    memory.copy(out_ops[1..<1 + a.op_count()], a.op_span(), a.op_count())
+    memory.copy(out[sdf_stride..<sdf_stride + a.param_span().length], a.param_span(), a.param_span().length)
+    out_ops[count - 1] = (u8)SdfOp.end_transform
+    return try new_sdf(ops.take(), params.take())

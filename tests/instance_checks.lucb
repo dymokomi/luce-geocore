@@ -1,0 +1,73 @@
+## Instances: prototypes once, instances as rows of one shared column. A
+## share keeps the rows (the same column id) and shares each prototype; so
+## do path filters; saving writes each prototype once.
+import geocore
+import geocore_kernel
+import interop
+import math
+import memory
+from io import path
+from geocore import Vector3, Mesh, GeometrySet
+from geocore_kernel import Instances, Placement, set_find, set_put, set_storage, empty_set, dispose_set, adopt_set, instances_component, new_instances, save_geometry, load_geometry
+from geocore_growing import Growing
+
+pub func exercise() -> !:
+    let cube = try Mesh.cube(1.0)
+    defer cube.release()
+    let cube_set = try GeometrySet.of_mesh(cube)
+    defer cube_set.release()
+    # 10,000 instances of two prototypes, built before the set takes them
+    # (a set drops an empty component).
+    let raised = try cube_set.value().transformed(Vector3(0.0, 5.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer raised.release()
+    let instances = try new_instances()
+    fill(instances, cube_set.value(), raised.value()) catch failure:
+        let close = instances_component().close
+        close((void*)instances)
+        error(failure.code, failure.message)
+    let storage = empty_set() catch failure:
+        let close = instances_component().close
+        close((void*)instances)
+        error(failure.code, failure.message)
+    set_put(storage, instances_component(), (void*)instances) catch failure:
+        dispose_set(storage)
+        error(failure.code, failure.message)
+    let set = try adopt_set(storage)
+    defer set.release()
+    assert(instances.count() == 10000 and instances.prototype_count() == 2)
+    # A share: the same rows, prototypes shared anew.
+    let copy = try adopt_set(try set_storage(set.value()))
+    defer copy.release()
+    let shared = (const Instances*)(set_find(copy.value(), instances_component()) else trap("instances"))
+    assert(shared.rows_id() == instances.rows_id() and shared.count() == 10000 and shared.prototype_count() == 2)
+    assert(shared.prototype(0) != instances.prototype(0))
+    assert(copy.value().instance_count() == 10000 and not (try copy.value().instance_visible(3)) and (try copy.value().instance_translation(7)).x == 7.0)
+    # Filters keep the rows too; the realized mesh has every instance.
+    let kept = try copy.value().blasted("*", true)
+    defer kept.release()
+    let filtered = (const Instances*)(set_find(kept.value(), instances_component()) else trap("instances"))
+    assert(filtered.rows_id() == instances.rows_id())
+    let realized = try copy.value().realized()
+    defer realized.release()
+    assert(realized.value().face_count() == 60000)
+    # Saved once per prototype, and loaded back row for row.
+    var file = Growing[u8]()
+    defer file.close()
+    try file.assign(path.temp().bytes)
+    for byte in "/luce-geocore-instances.prism".bytes: try file.push(byte)
+    discard(try save_geometry(set.value(), (str)file.view(), 1, 268435456))
+    let loaded = try adopt_set(try load_geometry((str)file.view()))
+    defer loaded.release()
+    let back = (const Instances*)(set_find(loaded.value(), instances_component()) else trap("instances"))
+    assert(back.count() == 10000 and back.prototype_count() == 2)
+    for at in 0..<(usize)10000:
+        let a = instances.row(at)
+        let b = back.row(at)
+        assert(a.prototype == b.prototype and a.visible == b.visible and a.translation == b.translation)
+
+func fill(instances: Instances*, a: const GeometrySet*, b: const GeometrySet*) -> !:
+    let first = try instances.add_prototype(try set_storage(a))
+    let second = try instances.add_prototype(try set_storage(b))
+    for at in 0..<(usize)10000:
+        let placement = Placement.compose(Vector3((f64)at, 0.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+        try instances.add_instance(first if at % 2 == 0 else second, &placement, at % 3 != 0)

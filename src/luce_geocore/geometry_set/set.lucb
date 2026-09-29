@@ -39,6 +39,14 @@ pub struct Placement:
 ## A component family: what a set may do with a component's data without
 ## knowing its layout. Data is an owned heap object; `share` makes another
 ## owner of the same contents and `close` gives one up.
+##
+## The tracing rule: `trace` visits the Luce objects this owner holds, and
+## every strong reference it visits must be owned by this owner exactly
+## once. A family whose data holds Luce objects (luce-cad's CAD models,
+## instances' prototype sets) therefore cannot share that data by count:
+## each share clones those references (sharing plain columns is fine), or
+## the cycle collector counts one edge per owner against a single
+## reference and traps.
 pub struct ComponentType:
     pub let name: str
     pub let share: func(const void*) -> void*!

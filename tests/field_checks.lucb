@@ -1,0 +1,306 @@
+## Volumes and SDFs: leaf keys, SDF programs (primitives, booleans, smooth
+## blends, placement, modifiers), sampled level sets from SDFs, meshes and
+## points, surface nets (closed, outward, on the surface), slices, the
+## volume and SDF families in sets, their previews, the codec round trip,
+## and every field verb's counts and determinism.
+import geocore
+import geocore_kernel
+import interop
+import math
+import memory
+from io import path
+from geocore import Vector3, Matrix4, Mesh, MeshPrimitives, GeometrySet
+from geocore_kernel import Sdf, SdfOp, SparseGrid, GridClass, GridSampler, Volume, Domain, primitive_sdf, combined_sdf, modified_sdf, placed_sdf, release_sdf, sampled_sdf, mesh_level_set, points_level_set, surface_mesh, release_grid, new_volume, add_grid, release_volume, volume_type, sdf_type, set_volume, set_sdf, set_put, empty_set, dispose_set, adopt_set, set_mesh, save_geometry, load_geometry, run_set_verb, find_set_verb, leaf_key, key_leaf, sdf_preview, mesh_adopt, point_span, face_normal_span, offset_span, corner_span, mesh_origin, attribute_entry
+from geocore_growing import Growing
+
+func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
+    return math.abs(a - b) < tolerance
+
+pub func exercise() -> !:
+    try keys()
+    try programs()
+    try level_sets()
+    try surfaces()
+    try sets_and_files()
+    try verbs()
+
+## A small, coarse pass over every kernel and verb, for allocation-failure
+## injection (each stage reruns it): SDF programs, sampling, surface nets,
+## mesh and point level sets, slices, the families in sets and the codec.
+pub func allocations() -> !:
+    let empty = try adopt_set(try empty_set())
+    defer empty.release()
+    let ball = try apply("SDF Sphere", empty.value(), [1.0, 0.0, 0.0, 0.0])
+    defer ball.release()
+    let block = try apply("SDF Box", empty.value(), [1.0, 1.0, 1.0, 0.1, 0.8, 0.0, 0.0])
+    defer block.release()
+    let carved = try apply("SDF Boolean", ball.value(), [1.0, 0.1], block.value())
+    defer carved.release()
+    let hollow = try apply("SDF Modify", carved.value(), [1.0, 0.05])
+    defer hollow.release()
+    let meshed = try apply("Convert to Mesh", hollow.value(), [0.25, 0.0, 1.0, 1.0])
+    defer meshed.release()
+    let sampled = try apply("SDF to Volume", ball.value(), [0.25, 2.0, 0.0])
+    defer sampled.release()
+    let slice = try apply("Volume Slice", sampled.value(), [1.0, 0.5, 4.0, 1.0])
+    defer slice.release()
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    let cube_set = try GeometrySet.of_mesh(cube)
+    defer cube_set.release()
+    let solid = try apply("Mesh to SDF", cube_set.value(), [0.25, 2.0, 1.0])
+    defer solid.release()
+    let blobs = try apply("Volume from Points", cube_set.value(), [0.3, 0.25, 2.0, 0.0])
+    defer blobs.release()
+    let remeshed = try apply("Convert to Mesh", blobs.value(), [0.0, 0.0, 0.0, 0.0])
+    defer remeshed.release()
+    let moved = try hollow.value().transformed(Vector3(1.0, 0.0, 0.0), Vector3(), Vector3(2.0, 2.0, 2.0))
+    defer moved.release()
+    let both = try moved.value().merged(solid)
+    defer both.release()
+    discard(try both.value().bounds())
+    var file = Growing[u8]()
+    defer file.close()
+    try file.assign(path.temp().bytes)
+    for byte in "/luce-geocore-fields-small.prism".bytes: try file.push(byte)
+    discard(try save_geometry(both.value(), (str)file.view(), 1, 1024))
+    let loaded = try adopt_set(try load_geometry((str)file.view()))
+    loaded.release()
+
+## The checks once more, reporting.
+pub func run() -> !:
+    try exercise()
+    print("PASS volumes and SDFs: keys, programs, level sets, surface nets, slices, sets, files, verbs")
+
+pub func keys() -> !:
+    for x in -3..<(i64)3:
+        let key = leaf_key(x, x * 7, -x * 11)
+        let (a, b, c) = key_leaf(key)
+        assert(a == x and b == x * 7 and c == -x * 11)
+    assert(leaf_key(0, 0, 0) < leaf_key(1, 0, 0) and leaf_key(1, 0, 0) < leaf_key(0, 1, 0))
+
+pub func programs() -> !:
+    let sphere = try primitive_sdf(SdfOp.sphere, [0.0, 0.0, 0.0, 1.0])
+    defer release_sdf(sphere)
+    assert(near(sphere.distance(Vector3()), -1.0) and near(sphere.distance(Vector3(2.0, 0.0, 0.0)), 1.0))
+    let box = try primitive_sdf(SdfOp.rounded_box, [0.5, 0.0, 0.0, 0.5, 0.5, 0.5, 0.0])
+    defer release_sdf(box)
+    assert(near(box.distance(Vector3(0.5, 0.0, 0.0)), -0.5) and near(box.distance(Vector3(2.0, 0.0, 0.0)), 1.0))
+    # The sphere without the box: the box's side is now outside.
+    let cut = try combined_sdf(sphere, box, SdfOp.subtract, 0.0)
+    defer release_sdf(cut)
+    assert(cut.distance(Vector3(0.5, 0.0, 0.0)) > 0.0 and near(cut.distance(Vector3(-0.5, 0.0, 0.0)), -0.5))
+    # A smooth union sinks below both at the seam.
+    let blend = try combined_sdf(sphere, box, SdfOp.smooth_unite, 0.5)
+    defer release_sdf(blend)
+    let seam = Vector3(0.9, 0.6, 0.0)
+    assert(blend.distance(seam) < math.min(sphere.distance(seam), box.distance(seam)))
+    # Placement: moved, and scaled distances.
+    let moved = try placed_sdf(sphere, Matrix4.compose(Vector3(3.0, 0.0, 0.0), Vector3(), Vector3(2.0, 2.0, 2.0)))
+    defer release_sdf(moved)
+    assert(near(moved.distance(Vector3(3.0, 0.0, 0.0)), -2.0, 0.0001) and near(moved.distance(Vector3(6.0, 0.0, 0.0)), 1.0, 0.0001))
+    let box_bounds = moved.bounds()
+    assert(near(box_bounds.minimum.x, 1.0) and near(box_bounds.maximum.x, 5.0))
+    let shell = try modified_sdf(sphere, SdfOp.shell, 0.1)
+    defer release_sdf(shell)
+    assert(near(shell.distance(Vector3()), 0.9) and near(shell.distance(Vector3(1.0, 0.0, 0.0)), -0.1))
+
+pub func level_sets() -> !:
+    let sphere = try primitive_sdf(SdfOp.sphere, [0.0, 0.0, 0.0, 1.0])
+    defer release_sdf(sphere)
+    let grid = try sampled_sdf(sphere, 0.05, 3.0, "surface")
+    defer release_grid(grid)
+    assert(grid.leaf_count() > 0 and grid.class == GridClass.level_set and grid.active_count() > 1000)
+    var sampler = GridSampler.of(grid)
+    assert(near(sampler.sample(Vector3(1.0, 0.0, 0.0)), 0.0, 0.002) and near(sampler.sample(Vector3(0.0, 1.05, 0.0)), 0.05, 0.002))
+    # Far outside: the background (the band's distance).
+    assert(near(sampler.sample(Vector3(5.0, 0.0, 0.0)), 0.15, 0.0001))
+    # A closed mesh's signed distance (the cube stands on y = 0): inside
+    # near its faces is negative.
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    let solid = try mesh_level_set(cube.value(), 0.1, 3.0, "surface")
+    defer release_grid(solid)
+    var cube_sampler = GridSampler.of(solid)
+    assert(near(cube_sampler.sample(Vector3(0.9, 1.0, 0.0)), -0.1, 0.01) and near(cube_sampler.sample(Vector3(1.1, 1.2, 0.3)), 0.1, 0.01))
+    # Spheres around points: -radius at a point.
+    let points: Vector3[2] = [Vector3(), Vector3(1.0, 0.0, 0.0)]
+    let blobs = try points_level_set(points, 0.2, 0.02, 3.0, "surface")
+    defer release_grid(blobs)
+    var blob_sampler = GridSampler.of(blobs)
+    assert(near(blob_sampler.sample(Vector3(1.0, 0.0, 0.0)), -0.06, 0.001) and near(blob_sampler.sample(Vector3(0.5, 0.0, 0.0)), 0.06, 0.001))
+
+## Every edge of `mesh` shared by two faces in opposite directions, and
+## every face facing away from `inside`.
+func closed_and_outward(mesh: interop.Reference[Mesh], inside: Vector3) -> !:
+    let m = mesh.value()
+    let counts = try alloc i64[(usize)(try m.edge_count())] in memory.heap
+    defer free(counts) in memory.heap
+    for at in 0..<counts.length: counts[at] = 0
+    for face in 0..<m.face_count():
+        for corner in 0..<(try m.face_size(face)):
+            let c = (try m.face_offset(face)) + corner
+            let edge = try m.corner_edge(c)
+            counts[(usize)edge] += 1 if (try m.corner_point(c)) == (try m.edge_point(edge, 0)) else -1
+        assert((try m.face_normal(face)).dot((try m.face_center(face)).subtract(inside)) > 0.0)
+    for count in counts: assert(count == 0)
+
+pub func surfaces() -> !:
+    let sphere = try primitive_sdf(SdfOp.sphere, [0.5, 0.0, 0.0, 1.0])
+    defer release_sdf(sphere)
+    let grid = try sampled_sdf(sphere, 0.05, 2.0, "surface")
+    defer release_grid(grid)
+    let mesh = try mesh_adopt(try surface_mesh(grid, 0.0, sphere))
+    defer mesh.release()
+    assert(mesh.value().face_count() > 1000)
+    let unprojected = try mesh_adopt(try surface_mesh(grid, 0.0, none))
+    defer unprojected.release()
+    try closed_and_outward(unprojected, Vector3(0.5, 0.0, 0.0))
+    for point in point_span(mesh.value()):
+        assert(near(point.vector().add(mesh_origin(mesh.value())).subtract(Vector3(0.5, 0.0, 0.0)).length(), 1.0, 0.001))
+    try closed_and_outward(mesh, Vector3(0.5, 0.0, 0.0))
+    # The same grid gives the same bytes.
+    let again = try mesh_adopt(try surface_mesh(grid, 0.0, sphere))
+    defer again.release()
+    let a = point_span(mesh.value())
+    let b = point_span(again.value())
+    assert(a.length == b.length)
+    for at in 0..<a.length: assert(a[at] == b[at])
+    # Without projection the vertices stay within a voxel of the surface.
+    let rough = try mesh_adopt(try surface_mesh(grid, 0.0, none))
+    defer rough.release()
+    for point in point_span(rough.value()):
+        assert(near(point.vector().subtract(Vector3(0.5, 0.0, 0.0)).length(), 1.0, 0.05))
+    # The cached preview is built once.
+    let first = (try sdf_preview(sphere)) else trap("preview")
+    let second = (try sdf_preview(sphere)) else trap("preview")
+    assert(first == second and first.face_count() > 0)
+
+## A set of `sdf` (taken).
+func sdf_set(sdf: Sdf*) -> interop.Reference[GeometrySet]!:
+    let storage = empty_set() catch failure:
+        release_sdf(sdf)
+        error(failure.code, failure.message)
+    set_put(storage, sdf_type(), (void*)sdf) catch failure:
+        dispose_set(storage)
+        error(failure.code, failure.message)
+    return try adopt_set(storage)
+
+pub func sets_and_files() -> !:
+    let sphere = try sdf_set(try primitive_sdf(SdfOp.sphere, [0.0, 0.0, 0.0, 1.0]))
+    defer sphere.release()
+    let described = try sphere.value().description()
+    defer described.release()
+    assert(described.value == "SDF of 1 ops")
+    # Placement wraps the program; merging two SDFs is their union.
+    let moved = try sphere.value().transformed(Vector3(2.0, 0.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer moved.release()
+    let both = try sphere.value().merged(moved)
+    defer both.release()
+    let joined = set_sdf(both.value()) else trap("sdf")
+    assert(near(joined.distance(Vector3(2.0, 0.0, 0.0)), -1.0) and near(joined.distance(Vector3()), -1.0))
+    # A volume of a sampled grid: bounds, description, placement.
+    let sampled = try apply("SDF to Volume", both.value(), [0.1, 3.0, 1.0])
+    defer sampled.release()
+    let volume = set_volume(sampled.value()) else trap("volume")
+    assert(volume.grid_count() == 1 and set_sdf(sampled.value()) != none)
+    let box = try sampled.value().bounds()
+    assert(box.minimum.x < -1.0 and box.maximum.x > 3.0)
+    let shifted = try sampled.value().transformed(Vector3(0.0, 1.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer shifted.release()
+    var sampler = GridSampler.of((set_volume(shifted.value()) else trap("volume")).grid(0))
+    assert(near(sampler.sample(Vector3(1.0, 1.0, 0.0)), 0.0, 0.01))
+    # Files: the volume and the SDF come back exactly.
+    var file = Growing[u8]()
+    defer file.close()
+    try file.assign(path.temp().bytes)
+    for byte in "/luce-geocore-fields.prism".bytes: try file.push(byte)
+    discard(try save_geometry(shifted.value(), (str)file.view(), 3, 4096))
+    let loaded = try adopt_set(try load_geometry((str)file.view()))
+    defer loaded.release()
+    let x = (set_volume(shifted.value()) else trap("volume")).grid(0)
+    let y = (set_volume(loaded.value()) else trap("volume")).grid(0)
+    assert(x.name() == y.name() and x.class == y.class and x.background == y.background and x.transform.translation == y.transform.translation and x.transform.x == y.transform.x)
+    assert(x.keys.count() == y.keys.count() and x.values.count() == y.values.count())
+    for at in 0..<x.values.count(): assert(x.values.view()[at] == y.values.view()[at])
+    for at in 0..<x.masks.count(): assert(x.masks.view()[at] == y.masks.view()[at])
+    let p = set_sdf(shifted.value()) else trap("sdf")
+    let q = set_sdf(loaded.value()) else trap("sdf")
+    assert(p.op_count() == q.op_count() and p.distance(Vector3(0.3, 0.2, 0.1)) == q.distance(Vector3(0.3, 0.2, 0.1)))
+
+## Run set verb `name` on `set` (and `second`).
+func apply(name: str, set: const GeometrySet*, numbers: const f64[], second: const GeometrySet*? = none) -> interop.Reference[GeometrySet]!:
+    let verb = find_set_verb(name) else trap("no such verb")
+    var output = try run_set_verb(&verb, set, second, "", 0, numbers)
+    defer output.close()
+    let made = output.set else trap("no set")
+    output.set = none
+    return try adopt_set(made)
+
+pub func verbs() -> !:
+    let empty = try adopt_set(try empty_set())
+    defer empty.release()
+    let ball = try apply("SDF Sphere", empty.value(), [1.0, 0.0, 0.0, 0.0])
+    defer ball.release()
+    let block = try apply("SDF Box", empty.value(), [1.0, 1.0, 1.0, 0.1, 0.8, 0.0, 0.0])
+    defer block.release()
+    let ring = try apply("SDF Torus", empty.value(), [1.0, 0.25, 0.0, 0.0, 0.0])
+    defer ring.release()
+    let pill = try apply("SDF Capsule", empty.value(), [0.25, 1.0, 0.0, 0.0, 0.0])
+    defer pill.release()
+    let can = try apply("SDF Cylinder", empty.value(), [0.5, 1.0, 0.0, 0.0, 0.0])
+    defer can.release()
+    for shape in [ball, block, ring, pill, can]: assert(set_sdf(shape.value()) != none)
+    # The ball minus the block, smoothly, then hollowed.
+    let carved = try apply("SDF Boolean", ball.value(), [1.0, 0.1], block.value())
+    defer carved.release()
+    let hollow = try apply("SDF Modify", carved.value(), [1.0, 0.05])
+    defer hollow.release()
+    assert((set_sdf(hollow.value()) else trap("sdf")).op_count() == 4)
+    # Its surface, twice: closed, outward, the same bytes.
+    let mesh_set = try apply("Convert to Mesh", ball.value(), [0.05, 0.0, 1.0, 0.0])
+    defer mesh_set.release()
+    let mesh = (try mesh_set.value().mesh()) else trap("mesh")
+    defer mesh.release()
+    assert(set_sdf(mesh_set.value()) == none and mesh.value().face_count() > 1000)
+    try closed_and_outward(mesh, Vector3())
+    let twice = try apply("Convert to Mesh", ball.value(), [0.05, 0.0, 1.0, 0.0])
+    defer twice.release()
+    let other = (try twice.value().mesh()) else trap("mesh")
+    defer other.release()
+    let a = point_span(mesh.value())
+    let b = point_span(other.value())
+    assert(a.length == b.length)
+    for at in 0..<a.length: assert(a[at] == b[at])
+    # Mesh to SDF, back to a mesh: the cube's surface, closed.
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    let cube_set = try GeometrySet.of_mesh(cube)
+    defer cube_set.release()
+    let solid = try apply("Mesh to SDF", cube_set.value(), [0.1, 3.0, 0.0])
+    defer solid.release()
+    assert(set_volume(solid.value()) != none and not solid.value().has_mesh())
+    let remeshed = try apply("Convert to Mesh", solid.value(), [0.0, 0.0, 0.0, 0.0])
+    defer remeshed.release()
+    let surface = (try remeshed.value().mesh()) else trap("mesh")
+    defer surface.release()
+    try closed_and_outward(surface, Vector3(0.0, 1.0, 0.0))
+    assert(near(surface.value().bounds().maximum.x, 1.0, 0.1))
+    # Spheres around the cube's corners.
+    let blobs = try apply("Volume from Points", cube_set.value(), [0.3, 0.05, 3.0, 0.0])
+    defer blobs.release()
+    let blob_mesh = try apply("Convert to Mesh", blobs.value(), [0.0, 0.0, 0.0, 0.0])
+    defer blob_mesh.release()
+    let blob_surface = (try blob_mesh.value().mesh()) else trap("mesh")
+    defer blob_surface.release()
+    assert(blob_surface.value().face_count() > 8 * 50)
+    # A slice through the ball: 17×17 points (with value and Cd) beside it.
+    let slice = try apply("Volume Slice", ball.value(), [1.0, 0.5, 16.0, 1.0])
+    defer slice.release()
+    let plane = (try slice.value().mesh()) else trap("mesh")
+    defer plane.release()
+    assert(plane.value().point_count() == 17 * 17 and plane.value().face_count() == 16 * 16 and set_sdf(slice.value()) != none)
+    let values = plane.value().find_attribute("value", 0)
+    assert(values >= 0 and plane.value().find_attribute("Cd", 0) >= 0)
+    # The plane's middle point is the ball's center: one inside.
+    assert(near(try plane.value().attribute_value(values, 8 * 17 + 8), -1.0, 0.001))

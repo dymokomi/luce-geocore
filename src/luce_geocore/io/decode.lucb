@@ -267,28 +267,37 @@ func decode_curves(reader: GeometryReader*, path: str) -> void*!:
     return (void*)(try curves_assembled(positions.take(), origin, offsets.take(), knots.take(), knot_offsets.take(), store))
 
 func decode_instances(reader: GeometryReader*, path: str) -> void*!:
-    while let header = try reader.next_property(): discard(header)
+    var count: i64 = 0
+    var prototypes = Growing[i32]()
+    defer prototypes.close()
+    var placements = Growing[f64]()
+    defer placements.close()
+    var visible = Growing[u8]()
+    defer visible.close()
+    while let header = try reader.next_property():
+        if header.name == "count": count = try reader.integer(header)
+        elif header.name == "prototype":
+            try prototypes.fill((usize)header.components(), 0)
+            try reader.crate.read_payload(u8[]((u8*)prototypes.items.data, prototypes.count * 4))
+        elif header.name == "placement":
+            try placements.fill((usize)header.components(), 0.0)
+            try reader.crate.read_payload(u8[]((u8*)placements.items.data, placements.count * 8))
+        elif header.name == "visible":
+            try visible.fill((usize)header.components(), 0)
+            try reader.crate.read_payload(visible.items[..<visible.count])
+    let total = (usize)count
+    if prototypes.count != total or placements.count != total * 9 or visible.count != total: error(errors.invalid, "saved instances disagree")
     let instances = try new_instances()
     errdefer close_instances_data((void*)instances)
     while let found = try reader.next_child(path):
-        let child = found.0
-        if found.1 != "instance": error(errors.invalid, "instances hold instance elements")
-        var translation = Vector3()
-        var rotation = Vector3()
-        var scale = Vector3(1.0, 1.0, 1.0)
-        var visible = true
-        while let header = try reader.next_property():
-            if header.name == "translation": translation = try reader.triple(header)
-            elif header.name == "rotation": rotation = try reader.triple(header)
-            elif header.name == "scale": scale = try reader.triple(header)
-            elif header.name == "visible": visible = (try reader.integer(header)) != 0
-        let base = try copied_text(child)
-        defer free(base) in memory.heap
-        let nested = (try reader.next_child((str)base)) else error(errors.invalid, "an instance has no geometry")
-        if nested.1 != "geometry": error(errors.invalid, "an instance holds a geometry element")
-        let set = try decode_set(reader, nested.0)
-        let placement = Placement.compose(translation, rotation, scale)
-        try instances.add(set, &placement, visible)
+        if found.1 != "geometry": error(errors.invalid, "instances hold geometry prototypes")
+        discard(try instances.add_prototype(try decode_set(reader, found.0)))
+    for at in 0..<total:
+        let prototype = prototypes.items[at]
+        if prototype < 0 or (usize)prototype >= instances.prototype_count(): error(errors.invalid, "a saved instance names a missing prototype")
+        let p = placements.items[at * 9..<at * 9 + 9]
+        let placement = Placement.compose(Vector3(p[0], p[1], p[2]), Vector3(p[3], p[4], p[5]), Vector3(p[6], p[7], p[8]))
+        try instances.add_instance((usize)prototype, &placement, visible.items[at] != 0)
     return (void*)instances
 
 func close_instances_data(data: void*):

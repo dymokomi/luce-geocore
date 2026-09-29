@@ -190,3 +190,35 @@ pub let dtype_uint64 = io.dtype_uint64
 pub let dtype_float32 = io.dtype_float32
 pub let dtype_float64 = io.dtype_float64
 pub let dtype_str = io.dtype_str
+
+## Fields: sparse voxel grids and volumes, SDF programs, sampling and
+## surfaces.
+import luce_geocore.fields as fields
+pub type SparseGrid = fields.SparseGrid
+pub type GridClass = fields.GridClass
+pub type GridSampler = fields.GridSampler
+pub type Volume = fields.Volume
+pub type Sdf = fields.Sdf
+pub type SdfOp = fields.SdfOp
+pub let volume_type = fields.volume_type
+pub let sdf_type = fields.sdf_type
+pub let set_volume = fields.set_volume
+pub let set_sdf = fields.set_sdf
+pub let new_volume = fields.new_volume
+pub let add_grid = fields.add_grid
+pub let release_volume = fields.release_volume
+pub let release_grid = fields.release_grid
+pub let release_sdf = fields.release_sdf
+pub let primitive_sdf = fields.primitive_sdf
+pub let combined_sdf = fields.combined_sdf
+pub let modified_sdf = fields.modified_sdf
+pub let placed_sdf = fields.placed_sdf
+pub let sampled_sdf = fields.sampled_sdf
+pub let mesh_level_set = fields.mesh_level_set
+pub let points_level_set = fields.points_level_set
+pub let surface_mesh = fields.surface_mesh
+pub let slice_mesh = fields.slice_mesh
+pub let sdf_preview = fields.sdf_preview
+pub let volume_preview = fields.volume_preview
+pub let leaf_key = fields.leaf_key
+pub let key_leaf = fields.key_leaf

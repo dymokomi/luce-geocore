@@ -53,6 +53,8 @@ func codec_of(name: str) -> ComponentCodec?:
     if name == "points": return ComponentCodec(name, points_component_type(), encode_points, decode_points)
     if name == "curves": return ComponentCodec(name, curves_type(), encode_curves, decode_curves)
     if name == "instances": return ComponentCodec(name, instances_component_type(), encode_instances, decode_instances)
+    if name == "volume": return ComponentCodec(name, volume_type(), encode_volume, decode_volume)
+    if name == "sdf": return ComponentCodec(name, sdf_type(), encode_sdf, decode_sdf)
     codec_lock.lock()
     defer codec_lock.unlock()
     for at in 0..<codec_count:
@@ -73,21 +75,34 @@ func instances_component_type() -> const ComponentType*:
 
 ## Where codecs write: element and property calls on the crate being built,
 ## with the column helpers geometry needs.
+##
+## Payload lifetimes: the crate streams payloads when `save` runs, so every
+## payload must outlive it. `column` copies its bytes (safe for temporaries,
+## stack arrays and anything freed before the save); `column_of` retains a
+## geocore Column until the writer closes (no copy); `column_borrowed`
+## borrows bytes the caller keeps alive and unchanged until `save` returns
+## (no copy: the built-in codecs use it for the columns of the set being
+## saved, which the caller holds).
 pub struct GeometryWriter:
     pub var crate: CrateWriter
     ## Path text built while nesting.
     var scratch: Growing[u8]
+    ## Copied and retained payloads, alive until the writer closes.
+    var kept: Growing[Column[u8]]
     ## The most bytes a property holds before a column is chunked.
     pub var chunk: usize = chunk_bytes
 
     pub func init():
         self.crate = CrateWriter()
         self.scratch = Growing[u8]()
+        self.kept = Growing[Column[u8]]()
         self.chunk = chunk_bytes
 
     pub mutating func close():
         self.crate.close()
         self.scratch.close()
+        for at in 0..<self.kept.count: self.kept.items[at].release()
+        self.kept.close()
 
     ## `parent` + "/" + `name`, valid until the next call.
     pub mutating func child(parent: str, name: str) -> str!:
@@ -96,10 +111,31 @@ pub struct GeometryWriter:
         for byte in name.bytes: try self.scratch.push(byte)
         return (str)self.scratch.view()
 
-    ## A typed column of `rows` × `columns` components, chunked above 256 MiB.
+    ## A typed column of `rows` × `columns` components, its bytes COPIED now:
+    ## safe whatever happens to them before the save. Chunked above 256 MiB.
     pub mutating func column(name: str, dtype: u8, rows: usize, columns: usize, bytes: const u8[]) -> !:
+        var copy = try Column[u8].copy_of(bytes)
+        let view = copy.view()
+        self.kept.push(copy) catch failure:
+            copy.release()
+            error(failure.code, failure.message)
+        try self.column_borrowed(name, dtype, rows, columns, view)
+
+    ## A typed column streamed from `column`, which the writer retains (its
+    ## block's users + 1) until it closes: no copy.
+    pub mutating func column_of(name: str, dtype: u8, rows: usize, columns: usize, column: const Column[u8]*) -> !:
+        var share = column.share()
+        let view = share.view()
+        self.kept.push(share) catch failure:
+            share.release()
+            error(failure.code, failure.message)
+        try self.column_borrowed(name, dtype, rows, columns, view)
+
+    ## A typed column BORROWING `bytes`, which must stay alive and unchanged
+    ## until `save` returns: no copy. For columns of the set being saved.
+    pub mutating func column_borrowed(name: str, dtype: u8, rows: usize, columns: usize, bytes: const u8[]) -> !:
         if bytes.length <= self.chunk or rows <= 1:
-            try self.crate.array(name, dtype, rows, columns, bytes)
+            try self.crate.array_borrowed(name, dtype, rows, columns, bytes)
             return
         let row_bytes = bytes.length // rows
         let per_chunk = math.max(1.0, (f64)(self.chunk // row_bytes))
@@ -116,7 +152,7 @@ pub struct GeometryWriter:
             label.clear()
             try append_name(&label, name, "_")
             try append_number(&label, chunk)
-            try self.crate.array((str)label.view(), dtype, end - first, columns, bytes[first * row_bytes..<end * row_bytes])
+            try self.crate.array_borrowed((str)label.view(), dtype, end - first, columns, bytes[first * row_bytes..<end * row_bytes])
 
     ## Every attribute of `store` as children of `parent` (a0, a1, …).
     pub mutating func attributes(parent: str, store: const AttributeStore*) -> !:
@@ -145,15 +181,15 @@ pub struct GeometryWriter:
             try self.crate.integer("flags", (i64)entry.flags)
             try self.crate.integer("role", (i64)(u8)entry.role)
             try self.crate.integer("elements", (i64)entry.elements)
-            if entry.kind == DataType.text: try self.column("table", dtype_uint8, entry.table.count(), 1, entry.table.view())
+            if entry.kind == DataType.text: try self.column_of("table", dtype_uint8, entry.table.count(), 1, &entry.table)
             let data = entry.data.view()
             match entry.kind:
-                .boolean: try self.column("value", dtype_uint64, data.length // 8, 1, data)
-                .int8: try self.column("value", dtype_int8, data.length // entry.width, entry.width, data)
-                .int32, .text: try self.column("value", dtype_int32, data.length // (4 * entry.width), entry.width, data)
-                .int64: try self.column("value", dtype_int64, data.length // (8 * entry.width), entry.width, data)
-                .float32: try self.column("value", dtype_float32, data.length // (4 * entry.width), entry.width, data)
-                _: try self.column("value", dtype_float64, data.length // (8 * entry.width), entry.width, data)
+                .boolean: try self.column_of("value", dtype_uint64, data.length // 8, 1, &entry.data)
+                .int8: try self.column_of("value", dtype_int8, data.length // entry.width, entry.width, &entry.data)
+                .int32, .text: try self.column_of("value", dtype_int32, data.length // (4 * entry.width), entry.width, &entry.data)
+                .int64: try self.column_of("value", dtype_int64, data.length // (8 * entry.width), entry.width, &entry.data)
+                .float32: try self.column_of("value", dtype_float32, data.length // (4 * entry.width), entry.width, &entry.data)
+                _: try self.column_of("value", dtype_float64, data.length // (8 * entry.width), entry.width, &entry.data)
 
 func append_name(out: Growing[u8]*, name: str, suffix: str) -> !:
     try append_text(out, name)
@@ -197,15 +233,15 @@ func encode_mesh(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let origin = mesh_origin(mesh)
     try writer.crate.triple("origin", origin.x, origin.y, origin.z)
     let points = point_span(mesh)
-    try writer.column("P", dtype_float32, points.length, 3, float3_bytes(points))
+    try writer.column_borrowed("P", dtype_float32, points.length, 3, float3_bytes(points))
     let offsets = offset_span(mesh)
-    try writer.column("face_offsets", dtype_int32, offsets.length, 1, i32_bytes(offsets))
+    try writer.column_borrowed("face_offsets", dtype_int32, offsets.length, 1, i32_bytes(offsets))
     let corners = corner_span(mesh)
-    try writer.column("corner_points", dtype_int32, corners.length, 1, i32_bytes(corners))
+    try writer.column_borrowed("corner_points", dtype_int32, corners.length, 1, i32_bytes(corners))
     let triangles = triangle_span(mesh)
-    try writer.column("triangles", dtype_int32, triangles.length, 1, i32_bytes(triangles))
+    try writer.column_borrowed("triangles", dtype_int32, triangles.length, 1, i32_bytes(triangles))
     let precise = precise_span(mesh)
-    if precise.length > 0: try writer.column("precise", dtype_float64, precise.length, 3, u8[]((u8*)precise.data, precise.length * 24))
+    if precise.length > 0: try writer.column_borrowed("precise", dtype_float64, precise.length, 3, u8[]((u8*)precise.data, precise.length * 24))
     var entries = Growing[const Attribute*]()
     defer entries.close()
     for index in 0..<(usize)mesh.attribute_count(): try entries.push(try attribute_entry(mesh, (i64)index))
@@ -217,7 +253,7 @@ func encode_points(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let origin = cloud_origin(cloud)
     try writer.crate.triple("origin", origin.x, origin.y, origin.z)
     let points = cloud_positions(cloud)
-    try writer.column("P", dtype_float32, points.length, 3, float3_bytes(points))
+    try writer.column_borrowed("P", dtype_float32, points.length, 3, float3_bytes(points))
     try writer.attributes(path, cloud_store(cloud))
 
 func encode_curves(data: const void*, writer: GeometryWriter*, path: str) -> !:
@@ -226,38 +262,49 @@ func encode_curves(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let origin = curves_origin(curves)
     try writer.crate.triple("origin", origin.x, origin.y, origin.z)
     let points = curves.position_span()
-    try writer.column("P", dtype_float32, points.length, 3, float3_bytes(points))
+    try writer.column_borrowed("P", dtype_float32, points.length, 3, float3_bytes(points))
     let offsets = curves.offset_span()
-    try writer.column("offsets", dtype_int32, offsets.length, 1, i32_bytes(offsets))
+    try writer.column_borrowed("offsets", dtype_int32, offsets.length, 1, i32_bytes(offsets))
     let knots = curves_knots(curves)
     if knots.length > 0:
-        try writer.column("knots", dtype_float32, knots.length, 1, f32_bytes(knots))
+        try writer.column_borrowed("knots", dtype_float32, knots.length, 1, f32_bytes(knots))
         let starts = curves_knot_offsets(curves)
-        try writer.column("knot_offsets", dtype_int32, starts.length, 1, i32_bytes(starts))
+        try writer.column_borrowed("knot_offsets", dtype_int32, starts.length, 1, i32_bytes(starts))
     try writer.attributes(path, curves.store())
 
+## Instances: each prototype once (children p0, p1, …), then the instances'
+## prototypes, placements and visibility as columns.
 func encode_instances(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let instances = (const Instances*)data
     try writer.crate.element(path, "instances")
-    try writer.crate.integer("count", (i64)instances.count())
+    let count = instances.count()
+    var prototypes = Growing[i32]()
+    defer prototypes.close()
+    var placements = Growing[f64]()
+    defer placements.close()
+    var visible = Growing[u8]()
+    defer visible.close()
+    for at in 0..<count:
+        let row = instances.row(at)
+        try prototypes.push(row.prototype)
+        for value in [row.translation.x, row.translation.y, row.translation.z, row.rotation.x, row.rotation.y, row.rotation.z, row.scale.x, row.scale.y, row.scale.z]:
+            try placements.push(value)
+        try visible.push(1 if row.visible else 0)
+    try writer.crate.integer("count", (i64)count)
+    try writer.crate.integer("prototypes", (i64)instances.prototype_count())
+    try writer.crate.copied_array("prototype", dtype_int32, count, u8[]((u8*)prototypes.items.data, count * 4))
+    try writer.crate.copied_array("placement", dtype_float64, count * 9, u8[]((u8*)placements.items.data, count * 72))
+    try writer.crate.copied_array("visible", dtype_uint8, count, visible.view())
     let base = try copied_text(path)
     defer free(base) in memory.heap
-    for index in 0..<instances.count():
-        let item = instances.item(index)
+    for index in 0..<instances.prototype_count():
         var name = Growing[u8]()
         defer name.close()
-        try append_text(&name, "i")
+        try append_text(&name, "p")
         try append_number(&name, index)
-        let child = try copied_text(try writer.child((str)base, (str)name.view()))
-        defer free(child) in memory.heap
-        try writer.crate.element((str)child, "instance")
-        try writer.crate.triple("translation", item.translation.x, item.translation.y, item.translation.z)
-        try writer.crate.triple("rotation", item.rotation.x, item.rotation.y, item.rotation.z)
-        try writer.crate.triple("scale", item.scale.x, item.scale.y, item.scale.z)
-        try writer.crate.integer("visible", 1 if item.visible else 0)
-        let nested = try copied_text(try writer.child((str)child, "geometry"))
+        let nested = try copied_text(try writer.child((str)base, (str)name.view()))
         defer free(nested) in memory.heap
-        try encode_set(writer, item.set, (str)nested)
+        try encode_set(writer, instances.prototype(index), (str)nested)
 
 ## Save `set` to `path` as a prism crate, `key` in its root (the Cache
 ## node keeps its stamp there); the bytes written.

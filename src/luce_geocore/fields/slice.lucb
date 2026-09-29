@@ -1,0 +1,136 @@
+## A field made visible: a plane of quads across its bounds, each point
+## carrying the field's `value` and a color `Cd`. Distances (SDFs, level
+## sets) map inside to blue and outside to orange with contour bands every
+## fifth of the range; densities (fog) to a grey ramp.
+
+## A slice of the set's SDF (else its first volume grid) across `axis`
+## (0 X, 1 Y, 2 Z) at `position` (0..1 of its bounds), `resolution` quads
+## along its longer side.
+pub func slice_mesh(set: const GeometrySet*, axis: i64, position: f64, resolution: i64) -> Mesh*!:
+    if axis < 0 or axis > 2 or resolution < 1 or resolution > 4096: error(errors.invalid, "a slice needs an axis 0..2 and 1..4096 quads")
+    var field = SliceField(set_sdf(set), none, false)
+    var box = Bounds(Vector3(), Vector3())
+    if let sdf = field.sdf:
+        box = sdf.bounds()
+    elif let volume = set_volume(set):
+        if volume.grid_count() == 0: error(errors.invalid, "the volume has no grids")
+        let grid = volume.grid(0)
+        field.grid = grid
+        field.density = grid.class == GridClass.fog
+        box = grid.bounds() else error(errors.invalid, "the volume grid is empty")
+    else:
+        error(errors.invalid, "the input has no SDF or volume")
+    let low = [box.minimum.x, box.minimum.y, box.minimum.z]
+    let high = [box.maximum.x, box.maximum.y, box.maximum.z]
+    let a = (usize)((axis + 1) % 3)
+    let b = (usize)((axis + 2) % 3)
+    let across = (usize)axis
+    let level = low[across] + (high[across] - low[across]) * math.clamp(position, 0.0, 1.0)
+    let width = high[a] - low[a]
+    let height = high[b] - low[b]
+    let longest = math.max(width, height)
+    if not (longest > 0.0): error(errors.invalid, "the field has no extent to slice")
+    let nu = (usize)math.max(1.0, math.round((f64)resolution * width / longest))
+    let nv = (usize)math.max(1.0, math.round((f64)resolution * height / longest))
+    var positions = try Column[Float3].allocate((nu + 1) * (nv + 1))
+    errdefer positions.release()
+    var values = try Attribute.create("value", Domain.point, DataType.float32, 1, (nu + 1) * (nv + 1))
+    defer values.release()
+    var colors = try Attribute.create("Cd", Domain.point, DataType.float32, 3, (nu + 1) * (nv + 1))
+    defer colors.release()
+    var work = SliceWork(&field, a, b, across, level, low[a], low[b], width, height, nu, nv, positions.span(),
+                         attribute_ops.typed_mut[f32](values.data.span()), attribute_ops.typed_mut[f32](colors.data.span()))
+    parallel.parallel_for(nv + 1, 8, sample_rows, (void*)&work)
+    # Color after sampling: distances scale to the largest magnitude.
+    var range = 0.0
+    for value in attribute_ops.typed[f32](values.data.view()): range = math.max(range, math.abs((f64)value))
+    color_values(attribute_ops.typed[f32](values.data.view()), attribute_ops.typed_mut[f32](colors.data.span()), range, field.density)
+    var corners = try Column[i32].allocate(nu * nv * 4)
+    errdefer corners.release()
+    let out = corners.span()
+    for v in 0..<nv:
+        for u in 0..<nu:
+            let at = (v * nu + u) * 4
+            let first = (i32)(v * (nu + 1) + u)
+            out[at] = first
+            out[at + 1] = first + 1
+            out[at + 2] = first + 1 + (i32)(nu + 1)
+            out[at + 3] = first + (i32)(nu + 1)
+    let mesh = try quads_mesh(positions.take(), corners.take())
+    errdefer mesh_dispose(mesh)
+    try put_attribute(mesh, values.share())
+    try put_attribute(mesh, colors.share())
+    return mesh
+
+struct SliceField:
+    let sdf: const Sdf*?
+    var grid: const SparseGrid*?
+    var density: bool
+
+struct SliceWork:
+    let field: const SliceField*
+    let a: usize
+    let b: usize
+    let across: usize
+    let level: f64
+    let low_a: f64
+    let low_b: f64
+    let width: f64
+    let height: f64
+    let nu: usize
+    let nv: usize
+    let positions: Float3[]
+    let values: f32[]
+    let colors: f32[]
+
+func sample_rows(context: void*?, first: usize, end: usize):
+    let work = (SliceWork*)(context else return)
+    var sampler: GridSampler? = none
+    if let grid = work.field.grid: sampler = GridSampler.of(grid)
+    for v in first..<end:
+        for u in 0..=work.nu:
+            var p: f64[3] = [0.0, 0.0, 0.0]
+            p[work.a] = work.low_a + work.width * (f64)u / (f64)work.nu
+            p[work.b] = work.low_b + work.height * (f64)v / (f64)work.nv
+            p[work.across] = work.level
+            let point = Vector3(p[0], p[1], p[2])
+            let at = v * (work.nu + 1) + u
+            work.positions[at] = Float3.of(point)
+            var value = 0.0
+            if let sdf = work.field.sdf: value = sdf.distance(point)
+            elif let grid_sampler = sampler:
+                var cursor = grid_sampler
+                value = cursor.sample(point)
+                sampler = cursor
+            work.values[at] = (f32)value
+
+func color_values(values: const f32[], colors: f32[], range: f64, density: bool):
+    let scale = range if range > 0.0 else 1.0
+    for at in 0..<values.length:
+        let value = (f64)values[at]
+        var red = 0.0
+        var green = 0.0
+        var blue = 0.0
+        if density:
+            let t = math.clamp(value / scale, 0.0, 1.0)
+            red = 0.1 + 0.85 * t
+            green = red
+            blue = red
+        else:
+            let t = math.clamp(value / scale, -1.0, 1.0)
+            # Outside orange, inside blue, white at the surface.
+            if t >= 0.0:
+                red = 1.0
+                green = 1.0 - 0.5 * t
+                blue = 1.0 - 0.9 * t
+            else:
+                red = 1.0 + 0.8 * t
+                green = 1.0 + 0.55 * t
+                blue = 1.0
+            let band = 0.85 + 0.15 * math.cos(value / scale * 5.0 * 2.0 * math.pi)
+            red *= band
+            green *= band
+            blue *= band
+        colors[at * 3] = (f32)red
+        colors[at * 3 + 1] = (f32)green
+        colors[at * 3 + 2] = (f32)blue

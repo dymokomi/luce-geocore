@@ -73,7 +73,9 @@ func collect_parts(set: const GeometrySet*, matrix: Matrix4, parts: Growing[Mesh
         if entry.kind == &mesh_component:
             try parts.push(MeshPart((const Mesh*)entry.data, matrix))
         elif entry.kind == &instances_component:
-            for item in ((const Instances*)entry.data).items.view():
+            let instances = (const Instances*)entry.data
+            for index in 0..<instances.count():
+                let item = instances.item(index)
                 try collect_parts(item.set, matrix.multiply(item.matrix()), parts, depth + 1)
         elif entry.kind.unrealizable != "":
             error(errors.invalid, entry.kind.unrealizable)

@@ -1,0 +1,92 @@
+## Codecs of the field families: a volume's grids as child elements (name,
+## class, background, the 12 transform numbers, and the leaf keys, values
+## and masks as columns), and an SDF's program (ops and parameters).
+
+func encode_volume(data: const void*, writer: GeometryWriter*, path: str) -> !:
+    let volume = (const Volume*)data
+    try writer.crate.element(path, "volume")
+    try writer.crate.integer("count", (i64)volume.grid_count())
+    let base = try copied_text(path)
+    defer free(base) in memory.heap
+    for index in 0..<volume.grid_count():
+        let grid = volume.grid(index)
+        var name = Growing[u8]()
+        defer name.close()
+        try append_text(&name, "g")
+        try append_number(&name, index)
+        let child = try writer.child((str)base, (str)name.view())
+        try writer.crate.element(child, "grid")
+        try writer.crate.text("name", grid.name())
+        try writer.crate.integer("class", (i64)(u8)grid.class)
+        try writer.crate.number("background", (f64)grid.background)
+        let m = grid.transform
+        let numbers: f64[12] = [m.x.x, m.x.y, m.x.z, m.y.x, m.y.y, m.y.z, m.z.x, m.z.y, m.z.z, m.translation.x, m.translation.y, m.translation.z]
+        try writer.crate.copied_array("transform", dtype_float64, 12, u8[]((u8*)&numbers[0], 96))
+        let keys = grid.keys.view()
+        try writer.column_borrowed("keys", dtype_uint64, keys.length, 1, u8[]((u8*)keys.data, keys.length * 8))
+        let values = grid.values.view()
+        try writer.column_borrowed("values", dtype_float32, values.length // leaf_voxels, leaf_voxels, u8[]((u8*)values.data, values.length * 4))
+        let masks = grid.masks.view()
+        try writer.column_borrowed("masks", dtype_uint64, masks.length // mask_words, mask_words, u8[]((u8*)masks.data, masks.length * 8))
+
+func decode_volume(reader: GeometryReader*, path: str) -> void*!:
+    while let header = try reader.next_property(): discard(header)
+    let volume = try new_volume()
+    errdefer release_volume(volume)
+    while let found = try reader.next_child(path):
+        if found.1 != "grid": error(errors.invalid, "volumes hold grid elements")
+        var name = Growing[u8]()
+        defer name.close()
+        var class: i64 = 0
+        var background = 0.0
+        var numbers: f64[12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+        var keys: Column[u64]
+        defer keys.release()
+        var values: Column[f32]
+        defer values.release()
+        var masks: Column[u64]
+        defer masks.release()
+        while let header = try reader.next_property():
+            let label = header.name
+            if label == "name": try reader.text(header, &name)
+            elif label == "class": class = try reader.integer(header)
+            elif label == "background":
+                var bytes: f64[1] = [0.0]
+                if header.dtype != dtype_float64 or header.bytes != 8: error(errors.invalid, "a grid background is one float64")
+                try reader.crate.read_payload(u8[]((u8*)&bytes[0], 8))
+                background = bytes[0]
+            elif label == "transform":
+                if header.dtype != dtype_float64 or header.bytes != 96: error(errors.invalid, "a grid transform is twelve float64s")
+                try reader.crate.read_payload(u8[]((u8*)&numbers[0], 96))
+            elif label == "keys" or label == "keys_chunks": keys = try reader.column[u64](header)
+            elif label == "values" or label == "values_chunks": values = try reader.column[f32](header)
+            elif label == "masks" or label == "masks_chunks": masks = try reader.column[u64](header)
+        let leaves = keys.count()
+        if values.count() != leaves * leaf_voxels or masks.count() != leaves * mask_words: error(errors.invalid, "a saved grid's columns disagree")
+        let sorted = keys.view()
+        for at in 1..<leaves:
+            if sorted[at] <= sorted[at - 1]: error(errors.invalid, "a saved grid's leaves are not sorted")
+        let transform = Matrix4(Vector3(numbers[0], numbers[1], numbers[2]), Vector3(numbers[3], numbers[4], numbers[5]),
+                                Vector3(numbers[6], numbers[7], numbers[8]), Vector3(numbers[9], numbers[10], numbers[11]))
+        let grid = try new_grid((str)name.view(), GridClass.level_set if class == 1 else GridClass.fog, (f32)background, transform, keys.take(), values.take(), masks.take())
+        try add_grid(volume, grid)
+    return (void*)volume
+
+func encode_sdf(data: const void*, writer: GeometryWriter*, path: str) -> !:
+    let sdf = (const Sdf*)data
+    try writer.crate.element(path, "sdf")
+    let ops = sdf.op_span()
+    try writer.column_borrowed("ops", dtype_uint8, ops.length, 1, ops)
+    let params = sdf.param_span()
+    try writer.column_borrowed("params", dtype_float32, ops.length, sdf_stride, u8[]((u8*)params.data, params.length * 4))
+
+func decode_sdf(reader: GeometryReader*, path: str) -> void*!:
+    var ops: Column[u8]
+    errdefer ops.release()
+    var params: Column[f32]
+    errdefer params.release()
+    while let header = try reader.next_property():
+        if header.name == "ops" or header.name == "ops_chunks": ops = try reader.column[u8](header)
+        elif header.name == "params" or header.name == "params_chunks": params = try reader.column[f32](header)
+    discard(path)
+    return (void*)(try new_sdf(ops.take(), params.take()))

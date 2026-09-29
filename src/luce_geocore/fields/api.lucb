@@ -1,0 +1,27 @@
+## Luce's view of fields: the preview surface the viewport draws for a set's
+## SDF and volume.
+
+pub struct Fields:
+    let reserved: u8 = 0
+
+    ## The surface preview of the set's own SDF and volume (not its
+    ## instances'), one mesh; none when it has neither. Built once per
+    ## component and kept with it.
+    pub static func preview(geometry: interop.Reference[GeometrySet]) -> interop.Reference[Mesh]?!:
+        let set = try geometry.get()
+        var first: const Mesh*? = none
+        var second: const Mesh*? = none
+        if let sdf = set_sdf(set): first = try sdf_preview(sdf)
+        if let volume = set_volume(set): second = try volume_preview(volume)
+        if first == none:
+            let b = second else return none
+            return try mesh_adopt(try mesh_share(b))
+        let a = first else return none
+        let b = second else return try mesh_adopt(try mesh_share(a))
+        let parts: MeshPart[2] = [MeshPart(a, Matrix4()), MeshPart(b, Matrix4())]
+        return try concatenated(parts)
+
+    ## Whether the set has an SDF or a volume of its own.
+    pub static func present(geometry: interop.Reference[GeometrySet]) -> bool!:
+        let set = try geometry.get()
+        return set_sdf(set) != none or set_volume(set) != none

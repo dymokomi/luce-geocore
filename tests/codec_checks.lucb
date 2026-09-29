@@ -14,6 +14,7 @@ from io import path
 from geocore import Vector3, Mesh, MeshPrimitives, GeometrySet, AttributeKernels
 from geocore_kernel import Curves, CurvesBuilder, CurveType, Attribute, AttributeStore, Domain, DataType, set_curves, curves_type, set_put, empty_set, dispose_set, adopt_set, save_geometry, load_geometry, geometry_key, arc_curves, set_mesh, set_find, points_component, instances_component, Instances, PointCloud, cloud_positions, cloud_store, set_component_count, set_component, curves_knots, evaluated_positions, curves_dispose, point_span, offset_span, corner_span, triangle_span, face_normal_span, mesh_origin, attribute_entry
 from geocore_growing import Growing
+from geocore_kernel import GeometryWriter, CrateReader, dtype_int32
 
 pub func exercise() -> !:
     let set = try sample_set()
@@ -41,6 +42,34 @@ pub func exercise() -> !:
     defer strings.release(native)
     try files.write((c.str)native, "not a crate at all".bytes)
     assert(not (try loads((str)bad.view())) and (try geometry_key((str)bad.view())) == 0)
+    try temporaries(&file)
+
+## A column written from a temporary freed before the file is: `column`
+## copies, so the file holds the values, not whatever reused the memory.
+func temporaries(file: Growing[u8]*) -> !:
+    var writer = GeometryWriter()
+    defer writer.close()
+    try writer.crate.element("/geometry", "geometry")
+    try writer.crate.integer("version", 1)
+    try writer.crate.element("/geometry/probe", "probe")
+    var values = Growing[i32]()
+    for at in 0..<(usize)1000: try values.push((i32)(at * 7))
+    try writer.column("values", dtype_int32, values.count, 1, u8[]((u8*)values.items.data, values.count * 4))
+    values.close()
+    var noise = Growing[i32]()
+    defer noise.close()
+    for at in 0..<(usize)1000: try noise.push(-1)
+    discard(try writer.crate.save((str)file.view()))
+    var reader = try CrateReader.open((str)file.view())
+    defer reader.close()
+    discard(try reader.next_element())
+    discard(try reader.next_element())
+    let header = (try reader.next_property()) else trap("probe")
+    assert(header.name == "values" and header.bytes == 4000)
+    var read = try alloc i32[1000] in memory.heap
+    defer free(read) in memory.heap
+    try reader.read_payload(u8[]((u8*)read.data, 4000))
+    for at in 0..<(usize)1000: assert(read[at] == (i32)(at * 7))
 
 ## Whether the file at `name` loads as geometry.
 func loads(name: str) -> bool!:

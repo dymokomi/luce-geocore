@@ -19,6 +19,7 @@ import luce_geocore.verbs as verbs
 import luce_geocore.subdivision as subdivision
 import luce_geocore.set_verbs as set_verbs
 import luce_geocore.io as io
+import luce_geocore.fields as fields
 import luce_geocore.errors as errors
 
 pub type Vector3 = vector.Vector3
@@ -53,6 +54,8 @@ pub type SetVerbResult = set_verbs.SetVerbResult
 pub type VerbCatalog = set_verbs.VerbCatalog
 ## Geometry files: a whole set as a .prism crate.
 pub type GeometryFile = io.GeometryFile
+## Volume and SDF previews for the viewport.
+pub type Fields = fields.Fields
 pub let invalid: ErrorCode = errors.invalid
 pub let busy: ErrorCode = errors.busy
 pub let limit: ErrorCode = errors.limit

@@ -23,9 +23,11 @@ from luce_geocore.core.shared import Column
 from luce_geocore.core.float3 import Float3
 from luce_geocore.core.attributes import Attribute, AttributeStore, Domain, DataType, Storage, Role
 from luce_geocore.math.vector import Vector3
+from luce_geocore.math.matrix import Matrix4
 from luce_geocore.geometries.polygon import Mesh, assembled, put_attribute, mesh_dispose, attribute_entry, point_span, mesh_origin, offset_span, corner_span, triangle_span, precise_span
 from luce_geocore.geometry_set import GeometrySet, ComponentType, Component, Placement, PointCloud, Instances, mesh_component, points_component, instances_component, set_put, empty_storage, dispose_set, adopt_set, append_text, append_number, new_instances, set_component_count, set_component, cloud_origin, cloud_positions, cloud_store, cloud_assembled, register
 from luce_geocore.curves import Curves, curves_type, curves_origin, curves_assembled, curves_knots, curves_knot_offsets
+from luce_geocore.fields import Volume, Sdf, GridClass, new_grid, new_volume, add_grid, release_volume, new_sdf, volume_type, sdf_type, leaf_voxels, mask_words, sdf_stride
 
 ## Wire dtype codes (luce-prism's DType; never reordered).
 pub let dtype_bool: u8 = 0
@@ -138,9 +140,11 @@ pub struct CrateWriter:
         let kind_index = try self.intern(kind)
         try self.elements.push(ElementPlan(path_index, kind_index, self.properties.count, 0))
 
-    ## An array property borrowing `payload` (rank 1 or 2: `rows`, and
-    ## `columns` when above 1).
-    pub mutating func array(name: str, dtype: u8, rows: usize, columns: usize, payload: const u8[]) -> !:
+    ## An array property BORROWING `payload` (rank 1 or 2: `rows`, and
+    ## `columns` when above 1): the bytes must stay alive and unchanged until
+    ## `save` returns. Callers with temporaries use GeometryWriter.column,
+    ## which copies, or copied_array.
+    pub mutating func array_borrowed(name: str, dtype: u8, rows: usize, columns: usize, payload: const u8[]) -> !:
         if rows > 4294967295: error(errors.limit, "a prism dimension exceeds 2^32")
         let rank: u8 = 2 if columns > 1 else 1
         try self.add(PropertyPlan(try self.intern(name), dtype, rank, [(u32)rows, (u32)columns, 0], payload, 0, 0, false))

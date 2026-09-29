@@ -1,8 +1,8 @@
 # Geometry families beyond meshes
 
 A `GeometrySet` holds one component per family. Meshes, points and instances
-are described in [API.md](API.md). This file covers curves, the set verbs
-and the geometry codec.
+are described in [API.md](API.md). This file covers curves, volumes and
+SDFs, the set verbs, and the geometry codec.
 
 ## Curves
 
@@ -93,6 +93,82 @@ A point group converts to curves whose every point is a member. A curve group
 converts to all the curve's points. Edge forms, `loop` and `ring` fail on
 curves.
 
+## Volumes and SDFs
+
+### Volumes
+
+A volume (`luce_geocore.fields`) holds named `SparseGrid`s, each shared by
+count. The layout is NanoVDB-like (design D9), flat and read-only:
+
+- 8×8×8 leaves, whose keys are sorted Morton codes of leaf coordinates;
+- 512 f32 values per leaf, x fastest;
+- 8 active-mask words per leaf;
+- an index-to-world affine transform;
+- a background value for everything outside the leaves.
+
+Builders fill leaves in parallel and publish a new grid; nothing writes a
+published one. Placing a volume composes its grids' transforms.
+
+The two grid classes:
+
+- **level set**: signed distances in a narrow band, negative inside;
+- **fog**: densities.
+
+### SDFs
+
+An SDF is an analytic program: a postfix column of ops with 16 parameters
+each.
+
+- Primitives: sphere, rounded box, torus, capsule, cylinder.
+- Booleans: union, subtract, intersect, each hard or smooth (polynomial
+  smooth min).
+- A transform pair: points map in, distances scale back.
+- `round` and `shell`.
+
+Programs compose by concatenation. Placing an SDF wraps its program in a
+transform, and joining two SDFs makes their union. Every op keeps the field
+1-Lipschitz.
+
+### Conversions
+
+- **SDF to level set** (`sampled_sdf`):
+  - First, blocks of 8×8×8 leaves are skipped when their center is farther
+    from the surface than their half diagonal plus the band. Then the same
+    test runs per leaf.
+  - The leaves left are sampled in parallel.
+- **Mesh to level set** (`mesh_level_set`):
+  - Leaves come from each face's grown box.
+  - Each voxel gets the exact distance to the nearest face (the mesh's BVH),
+    signed by that face's side. Leaves far from the surface take one side's
+    value from their center.
+- **Points to level set** (`points_level_set`): a union of spheres. Each
+  point writes only the voxels within its reach.
+- **Surface nets** (`surface_mesh`):
+  - Three parallel passes over leaves, each reading a 9×9×9 neighbourhood
+    block: crossing cells, then quads, then filling.
+  - Cells touching a level set's missing leaves make no surface. Those
+    leaves have no known side, and the band keeps every cell the real
+    surface crosses whole.
+  - An SDF can pull the vertices onto its exact surface with two Newton
+    steps.
+- **Slices** (`slice_mesh`): a plane of quads across a field. Each point
+  carries `value` and a color `Cd`:
+  - distances: blue inside, orange outside, with contour bands;
+  - densities: grey.
+
+### Previews and files
+
+The viewport draws a volume or SDF by its surface preview:
+
+- an SDF's zero set at 1/128 of its extent, made exact;
+- a level set's zero set;
+- a fog volume's half-maximum density.
+
+The preview is built once and kept with the component. The codec writes:
+
+- grids with their keys, values and masks as columns;
+- SDF programs as `ops` and `params`.
+
 ## Set verbs and the verb catalog
 
 A set verb (`luce_geocore.set_verbs`) takes whole geometry sets. Mesh verbs
@@ -132,6 +208,18 @@ The curve verbs:
   become poly curves. Pass-through points join chains, and closed chains
   become cyclic.
 
+The volume verbs:
+
+- **SDF Sphere**, **SDF Box**, **SDF Torus**, **SDF Capsule** and **SDF
+  Cylinder** are generators.
+- **SDF Boolean**: union, subtract or intersect of two SDFs, with a smoothness.
+- **SDF Modify**: round outward, or hollow into a shell.
+- **SDF to Volume**, **Mesh to SDF** and **Volume from Points** make level
+  sets, with a voxel size and a band.
+- **Convert to Mesh**: surface nets of the SDF and every grid, SDF surfaces
+  made exact.
+- **Volume Slice**: a colored plane, beside the field or alone.
+
 ## Geometry files (.prism)
 
 `GeometryFile.save(geometry, path, key)` writes a whole set as a prism v4
@@ -154,9 +242,9 @@ The document is a tree of elements:
                                    elements; [uint8 table]; typed value
   /geometry/points     points      origin, P
   /geometry/curves     curves      origin, P, offsets, [knots, knot_offsets]
-  /geometry/instances  instances   int64 count
-    .../i0             instance    translation, rotation, scale, visible
-      .../i0/geometry  geometry    (a nested set)
+  /geometry/instances  instances   int64 count, prototypes; int32 prototype;
+                                   float64[n*9] placement; uint8 visible
+    .../p0             geometry    (a prototype set, written once)
 ```
 
 Derived caches are never written: normals, edges, evaluated curves, BVHs.
@@ -184,9 +272,9 @@ from geocore_kernel import register_codec, GeometryWriter, GeometryReader
 register_codec(my_component_type(), encode, decode)
 ## encode(data: const void*, writer: GeometryWriter*, path: str) -> !
 ##   writer.crate.element(path, "<family name>"), then properties:
-##   writer.crate.integer/number/triple/text/copied_array, writer.column(name,
-##   dtype, rows, columns, bytes) for columns (chunked as needed), and
-##   writer.attributes(path, store) for an AttributeStore's children.
+##   writer.crate.integer/number/triple/text/copied_array, a column with
+##   writer.column / column_of / column_borrowed (see below; chunked as
+##   needed), and writer.attributes(path, store) for an AttributeStore.
 ## decode(reader: GeometryReader*, path: str) -> void*!
 ##   reader.next_property() until none, reading each with integer/triple/
 ##   text/column[T](header); then reader.attributes(path, &store) and
@@ -195,6 +283,21 @@ register_codec(my_component_type(), encode, decode)
 
 The element kind of a component is its family name. The loader finds the
 codec by that name, and fails clearly when a family has none.
+
+**Payload lifetimes.** The crate streams payloads when `save` runs, so every
+payload must still be valid then.
+
+- `writer.column(name, dtype, rows, columns, bytes)` copies the bytes. It is
+  safe for temporaries, stack arrays and anything freed before the save.
+- `writer.column_of(..., column: const Column[u8]*)` retains the column until
+  the writer closes, with no copy.
+- `writer.column_borrowed(...)` and `writer.crate.array_borrowed(...)` borrow.
+  The caller keeps the bytes alive and unchanged until `save` returns. The
+  built-in codecs use them for the columns of the set being saved, which the
+  caller holds for the whole save.
+
+`tests/codec_checks.lucb` writes a column from a temporary freed before the
+save and reads the values back.
 
 ## Benchmarks
 
@@ -213,6 +316,11 @@ codec by that name, and fails clearly when a family has none.
 | Mesh to Curve: every edge of the 837×837 grid | 345.9 ms | 1,402,808 |
 | Save: the 837×837 grid with uv to .prism (bytes) | 8.0 ms | 84,089,051 |
 | Load: that .prism back (faces) | 19.3 ms | 700,569 |
+| SDF to Volume: a smooth union, voxel 1/400 of its size (active voxels) | 57.1 ms | 3,706,635 |
+| Surface nets: that level set (faces) | 107.7 ms | 848,874 |
+| Surface nets projected onto the SDF (faces) | 165.4 ms | 848,874 |
+| Mesh to SDF: a 64-segment sphere, voxel 0.01 (active voxels) | 750.3 ms | 751,940 |
+| Volume from Points: 100k points, radius 0.02, voxel 0.01 (active voxels) | 105.2 ms | 3,044,352 |
 
 luced-3d's headless benchmark (`tests/bench/run.py`, `--native --opt 2`)
 saves and loads cooked results:
