@@ -48,6 +48,33 @@ func made(mesh: interop.Reference[Mesh], name: str, group: str, group_type: i64,
         assert(false)
     return try result.value().mesh()
 
+## The fixture's attributes and groups came through: uv, the integer face
+## ids (each a multiple of ten), the face and point groups.
+func carried(mesh: interop.Reference[Mesh]) -> !:
+    assert(mesh.value().find_attribute("uv", 1) >= 0)
+    assert(mesh.value().group_size("top", 2) >= 0 and mesh.value().group_size("pinned", 0) >= 0)
+    let id = mesh.value().find_attribute("id", 2)
+    assert(id >= 0)
+    for face in 0..<mesh.value().face_count():
+        let value = try mesh.value().attribute_value(id, face)
+        assert(value >= 0.0 and value <= 150.0 and math.abs(value / 10.0 - math.round(value / 10.0)) < 0.000001)
+
+## The same run twice makes the same topology and points.
+func stable(mesh: interop.Reference[Mesh], name: str, group: str, group_type: i64, numbers: const f64[]) -> !:
+    let first = try Verbs.run(name, mesh, group, group_type, numbers)
+    defer first.release()
+    let second = try Verbs.run(name, mesh, group, group_type, numbers)
+    defer second.release()
+    let a = try first.value().mesh()
+    defer a.release()
+    let b = try second.value().mesh()
+    defer b.release()
+    assert(a.value().topology_hash() == b.value().topology_hash() and a.value().point_count() == b.value().point_count())
+    for point in 0..<a.value().point_count():
+        let p = try a.value().point(point)
+        let q = try b.value().point(point)
+        assert(p.x == q.x and p.y == q.y and p.z == q.z)
+
 func near(a: f64, b: f64):
     if math.abs(a - b) >= 0.00001: print(f"near: {a} vs {b}")
     assert(math.abs(a - b) < 0.00001)
@@ -113,10 +140,13 @@ func bevel_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) 
     counts(line, 35, 24)
     try planar_uv(line)
     assert(line.value().group_size("top", 2) == 4 and line.value().group_size("pinned", 0) == 4)
-    let id = line.value().find_attribute("id", 2)
-    for face in 0..<line.value().face_count():
-        let value = try line.value().attribute_value(id, face)
-        assert(value >= 0.0 and value <= 150.0 and math.abs(value / 10.0 - math.round(value / 10.0)) < 0.000001)
+    try carried(line)
+    try stable(grid, "PolyBevel", "p10-11-12-13-14", 2, [0.1, 2.0, 0.5, 1.0])
+    # A region's edges with three segments: the strips' ends on the mesh's
+    # boundary stay open without a warning.
+    let region = try Verbs.run("PolyBevel", grid, "0-5", 3, [0.1, 3.0, 0.5, 1.0])
+    defer region.release()
+    assert(region.value().warning() == "")
     # An edge ending inside: its ends stay, in a six-sided strip.
     let inner = try made(grid, "PolyBevel", "p11-12", 2, round, 1)
     defer inner.release()
@@ -156,6 +186,8 @@ func extrude_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]
     near((try region.value().face_center(5)).y, 0.5)
     near(try region.value().attribute_value(region.value().find_attribute("id", 2), 9), 90.0)
     assert(region.value().group_size("top", 2) == 4)
+    try carried(region)
+    try stable(grid, "PolyExtrude", "5 6", 3, [0.5, 0.1, 2.0, 1.0, 1.0])
     # One by one: every face its own front and walls.
     let apart = try made(grid, "PolyExtrude", "5 6", 3, [0.5, 0.0, 1.0, 1.0, 1.0], 2)
     defer apart.release()
@@ -177,6 +209,8 @@ func extrude_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]
     defer inset.release()
     counts(inset, 31, 22)
     try planar_uv(inset)
+    try carried(inset)
+    try stable(grid, "Inset", "5 6", 3, [0.1, 0.0, 0.0, 1.0])
     let inner = try inset.value().face_center(5)
     near(inner.x, -0.25 + 0.05)
     near(inner.z, -0.25)
@@ -212,6 +246,8 @@ func loop_cut_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh
     defer one.release()
     counts(one, 30, 20)
     try planar_uv(one)
+    try carried(one)
+    try stable(grid, "Loop Cut", "p0-1", 2, [2.0, 0.3, 1.0])
     near((try one.value().point(25)).x, -0.75)
     # Two cuts slid toward the ring's start.
     let two = try made(grid, "Loop Cut", "p0-1", 2, [2.0, -0.5, 1.0], 8)
@@ -248,6 +284,8 @@ func bridge_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh])
     defer rebuilt.release()
     counts(rebuilt, 25, 16)
     try planar_uv(rebuilt)
+    try carried(rebuilt)
+    try stable(apart, "Bridge", "p5-6-7-8-9 p10-11-12-13-14", 2, [2.0, 0.0])
     let edges = try rebuilt.value().edge_count()
     assert(rebuilt.value().point_count() - edges + rebuilt.value().face_count() == 1)
     # Runs of different lengths zip together with triangles.
@@ -277,6 +315,8 @@ func merge_fill_dissolve_checks(grid: interop.Reference[Mesh], cube: interop.Ref
     let center = try made(grid, "Merge Points", "6 7 11 12", 1, [0.0, 0.001], 1)
     defer center.release()
     counts(center, 22, 15)
+    try carried(center)
+    try stable(grid, "Merge Points", "6 7 11 12", 1, [0.0, 0.001])
     let at_first = try made(grid, "Merge Points", "6 7", 1, [1.0, 0.001], 1)
     defer at_first.release()
     counts(at_first, 24, 16)
@@ -302,12 +342,21 @@ func merge_fill_dissolve_checks(grid: interop.Reference[Mesh], cube: interop.Ref
     defer fan.release()
     counts(fan, 26, 19)
     try planar_uv(fan)
+    try carried(fan)
+    try stable(holed, "Fill", "p6-11-12-7-6", 2, [1.0])
     near((try fan.value().point(25)).x, -0.25)
     # Dissolve points: an inner point's faces join into one and the point
     # goes; a border point between two edges leaves its faces.
     let inner = try made(grid, "Dissolve", "12", 1, [0.0], 1)
     defer inner.release()
     counts(inner, 24, 13)
+    try carried(inner)
+    try stable(grid, "Dissolve", "12", 1, [0.0])
+    # A face group dissolves only the edges between its faces: the first
+    # two columns join into one face, their inner points gone.
+    let pairs = try made(grid, "Dissolve", "0-15:2,4", 3, [0.0], 1)
+    defer pairs.release()
+    counts(pairs, 22, 9)
     let border = try made(grid, "Dissolve", "2", 1, [0.0], 1)
     defer border.release()
     counts(border, 24, 15)
@@ -315,7 +364,7 @@ func merge_fill_dissolve_checks(grid: interop.Reference[Mesh], cube: interop.Ref
     let corner = try made(cube, "Dissolve", "0", 1, [0.0], 1)
     defer corner.release()
     counts(corner, 7, 4)
-    print("PASS Merge (center, first, last, islands, distance), Fill fan, Dissolve points")
+    print("PASS Merge Points (center, first, last, islands, distance), Fill fan, Dissolve points and face groups; uv, groups and ids carried; runs repeat exactly")
 
 func dump(mesh: interop.Reference[Mesh]) -> !:
     print(f"{mesh.value().point_count()} points {mesh.value().face_count()} faces")

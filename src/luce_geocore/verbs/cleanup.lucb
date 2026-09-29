@@ -163,37 +163,45 @@ func rebuild(input: const VerbInput*, output: VerbOutput*, target: const i32[], 
     let offsets = offset_span(mesh)
     let corners = corner_span(mesh)
     let points = target.length
-    let used = try alloc i32[points] in memory.heap
-    defer free(used) in memory.heap
-    for at in 0..<points: used[at] = -1
-    for corner in corners: used[(usize)target[(usize)corner]] = 0
     var builder = &output.builder
     try builder.begin(mesh)
+    try builder.copy_points(mesh)
     output.built = true
+    # Points that absorbed others are selected (and placed, when given).
+    output.selection = try BitsBuilder.zeros(points)
     for point in 0..<points:
-        if used[point] == 0: used[point] = try builder.point(places[point] if places.length > 0 else builder_position(mesh, point), (i32)point)
-    output.selection = try BitsBuilder.zeros(builder.point_count())
-    for point in 0..<points:
-        if target[point] != (i32)point and used[(usize)target[point]] >= 0: output.selection.set((usize)used[(usize)target[point]])
+        if target[point] == (i32)point: continue
+        output.selection.set((usize)target[point])
+        if places.length > 0: builder.move_point(target[point], places[(usize)target[point]])
+    # Faces whose points all stay copy in runs; the rest are rebuilt over
+    # their targets, dropping repeated corners (and the face below three).
     var ids: i32[256]
     var parents: i32[256]
-    for face in 0..<offsets.length - 1:
+    var run: usize = 0
+    let faces = offsets.length - 1
+    for face in 0..<faces:
         let start = (usize)offsets[face]
         let end = (usize)offsets[face + 1]
-        var count: usize = 0
         var moved = false
         for corner in start..<end:
-            let point = used[(usize)target[(usize)corners[corner]]]
-            moved = moved or target[(usize)corners[corner]] != corners[corner]
+            if target[(usize)corners[corner]] != corners[corner]: moved = true
+        if not moved: continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        var count: usize = 0
+        for corner in start..<end:
+            let point = target[(usize)corners[corner]]
             if count == 0 or point != ids[count - 1]:
                 ids[count] = point
                 parents[count] = (i32)corner
                 count += 1
         if count > 1 and ids[0] == ids[count - 1]: count -= 1
         if count < 3: continue
-        try builder.face((i32)face, not moved)
+        try builder.face((i32)face)
         for at in 0..<count: try builder.corner(ids[at], parents[at])
         try builder.end_face()
+    try builder.copy_faces(mesh, run, faces)
+    try builder.drop_unused_points(&output.selection)
 
 func builder_position(mesh: const Mesh*, point: usize) -> Vector3:
     let exact = precise_span(mesh)

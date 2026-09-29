@@ -1,0 +1,134 @@
+## The verb benchmark: every modeling verb on the 837×837 quad grid
+## (702,244 points, 700,569 faces), a few on an open 837×837 tube or a grid
+## with a hole. Prints one `name<TAB>milliseconds` line per case; run.py
+## makes the table. Each figure is one run, including building the output
+## mesh with its attributes (topology caches are warm after the first case).
+import time
+import math
+import interop
+import memory
+import geocore
+from geocore import Mesh, Vector3, Verbs
+import geocore_parallel
+
+## One case: what it runs, on which mesh (0 grid, 1 tube cut in two, 2 grid
+## with a ten-face hole), and its numbers.
+struct Case:
+    let name: str
+    let verb: str
+    let group: str
+    let group_type: i64
+    let mesh: u8
+    let numbers: f64[16]
+
+let case_total: usize = 28
+
+func case_at(index: usize) -> Case:
+    let row = "350000-350999"
+    match index:
+        0: return Case("Transform Components, 1k faces", "Transform Components", row, 3, 0, [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0])
+        1: return Case("Smooth, everything", "Smooth", "*", 0, 0, [0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        2: return Case("Delete, 1k faces", "Delete", row, 3, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        3: return Case("Reverse, 1k faces", "Reverse", row, 3, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        4: return Case("Triangulate, half", "Triangulate", "0-350000", 3, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        5: return Case("Duplicate, 1k faces", "Duplicate", row, 3, 0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        6: return Case("Subdivide, everything to 2.8M faces", "Subdivide", "*", 0, 0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        7: return Case("Fuse, 1k faces' points", "Fuse", row, 3, 0, [0.001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        8: return Case("PolyExtrude, 1k faces as a region", "PolyExtrude", row, 3, 0, [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        9: return Case("PolyExtrude, 1k faces one by one, inset, 2 divisions", "PolyExtrude", row, 3, 0, [0.5, 0.1, 2.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        10: return Case("PolyExtrude, 100k faces as a region", "PolyExtrude", "0-99999", 3, 0, [0.5, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        11: return Case("PolyExtrude, 3 edges", "PolyExtrude", "p350000-350001-350002-350003", 2, 0, [0.5, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        12: return Case("Inset, 1k faces as a region", "Inset", row, 3, 0, [0.1, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        13: return Case("Inset, 100k faces as a region", "Inset", "0-99999", 3, 0, [0.1, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        14: return Case("PolyBevel, 1k faces' inner edges", "PolyBevel", row, 3, 0, [0.1, 1.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        15: return Case("PolyBevel, 100k faces' inner edges, 3 segments", "PolyBevel", "0-99999", 3, 0, [0.1, 3.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        16: return Case("PolyBevel, every edge (1.4M)", "PolyBevel", "*", 0, 0, [0.1, 1.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        17: return Case("Loop Cut, one ring of 837 quads", "Loop Cut", "p0-1", 2, 0, [1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        18: return Case("Loop Cut, every ring both ways", "Loop Cut", "0-836", 3, 0, [1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        19: return Case("Bridge, two facing 837-edge loops, 4 divisions", "Bridge", "349866-351539", 1, 1, [4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        20: return Case("Merge Points, a face's points at their center", "Merge Points", "350000-350001 350838-350839", 1, 0, [0.0, 0.001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        21: return Case("Merge Points, 250 pairs as islands", "Merge Points", "350000-350999:2,4", 1, 0, [3.0, 0.001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        22: return Case("Dissolve, 250 edges between face pairs", "Dissolve", "350000-350999:2,4", 3, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        23: return Case("Dissolve, 250 points", "Dissolve", "350000-350999:1,4", 1, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        24: return Case("Fill, a 22-edge hole", "Fill", "", 0, 2, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        25: return Case("Fill, a 22-edge hole as a fan", "Fill", "", 0, 2, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        26: return Case("Split, 1k faces", "Split", row, 3, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        _: return Case("Clean, everything", "Clean", "*", 0, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+pub func main(arguments: str[]) -> i32!:
+    geocore_parallel.warm()
+    let grid = try quad_grid(837)
+    defer grid.release()
+    # The tube with its middle row of faces gone: two loops facing.
+    let tube = try open_tube(837)
+    defer tube.release()
+    let cut = try Verbs.run("Delete", tube, "349866-350702", 3, [0.0])
+    defer cut.release()
+    let halves = try cut.value().mesh()
+    defer halves.release()
+    let hole = try Verbs.run("Delete", grid, "350000-350009", 3, [0.0])
+    defer hole.release()
+    let holed = try hole.value().mesh()
+    defer holed.release()
+    # Warm each mesh's connectivity caches (edges, their corners, point
+    # edges), which every mesh with that topology shares.
+    let meshes: interop.Reference[Mesh][3] = [grid, halves, holed]
+    for mesh in meshes:
+        let warm = try Verbs.run("Dissolve", mesh, "0", 3, [0.0])
+        warm.release()
+    for index in 0..<case_total:
+        let case = case_at(index)
+        var source = grid
+        if case.mesh == 1: source = halves
+        if case.mesh == 2: source = holed
+        let start = time.now()
+        let result = try Verbs.run(case.verb, source, case.group, case.group_type, case.numbers[..<16])
+        let spent = (f64)time.since(start) / 1000000.0
+        let mesh = try result.value().mesh()
+        print(f"{case.name}\t{spent}\t{mesh.value().face_count()}\t{result.value().warning()}")
+        mesh.release()
+        result.release()
+    return 0
+
+## The n×n quad grid in the XZ plane, one unit per quad.
+func quad_grid(n: usize) -> interop.Reference[Mesh]!:
+    let points = try alloc Vector3[(n + 1) * (n + 1)] in memory.heap
+    defer free(points) in memory.heap
+    let sizes = try alloc i64[n * n] in memory.heap
+    defer free(sizes) in memory.heap
+    let corners = try alloc i64[n * n * 4] in memory.heap
+    defer free(corners) in memory.heap
+    for z in 0..<n + 1:
+        for x in 0..<n + 1: points[z * (n + 1) + x] = Vector3((f64)x - (f64)n * 0.5, 0.0, (f64)z - (f64)n * 0.5)
+    for z in 0..<n:
+        for x in 0..<n:
+            let a = (i64)(z * (n + 1) + x)
+            let face = z * n + x
+            sizes[face] = 4
+            corners[face * 4] = a
+            corners[face * 4 + 1] = a + (i64)n + 1
+            corners[face * 4 + 2] = a + (i64)n + 2
+            corners[face * 4 + 3] = a + 1
+    return try interop.Reference[Mesh].adopt(try new Mesh(points, sizes, corners) in memory.heap, geocore.mesh_type, memory.heap)
+
+## An open tube of n rows of n quads around the Y axis.
+func open_tube(n: usize) -> interop.Reference[Mesh]!:
+    let points = try alloc Vector3[n * (n + 1)] in memory.heap
+    defer free(points) in memory.heap
+    let sizes = try alloc i64[n * n] in memory.heap
+    defer free(sizes) in memory.heap
+    let corners = try alloc i64[n * n * 4] in memory.heap
+    defer free(corners) in memory.heap
+    for y in 0..<n + 1:
+        for i in 0..<n:
+            let angle = 6.283185307179586 * (f64)i / (f64)n
+            points[y * n + i] = Vector3(100.0 * math.cos(angle), (f64)y, 100.0 * math.sin(angle))
+    for y in 0..<n:
+        for i in 0..<n:
+            let face = y * n + i
+            sizes[face] = 4
+            corners[face * 4] = (i64)(y * n + i)
+            corners[face * 4 + 1] = (i64)((y + 1) * n + i)
+            corners[face * 4 + 2] = (i64)((y + 1) * n + (i + 1) % n)
+            corners[face * 4 + 3] = (i64)(y * n + (i + 1) % n)
+    return try interop.Reference[Mesh].adopt(try new Mesh(points, sizes, corners) in memory.heap, geocore.mesh_type, memory.heap)

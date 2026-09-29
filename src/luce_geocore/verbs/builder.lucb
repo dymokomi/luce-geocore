@@ -151,7 +151,8 @@ pub struct TopologyBuilder:
 
     ## Remove the points no corner uses, renumbering the rest in order (a
     ## verb that replaces some input points copies them all first).
-    pub mutating func drop_unused_points() -> !:
+    ## A point selection `selected`, when given, is renumbered with them.
+    pub mutating func drop_unused_points(selected: BitsBuilder*? = none) -> !:
         let points = self.positions.count
         let map = try alloc i32[points] in memory.heap
         defer free(map) in memory.heap
@@ -164,6 +165,12 @@ pub struct TopologyBuilder:
             self.positions.items[kept] = self.positions.items[at]
             self.point_parents.items[kept] = self.point_parents.items[at]
             kept += 1
+        if let bits = selected:
+            var renumbered = try BitsBuilder.zeros(kept)
+            for at in 0..<points:
+                if map[at] >= 0 and bits.view().get(at): renumbered.set((usize)map[at])
+            bits.close()
+            *bits = renumbered
         self.positions.count = kept
         self.point_parents.count = kept
         for at in 0..<self.corners.count: self.corners.items[at] = map[(usize)self.corners.items[at]]

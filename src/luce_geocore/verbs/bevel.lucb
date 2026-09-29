@@ -654,6 +654,9 @@ func close_vertex(work: Bevel*, builder: TopologyBuilder*, begin: usize, end: us
                 next = (i64)candidate if next == -1 else -2
             if next < 0: break
             at = (usize)next
+        # At a point on the mesh's boundary the strips' ends are boundary
+        # too: an open run there is no hole.
+        if not closed and work.cyclic.items[slot] == 0: continue
         if not closed or loop.count < 3 or loop.count > 256:
             work.skipped += 1
             continue

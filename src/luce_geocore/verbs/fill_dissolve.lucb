@@ -15,7 +15,7 @@ pub func fill_verb() -> Verb:
     return Verb("Fill", "Modeling", "Cap each closed loop of the group's boundary edges", Domain.edge, true, fill_parms, true, cook_fill)
 
 pub func dissolve_verb() -> Verb:
-    return Verb("Dissolve", "Modeling", "Join the faces across the group's interior edges (or around its points), one face per region", Domain.edge, true, placeholder_parms[..<0], true, cook_dissolve, false, Domain.point)
+    return Verb("Dissolve", "Modeling", "Join the faces across the group's interior edges (or around its points), one face per region", Domain.edge, true, placeholder_parms[..<0], true, cook_dissolve, false, Domain.point, true)
 
 func cook_fill(input: const VerbInput*, output: VerbOutput*) -> !:
     let mesh = input.mesh

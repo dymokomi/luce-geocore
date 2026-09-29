@@ -202,9 +202,67 @@ selection and a warning. `Verbs.count`, `name`, `category`, `description`,
 `domain` and `parm_*` describe the verbs, and luced-3d generates its node
 catalog from them.
 
+The modeling verbs, after Houdini's SOPs and Blender's tools:
+
+- **PolyBevel** (edges): strips offset a constant distance into the faces
+  beside each interior edge, 1–64 segments along a profile, overlap clamping,
+  one patch face per corner hole; a lone edge's end vertex stays and its strip
+  fans around it.
+- **PolyExtrude** (faces or edges): regions or individual faces, with an inset
+  across the region boundary and wall divisions; one front point per run of
+  faces around a boundary point; a closed surface moves out. Edges extrude into
+  quads (outward in the face plane on a boundary) and select their front edges.
+- **Inset** (faces): the rim moves in by a distance, with a depth, as regions
+  or one by one, clamped to half the boundary edges.
+- **Loop Cut** (edges): loops across the quads of each edge ring, with cuts and
+  slide; other faces on a ring take the new points.
+- **Bridge** (edges): boundary loops or runs, paired by nearness, joined by rows
+  of quads (same edge counts) or zipped with triangles.
+- **Merge Points**: at the center, first, last, per island or by distance.
+- **Fill**: one face per boundary loop, or a fan around a center point.
+- **Dissolve** (edges, points, faces strictly): one face per joined region;
+  points left between two edges go.
+
+New corners inside a face blend that face's corners (the builder's mixed
+corners), so UVs follow insets, slides and cuts; every other attribute and
+group follows the parents. A verb with nothing to do, or a result with
+degenerate faces, passes its input through with a warning. Edge output
+selections are named by point pairs (`TopologyBuilder.select_edge`) and found
+on the result.
+
 Faces a builder copies keep their triangles (CAD cut cells survive); runs of
 untouched faces copy in one pass (`copy_faces`), and only new faces are ear
-clipped. On the 700k-face grid: Transform Components of 1k faces 12 ms,
-PolyExtrude 46 ms, Inset 27 ms, Delete 10 ms, Reverse 24 ms, Duplicate 23 ms,
-Smooth (everything) 45 ms, Triangulate (half) 71 ms, Subdivide to 2.8M faces
-0.73 s.
+clipped. `tests/bench/run.py --base <luce-base>` times every verb on the 837×837
+grid (one `--native --opt 3` run each, connectivity caches warm, output mesh
+and attributes included):
+
+| Verb run | Time | Faces out | Warning |
+|---|---:|---:|---|
+| Transform Components, 1k faces | 21.9 ms | 700,569 |  |
+| Smooth, everything | 24.5 ms | 700,569 |  |
+| Delete, 1k faces | 9.7 ms | 699,569 |  |
+| Reverse, 1k faces | 20.8 ms | 700,569 |  |
+| Triangulate, half | 65.1 ms | 1,050,570 |  |
+| Duplicate, 1k faces | 20.5 ms | 701,569 |  |
+| Subdivide, everything to 2.8M faces | 662.5 ms | 2,802,276 |  |
+| Fuse, 1k faces' points | 43.5 ms | 700,569 |  |
+| PolyExtrude, 1k faces as a region | 29.4 ms | 702,247 |  |
+| PolyExtrude, 1k faces one by one, inset, 2 divisions | 35.1 ms | 708,569 |  |
+| PolyExtrude, 100k faces as a region | 53.5 ms | 702,483 |  |
+| PolyExtrude, 3 edges | 50.4 ms | 700,572 |  |
+| Inset, 1k faces as a region | 32.5 ms | 702,247 |  |
+| Inset, 100k faces as a region | 54.1 ms | 702,483 |  |
+| PolyBevel, 1k faces' inner edges | 63.5 ms | 705,242 |  |
+| PolyBevel, 100k faces' inner edges, 3 segments | 453.8 ms | 1,400,093 |  |
+| PolyBevel, every edge (1.4M) | 1095.2 ms | 2,798,929 |  |
+| Loop Cut, one ring of 837 quads | 51.7 ms | 701,406 |  |
+| Loop Cut, every ring both ways | 420.5 ms | 1,401,138 |  |
+| Bridge, two facing 837-edge loops, 4 divisions | 35.6 ms | 703,080 |  |
+| Merge Points, a face's points at their center | 43.6 ms | 700,568 |  |
+| Merge Points, 250 pairs as islands | 45.8 ms | 700,569 |  |
+| Dissolve, 250 edges between face pairs | 60.9 ms | 700,278 |  |
+| Dissolve, 250 points | 52.0 ms | 699,821 |  |
+| Fill, a 22-edge hole | 22.2 ms | 700,560 | Some boundary runs in the group are not closed simple loops and were left open |
+| Fill, a 22-edge hole as a fan | 22.2 ms | 700,581 | Some boundary runs in the group are not closed simple loops and were left open |
+| Split, 1k faces | 19.7 ms | 700,569 |  |
+| Clean, everything | 28.5 ms | 700,569 |  |

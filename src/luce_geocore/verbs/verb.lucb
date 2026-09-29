@@ -151,6 +151,9 @@ pub struct Verb:
     ## A second domain the kernel takes as it is (PolyExtrude: edges);
     ## detail when none.
     pub let also: Domain = Domain.detail
+    ## Groups of other domains convert with "all" related elements (Dissolve:
+    ## a face group dissolves only the edges between its faces).
+    pub let strict: bool = false
 
 ## A run's product: the output mesh, its selection and the warning.
 pub struct VerbRun:
@@ -198,7 +201,7 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
     defer bits.close()
     if domain != target:
         let topology = try Topology.of(mesh)
-        var moved = try converted(&topology, bits.view(), domain, target, strict_conversion(domain, target) and not verb.loose)
+        var moved = try converted(&topology, bits.view(), domain, target, (strict_conversion(domain, target) or verb.strict) and not verb.loose)
         bits.close()
         bits = moved
     var output = VerbOutput()
