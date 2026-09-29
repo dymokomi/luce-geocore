@@ -195,6 +195,13 @@ pub let edge_span = polygon.edge_span
 pub let corner_edge_span = polygon.corner_edge_span
 pub let mesh_origin = polygon.mesh_origin
 pub let attribute_entry = polygon.attribute_entry
+## Assembly from columns an importer filled (luce-usd): a mesh taking its
+## columns, attributes put on it, curves and detail attributes likewise.
+pub let assembled = polygon.assembled
+pub let put_attribute = polygon.put_attribute
+pub let curves_assembled = curves.curves_assembled
+pub let set_detail = geometry_set.set_detail
+pub let set_put_detail = geometry_set.set_put_detail
 ## Prism wire dtypes, for codecs' columns.
 pub let dtype_int8 = io.dtype_int8
 pub let dtype_int32 = io.dtype_int32
