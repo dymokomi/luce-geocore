@@ -19,6 +19,8 @@ def dependency "luce-geocore" {
 ```
 
 Import `geocore` (`from geocore import PolygonMesh, MeshBuilder, Vector3`).
+Base code in other packages reads a mesh's arrays through `geocore_native`
+(spans, and packing into GPU layouts, which Luce cannot call), and
 `geocore_growing` exports `Growing`, a heap array that keeps its capacity.
 
 Use the compiler revisions in `bootstrap/PACKAGES`, checked out beside this

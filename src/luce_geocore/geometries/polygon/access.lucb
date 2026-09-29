@@ -199,3 +199,17 @@ pub func face_normal_span(mesh: const PolygonMesh*) -> const Vector3[]:
     return mesh.normals.view()
 pub func triangle_span(mesh: const PolygonMesh*) -> const i64[]:
     return mesh.triangles.view()
+pub func edge_span(mesh: const PolygonMesh*) -> const i64[]:
+    return mesh.edge_points.view()
+
+## Attribute `index` of `mesh`, for Base readers.
+pub func attribute_entry(mesh: const PolygonMesh*, index: i64) -> const Attribute*!:
+    try checked(index, mesh.attributes.count())
+    return mesh.attributes.entry((usize)index)
+
+## The arrays positions and face normals were derived from by a position
+## edit (0: none), for caches that update in place.
+pub func points_parent(mesh: const PolygonMesh*) -> u64:
+    return mesh.points.parent()
+pub func normals_parent(mesh: const PolygonMesh*) -> u64:
+    return mesh.normals.parent()

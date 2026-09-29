@@ -81,6 +81,9 @@ extend PolygonMesh:
         storage[0] = self.shared_columns()
         storage[0].attributes = attributes
         storage[0].queries = queries
+        # Record provenance: caches keyed on the old arrays can update in place.
+        edit.points.set_parent(self.points.id())
+        edit.normals.set_parent(self.normals.id())
         storage[0].points.release()
         storage[0].points = edit.points
         storage[0].normals.release()
