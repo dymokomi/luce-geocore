@@ -1,0 +1,259 @@
+## Bridge: faces joining pairs of boundary chains among the group's edges,
+## after Blender's Bridge Edge Loops and Houdini's PolyBridge. The group's
+## boundary edges form chains (closed loops or open runs); each chain is
+## paired with the nearest other one of the same kind. Chains with as many
+## edges bridge with `divisions` rows of quads; otherwise the two sides zip
+## together with triangles, by distance along each chain. A closed pair
+## starts where the second loop comes nearest the first's start, turned by
+## `twist`. The bridge faces are the output selection.
+
+let bridge_parms: ParmSpec[2] = [
+    ParmSpec("Divisions", ParmKind.integer, 1.0, 1.0, 64.0, 1, "", "Rows of faces across each bridge (chains with as many edges)."),
+    ParmSpec("Twist", ParmKind.integer, 0.0, -1000.0, 1000.0, 1, "", "Turn where a closed pair's second loop starts, by this many points.")]
+
+pub func bridge_verb() -> Verb:
+    return Verb("Bridge", "Modeling", "Join pairs of boundary loops or runs among the group's edges with faces", Domain.edge, true, bridge_parms, true, cook_bridge)
+
+## The group's boundary chains: corners (each the one face corner of a
+## boundary edge, in chain order) and where each chain starts.
+struct Chains:
+    var corners: Growing[i32]
+    var starts: Growing[u32]
+    var closed: Growing[u8]
+
+    func init():
+        self.corners = Growing[i32]()
+        self.starts = Growing[u32]()
+        self.closed = Growing[u8]()
+
+    func count() -> usize:
+        return self.closed.count
+
+    func size(chain: usize) -> usize:
+        return (usize)(self.starts.items[chain + 1] - self.starts.items[chain])
+
+    mutating func close():
+        self.corners.close()
+        self.starts.close()
+        self.closed.close()
+
+func cook_bridge(input: const VerbInput*, output: VerbOutput*) -> !:
+    let divisions = (usize)math.max(1.0, math.min(64.0, input.parms.at(0)))
+    let twist = (i64)math.max(-1000.0, math.min(1000.0, input.parms.at(1)))
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var chains = Chains()
+    defer chains.close()
+    try find_chains(&topology, input.group, &chains)
+    # Pair each chain with the nearest unpaired one of the same kind.
+    let count = chains.count()
+    let partner = try alloc i32[count] in memory.heap
+    defer free(partner) in memory.heap
+    for at in 0..<count: partner[at] = -1
+    var pairs: usize = 0
+    for chain in 0..<count:
+        if partner[chain] >= 0: continue
+        var best: i64 = -1
+        var nearest = 0.0
+        let here = chain_center(mesh, &topology, &chains, chain)
+        for other in chain + 1..<count:
+            if partner[other] >= 0 or chains.closed.items[other] != chains.closed.items[chain]: continue
+            let distance = chain_center(mesh, &topology, &chains, other).subtract(here).length()
+            if best < 0 or distance < nearest:
+                best = (i64)other
+                nearest = distance
+        if best < 0: continue
+        partner[chain] = (i32)best
+        partner[(usize)best] = (i32)chain
+        pairs += 1
+    if pairs == 0:
+        output.warning = "The group needs two boundary loops or runs to bridge; the input passes through"
+        return
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    try builder.copy_faces(mesh, 0, topology.faces())
+    let first = builder.face_count()
+    for chain in 0..<count:
+        if partner[chain] > (i32)chain: try bridge_pair(mesh, &topology, &chains, chain, (usize)partner[chain], divisions, twist, builder)
+    output.selection = try BitsBuilder.zeros(builder.face_count())
+    output.selection.set_range(first, builder.face_count())
+    output.selection_domain = Domain.face
+    if pairs * 2 < count: output.warning = "A boundary loop or run in the group had no partner and was left open"
+
+## Chains of the group's boundary edges: each point's boundary edge leaving
+## it continues the chain; runs start where none arrives. Points where two
+## boundary edges of the group leave are pinches, which no chain crosses.
+func find_chains(topology: const Topology*, group: Bits, chains: Chains*) -> !:
+    let points = topology.points
+    let leaving = try alloc i32[points] in memory.heap
+    defer free(leaving) in memory.heap
+    let arriving = try alloc u8[points] in memory.heap
+    defer free(arriving) in memory.heap
+    for at in 0..<points:
+        leaving[at] = -1
+        arriving[at] = 0
+    for edge in 0..<topology.edges():
+        if not group.get(edge): continue
+        let first = (usize)topology.edge_corner_offsets[edge]
+        if (usize)topology.edge_corner_offsets[edge + 1] - first != 1: continue
+        let corner = (usize)topology.edge_corners[first]
+        let point = (usize)topology.corners[corner]
+        leaving[point] = (i32)corner if leaving[point] == -1 else -2
+        let end = (usize)topology.corners[topology.next(corner)]
+        if arriving[end] < 255: arriving[end] += 1
+    var used = try BitsBuilder.zeros(topology.corners.length)
+    defer used.close()
+    try chains.starts.push(0)
+    # Open runs first (from points nothing arrives at), then closed loops.
+    for pass in 0..<(usize)2:
+        for point in 0..<points:
+            let corner = leaving[point]
+            if corner < 0 or used.view().get((usize)corner): continue
+            if pass == 0 and arriving[point] != 0: continue
+            let begin = chains.corners.count
+            var at = corner
+            var closed = false
+            while at >= 0 and not used.view().get((usize)at):
+                used.set((usize)at)
+                try chains.corners.push(at)
+                let next = leaving[(usize)topology.corners[topology.next((usize)at)]]
+                if next == corner:
+                    closed = true
+                    break
+                at = next
+            if pass == 1 and not closed:
+                chains.corners.count = begin
+                continue
+            try chains.starts.push((u32)chains.corners.count)
+            try chains.closed.push(1 if closed else 0)
+
+## Point `index` of a chain (its corners' points, then an open run's end)
+## and the face corner at it.
+func chain_point(topology: const Topology*, chains: const Chains*, chain: usize, index: usize) -> (i32, i32):
+    let start = (usize)chains.starts.items[chain]
+    let size = chains.size(chain)
+    if index < size:
+        let corner = chains.corners.items[start + index]
+        return (topology.corners[(usize)corner], corner)
+    let last = topology.next((usize)chains.corners.items[start + size - 1])
+    return (topology.corners[last], (i32)last)
+
+func chain_center(mesh: const Mesh*, topology: const Topology*, chains: const Chains*, chain: usize) -> Vector3:
+    let size = chains.size(chain)
+    var sum = Vector3()
+    for index in 0..<size:
+        let (point, _) = chain_point(topology, chains, chain, index)
+        sum = sum.add(point_of(mesh, point))
+    return sum.multiply_scalar(1.0 / (f64)size)
+
+## One side of a bridge: its points and corners in order (a closed loop
+## repeats its first at the end), and the distance along it to each.
+struct Side:
+    var points: Growing[i32]
+    var corners: Growing[i32]
+    var along: Growing[f64]
+
+    func init():
+        self.points = Growing[i32]()
+        self.corners = Growing[i32]()
+        self.along = Growing[f64]()
+
+    mutating func close():
+        self.points.close()
+        self.corners.close()
+        self.along.close()
+
+## The first chain as it runs; the second reversed (so both run the same way
+## across the bridge), starting nearest the first's start for loops.
+func side_of(mesh: const Mesh*, topology: const Topology*, chains: const Chains*, chain: usize, reversed: bool, align: Vector3, twist: i64, side: Side*) -> !:
+    let size = chains.size(chain)
+    let closed = chains.closed.items[chain] == 1
+    let total = size if closed else size + 1
+    var shift: usize = 0
+    if closed and reversed:
+        var nearest = -1.0
+        for index in 0..<total:
+            let (point, _) = chain_point(topology, chains, chain, total - 1 - index)
+            let distance = point_of(mesh, point).subtract(align).length()
+            if nearest < 0.0 or distance < nearest:
+                nearest = distance
+                shift = index
+        shift = (usize)(((i64)shift + twist % (i64)total + (i64)total) % (i64)total)
+    for step in 0..<total + (1 if closed else 0):
+        var index = (step + shift) % total
+        if reversed: index = total - 1 - index
+        let (point, corner) = chain_point(topology, chains, chain, index)
+        try side.points.push(point)
+        try side.corners.push(corner)
+        let length = 0.0 if step == 0 else side.along.items[step - 1] + point_of(mesh, point).subtract(point_of(mesh, side.points.items[step - 1])).length()
+        try side.along.push(length)
+
+func bridge_pair(mesh: const Mesh*, topology: const Topology*, chains: const Chains*, first: usize, second: usize, divisions: usize, twist: i64, builder: TopologyBuilder*) -> !:
+    var a = Side()
+    defer a.close()
+    var b = Side()
+    defer b.close()
+    try side_of(mesh, topology, chains, first, false, Vector3(), 0, &a)
+    try side_of(mesh, topology, chains, second, true, point_of(mesh, a.points.items[0]), twist, &b)
+    let n = a.points.count - 1
+    let m = b.points.count - 1
+    let face = topology.corner_faces[(usize)a.corners.items[0]]
+    if n == m:
+        # Rows between the sides: row 0 is the first chain, row `divisions`
+        # the second.
+        let rows = try alloc i32[(n + 1) * (divisions + 1)] in memory.heap
+        defer free(rows) in memory.heap
+        for index in 0..<n + 1:
+            rows[index] = a.points.items[index]
+            rows[divisions * (n + 1) + index] = b.points.items[index]
+            for row in 1..<divisions:
+                let t = (f64)row / (f64)divisions
+                let start = point_of(mesh, a.points.items[index])
+                let placed = start.add(point_of(mesh, b.points.items[index]).subtract(start).multiply_scalar(t))
+                let parents: i32[2] = [a.points.items[index], b.points.items[index]]
+                let weights: f32[2] = [(f32)(1.0 - t), (f32)t]
+                # A closed loop's last point is its first.
+                if index == n and a.points.items[n] == a.points.items[0]:
+                    rows[row * (n + 1) + index] = rows[row * (n + 1)]
+                else:
+                    rows[row * (n + 1) + index] = try builder.mixed_point(placed, parents[..<2], weights[..<2])
+        for row in 0..<divisions:
+            for index in 0..<n:
+                try builder.face(face)
+                try bridge_corner(builder, rows[row * (n + 1) + index + 1], &a, &b, index + 1, row, divisions)
+                try bridge_corner(builder, rows[row * (n + 1) + index], &a, &b, index, row, divisions)
+                try bridge_corner(builder, rows[(row + 1) * (n + 1) + index], &a, &b, index, row + 1, divisions)
+                try bridge_corner(builder, rows[(row + 1) * (n + 1) + index + 1], &a, &b, index + 1, row + 1, divisions)
+                try builder.end_face()
+        return
+    # Zip: advance along whichever side is behind, by fraction of length.
+    let length_a = math.max(a.along.items[n], 0.000000001)
+    let length_b = math.max(b.along.items[m], 0.000000001)
+    var i: usize = 0
+    var j: usize = 0
+    while i < n or j < m:
+        let advance_a = j == m or (i < n and a.along.items[i + 1] / length_a <= b.along.items[j + 1] / length_b)
+        try builder.face(face)
+        if advance_a:
+            try builder.corner(a.points.items[i + 1], a.corners.items[i + 1])
+            try builder.corner(a.points.items[i], a.corners.items[i])
+            try builder.corner(b.points.items[j], b.corners.items[j])
+            i += 1
+        else:
+            try builder.corner(a.points.items[i], a.corners.items[i])
+            try builder.corner(b.points.items[j], b.corners.items[j])
+            try builder.corner(b.points.items[j + 1], b.corners.items[j + 1])
+            j += 1
+        try builder.end_face()
+
+## A bridge corner at `index` on row `row`: the first side's corner values,
+## blended toward the second side's across the rows.
+func bridge_corner(builder: TopologyBuilder*, point: i32, a: const Side*, b: const Side*, index: usize, row: usize, rows: usize) -> !:
+    if row == 0: return try builder.corner(point, a.corners.items[index])
+    if row == rows: return try builder.corner(point, b.corners.items[index])
+    let t = (f32)row / (f32)rows
+    let parents: i32[2] = [a.corners.items[index], b.corners.items[index]]
+    let weights: f32[2] = [1.0 - t, t]
+    try builder.mixed_corner(point, parents[..<2], weights[..<2])

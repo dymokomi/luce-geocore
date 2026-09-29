@@ -2,7 +2,7 @@
 ## from it: each verb is a node kind whose parameters are the verb's, plus
 ## Group and Group Type.
 
-let verb_total: usize = 20
+let verb_total: usize = 21
 
 ## Verb `index` in menu order.
 pub func verb_at(index: usize) -> Verb:
@@ -27,6 +27,7 @@ pub func verb_at(index: usize) -> Verb:
         17: return fill_verb()
         18: return dissolve_verb()
         19: return loop_cut_verb()
+        20: return bridge_verb()
         _: return transform_verb()
 
 pub func verb_count() -> usize:

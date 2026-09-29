@@ -18,6 +18,7 @@ pub func exercise() -> !:
     try bevel_checks(grid, cube)
     try extrude_checks(grid, cube)
     try loop_cut_checks(grid, cube)
+    try bridge_checks(grid, cube)
 
 func fixture() -> interop.Reference[Mesh]!:
     let grid = try MeshPrimitives.grid(2.0, 4)
@@ -235,6 +236,39 @@ func loop_cut_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh
     defer alone.release()
     assert(alone.value().warning().length > 0)
     print("PASS Loop Cut: grid ring, cuts and slide, cube ring, crossing rings, group-only cut, pass-through")
+
+func bridge_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) -> !:
+    # Two rows of a grid apart: bridging their facing runs with two
+    # divisions rebuilds the missing rows, uv and all.
+    let apart = try made(grid, "Delete", "4-11", 3, [0.0], 0)
+    defer apart.release()
+    counts(apart, 20, 8)
+    let rebuilt = try made(apart, "Bridge", "p5-6-7-8-9 p10-11-12-13-14", 2, [2.0, 0.0], 8)
+    defer rebuilt.release()
+    counts(rebuilt, 25, 16)
+    try planar_uv(rebuilt)
+    let edges = try rebuilt.value().edge_count()
+    assert(rebuilt.value().point_count() - edges + rebuilt.value().face_count() == 1)
+    # Runs of different lengths zip together with triangles.
+    let zipped = try made(apart, "Bridge", "p5-6-7-8-9 p10-11-12", 2, [1.0, 0.0], 6)
+    defer zipped.release()
+    counts(zipped, 20, 14)
+    # Holes through two opposite sides of a cube: bridged, a tunnel makes
+    # a closed surface of genus one.
+    let insets = try made(cube, "Inset", "4 5", 3, [0.4, 0.0, 1.0, 1.0], 2)
+    defer insets.release()
+    let holes = try made(insets, "Delete", "4 5", 3, [0.0], 0)
+    defer holes.release()
+    let tunnel = try made(holes, "Bridge", "", 0, [1.0, 0.0], 4)
+    defer tunnel.release()
+    counts(tunnel, 16, 16)
+    let tunnel_edges = try tunnel.value().edge_count()
+    assert((try tunnel.value().domain_count(1)) == tunnel_edges * 2 and tunnel.value().point_count() - tunnel_edges + tunnel.value().face_count() == 0)
+    # One run alone has nothing to bridge to.
+    let alone = try Verbs.run("Bridge", apart, "p5-6-7", 2, [1.0, 0.0])
+    defer alone.release()
+    assert(alone.value().warning().length > 0)
+    print("PASS Bridge: runs with divisions, zipped runs, a tunnel through a cube, pass-through")
 
 func dump(mesh: interop.Reference[Mesh]) -> !:
     print(f"{mesh.value().point_count()} points {mesh.value().face_count()} faces")
