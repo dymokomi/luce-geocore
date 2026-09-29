@@ -140,6 +140,25 @@ pub struct TopologyBuilder:
             try self.corner(points[(usize)point] if points.length > 0 else point, (i32)corner)
         try self.end_face()
 
+    ## Remove the points no corner uses, renumbering the rest in order (a
+    ## verb that replaces some input points copies them all first).
+    pub mutating func drop_unused_points() -> !:
+        let points = self.positions.count
+        let map = try alloc i32[points] in memory.heap
+        defer free(map) in memory.heap
+        for at in 0..<points: map[at] = -1
+        for point in self.corners.view(): map[(usize)point] = 0
+        var kept: usize = 0
+        for at in 0..<points:
+            if map[at] < 0: continue
+            map[at] = (i32)kept
+            self.positions.items[kept] = self.positions.items[at]
+            self.point_parents.items[kept] = self.point_parents.items[at]
+            kept += 1
+        self.positions.count = kept
+        self.point_parents.count = kept
+        for at in 0..<self.corners.count: self.corners.items[at] = map[(usize)self.corners.items[at]]
+
     ## The mesh: positions, faces, triangles (kept or clipped), normals, and
     ## every attribute of `source` through the parents.
     pub mutating func finish(source: const Mesh*) -> Mesh*!:

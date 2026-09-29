@@ -178,7 +178,7 @@ func topology_verbs(mesh: interop.Reference[Mesh]) -> !:
     defer catmull.release()
     near((try catmull.value().point(0)).x, -5.0 / 9.0)
     near((try catmull.value().point(0)).y, 4.0 / 9.0)
-    let chamfer = try run(cube, "Bevel", "", [0.2])
+    let chamfer = try run(cube, "PolyBevel", "", [0.2, 1.0, 0.5, 1.0])
     defer chamfer.release()
     let chamfered = try chamfer.value().mesh()
     defer chamfered.release()
