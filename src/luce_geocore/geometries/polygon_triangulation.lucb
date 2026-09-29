@@ -1,5 +1,6 @@
 import luce_geocore.errors as errors
 import math
+import memory
 from luce_geocore.math.vector import Vector3
 from luce_geocore.geometries.polygon_partition import partition
 
@@ -100,7 +101,12 @@ pub func triangulate(points: const Vector3[], corners: const i64[], start: usize
         if not clipped:
             # Greedy ears can strand a rounded, nearly straight trim chain.
             # Solve the original polygon transactionally, not the stranded tail.
-            if try partition(points,corners,start,count,normal,epsilon,output): return
+            # Only running out of memory fails; a partition that cannot
+            # solve the polygon leaves the fan below.
+            let solved = partition(points,corners,start,count,normal,epsilon,output) catch failure:
+                if failure.code == memory.exhausted: error(failure.code, failure.message)
+                recover false
+            if solved: return
             # Self-intersecting or folded: the whole face as a fan (the
             # partition may have written over the ears clipped so far).
             fan(start, count, output)
