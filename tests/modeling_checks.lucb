@@ -17,6 +17,7 @@ pub func exercise() -> !:
     defer cube.release()
     try bevel_checks(grid, cube)
     try extrude_checks(grid, cube)
+    try loop_cut_checks(grid, cube)
 
 func fixture() -> interop.Reference[Mesh]!:
     let grid = try MeshPrimitives.grid(2.0, 4)
@@ -201,6 +202,39 @@ func extrude_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]
     defer none_left.release()
     assert(none_left.value().warning().length > 0)
     print("PASS PolyExtrude and Inset: regions, individual faces, divisions, closed shells, distance insets, clamping, edges")
+
+func loop_cut_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) -> !:
+    # The ring through a grid's edge: a new loop across its column of quads,
+    # the new edges selected, the uv following the points.
+    let one = try made(grid, "Loop Cut", "p0-1", 2, [1.0, 0.0, 1.0], 4)
+    defer one.release()
+    counts(one, 30, 20)
+    try planar_uv(one)
+    near((try one.value().point(25)).x, -0.75)
+    # Two cuts slid toward the ring's start.
+    let two = try made(grid, "Loop Cut", "p0-1", 2, [2.0, -0.5, 1.0], 8)
+    defer two.release()
+    counts(two, 35, 24)
+    try planar_uv(two)
+    near((try two.value().point(25)).x, -1.0 + 0.5 / 3.0 - 0.5 * 0.98 * 0.5 / 3.0)
+    # Around a cube: closed, 4 quads cut; two crossing rings stay closed.
+    let ring = try made(cube, "Loop Cut", "p0-1", 2, [1.0, 0.0, 1.0], 4)
+    defer ring.release()
+    counts(ring, 12, 10)
+    try closed(ring)
+    let crossing = try Verbs.run("Loop Cut", cube, "p0-1 p0-3", 2, [1.0, 0.0, 1.0])
+    defer crossing.release()
+    let crossed = try crossing.value().mesh()
+    defer crossed.release()
+    try closed(crossed)
+    # Only between the group's edges: one quad.
+    let between = try made(grid, "Loop Cut", "p0-1 p5-6", 2, [1.0, 0.0, 0.0], 1)
+    defer between.release()
+    counts(between, 27, 17)
+    let alone = try Verbs.run("Loop Cut", grid, "p0-1", 2, [1.0, 0.0, 0.0])
+    defer alone.release()
+    assert(alone.value().warning().length > 0)
+    print("PASS Loop Cut: grid ring, cuts and slide, cube ring, crossing rings, group-only cut, pass-through")
 
 func dump(mesh: interop.Reference[Mesh]) -> !:
     print(f"{mesh.value().point_count()} points {mesh.value().face_count()} faces")

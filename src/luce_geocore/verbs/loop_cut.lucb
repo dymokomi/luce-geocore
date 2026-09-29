@@ -1,0 +1,181 @@
+## Loop Cut: new edge loops across the quads of the group's edge rings,
+## after Blender's Loop Cut and Slide. Each ring edge gets `cuts` new points
+## (slid together toward one side of the ring by `slide`); each quad crossed
+## by the ring splits into `cuts + 1` quads, and any other face on a ring
+## edge takes the new points into its boundary so the surface stays closed.
+## Edges keep a direction along the ring, so the cuts line up. The new
+## loops are the output selection.
+
+let loop_cut_parms: ParmSpec[3] = [
+    ParmSpec("Cuts", ParmKind.integer, 1.0, 1.0, 64.0, 1, "", "New loops across each ring."),
+    ParmSpec("Slide", ParmKind.number, 0.0, -1.0, 1.0, 1, "", "Move the loops toward one side of the ring (-1..1)."),
+    ParmSpec("Whole ring", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Cut the whole ring through each of the group's edges; off: only across the group's edges.")]
+
+pub func loop_cut_verb() -> Verb:
+    return Verb("Loop Cut", "Modeling", "Cut edge loops across the rings of the group's edges", Domain.edge, true, loop_cut_parms, true, cook_loop_cut)
+
+struct Rings:
+    ## Per edge: the point its ring direction starts from, or -1 off the
+    ## ring; and the builder id of its first new point.
+    var start: Growing[i32]
+    var first_new: Growing[i32]
+    ## Per face: the corner whose edge the split enters by, or -1.
+    var split: Growing[i32]
+    var queue: Growing[i32]
+
+    func init():
+        self.start = Growing[i32]()
+        self.first_new = Growing[i32]()
+        self.split = Growing[i32]()
+        self.queue = Growing[i32]()
+
+    mutating func close():
+        self.start.close()
+        self.first_new.close()
+        self.split.close()
+        self.queue.close()
+
+func cook_loop_cut(input: const VerbInput*, output: VerbOutput*) -> !:
+    let cuts = (usize)math.max(1.0, math.min(64.0, input.parms.at(0)))
+    let slide = math.max(-1.0, math.min(1.0, input.parms.at(1)))
+    if not math.is_finite(input.parms.at(1)): error(errors.invalid, "Loop Cut slide must be finite")
+    let whole = input.parms.at(2) != 0.0
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var rings = Rings()
+    defer rings.close()
+    try rings.start.fill(topology.edges(), -1)
+    try rings.first_new.fill(topology.edges(), -1)
+    try rings.split.fill(topology.faces(), -1)
+    var splits: usize = 0
+    for edge in 0..<topology.edges():
+        if not input.group.get(edge) or rings.start.items[edge] >= 0: continue
+        rings.start.items[edge] = topology.edge_points[edge * 2]
+        splits += try walk_ring_edges(&topology, input.group, whole, &rings, (i32)edge)
+    if splits == 0:
+        output.warning = "No quad crossed by the group's edge rings to cut; the input passes through"
+        return
+    try build_cuts(mesh, &topology, &rings, cuts, slide, output)
+
+## Spread the ring from `seed`: across each quad beside a ring edge to the
+## opposite edge (in the group, unless the whole ring is cut), carrying the
+## direction. Returns the quads it will split.
+func walk_ring_edges(topology: const Topology*, group: Bits, whole: bool, rings: Rings*, seed: i32) -> usize!:
+    var splits: usize = 0
+    rings.queue.clear()
+    try rings.queue.push(seed)
+    var at: usize = 0
+    while at < rings.queue.count:
+        let edge = (usize)rings.queue.items[at]
+        at += 1
+        for slot in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+            let corner = (usize)topology.edge_corners[slot]
+            let face = (usize)topology.corner_faces[corner]
+            if topology.offsets[face + 1] - topology.offsets[face] != 4: continue
+            let opposite = topology.next(topology.next(corner))
+            let other = (usize)topology.corner_edges[opposite]
+            if other == edge: continue
+            if not whole and not group.get(other): continue
+            # A quad split already, across the other pair, stops this ring.
+            let entered = rings.split.items[face]
+            if entered >= 0 and (usize)entered != corner and (usize)entered != opposite: continue
+            if entered < 0:
+                rings.split.items[face] = (i32)corner
+                splits += 1
+            if rings.start.items[other] >= 0: continue
+            # The corner's point faces the opposite edge's end: the ring
+            # direction runs from there when it runs from this corner.
+            let from_corner = rings.start.items[edge] == topology.corners[corner]
+            rings.start.items[other] = topology.corners[topology.next(opposite)] if from_corner else topology.corners[opposite]
+            try rings.queue.push((i32)other)
+    return splits
+
+func build_cuts(mesh: const Mesh*, topology: const Topology*, rings: Rings*, cuts: usize, slide: f64, output: VerbOutput*) -> !:
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    let step = 1.0 / (f64)(cuts + 1)
+    for edge in 0..<topology.edges():
+        let start = rings.start.items[edge]
+        if start < 0: continue
+        let a = topology.edge_points[edge * 2]
+        let end = topology.edge_points[edge * 2 + 1] if a == start else a
+        rings.first_new.items[edge] = (i32)builder.point_count()
+        let head = builder.position(start)
+        let tail = builder.position(end)
+        for k in 1..<cuts + 1:
+            let t = (f64)k * step + slide * step * 0.98
+            let parents: i32[2] = [start, end]
+            let weights: f32[2] = [(f32)(1.0 - t), (f32)t]
+            discard(try builder.mixed_point(head.add(tail.subtract(head).multiply_scalar(t)), parents[..<2], weights[..<2]))
+    let faces = topology.faces()
+    var run: usize = 0
+    for face in 0..<faces:
+        var touched = false
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if rings.start.items[(usize)topology.corner_edges[corner]] >= 0: touched = true
+        if not touched: continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        let entered = rings.split.items[face]
+        if entered < 0:
+            try builder.face((i32)face)
+            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                try corner_and_cuts(topology, rings, builder, corner, cuts, slide)
+            try builder.end_face()
+            continue
+        try split_quad(topology, rings, builder, (usize)entered, cuts, slide)
+    try builder.copy_faces(mesh, run, faces)
+
+## New point `k` (1..cuts, from the corner's point) on corner `corner`'s edge.
+func cut_point(topology: const Topology*, rings: const Rings*, corner: usize, k: usize, cuts: usize) -> i32:
+    let edge = (usize)topology.corner_edges[corner]
+    let index = k if rings.start.items[edge] == topology.corners[corner] else cuts + 1 - k
+    return rings.first_new.items[edge] + (i32)index - 1
+
+## The fraction of the way from corner `corner`'s point to the next that its
+## edge's new point `k` (counted from the corner) lies.
+func cut_fraction(topology: const Topology*, rings: const Rings*, corner: usize, k: usize, cuts: usize, slide: f64) -> f64:
+    let edge = (usize)topology.corner_edges[corner]
+    let step = 1.0 / (f64)(cuts + 1)
+    let forward = rings.start.items[edge] == topology.corners[corner]
+    let index = k if forward else cuts + 1 - k
+    let t = (f64)index * step + slide * step * 0.98
+    return t if forward else 1.0 - t
+
+## Corner `corner` of its face, then the new points on its edge (when it is
+## on a ring) in the face's order, their values blended along the edge.
+func corner_and_cuts(topology: const Topology*, rings: const Rings*, builder: TopologyBuilder*, corner: usize, cuts: usize, slide: f64) -> !:
+    try builder.corner(topology.corners[corner], (i32)corner)
+    if rings.start.items[(usize)topology.corner_edges[corner]] < 0: return
+    for k in 1..<cuts + 1:
+        try edge_corner(topology, rings, builder, corner, k, cuts, slide)
+
+func edge_corner(topology: const Topology*, rings: const Rings*, builder: TopologyBuilder*, corner: usize, k: usize, cuts: usize, slide: f64) -> !:
+    let t = (f32)cut_fraction(topology, rings, corner, k, cuts, slide)
+    let parents: i32[2] = [(i32)corner, (i32)topology.next(corner)]
+    let weights: f32[2] = [1.0 - t, t]
+    try builder.mixed_corner(cut_point(topology, rings, corner, k, cuts), parents[..<2], weights[..<2])
+
+## A quad crossed at corner `c0`'s edge and the opposite one: `cuts + 1`
+## quads between the cut lines, the side edges keeping any points of
+## another ring. Each cut line is selected.
+func split_quad(topology: const Topology*, rings: const Rings*, builder: TopologyBuilder*, c0: usize, cuts: usize, slide: f64) -> !:
+    let c1 = topology.next(c0)
+    let c2 = topology.next(c1)
+    let c3 = topology.next(c2)
+    let face = (i32)topology.corner_faces[c0]
+    for j in 0..<cuts + 1:
+        try builder.face(face)
+        # A_j, A_{j+1} along c0→c1; B_{j+1}, B_j back along c3→c2.
+        if j == 0: try builder.corner(topology.corners[c0], (i32)c0)
+        else: try edge_corner(topology, rings, builder, c0, j, cuts, slide)
+        if j == cuts: try corner_and_cuts(topology, rings, builder, c1, cuts, slide)
+        else: try edge_corner(topology, rings, builder, c0, j + 1, cuts, slide)
+        if j == cuts: try builder.corner(topology.corners[c2], (i32)c2)
+        else: try edge_corner(topology, rings, builder, c2, cuts - j, cuts, slide)
+        if j == 0: try corner_and_cuts(topology, rings, builder, c3, cuts, slide)
+        else: try edge_corner(topology, rings, builder, c2, cuts + 1 - j, cuts, slide)
+        try builder.end_face()
+        if j > 0: try builder.select_edge(cut_point(topology, rings, c0, j, cuts), cut_point(topology, rings, c2, cuts + 1 - j, cuts))
