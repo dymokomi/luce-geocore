@@ -33,6 +33,11 @@ pub struct Selection:
     pub func domain() -> i64:
         return (i64)(u8)self.domain_value
 
+    ## The bits' identity: equal keys are equal selections (renderers skip
+    ## rebuilding for an unchanged one).
+    pub func key() -> u64:
+        return self.bits.id() ^ (u64)self.elements
+
     ## Elements selected, and elements there are.
     pub func count() -> i64:
         return (i64)self.view().population()

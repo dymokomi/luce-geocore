@@ -19,7 +19,7 @@ from luce_geocore.core.attributes import Attribute, AttributeStore, Domain, Data
 from luce_geocore.core.geometry import Bounds
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
-from luce_geocore.geometries.polygon import Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, attribute_entry, point_span, mesh_origin, offset_span, corner_span, corner_face_span, edge_span, corner_edge_span, face_normal_span, triangle_span, point_face_span, edge_corner_span, point_edge_span, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions
+from luce_geocore.geometries.polygon import Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, attribute_entry, point_span, mesh_origin, offset_span, corner_span, corner_face_span, edge_span, corner_edge_span, face_normal_span, triangle_span, point_face_span, edge_corner_span, point_edge_span, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute
 from luce_geocore.geometries.polygon_triangulation import area_normal
 from luce_geocore.geometries.topology_tools import TopologyTools
 from luce_geocore.geometries.dissolve_workspace import DissolveWorkspace
@@ -182,6 +182,12 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
     try cook(&input, &output)
     let product = try finish(mesh, &output)
     var selection = output.selection.finish()
+    # The output selection also rides in the mesh as the group `.selection`
+    # (Houdini's cook selection), so it reaches the viewport with the result.
+    mark_selection(product, &selection, output.selection_domain) catch failure:
+        mesh_dispose(product)
+        selection.release()
+        error(failure.code, failure.message)
     let count = (usize)(product.domain_count((i64)(u8)output.selection_domain) catch failure:
         mesh_dispose(product)
         selection.release()
@@ -211,6 +217,17 @@ func finish(source: const Mesh*, output: VerbOutput*) -> Mesh*!:
             recover none
         if let made = moved: return made
     return try mesh_share(source)
+
+## Replace any `.selection` group of `mesh` with `bits` on `domain`.
+func mark_selection(mesh: Mesh*, bits: Column[u64]*, domain: Domain) -> !:
+    let domains: Domain[4] = [Domain.point, Domain.corner, Domain.face, Domain.edge]
+    for other in domains: remove_attribute(mesh, ".selection", other)
+    let count = (usize)(try mesh.domain_count((i64)(u8)domain))
+    if bits.count() < (count + 63) // 64:
+        var empty = try BitsBuilder.zeros(count)
+        bits.release()
+        *bits = empty.finish()
+    try put_attribute(mesh, try Attribute.group_of(".selection", domain, count, bits.view()))
 
 func blank(text: str) -> bool:
     for byte in text.bytes:

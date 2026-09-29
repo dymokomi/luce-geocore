@@ -175,6 +175,11 @@ pub func moved_storage(source: const Mesh*, positions: Column[Float3], moved: co
 pub func put_attribute(mesh: Mesh*, attribute: Attribute) -> !:
     try mesh.attributes.put(attribute)
 
+## Remove attribute `name` on `domain` from a mesh being built, if present.
+pub func remove_attribute(mesh: Mesh*, name: str, domain: Domain):
+    let found = mesh.attributes.find(name, (i64)(u8)domain)
+    if found >= 0: mesh.attributes.remove((usize)found)
+
 ## A precise mesh's f64 points; empty otherwise.
 pub func precise_span(mesh: const Mesh*) -> const Vector3[]:
     return mesh.precise.view()

@@ -14,6 +14,8 @@ pub func propagate(source: const Mesh*, output: Mesh*, point_parents: const i32[
         # Authored normals are stale where topology changed; the derived ones
         # take over.
         if entry.role == Role.normal and entry.domain != Domain.detail: continue
+        # Each verb makes its own output selection.
+        if entry.name() == ".selection": continue
         if entry.domain == Domain.edge and edge_map.length == 0:
             let representatives = try alloc i32[corner_parents.length] in memory.heap
             defer free(representatives) in memory.heap
