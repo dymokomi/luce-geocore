@@ -93,6 +93,44 @@ A point group converts to curves whose every point is a member. A curve group
 converts to all the curve's points. Edge forms, `loop` and `ring` fail on
 curves.
 
+### Edit Sketch
+
+`Sketches` (curves/sketch.lucb, sketch_pick.lucb) edits planar sketches as
+curves for luced-3d's Edit Sketch.
+
+- The sketch plane is the set's detail attributes `sketch.plane_origin`
+  (role position) and `sketch.plane_normal` (role normal), so it exists before
+  any curve, moves with a Transform and reaches later nodes. Unset, it is the
+  ground (ZX). Its in-plane axes are X, Y on XY; Y, Z on YZ; Z, X on the
+  ground.
+- Shapes on the plane: line, polyline, arc and circle (exact NURBS),
+  rectangle (closed poly), spline (cubic NURBS).
+- Picking uses faceless point clouds: the control points (Points), or
+  samples along each curve tagged `curve` and `segment` (Object,
+  Segments). Segments run between consecutive control points and are
+  numbered across curves.
+- Steps name points, segments or curves by a group on that cloud (Group Type
+  points, edges or primitives): moves keep their translation in the plane;
+  grid snaps, end snaps (onto the nearest other end), deletes (a segment
+  splits an open curve and opens a closed one), close and open.
+- Every position change goes through `placed_curves(curves, targets, moved,
+  linear)`, the one place a constraint solver would adjust the targets.
+
+## Detail attributes
+
+A set holds its own attributes on the detail domain, one element each, apart
+from its components, as Houdini's detail attributes are. They exist with no
+components at all.
+
+- `with_detail(name, values, role)`, `detail_value`, `detail_width`,
+  `has_detail`, `without_detail`, `detail_count` and `detail_name` from Luce;
+  `set_detail` and `set_put_detail` from Base.
+- Copies share their columns. Placing a set moves width-3 float attributes
+  by role: positions take the whole matrix, vectors its linear part, normals
+  the inverse transpose.
+- Joining keeps the first set's values and adds the second's it lacks.
+- The codec writes them as attribute children of the geometry element.
+
 ## Volumes and SDFs
 
 ### Volumes
@@ -128,6 +166,23 @@ each.
 Programs compose by concatenation. Placing an SDF wraps its program in a
 transform, and joining two SDFs makes their union. Every op keeps the field
 1-Lipschitz.
+
+`SdfEdits` (fields/sdf_tree.lucb, sdf_proxy.lucb, sdf_edit.lucb) edits a
+program primitive by primitive for luced-3d's Edit SDF.
+
+- `SdfTree` parses the postfix program once into nodes. A primitive's number
+  is its place among the primitives. Its placement is the transform directly
+  around it (through modifiers); its boolean is the one taking it as the
+  second operand.
+- `SdfRewrite` makes every edit one linear pass over the ops. A move composes
+  into the placing transform, or wraps the primitive in a new one; the world
+  delta is conjugated into the frame the placement lives in. A boolean change
+  rewrites one op. A delete drops the primitive with what wraps it and each
+  boolean left with one operand.
+- Proxies: each primitive's own shape (sphere, box, torus, capsule,
+  cylinder), placed by every transform around it, tagged `sdf_prim`. Their
+  topology depends only on the shapes, so moves keep selections, and a
+  subtracted primitive stays pickable.
 
 ### Conversions
 
@@ -248,6 +303,7 @@ The document is a tree of elements:
 
 ```
 /geometry              geometry    int64 version, int64 key
+  /geometry/a0         attribute   the set's detail attributes (as below)
   /geometry/mesh       mesh        float64[3] origin, float32[n,3] P, int32 face_offsets,
                                    int32 corner_points, int32 triangles, [float64[n,3] precise]
     /geometry/mesh/a0  attribute   str name, domain, type; int64 width, single, flags, role,

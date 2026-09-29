@@ -24,6 +24,9 @@ import subdivision_checks
 import curve_checks
 import codec_checks
 import field_checks
+import sdf_edit_checks
+import sketch_checks
+import detail_checks
 import instance_checks
 
 ## Counts live blocks and fails the allocation after `remaining` more.
@@ -138,6 +141,15 @@ pub func main(arguments: str[]) -> i32!:
     try field_checks.allocations()
     settle(&tracker)
     try field_checks.run()
+    settle(&tracker)
+    inject(&tracker, 300, sdf_edit_checks.exercise)
+    try sdf_edit_checks.run()
+    settle(&tracker)
+    inject(&tracker, 200, detail_checks.exercise)
+    try detail_checks.run()
+    settle(&tracker)
+    inject(&tracker, 400, sketch_checks.exercise)
+    try sketch_checks.run()
     settle(&tracker)
     print("ok polygon meshes, operators, queries and allocation failures")
     return 0

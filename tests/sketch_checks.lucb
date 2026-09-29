@@ -1,0 +1,146 @@
+## Edit Sketch's operations: the sketch plane and its axes, every shape on
+## it, the pick clouds and their tags, moves of points, segments and curves
+## (in the plane, rotations about the picked centroid), grid and end
+## snapping, deletes that split and open curves, closing and opening.
+import interop
+import math
+from geocore import Vector3, Mesh, GeometrySet, Sketches
+from geocore_kernel import Curves, set_curves, empty_set, adopt_set
+
+func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
+    return math.abs(a - b) < tolerance
+
+func same(a: Vector3, b: Vector3) -> bool:
+    return a.subtract(b).length() < 0.0001
+
+func curves_of(geometry: interop.Reference[GeometrySet]) -> const Curves*!:
+    return set_curves(try geometry.get()) else error(0, "no curves")
+
+## Curve `curve`'s point count and closure.
+func shape_of(geometry: interop.Reference[GeometrySet], curve: usize) -> (usize, bool)!:
+    let curves = try curves_of(geometry)
+    return (curves.range(curve).1, curves.settings(curve).cyclic)
+
+## Point `at` of curve `curve`.
+func point_of(geometry: interop.Reference[GeometrySet], curve: usize, at: usize) -> Vector3!:
+    let curves = try curves_of(geometry)
+    return curves.point(curves.range(curve).0 + at)
+
+## A pick of `geometry` at `level`.
+func picked(geometry: interop.Reference[GeometrySet], level: i64) -> interop.Reference[Mesh]!:
+    return try Sketches.pick(geometry, level)
+
+## A move by (x, y, z), rotated `turn` degrees about Z, about the centroid.
+func moves(x: f64, y: f64, z: f64, turn: f64) -> f64[15]:
+    return [x, y, z, 0.0, 0.0, turn, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+
+pub func exercise() -> !:
+    let empty = try adopt_set(try empty_set())
+    defer empty.release()
+    # The ground by default; the XY plane one unit up once chosen (a
+    # detail attribute, there before any curve).
+    assert(same(try Sketches.plane_normal(empty), Vector3(0.0, 1.0, 0.0)) and same(try Sketches.plane_u(empty), Vector3(0.0, 0.0, 1.0)) and same(try Sketches.plane_v(empty), Vector3(1.0, 0.0, 0.0)))
+    let planed = try Sketches.with_plane(empty, Vector3(0.0, 0.0, 1.0), Vector3(0.0, 0.0, 2.0))
+    defer planed.release()
+    assert((try Sketches.curve_count(planed)) == 0 and planed.value().has_detail("sketch.plane_origin"))
+    assert(same(try Sketches.plane_u(planed), Vector3(1.0, 0.0, 0.0)) and same(try Sketches.plane_v(planed), Vector3(0.0, 1.0, 0.0)) and same(try Sketches.plane_normal(planed), Vector3(0.0, 0.0, 1.0)))
+    let side_plane = try Sketches.with_plane(empty, Vector3(), Vector3(1.0, 0.0, 0.0))
+    defer side_plane.release()
+    assert(same(try Sketches.plane_u(side_plane), Vector3(0.0, 1.0, 0.0)) and same(try Sketches.plane_v(side_plane), Vector3(0.0, 0.0, 1.0)))
+    # Every shape: a line, a rectangle, a circle, a polyline, a spline, an arc.
+    let line = try Sketches.with_shape(planed, 0, [2.0], 0.0, 0.0)
+    defer line.release()
+    let rectangle = try Sketches.with_shape(line, 4, [2.0, 1.0], 3.0, 0.0)
+    defer rectangle.release()
+    let circle = try Sketches.with_shape(rectangle, 3, [1.0], 0.0, 3.0)
+    defer circle.release()
+    let polyline = try Sketches.with_shape(circle, 1, [3.0, 1.0], 0.0, -3.0)
+    defer polyline.release()
+    let spline = try Sketches.with_shape(polyline, 5, [3.0, 1.0], 4.0, -3.0)
+    defer spline.release()
+    let all = try Sketches.with_shape(spline, 2, [1.0, 0.0, 90.0], -4.0, 0.0)
+    defer all.release()
+    assert((try Sketches.curve_count(all)) == 6 and same(try Sketches.plane_origin(all), Vector3(0.0, 0.0, 1.0)))
+    assert(same(try point_of(all, 0, 0), Vector3(-1.0, 0.0, 1.0)) and same(try point_of(all, 0, 1), Vector3(1.0, 0.0, 1.0)))
+    let (corners, closed) = try shape_of(all, 1)
+    assert(corners == 4 and closed)
+    assert(near((try point_of(all, 2, 0)).subtract(Vector3(0.0, 3.0, 1.0)).length(), 1.0))
+    assert(near((try point_of(all, 5, 0)).x, -3.0) and near((try point_of(all, 5, 0)).z, 1.0))
+    # The pick clouds: control points tagged by curve; samples tagged by
+    # curve and segment.
+    let points = try picked(all, 2)
+    defer points.release()
+    let curves = try curves_of(all)
+    assert((usize)points.value().point_count() == curves.point_count() and points.value().face_count() == 0 and points.value().find_attribute("curve", 0) >= 0)
+    let samples = try picked(all, 0)
+    defer samples.release()
+    assert((usize)samples.value().point_count() > curves.point_count() and samples.value().find_attribute("segment", 0) >= 0)
+    # A whole curve (the rectangle) moves in the plane: the normal part of
+    # the move is dropped.
+    let numbers1 = moves(1.0, 0.0, 5.0, 0.0)
+    let shifted = try Sketches.moved(all, samples, "@curve=1", 3, numbers1[..<15])
+    defer shifted.release()
+    assert(same(try point_of(shifted, 1, 0), (try point_of(all, 1, 0)).add(Vector3(1.0, 0.0, 0.0))) and same(try point_of(shifted, 0, 0), try point_of(all, 0, 0)))
+    # A quarter turn of the line about its centroid.
+    let numbers2 = moves(0.0, 0.0, 0.0, 90.0)
+    let turned = try Sketches.moved(all, samples, "@curve=0", 3, numbers2[..<15])
+    defer turned.release()
+    assert(same(try point_of(turned, 0, 0), Vector3(0.0, -1.0, 1.0)) and same(try point_of(turned, 0, 1), Vector3(0.0, 1.0, 1.0)))
+    # One control point, and one segment (its two ends).
+    let numbers3 = moves(0.23, 0.0, 0.0, 0.0)
+    let dragged = try Sketches.moved(all, points, "0", 1, numbers3[..<15])
+    defer dragged.release()
+    assert(same(try point_of(dragged, 0, 0), Vector3(-0.77, 0.0, 1.0)) and same(try point_of(dragged, 0, 1), Vector3(1.0, 0.0, 1.0)))
+    let numbers4 = moves(0.0, 1.0, 0.0, 0.0)
+    let side = try Sketches.moved(all, samples, "@segment=2", 2, numbers4[..<15])
+    defer side.release()
+    assert(same(try point_of(side, 1, 0), try point_of(all, 1, 0)) and same(try point_of(side, 1, 1), (try point_of(all, 1, 1)).add(Vector3(0.0, 1.0, 0.0))))
+    assert(same(try point_of(side, 1, 2), (try point_of(all, 1, 2)).add(Vector3(0.0, 1.0, 0.0))))
+    # Grid snapping: the dragged point back onto the half-unit grid.
+    let dragged_points = try picked(dragged, 2)
+    defer dragged_points.release()
+    let gridded = try Sketches.snapped(dragged, dragged_points, "0", 1, 0.5)
+    defer gridded.release()
+    assert(same(try point_of(gridded, 0, 0), Vector3(-1.0, 0.0, 1.0)))
+    # End snapping: a second line starting just off the first one's end
+    # joins it.
+    let second = try Sketches.with_shape(all, 0, [2.0], 2.05, 0.0)
+    defer second.release()
+    let second_points = try picked(second, 2)
+    defer second_points.release()
+    # Control points: the line's 0..1, the rectangle's 2..5, the circle's
+    # 6..12, the polyline's 13..16, the spline's 17..20, the arc's 21..23.
+    assert((try curves_of(second)).range(6).0 == 24)
+    let joined = try Sketches.joined(second, second_points, "24", 1, 0.1)
+    defer joined.release()
+    assert(same(try point_of(joined, 6, 0), Vector3(1.0, 0.0, 1.0)) and same(try point_of(joined, 6, 1), Vector3(3.05, 0.0, 1.0)))
+    # Deleting: a polyline point, a polyline segment (a split), a rectangle
+    # side (it opens), a whole curve.
+    let fewer = try Sketches.without(all, points, "14", 1)
+    defer fewer.release()
+    let (kept, kept_closed) = try shape_of(fewer, 3)
+    assert(kept == 3 and not kept_closed and (try Sketches.curve_count(fewer)) == 6)
+    # Segments number across curves: the line's 0, the rectangle's 1..4,
+    # the circle's six 5..10, the polyline's 11..13.
+    let split = try Sketches.without(all, samples, "@segment=12", 2)
+    defer split.release()
+    assert((try Sketches.curve_count(split)) == 7)
+    let opened = try Sketches.without(all, samples, "@segment=1", 2)
+    defer opened.release()
+    let (sides, still_closed) = try shape_of(opened, 1)
+    assert(sides == 4 and not still_closed)
+    assert(same(try point_of(opened, 1, 0), try point_of(all, 1, 1)))
+    let fewer_curves = try Sketches.without(all, samples, "@curve=2", 3)
+    defer fewer_curves.release()
+    assert((try Sketches.curve_count(fewer_curves)) == 5)
+    # Closing the polyline, opening the rectangle; the plane survives.
+    let closed_line = try Sketches.with_closure(all, samples, "@curve=3", 3, true)
+    defer closed_line.release()
+    assert((try shape_of(closed_line, 3)).1 and (try shape_of(closed_line, 1)).1)
+    let open_box = try Sketches.with_closure(all, samples, "@curve=1", 3, false)
+    defer open_box.release()
+    assert(not (try shape_of(open_box, 1)).1 and same(try Sketches.plane_origin(open_box), Vector3(0.0, 0.0, 1.0)))
+
+pub func run() -> !:
+    try exercise()
+    print("PASS Edit Sketch: plane (detail), shapes, pick clouds, moves of points, segments and curves, grid and end snaps, deletes, closing")

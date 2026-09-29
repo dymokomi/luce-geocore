@@ -6,6 +6,8 @@
 ## Blender's GeometryComponent and its attribute accessor tables). Copying a
 ## set shares every component (O(columns)); a component changes by being
 ## replaced, so a published set is immutable and any thread may read it.
+## Detail attributes belong to the set itself (detail.lucb), as in Houdini:
+## they exist with no components at all.
 import interop
 import math
 import memory
@@ -19,7 +21,7 @@ from luce_geocore.core.paths import PathFilter
 from luce_geocore.core.geometry import Bounds
 from luce_geocore.core.float3 import Float3
 from luce_geocore.core.shared import Column
-from luce_geocore.core.attributes import Attribute, AttributeStore, Domain
+from luce_geocore.core.attributes import Attribute, AttributeStore, Domain, DataType, Role
 import luce_geocore.core.attribute_ops as attribute_ops
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
@@ -115,9 +117,12 @@ pub struct Component:
 
 pub struct GeometrySet:
     var entries: Growing[Component]
+    ## The set's own attributes (domain detail, one element each).
+    var detail: AttributeStore
 
     pub func init():
         self.entries = Growing[Component]()
+        self.detail = AttributeStore()
 
     ## The data of the `kind` component, if there is one.
     func find(kind: const ComponentType*) -> const void*?:
@@ -168,6 +173,8 @@ pub struct GeometrySet:
     func shared() -> GeometrySet!:
         var copy = GeometrySet()
         errdefer copy.close()
+        copy.detail.close()
+        copy.detail = try self.detail.shared()
         try copy.entries.reserve(self.entries.count)
         for entry in self.entries.view():
             let share = entry.kind.share
@@ -192,6 +199,7 @@ pub struct GeometrySet:
             let close = entry.kind.close
             close(entry.data)
         self.entries.close()
+        self.detail.close()
 
     func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
         for entry in self.entries.view():

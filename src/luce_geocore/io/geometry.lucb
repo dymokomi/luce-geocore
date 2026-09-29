@@ -3,6 +3,7 @@
 ## by a Cache/Freeze node or an export; projects keep recipes.
 ##
 ##   /geometry            geometry   int64 version, int64 key
+##     /geometry/a0       attribute  the set's detail attributes (as below)
 ##     /geometry/mesh     mesh       origin, P, face_offsets, corner_points,
 ##                                   triangles, [precise]
 ##       /geometry/mesh/a0  attribute  name, domain, type, width, storage,
@@ -213,6 +214,7 @@ pub func encode_set(writer: GeometryWriter*, set: const GeometrySet*, path: str,
         try writer.crate.integer("key", key)
     let base = try copied_text(path)
     defer free(base) in memory.heap
+    try writer.attributes((str)base, set_detail(set))
     for index in 0..<set_component_count(set):
         let component = set_component(set, index)
         let codec = codec_of(component.kind.name) else error(errors.invalid, "this geometry family cannot be saved yet (no codec)")

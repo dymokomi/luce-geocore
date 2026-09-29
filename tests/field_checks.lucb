@@ -241,10 +241,14 @@ pub func surfaces() -> !:
     defer rough.release()
     for point in point_span(rough.value()):
         assert(near(point.vector().subtract(Vector3(0.5, 0.0, 0.0)).length(), 1.0, 0.05))
-    # The cached preview is built once.
-    let first = (try sdf_preview(sphere)) else trap("preview")
-    let second = (try sdf_preview(sphere)) else trap("preview")
-    assert(first == second and first.face_count() > 0)
+    # A drag's quick preview is coarser and kept apart; the full preview is
+    # built once, and then serves quick requests too.
+    let quick = (try sdf_preview(sphere, true)) else trap("preview")
+    assert((try sdf_preview(sphere, true)) == quick)
+    let first = (try sdf_preview(sphere, false)) else trap("preview")
+    let second = (try sdf_preview(sphere, false)) else trap("preview")
+    assert(first == second and first.face_count() > quick.face_count() * 4 and quick.face_count() > 0)
+    assert((try sdf_preview(sphere, true)) == first)
 
 ## A set of `sdf` (taken).
 func sdf_set(sdf: Sdf*) -> interop.Reference[GeometrySet]!:

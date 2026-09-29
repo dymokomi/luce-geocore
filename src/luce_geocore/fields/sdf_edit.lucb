@@ -1,0 +1,158 @@
+## Luce's Edit SDF operations: a set's SDF edited primitive by primitive.
+## Steps name primitives by a group on the proxy mesh (sdf_proxies) they
+## were picked on, read through its `sdf_prim` face tags; every other
+## component of the set passes through.
+
+pub struct SdfEdits:
+    let reserved: u8 = 0
+
+    ## How many primitives the set's SDF has (0 without one).
+    pub static func count(geometry: interop.Reference[GeometrySet]) -> i64!:
+        let sdf = set_sdf(try geometry.get()) else return 0
+        var tree = try SdfTree.of(sdf)
+        defer tree.close()
+        return (i64)tree.primitive_count()
+
+    ## The proxies of the set's SDF primitives, tagged `sdf_prim` (empty
+    ## without an SDF).
+    pub static func proxies(geometry: interop.Reference[GeometrySet]) -> interop.Reference[Mesh]!:
+        let sdf = set_sdf(try geometry.get()) else return try Mesh.empty()
+        return try sdf_proxies(sdf)
+
+    ## The set with primitive `shape` (SdfOp: 0 sphere, 1 box, 2 torus,
+    ## 3 capsule, 4 cylinder) added at `position`, combined with its SDF by
+    ## `mode` (0 add, 1 subtract, 2 intersect), smooth over `blend` when
+    ## positive. `sizes`: sphere radius; box width, height, depth and
+    ## rounding; torus ring and tube radii; capsule and cylinder radius and
+    ## height.
+    pub static func with_primitive(geometry: interop.Reference[GeometrySet], shape: i64, sizes: const f64[], position: Vector3, mode: i64, blend: f64) -> interop.Reference[GeometrySet]!:
+        let source = try geometry.get()
+        if shape < 0 or shape > 4 or mode < 0 or mode > 2 or not (blend >= 0.0): error(errors.invalid, "an SDF primitive needs a shape 0..4, a mode 0..2 and a blend of at least 0")
+        var values: f64[8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        match shape:
+            0: values[3] = size_at(sizes, 0)
+            1:
+                values[3] = size_at(sizes, 0) * 0.5
+                values[4] = size_at(sizes, 1) * 0.5
+                values[5] = size_at(sizes, 2) * 0.5
+                values[6] = math.min((sizes[3] if sizes.length > 3 else 0.0), math.min(values[3], math.min(values[4], values[5])))
+            2:
+                values[3] = size_at(sizes, 0)
+                values[4] = size_at(sizes, 1)
+            3:
+                values[3] = size_at(sizes, 1) * 0.5
+                values[4] = size_at(sizes, 0)
+            _:
+                values[3] = size_at(sizes, 0)
+                values[4] = size_at(sizes, 1) * 0.5
+        let made = try primitive_sdf(SdfOp((u8)shape), values[..<7])
+        defer release_sdf(made)
+        let placed = try placed_sdf(made, Matrix4(Vector3(1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0), position))
+        defer release_sdf(placed)
+        let sdf = set_sdf(source) else return try with_program(source, share_sdf(placed))
+        let op = SdfOp((u8)(16 + mode + (3 if blend > 0.0 else 0)))
+        return try with_program(source, try combined_sdf(sdf, placed, op, blend))
+
+    ## The set with the primitives `group` names on `pick` moved by
+    ## Transform Components' numbers (translate, rotate in degrees, scale,
+    ## pivot mode and custom pivot; the centroid pivot is the picked faces').
+    pub static func transformed(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
+        if numbers.length < 13: error(errors.invalid, "a transform needs its thirteen numbers")
+        let source = try geometry.get()
+        let sdf = set_sdf(source) else error(errors.invalid, "Edit SDF has no primitives to move")
+        var tree = try SdfTree.of(sdf)
+        defer tree.close()
+        var chosen = try ChosenPrimitives.of(try pick.get(), group, tree.primitive_count())
+        defer chosen.close()
+        let degrees = 0.017453292519943295
+        let linear = Matrix4.compose(Vector3(), Vector3(numbers[3] * degrees, numbers[4] * degrees, numbers[5] * degrees), Vector3(numbers[6], numbers[7], numbers[8]))
+        var pivot = Vector3(numbers[10], numbers[11], numbers[12])
+        if numbers[9] == 1.0: pivot = Vector3()
+        elif numbers[9] == 0.0: pivot = chosen.centroid
+        let moved = Vector3(numbers[0], numbers[1], numbers[2]).add(pivot).subtract(linear.transform_point(pivot))
+        let delta = Matrix4(linear.x, linear.y, linear.z, moved)
+        var rewrite = try SdfRewrite.of(sdf)
+        defer rewrite.close()
+        for index in 0..<tree.primitive_count():
+            if chosen.marks.items[index]: try rewrite.move(&tree, index, delta)
+        return try with_program(source, try rewrite.finish())
+
+    ## The set with the booleans of the primitives `group` names set to
+    ## `mode` (0 add, 1 subtract, 2 intersect; -1 keeps each) and `blend`
+    ## (< 0 keeps each). Fails when none of them has a boolean (the first
+    ## shape of a program has none).
+    pub static func with_boolean(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, mode: i64, blend: f64) -> interop.Reference[GeometrySet]!:
+        if mode < -1 or mode > 2: error(errors.invalid, "an SDF boolean is 0 add, 1 subtract or 2 intersect")
+        let source = try geometry.get()
+        let sdf = set_sdf(source) else error(errors.invalid, "Edit SDF has no primitives")
+        var tree = try SdfTree.of(sdf)
+        defer tree.close()
+        var chosen = try ChosenPrimitives.of(try pick.get(), group, tree.primitive_count())
+        defer chosen.close()
+        var rewrite = try SdfRewrite.of(sdf)
+        defer rewrite.close()
+        var changed = false
+        for index in 0..<tree.primitive_count():
+            if chosen.marks.items[index] and rewrite.combine(&tree, index, mode, blend): changed = true
+        if not changed: error(errors.invalid, "the first shape has no boolean: change the shapes combined with it")
+        return try with_program(source, try rewrite.finish())
+
+    ## The set without the primitives `group` names; its SDF goes when none
+    ## remain.
+    pub static func without(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str) -> interop.Reference[GeometrySet]!:
+        let source = try geometry.get()
+        let sdf = set_sdf(source) else error(errors.invalid, "Edit SDF has no primitives to delete")
+        var tree = try SdfTree.of(sdf)
+        defer tree.close()
+        var chosen = try ChosenPrimitives.of(try pick.get(), group, tree.primitive_count())
+        defer chosen.close()
+        var rewrite = try SdfRewrite.of(sdf)
+        defer rewrite.close()
+        if not (try rewrite.remove(&tree, chosen.marks.view())):
+            let storage = try set_storage(source)
+            set_remove(storage, sdf_type())
+            return try adopt_set(storage)
+        return try with_program(source, try rewrite.finish())
+
+## Size `at` of a primitive's sizes (1 when missing).
+func size_at(sizes: const f64[], at: usize) -> f64:
+    return sizes[at] if at < sizes.length else 1.0
+
+## A heap copy of `source` with `sdf` (taken) as its SDF.
+func with_program(source: const GeometrySet*, sdf: Sdf*) -> interop.Reference[GeometrySet]!:
+    let storage = set_storage(source) catch failure:
+        release_sdf(sdf)
+        error(failure.code, failure.message)
+    set_put(storage, sdf_type(), (void*)sdf) catch failure:
+        dispose_set(storage)
+        error(failure.code, failure.message)
+    return try adopt_set(storage)
+
+## The primitives a group names on a proxy mesh, and its faces' centroid.
+struct ChosenPrimitives:
+    var marks: Growing[bool]
+    var centroid: Vector3
+
+    static func of(pick: const Mesh*, group: str, count: usize) -> ChosenPrimitives!:
+        var result = ChosenPrimitives(Growing[bool](), Vector3())
+        errdefer result.close()
+        try result.marks.fill(count, false)
+        let tag = pick.find_attribute("sdf_prim", 2)
+        if tag < 0: error(errors.invalid, "the pick mesh has no SDF primitive tags")
+        var found = try group_bits(pick, group, Domain.face)
+        defer found.bits.release()
+        let words = found.bits.view()
+        var sum = Vector3()
+        var faces = 0.0
+        for face in 0..<pick.face_count():
+            if (words[(usize)face >> 6] >> (u64)((usize)face & 63)) & 1 == 0: continue
+            let index = (usize)(try pick.attribute_value(tag, face))
+            if index >= count: error(errors.invalid, "the pick mesh does not match the SDF: undo the upstream change or clear this node's edits")
+            result.marks.items[index] = true
+            sum = sum.add(try pick.face_center(face))
+            faces += 1.0
+        if faces > 0.0: result.centroid = sum.multiply_scalar(1.0 / faces)
+        return result
+
+    mutating func close():
+        self.marks.close()

@@ -179,6 +179,9 @@ func decode_set(reader: GeometryReader*, path: str) -> GeometrySet*!:
         if header.name == "version" and (try reader.integer(header)) != 1: error(errors.invalid, "this geometry file is from another format version")
     while let found = try reader.next_child(path):
         let child = found.0
+        if found.1 == "attribute":
+            try set_put_detail(storage, try reader.attribute())
+            continue
         let codec = codec_of(found.1) else error(errors.invalid, "the file holds a geometry family with no codec here")
         let decode = codec.decode
         let data = try decode(reader, child)

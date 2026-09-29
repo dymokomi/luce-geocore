@@ -1,0 +1,287 @@
+## Luce's Edit Sketch operations: planar sketches as curves. Shapes (line,
+## polyline, arc, circle, rectangle, spline) are made on the set's sketch
+## plane (sketch_pick.lucb);
+## steps name control points, segments or curves by a group on the pick
+## cloud they were made on (sketch_pick.lucb) and move, delete, close, open
+## or snap them. Every change of positions goes through `placed_curves`, the
+## one place a constraint solver would adjust targets before they land.
+## Other components of the set pass through.
+
+pub struct Sketches:
+    let reserved: u8 = 0
+
+    ## The sketch plane: its origin, normal and in-plane axes.
+    pub static func plane_origin(geometry: interop.Reference[GeometrySet]) -> Vector3!:
+        return (try sketch_plane_of(try geometry.get())).origin
+    pub static func plane_normal(geometry: interop.Reference[GeometrySet]) -> Vector3!:
+        return (try sketch_plane_of(try geometry.get())).normal
+    pub static func plane_u(geometry: interop.Reference[GeometrySet]) -> Vector3!:
+        return (try sketch_plane_of(try geometry.get())).u
+    pub static func plane_v(geometry: interop.Reference[GeometrySet]) -> Vector3!:
+        return (try sketch_plane_of(try geometry.get())).v
+
+    ## The set with its sketch plane through `origin` facing `normal`
+    ## (curves already drawn stay where they are).
+    pub static func with_plane(geometry: interop.Reference[GeometrySet], origin: Vector3, normal: Vector3) -> interop.Reference[GeometrySet]!:
+        let plane = try SketchPlane.of(origin, normal)
+        let placed = try geometry.value().with_detail("sketch.plane_origin", [plane.origin.x, plane.origin.y, plane.origin.z], 1)
+        defer placed.release()
+        return try placed.value().with_detail("sketch.plane_normal", [plane.normal.x, plane.normal.y, plane.normal.z], 3)
+
+    pub static func curve_count(geometry: interop.Reference[GeometrySet]) -> i64!:
+        let curves = set_curves(try geometry.get()) else return 0
+        return (i64)curves.curve_count()
+
+    ## The set with shape `shape` added on its sketch plane, centred at plane
+    ## coordinates (`a`, `b`): 0 a line (length), 1 a polyline (width,
+    ## height), 2 an arc (radius, start and end degrees), 3 a circle
+    ## (radius), 4 a rectangle (width, height), 5 a spline (width, height).
+    ## Arcs and circles are exact NURBS; the spline is a cubic NURBS.
+    pub static func with_shape(geometry: interop.Reference[GeometrySet], shape: i64, sizes: const f64[], a: f64, b: f64) -> interop.Reference[GeometrySet]!:
+        let source = try geometry.get()
+        let existing = set_curves(source)
+        let plane = try sketch_plane_of(source)
+        let first = sized(sizes, 0, 2.0)
+        let second = sized(sizes, 1, 1.0)
+        var out = CurvesBuilder()
+        defer out.close()
+        if let curves = existing:
+            for curve in 0..<curves.curve_count(): try out.copy_curve(curves, curve)
+        if shape == 2 or shape == 3:
+            var arc = Owned(try arc_curves(first, sized(sizes, 1, 0.0) if shape == 2 else 0.0, sized(sizes, 2, 90.0) if shape == 2 else 360.0, 1, 2, 0, default_resolution))
+            defer arc.release()
+            try copy_onto(&out, arc.value(), plane, a, b)
+        elif shape == 0:
+            try out.begin(CurveType.poly)
+            try out.point(plane.at(a - first * 0.5, b))
+            try out.point(plane.at(a + first * 0.5, b))
+        elif shape == 4:
+            try out.begin(CurveType.poly, true)
+            for corner in 0..<(usize)4:
+                let sx = 0.5 if corner == 1 or corner == 2 else -0.5
+                let sy = 0.5 if corner >= 2 else -0.5
+                try out.point(plane.at(a + first * sx, b + second * sy))
+        elif shape == 1 or shape == 5:
+            try out.begin(CurveType.nurbs if shape == 5 else CurveType.poly)
+            let steps: f64[4] = [-0.5, -0.1666666666666667, 0.1666666666666667, 0.5]
+            for at in 0..<(usize)4:
+                try out.point(plane.at(a + first * steps[at], b + second * (0.5 if at % 2 == 1 else -0.5)))
+        else:
+            error(errors.invalid, "a sketch shape is 0..5")
+        let made = try out.finish(existing)
+        return try adopt_set(try with_curves(source, made))
+
+    ## What level `level` picks on: 0 Object and 1 Segments the sample cloud,
+    ## 2 Points the control points (an empty mesh without curves).
+    pub static func pick(geometry: interop.Reference[GeometrySet], level: i64) -> interop.Reference[Mesh]!:
+        let curves = set_curves(try geometry.get()) else return try Mesh.empty()
+        if level == 2: return try control_cloud(curves)
+        return try sample_cloud(curves)
+
+    ## The set with what `group` names (on `group_type`, see SketchChoice)
+    ## moved by Transform Components' numbers; the translation stays in the
+    ## sketch plane. The centroid pivot is the picked points'.
+    pub static func moved(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
+        if numbers.length < 13: error(errors.invalid, "a transform needs its thirteen numbers")
+        let source = try geometry.get()
+        let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves to move")
+        var chosen = try SketchChoice.of(curves, try pick.get(), group, group_type)
+        defer chosen.close()
+        let plane = try sketch_plane_of(source)
+        let degrees = 0.017453292519943295
+        let linear = Matrix4.compose(Vector3(), Vector3(numbers[3] * degrees, numbers[4] * degrees, numbers[5] * degrees), Vector3(numbers[6], numbers[7], numbers[8]))
+        var pivot = Vector3(numbers[10], numbers[11], numbers[12])
+        if numbers[9] == 1.0: pivot = Vector3()
+        elif numbers[9] == 0.0: pivot = chosen.centroid
+        var shift = Vector3(numbers[0], numbers[1], numbers[2])
+        shift = shift.subtract(plane.normal.multiply_scalar(shift.dot(plane.normal)))
+        let delta = Matrix4(linear.x, linear.y, linear.z, shift.add(pivot).subtract(linear.transform_point(pivot)))
+        var targets = Growing[Vector3]()
+        defer targets.close()
+        for at in 0..<curves.point_count():
+            let here = curves.point(at)
+            try targets.push(delta.transform_point(here) if chosen.points.items[at] else here)
+        return try adopt_set(try with_curves(source, try placed_curves(curves, targets.view(), chosen.points.view(), linear)))
+
+    ## The set with the chosen control points snapped to a grid of
+    ## `spacing` in the sketch plane (their height off it kept).
+    pub static func snapped(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, spacing: f64) -> interop.Reference[GeometrySet]!:
+        if not (spacing > 0.0): error(errors.invalid, "a grid needs a positive spacing")
+        let source = try geometry.get()
+        let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves to snap")
+        var chosen = try SketchChoice.of(curves, try pick.get(), group, group_type)
+        defer chosen.close()
+        let plane = try sketch_plane_of(source)
+        var targets = Growing[Vector3]()
+        defer targets.close()
+        for at in 0..<curves.point_count():
+            let here = curves.point(at)
+            if not chosen.points.items[at]:
+                try targets.push(here)
+                continue
+            let offset = here.subtract(plane.origin)
+            let a = math.round(offset.dot(plane.u) / spacing) * spacing
+            let b = math.round(offset.dot(plane.v) / spacing) * spacing
+            try targets.push(plane.at(a, b).add(plane.normal.multiply_scalar(offset.dot(plane.normal))))
+        return try adopt_set(try with_curves(source, try placed_curves(curves, targets.view(), chosen.points.view(), Matrix4())))
+
+    ## The set with each chosen end point of an open curve moved onto the
+    ## nearest end point of another curve (or its own other end) within
+    ## `tolerance`.
+    pub static func joined(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, tolerance: f64) -> interop.Reference[GeometrySet]!:
+        if not (tolerance > 0.0): error(errors.invalid, "snapping ends needs a positive tolerance")
+        let source = try geometry.get()
+        let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves to join")
+        var chosen = try SketchChoice.of(curves, try pick.get(), group, group_type)
+        defer chosen.close()
+        var ends = Growing[usize]()
+        defer ends.close()
+        for curve in 0..<curves.curve_count():
+            let (first, points) = curves.range(curve)
+            if points < 2 or curves.settings(curve).cyclic: continue
+            try ends.push(first)
+            try ends.push(first + points - 1)
+        var targets = Growing[Vector3]()
+        defer targets.close()
+        for at in 0..<curves.point_count(): try targets.push(curves.point(at))
+        for end in ends.view():
+            if not chosen.points.items[end]: continue
+            let here = curves.point(end)
+            var best = tolerance
+            for other in ends.view():
+                if other == end: continue
+                let distance = curves.point(other).subtract(here).length()
+                if distance <= best and not (chosen.points.items[other] and other < end):
+                    best = distance
+                    targets.items[end] = curves.point(other)
+        return try adopt_set(try with_curves(source, try placed_curves(curves, targets.view(), chosen.points.view(), Matrix4())))
+
+    ## The set without what `group` names: control points (their curves keep
+    ## the rest), segments (open curves split there; closed ones open) or
+    ## whole curves. Curves left under two points go.
+    pub static func without(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64) -> interop.Reference[GeometrySet]!:
+        let source = try geometry.get()
+        let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves to delete")
+        var chosen = try SketchChoice.of(curves, try pick.get(), group, group_type)
+        defer chosen.close()
+        var out = CurvesBuilder()
+        defer out.close()
+        var run = Growing[usize]()
+        defer run.close()
+        var segment_base: usize = 0
+        for curve in 0..<curves.curve_count():
+            let (first, points) = curves.range(curve)
+            let cyclic = curves.settings(curve).cyclic
+            let segments = segment_count(curves, curve)
+            let base = segment_base
+            segment_base += segments
+            if not chosen.curves.items[curve]:
+                try out.copy_curve(curves, curve)
+                continue
+            if group_type == 3: continue
+            if group_type == 1:
+                run.clear()
+                for at in first..<first + points:
+                    if not chosen.points.items[at]: try run.push(at)
+                if run.count >= 2: try copy_points(&out, curves, curve, run.view(), cyclic and run.count >= 3)
+                continue
+            # Segments: runs of kept segments become curves, a closed curve
+            # starting after its first removed segment.
+            var start: usize = 0
+            while start < segments and not chosen.segments.items[base + start]: start += 1
+            if start == segments:
+                try out.copy_curve(curves, curve)
+                continue
+            start = (start + 1) % segments if cyclic else 0
+            run.clear()
+            for step in 0..<segments:
+                let segment = (start + step) % segments
+                if chosen.segments.items[base + segment]:
+                    if run.count >= 2: try copy_points(&out, curves, curve, run.view(), false)
+                    run.clear()
+                    continue
+                if run.count == 0: try run.push(first + segment)
+                try run.push(first + (segment + 1) % points)
+            if run.count >= 2: try copy_points(&out, curves, curve, run.view(), false)
+        return try adopt_set(try with_curves(source, try out.finish(curves)))
+
+    ## The set with the curves `group` touches closed (`cyclic`) or opened.
+    pub static func with_closure(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, cyclic: bool) -> interop.Reference[GeometrySet]!:
+        let source = try geometry.get()
+        let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves")
+        var chosen = try SketchChoice.of(curves, try pick.get(), group, group_type)
+        defer chosen.close()
+        var out = CurvesBuilder()
+        defer out.close()
+        var every = Growing[usize]()
+        defer every.close()
+        for curve in 0..<curves.curve_count():
+            let (first, points) = curves.range(curve)
+            if not chosen.curves.items[curve] or points < 2 or (cyclic and points < 3):
+                try out.copy_curve(curves, curve)
+                continue
+            every.clear()
+            for at in first..<first + points: try every.push(at)
+            try copy_points(&out, curves, curve, every.view(), cyclic)
+        return try adopt_set(try with_curves(source, try out.finish(curves)))
+
+## Size `at` of a shape's sizes, else `fallback`.
+func sized(sizes: const f64[], at: usize, fallback: f64) -> f64:
+    return sizes[at] if at < sizes.length else fallback
+
+## Every curve of `source` onto `out`, mapped from the XY plane onto
+## `plane` around its coordinates (a, b), weights and knots kept.
+func copy_onto(out: CurvesBuilder*, source: const Curves*, plane: SketchPlane, a: f64, b: f64) -> !:
+    let weights = weight_span(source)
+    for curve in 0..<source.curve_count():
+        try out.begin_like(source, curve)
+        let (first, points) = source.range(curve)
+        for at in first..<first + points:
+            let p = source.point(at)
+            try out.point(plane.at(a + p.x, b + p.y))
+            if let w = weights: out.weight((f64)w[at])
+        let knots = source.custom_knots(curve)
+        for value in knots: try out.knots.push(value)
+        if knots.length > 0: out.any_knots = true
+
+## Control points `indices` (global ids, in order) of curve `curve` as a new
+## curve like it, closed when `cyclic`. Custom knots do not survive a
+## change of points: such a curve takes endpoint knots.
+func copy_points(out: CurvesBuilder*, source: const Curves*, curve: usize, indices: const usize[], cyclic: bool) -> !:
+    let settings = source.settings(curve)
+    try out.begin(settings.kind, cyclic, (i64)settings.resolution, (i64)settings.order, KnotMode.endpoint if settings.knot_mode == KnotMode.custom else settings.knot_mode, (i32)curve)
+    let left = float3_span(source, "handle_l")
+    let right = float3_span(source, "handle_r")
+    let weights = weight_span(source)
+    for at in indices:
+        try out.point(source.point(at), (i32)at)
+        if let l = left:
+            if let r = right: out.handles(l[at].vector().add(source.origin), r[at].vector().add(source.origin))
+        if let w = weights: out.weight((f64)w[at])
+
+## `curves` with its control points at `targets` (world, one per point):
+## the moved points' (`moved`) Bezier handles turn by `linear` and follow
+## them. The single entry for changing sketch positions: a constraint
+## solver would adjust `targets` here, holding what the user moved.
+pub func placed_curves(curves: const Curves*, targets: const Vector3[], moved: const bool[], linear: Matrix4) -> Curves*!:
+    var out = CurvesBuilder()
+    defer out.close()
+    let left = float3_span(curves, "handle_l")
+    let right = float3_span(curves, "handle_r")
+    let weights = weight_span(curves)
+    for curve in 0..<curves.curve_count():
+        try out.begin_like(curves, curve, (i32)curve)
+        let (first, points) = curves.range(curve)
+        for at in first..<first + points:
+            try out.point(targets[at], (i32)at)
+            if let l = left:
+                if let r = right:
+                    let here = curves.point(at)
+                    let turn = linear if moved[at] else Matrix4()
+                    out.handles(targets[at].add(turn.transform_direction(l[at].vector().add(curves.origin).subtract(here))),
+                                targets[at].add(turn.transform_direction(r[at].vector().add(curves.origin).subtract(here))))
+            if let w = weights: out.weight((f64)w[at])
+        let knots = curves.custom_knots(curve)
+        for value in knots: try out.knots.push(value)
+        if knots.length > 0: out.any_knots = true
+    return try out.finish(curves)

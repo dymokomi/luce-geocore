@@ -1,0 +1,75 @@
+## Detail attributes on a set: present with no components, kept through
+## component changes, moved by a Transform by role, first-wins on merge,
+## and saved and loaded by the codec.
+import interop
+import math
+from io import path
+from geocore import Vector3, Mesh, GeometrySet
+from geocore_kernel import empty_set, adopt_set, save_geometry, load_geometry
+from geocore_growing import Growing
+
+func near(a: f64, b: f64) -> bool:
+    return math.abs(a - b) < 0.00001
+
+func vector_of(geometry: interop.Reference[GeometrySet], name: str) -> Vector3!:
+    let set = geometry.value()
+    return Vector3(try set.detail_value(name, 0), try set.detail_value(name, 1), try set.detail_value(name, 2))
+
+func same(a: Vector3, b: Vector3) -> bool:
+    return near(a.x, b.x) and near(a.y, b.y) and near(a.z, b.z)
+
+pub func exercise() -> !:
+    let empty = try adopt_set(try empty_set())
+    defer empty.release()
+    let origin = try empty.value().with_detail("sketch.plane_origin", [0.0, 0.0, 1.0], 1)
+    defer origin.release()
+    let planed = try origin.value().with_detail("sketch.plane_normal", [0.0, 0.0, 1.0], 3)
+    defer planed.release()
+    let set = planed.value()
+    assert(set.is_empty() and set.detail_count() == 2 and set.has_detail("sketch.plane_origin") and set.detail_width("sketch.plane_normal") == 3)
+    assert(not empty.value().has_detail("sketch.plane_origin"))
+    # Kept when a component comes and goes.
+    let cube = try Mesh.cube(1.0)
+    defer cube.release()
+    let meshed = try set.with_mesh(cube)
+    defer meshed.release()
+    let bare = try meshed.value().with_mesh(none)
+    defer bare.release()
+    assert(same(try vector_of(bare, "sketch.plane_origin"), Vector3(0.0, 0.0, 1.0)))
+    # Their content key holds while only components change.
+    assert(bare.value().detail_key() == set.detail_key() and meshed.value().detail_key() == set.detail_key() and origin.value().detail_key() != set.detail_key())
+    # A Transform moves the origin and turns the normal.
+    let moved = try set.transformed(Vector3(1.0, 0.0, 0.0), Vector3(1.5707963267948966, 0.0, 0.0), Vector3(1.0, 1.0, 1.0))
+    defer moved.release()
+    assert(same(try vector_of(moved, "sketch.plane_origin"), Vector3(1.0, -1.0, 0.0)) and same(try vector_of(moved, "sketch.plane_normal"), Vector3(0.0, -1.0, 0.0)))
+    # Merge: the first set's values, plus what only the second has.
+    let other = try empty.value().with_detail("sketch.plane_origin", [5.0, 5.0, 5.0], 1)
+    defer other.release()
+    let extra = try other.value().with_detail("note", [7.0])
+    defer extra.release()
+    let merged = try set.merged(extra)
+    defer merged.release()
+    assert(same(try vector_of(merged, "sketch.plane_origin"), Vector3(0.0, 0.0, 1.0)) and near(try merged.value().detail_value("note"), 7.0) and merged.value().detail_count() == 3)
+    let removed = try merged.value().without_detail("note")
+    defer removed.release()
+    assert(removed.value().detail_count() == 2)
+    # The codec round trip, with and without components.
+    var file = Growing[u8]()
+    defer file.close()
+    try file.assign(path.temp().bytes)
+    try file.push(47)
+    for byte in "luce-geocore-detail.prism".bytes: try file.push(byte)
+    try round_trip(planed, (str)file.view())
+    try round_trip(meshed, (str)file.view())
+
+## `source` saved to `file` and loaded back keeps its detail attributes.
+func round_trip(source: interop.Reference[GeometrySet], file: str) -> !:
+    discard(try save_geometry(source.value(), file, 3, 268435456))
+    let loaded = try adopt_set(try load_geometry(file))
+    defer loaded.release()
+    assert(loaded.value().detail_count() == 2 and same(try vector_of(loaded, "sketch.plane_normal"), Vector3(0.0, 0.0, 1.0)))
+    assert(loaded.value().has_mesh() == source.value().has_mesh())
+
+pub func run() -> !:
+    try exercise()
+    print("PASS detail attributes: without components, through component changes, Transform by role, merge, codec")

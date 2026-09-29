@@ -4,6 +4,9 @@
 ## Bytes of the arrays of every component that `ids` has not seen.
 pub func set_bytes(set: const GeometrySet*, ids: IdSet*) -> usize!:
     var total: usize = 64
+    for index in 0..<set.detail.count():
+        let entry = set.detail.entry(index)
+        total += try ids.charge(entry.data.id(), entry.data.bytes())
     for entry in set.entries.view():
         let bytes = entry.kind.bytes
         total += try bytes(entry.data, ids)
@@ -30,24 +33,30 @@ pub func set_paths(set: const GeometrySet*, out: TableBuilder*) -> !:
 pub func set_filtered(set: const GeometrySet*, filter: const PathFilter*, keep: bool) -> GeometrySet*!:
     let result = try empty_storage()
     errdefer dispose_set(result)
+    try result.take_detail(try set.detail.shared())
     for entry in set.entries.view():
         let filtered = entry.kind.filtered
         try result.put(entry.kind, try filtered(entry.data, filter, keep))
     return result
 
-## Each component placed.
+## Each component placed, and the detail attributes with roles.
 pub func set_placed(set: const GeometrySet*, placement: const Placement*) -> GeometrySet*!:
     let result = try empty_storage()
     errdefer dispose_set(result)
+    try result.take_detail(try placed_detail(&set.detail, placement.matrix))
     for entry in set.entries.view():
         let placed = entry.kind.placed
         try result.put(entry.kind, try placed(entry.data, placement))
     return result
 
 ## Both sets' components; a family both have is joined, `first`'s first.
+## Detail attributes are the first's, plus the second's it lacks.
 pub func set_joined(first: const GeometrySet*, second: const GeometrySet*) -> GeometrySet*!:
     let result = try first.storage()
     errdefer dispose_set(result)
+    for index in 0..<second.detail.count():
+        let entry = second.detail.entry(index)
+        if result.detail.find(entry.name(), (i64)(u8)Domain.detail) < 0: try result.detail.put(entry.share())
     for entry in second.entries.view():
         if let mine = first.find(entry.kind):
             let joined = entry.kind.joined

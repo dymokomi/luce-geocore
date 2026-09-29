@@ -1,0 +1,183 @@
+## Edit Sketch's plane and pick geometry. The sketch plane is the set's
+## detail attributes `sketch.plane_origin` (a position) and
+## `sketch.plane_normal` (a normal), so it exists before any curve, moves
+## with a Transform and reaches nodes downstream; unset, it is the ground
+## (ZX). Curves are picked on faceless point clouds, which
+## luce-3d picks by screen distance: the control points (the Points level),
+## or samples along every curve tagged with their `curve` and `segment`
+## (Object and Segments). A segment runs between consecutive control points
+## (the last to the first on a closed curve); segments are numbered across
+## all curves in order.
+
+## Samples per evaluated edge of a poly curve (whose edges are its long
+## segments), and of the other types (already evaluated finely).
+let poly_samples: usize = 8
+
+pub struct SketchPlane:
+    pub let origin: Vector3
+    pub let normal: Vector3
+    pub let u: Vector3
+    pub let v: Vector3
+
+    ## The plane through `origin` facing `normal`, with in-plane axes: X and
+    ## Y on XY, Y and Z on YZ, Z and X on the ground, else any pair.
+    pub static func of(origin: Vector3, normal: Vector3) -> SketchPlane!:
+        let n = normal.normalized() catch failure: error(errors.invalid, "a sketch plane needs a nonzero normal")
+        var u = Vector3(0.0, 0.0, 1.0)
+        if math.abs(n.z) >= 0.99: u = Vector3(1.0, 0.0, 0.0)
+        elif math.abs(n.x) >= 0.99: u = Vector3(0.0, 1.0, 0.0)
+        elif math.abs(n.y) < 0.99: u = try Vector3(0.0, 1.0, 0.0).subtract(n.multiply_scalar(n.y)).normalized()
+        u = try u.subtract(n.multiply_scalar(u.dot(n))).normalized()
+        return SketchPlane(origin, n, u, n.cross(u))
+
+    ## Plane coordinates (a, b) as a world point.
+    pub func at(a: f64, b: f64) -> Vector3:
+        return self.origin.add(self.u.multiply_scalar(a)).add(self.v.multiply_scalar(b))
+
+## The sketch plane of `set` (the ground when unset).
+pub func sketch_plane_of(set: const GeometrySet*) -> SketchPlane!:
+    let store = set_detail(set)
+    return try SketchPlane.of(detail_vector(store, "sketch.plane_origin", Vector3()), detail_vector(store, "sketch.plane_normal", Vector3(0.0, 1.0, 0.0)))
+
+## Detail attribute `name` as a vector, or `fallback`.
+func detail_vector(store: const AttributeStore*, name: str, fallback: Vector3) -> Vector3:
+    let index = store.find(name, (i64)(u8)Domain.detail)
+    if index < 0: return fallback
+    let entry = store.entry((usize)index)
+    if entry.width != 3: return fallback
+    return Vector3(entry.number(0, 0), entry.number(0, 1), entry.number(0, 2))
+
+## Segments of curve `curve` (points - 1 open, points closed, none under
+## two points).
+func segment_count(curves: const Curves*, curve: usize) -> usize:
+    let (first, points) = curves.range(curve)
+    discard(first)
+    if points < 2: return 0
+    return points if curves.settings(curve).cyclic else points - 1
+
+## The control points as a faceless cloud, each tagged with its curve.
+pub func control_cloud(curves: const Curves*) -> interop.Reference[Mesh]!:
+    var out = try MeshBuilder()
+    defer out.close()
+    var tags = Growing[f64]()
+    defer tags.close()
+    for curve in 0..<curves.curve_count():
+        let (first, points) = curves.range(curve)
+        for at in first..<first + points:
+            discard(try out.point(curves.point(at)))
+            try tags.push((f64)curve)
+    let cloud = try out.finish()
+    defer cloud.release()
+    return try cloud.value().with_attribute("curve", 0, 1, tags.view(), true)
+
+## Samples along every curve's evaluated line as a faceless cloud, tagged
+## with their `curve` and `segment`.
+pub func sample_cloud(curves: const Curves*) -> interop.Reference[Mesh]!:
+    let evaluated = try evaluated_offsets(curves)
+    let positions = try evaluated_positions(curves)
+    var out = try MeshBuilder()
+    defer out.close()
+    var curve_tags = Growing[f64]()
+    defer curve_tags.close()
+    var segment_tags = Growing[f64]()
+    defer segment_tags.close()
+    var base: usize = 0
+    for curve in 0..<curves.curve_count():
+        let (first, points) = curves.range(curve)
+        let segments = segment_count(curves, curve)
+        let start = (usize)evaluated[curve]
+        let count = (usize)evaluated[curve + 1] - start
+        if points == 0 or count == 0: continue
+        if segments == 0 or count < 2:
+            discard(try out.point(curves.point(first)))
+            try curve_tags.push((f64)curve)
+            try segment_tags.push(-1.0)
+            base += segments
+            continue
+        let cyclic = curves.settings(curve).cyclic
+        let steps = poly_samples if curves.settings(curve).kind == CurveType.poly else (usize)1
+        let edges = count if cyclic else count - 1
+        for edge in 0..<edges:
+            let a = positions[start + edge].vector()
+            let b = positions[start + (edge + 1) % count].vector()
+            for step in 0..<steps:
+                let t = (f64)step / (f64)steps
+                discard(try out.point(a.multiply_scalar(1.0 - t).add(b.multiply_scalar(t)).add(curves.origin)))
+                let (parent, other, share) = control_parents(curves, curve, count, edge, t)
+                discard(other)
+                discard(share)
+                try curve_tags.push((f64)curve)
+                let within = (usize)parent - first
+                try segment_tags.push((f64)(base + (within if within < segments else segments - 1)))
+        if not cyclic:
+            discard(try out.point(positions[start + count - 1].vector().add(curves.origin)))
+            try curve_tags.push((f64)curve)
+            try segment_tags.push((f64)(base + segments - 1))
+        base += segments
+    let cloud = try out.finish()
+    defer cloud.release()
+    let tagged = try cloud.value().with_attribute("curve", 0, 1, curve_tags.view(), true)
+    defer tagged.release()
+    return try tagged.value().with_attribute("segment", 0, 1, segment_tags.view(), true)
+
+## What a step's group names on its pick cloud: control points (Group Type
+## points), segments (edges) or whole curves (primitives), as the control
+## points that move, the curves touched and the segments named; and the
+## centroid of the picked points (the gizmo's pivot).
+pub struct SketchChoice:
+    pub var points: Growing[bool]
+    pub var curves: Growing[bool]
+    pub var segments: Growing[bool]
+    pub var centroid: Vector3
+    pub var any: bool
+
+    pub static func of(curves: const Curves*, pick: const Mesh*, group: str, group_type: i64) -> SketchChoice!:
+        var result = SketchChoice(Growing[bool](), Growing[bool](), Growing[bool](), Vector3(), false)
+        errdefer result.close()
+        try result.points.fill(curves.point_count(), false)
+        try result.curves.fill(curves.curve_count(), false)
+        var bases = Growing[usize]()
+        defer bases.close()
+        var total: usize = 0
+        for curve in 0..<curves.curve_count():
+            try bases.push(total)
+            total += segment_count(curves, curve)
+        try result.segments.fill(total, false)
+        let curve_tag = pick.find_attribute("curve", 0)
+        let segment_tag = pick.find_attribute("segment", 0)
+        if curve_tag < 0 or (group_type != 1 and segment_tag < 0): error(errors.invalid, "the pick cloud does not match the sketch: undo the upstream change or clear this node's edits")
+        if group_type == 1 and (usize)pick.point_count() != curves.point_count(): error(errors.invalid, "the pick cloud does not match the sketch's points")
+        var found = try group_bits(pick, group, Domain.point)
+        defer found.bits.release()
+        let words = found.bits.view()
+        var sum = Vector3()
+        var count = 0.0
+        for point in 0..<pick.point_count():
+            if (words[(usize)point >> 6] >> (u64)((usize)point & 63)) & 1 == 0: continue
+            sum = sum.add(try pick.point(point))
+            count += 1.0
+            let curve = (usize)(try pick.attribute_value(curve_tag, point))
+            if curve >= curves.curve_count(): error(errors.invalid, "the pick cloud does not match the sketch's curves")
+            result.curves.items[curve] = true
+            let (first, points) = curves.range(curve)
+            if group_type == 1:
+                result.points.items[(usize)point] = true
+            elif group_type == 2:
+                let segment = try pick.attribute_value(segment_tag, point)
+                if segment < 0.0: continue
+                let within = (usize)segment - bases.items[curve]
+                if within >= points: error(errors.invalid, "the pick cloud does not match the sketch's segments")
+                result.segments.items[(usize)segment] = true
+                result.points.items[first + within] = true
+                result.points.items[first + (within + 1) % points] = true
+            else:
+                for at in first..<first + points: result.points.items[at] = true
+        if count > 0.0:
+            result.centroid = sum.multiply_scalar(1.0 / count)
+            result.any = true
+        return result
+
+    pub mutating func close():
+        self.points.close()
+        self.curves.close()
+        self.segments.close()

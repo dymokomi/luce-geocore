@@ -1,0 +1,139 @@
+## Proxy meshes of an SDF's primitives (Edit SDF picks on them): each
+## primitive's own shape, placed by every transform around it, its faces
+## tagged `sdf_prim` with the primitive's number. A proxy's topology depends
+## only on its shape, so moving primitives keeps selections valid, and a
+## subtracted primitive stays pickable where the surface no longer shows it.
+## Modifiers (round, shell) do not change proxies.
+
+let proxy_segments: i64 = 16
+
+## The proxies of `sdf`'s primitives as one mesh (empty without any).
+pub func sdf_proxies(sdf: const Sdf*) -> interop.Reference[Mesh]!:
+    var tree = try SdfTree.of(sdf)
+    defer tree.close()
+    if tree.primitive_count() == 0: return try Mesh.empty()
+    var out = try MeshBuilder()
+    defer out.close()
+    var tags = Growing[f64]()
+    defer tags.close()
+    let params = sdf.param_span()
+    for index in 0..<tree.primitive_count():
+        let node = tree.primitive(index)
+        let p = params[(usize)node.start * sdf_stride..<((usize)node.start + 1) * sdf_stride]
+        let world = tree.primitive_world(index).multiply(Matrix4(Vector3(1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0), Vector3((f64)p[0], (f64)p[1], (f64)p[2])))
+        match node.op:
+            0: try lathe(&out, world, sphere_profile((f64)p[3], 0.0), false)
+            1: try cuboid(&out, world, Vector3((f64)p[3], (f64)p[4], (f64)p[5]))
+            2: try lathe(&out, world, torus_profile((f64)p[3], (f64)p[4]), true)
+            3: try lathe(&out, world, sphere_profile((f64)p[4], (f64)p[3]), false)
+            _: try lathe(&out, world, cylinder_profile((f64)p[3], (f64)p[4]), false)
+        try tags.extend(out.nf, (f64)index)
+    let shapes = try out.finish()
+    defer shapes.release()
+    return try shapes.value().with_attribute("sdf_prim", 2, 1, tags.view(), true)
+
+## A profile of (radius, height) pairs, top to bottom, revolved about Y.
+struct Profile:
+    var radii: f64[24]
+    var heights: f64[24]
+    var count: usize
+
+    static func empty() -> Profile:
+        var result: Profile = ---
+        result.count = 0
+        return result
+
+    mutating func add(radius: f64, height: f64):
+        self.radii[self.count] = radius
+        self.heights[self.count] = height
+        self.count += 1
+
+## A sphere of `radius`; with `stretch`, a capsule whose halves sit
+## `stretch` above and below the middle.
+func sphere_profile(radius: f64, stretch: f64) -> Profile:
+    var result = Profile.empty()
+    let rows: i64 = 8
+    result.add(0.0, radius + stretch)
+    for row in 1..<rows:
+        let theta = (f64)row * 3.141592653589793 / (f64)rows
+        let r = math.sin(theta) * radius
+        let y = math.cos(theta) * radius
+        if row * 2 == rows and stretch > 0.0:
+            result.add(r, stretch)
+            result.add(r, -stretch)
+        else:
+            result.add(r, y + (stretch if row * 2 < rows else -stretch))
+    result.add(0.0, -radius - stretch)
+    return result
+
+func cylinder_profile(radius: f64, half: f64) -> Profile:
+    var result = Profile.empty()
+    result.add(0.0, half)
+    result.add(radius, half)
+    result.add(radius, -half)
+    result.add(0.0, -half)
+    return result
+
+## The tube's circle around the ring (a closed profile).
+func torus_profile(major: f64, minor: f64) -> Profile:
+    var result = Profile.empty()
+    let rows: i64 = 8
+    for row in 0..<rows:
+        let theta = (f64)row * 2.0 * 3.141592653589793 / (f64)rows
+        result.add(major + math.cos(theta) * minor, math.sin(theta) * minor)
+    return result
+
+## `profile` revolved about the local Y axis in `proxy_segments` steps and
+## placed by `world`. An open profile's ends of radius 0 are poles; a
+## closed one joins its last row to its first.
+func lathe(out: MeshBuilder*, world: Matrix4, profile: Profile, closed: bool) -> !:
+    let first = (i64)out.np
+    var rows: i64[24] = ---
+    var poles: bool[24] = ---
+    var next = first
+    for row in 0..<profile.count:
+        rows[row] = next
+        poles[row] = not closed and profile.radii[row] == 0.0 and (row == 0 or row + 1 == profile.count)
+        if poles[row]:
+            discard(try out.point(world.transform_point(Vector3(0.0, profile.heights[row], 0.0))))
+            next += 1
+            continue
+        for segment in 0..<proxy_segments:
+            let phi = (f64)segment * 2.0 * 3.141592653589793 / (f64)proxy_segments
+            discard(try out.point(world.transform_point(Vector3(math.cos(phi) * profile.radii[row], profile.heights[row], math.sin(phi) * profile.radii[row]))))
+        next += proxy_segments
+    let bands = profile.count if closed else profile.count - 1
+    for band in 0..<bands:
+        let upper = band
+        let lower = (band + 1) % profile.count
+        for segment in 0..<proxy_segments:
+            let turn = (segment + 1) % proxy_segments
+            if poles[upper]:
+                try out.face(3)
+                try out.corner(rows[upper])
+                try out.corner(rows[lower] + turn)
+                try out.corner(rows[lower] + segment)
+            elif poles[lower]:
+                try out.face(3)
+                try out.corner(rows[upper] + segment)
+                try out.corner(rows[upper] + turn)
+                try out.corner(rows[lower])
+            else:
+                try out.face(4)
+                try out.corner(rows[upper] + segment)
+                try out.corner(rows[upper] + turn)
+                try out.corner(rows[lower] + turn)
+                try out.corner(rows[lower] + segment)
+
+## A box of half size `half` placed by `world`.
+func cuboid(out: MeshBuilder*, world: Matrix4, half: Vector3) -> !:
+    let first = (i64)out.np
+    for corner in 0..<(i64)8:
+        let x = half.x if corner & 1 != 0 else -half.x
+        let y = half.y if corner & 2 != 0 else -half.y
+        let z = half.z if corner & 4 != 0 else -half.z
+        discard(try out.point(world.transform_point(Vector3(x, y, z))))
+    let sides: i64[24] = [0, 2, 3, 1, 4, 5, 7, 6, 0, 1, 5, 4, 2, 6, 7, 3, 0, 4, 6, 2, 1, 3, 7, 5]
+    for side in 0..<(usize)6:
+        try out.face(4)
+        for at in 0..<(usize)4: try out.corner(first + sides[side * 4 + at])

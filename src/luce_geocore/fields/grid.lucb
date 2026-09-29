@@ -28,7 +28,9 @@ from luce_geocore.core.geometry import Bounds
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
 from luce_geocore.geometries.polygon import Mesh, MeshPart, concatenated, assembled, put_attribute, mesh_dispose, mesh_share, mesh_adopt, point_span, mesh_origin, offset_span, corner_span, triangle_span, face_normal_span, corner_edge_span, point_face_span, edge_corner_span, corner_face_span, nearest_face_within
-from luce_geocore.geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, union_box, set_find, set_put, set_storage, set_mesh, empty_storage, dispose_set
+from luce_geocore.geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, union_box, set_find, set_put, set_remove, set_storage, set_mesh, empty_storage, dispose_set, adopt_set
+from luce_geocore.geometries.builder import MeshBuilder
+from luce_geocore.groups import group_bits
 
 pub let leaf_size: i64 = 8
 pub let leaf_voxels: usize = 512

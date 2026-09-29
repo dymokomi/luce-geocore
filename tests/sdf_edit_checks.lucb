@@ -1,0 +1,130 @@
+## Edit SDF's operations: primitives added with booleans, proxies tagged by
+## primitive with a topology moves keep, moves composing into one transform
+## (inside a placed program too), rotations about the picked centroid,
+## boolean and blend changes, deletes, and malformed picks failing.
+import interop
+import math
+import memory
+from geocore import Vector3, Mesh, GeometrySet, SdfEdits
+from geocore_kernel import set_sdf, empty_set, adopt_set
+
+func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
+    return math.abs(a - b) < tolerance
+
+func distance(geometry: interop.Reference[GeometrySet], point: Vector3) -> f64!:
+    let sdf = set_sdf(try geometry.get()) else error(0, "no SDF")
+    return sdf.distance(point)
+
+func ops(geometry: interop.Reference[GeometrySet]) -> usize!:
+    let sdf = set_sdf(try geometry.get()) else return 0
+    return sdf.op_count()
+
+## The centroid of the proxy faces tagged `prim`.
+func proxy_center(pick: interop.Reference[Mesh], prim: i64) -> Vector3!:
+    let mesh = pick.value()
+    let tag = mesh.find_attribute("sdf_prim", 2)
+    var sum = Vector3()
+    var count = 0.0
+    for face in 0..<mesh.face_count():
+        if (try mesh.attribute_value(tag, face)) != (f64)prim: continue
+        sum = sum.add(try mesh.face_center(face))
+        count += 1.0
+    assert(count > 0.0)
+    return sum.multiply_scalar(1.0 / count)
+
+## Whether deleting everything (`remove`) or subtracting the first shape
+## fails for a reason other than memory (which propagates).
+func refuses(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], remove: bool) -> bool!:
+    if remove:
+        let made = SdfEdits.without(geometry, pick, "*") catch failure:
+            if failure.code == memory.exhausted: error(failure.code, failure.message)
+            return true
+        made.release()
+        return false
+    let made = SdfEdits.with_boolean(geometry, pick, "@sdf_prim=0", 1, -1.0) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
+        return true
+    made.release()
+    return false
+
+pub func exercise() -> !:
+    let empty = try adopt_set(try empty_set())
+    defer empty.release()
+    assert((try SdfEdits.count(empty)) == 0)
+    let nothing = try SdfEdits.proxies(empty)
+    defer nothing.release()
+    assert(nothing.value().face_count() == 0)
+    # A sphere, a box added beside it, a small sphere carved out of the box.
+    let ball = try SdfEdits.with_primitive(empty, 0, [1.0], Vector3(), 0, 0.0)
+    defer ball.release()
+    let both = try SdfEdits.with_primitive(ball, 1, [1.0, 1.0, 1.0], Vector3(3.0, 0.0, 0.0), 0, 0.0)
+    defer both.release()
+    let carved = try SdfEdits.with_primitive(both, 0, [0.3], Vector3(3.0, 0.5, 0.0), 1, 0.0)
+    defer carved.release()
+    assert((try SdfEdits.count(carved)) == 3)
+    assert((try distance(carved, Vector3())) < 0.0 and (try distance(carved, Vector3(3.0, -0.2, 0.0))) < 0.0)
+    assert((try distance(carved, Vector3(3.0, 0.45, 0.0))) > 0.0)
+    let pick = try SdfEdits.proxies(carved)
+    defer pick.release()
+    assert(pick.value().face_count() > 0 and pick.value().find_attribute("sdf_prim", 2) >= 0)
+    let box_center = try proxy_center(pick, 1)
+    assert(near(box_center.x, 3.0, 0.01) and near(box_center.y, 0.0, 0.01))
+    # Moving the box: its proxy follows with the same topology, and a
+    # second move composes into the same transform.
+    let moves: f64[15] = [0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+    let moved = try SdfEdits.transformed(carved, pick, "@sdf_prim=1", moves[..<15])
+    defer moved.release()
+    assert((try distance(moved, Vector3(3.0, 0.0, 4.0))) < 0.0 and (try distance(moved, Vector3(3.0, -0.2, 0.0))) > 0.0)
+    let moved_pick = try SdfEdits.proxies(moved)
+    defer moved_pick.release()
+    assert(moved_pick.value().topology_hash() == pick.value().topology_hash())
+    assert(near((try proxy_center(moved_pick, 1)).z, 4.0, 0.01))
+    let again = try SdfEdits.transformed(moved, moved_pick, "@sdf_prim=1", moves[..<15])
+    defer again.release()
+    assert((try ops(again)) == (try ops(moved)) and (try distance(again, Vector3(3.0, 0.0, 8.0))) < 0.0)
+    # A quarter turn about Y of the box, about its own centroid: its corner
+    # direction changes, its center stays.
+    let turns: f64[15] = [0.0, 0.0, 0.0, 0.0, 45.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+    let turned = try SdfEdits.transformed(carved, pick, "@sdf_prim=1", turns[..<15])
+    defer turned.release()
+    assert((try distance(turned, Vector3(3.0, -0.2, 0.0))) < 0.0)
+    assert((try distance(turned, Vector3(3.6, 0.0, 0.0))) < 0.0 and (try distance(turned, Vector3(3.45, 0.0, 0.45))) > 0.0)
+    # A placed program (the Transform node) still moves its primitive in
+    # world space.
+    let placed_set = try carved.value().transformed(Vector3(0.0, 10.0, 0.0), Vector3(), Vector3(2.0, 2.0, 2.0))
+    defer placed_set.release()
+    let placed_pick = try SdfEdits.proxies(placed_set)
+    defer placed_pick.release()
+    assert(near((try proxy_center(placed_pick, 1)).x, 6.0, 0.01))
+    let placed_move = try SdfEdits.transformed(placed_set, placed_pick, "@sdf_prim=1", moves[..<15])
+    defer placed_move.release()
+    assert((try distance(placed_move, Vector3(6.0, 10.0, 4.0))) < 0.0 and (try distance(placed_move, Vector3(6.0, 9.6, 0.0))) > 0.0)
+    # The box subtracted, then intersected, then added back smoothly.
+    let subtracted = try SdfEdits.with_boolean(carved, pick, "@sdf_prim=1", 1, -1.0)
+    defer subtracted.release()
+    assert((try distance(subtracted, Vector3(3.0, -0.2, 0.0))) > 0.0 and (try distance(subtracted, Vector3())) < 0.0)
+    let intersected = try SdfEdits.with_boolean(both, pick, "@sdf_prim=1", 2, -1.0)
+    defer intersected.release()
+    assert((try distance(intersected, Vector3())) > 0.0)
+    let smooth = try SdfEdits.with_boolean(carved, pick, "@sdf_prim=1", -1, 0.8)
+    defer smooth.release()
+    let seam = Vector3(1.5, 0.0, 0.0)
+    assert((try distance(smooth, seam)) < (try distance(carved, seam)))
+    # The first shape has no boolean.
+    assert(try refuses(carved, pick, false))
+    # Deleting the first sphere leaves the box with its carved hole;
+    # deleting everything drops the SDF.
+    let rest = try SdfEdits.without(carved, pick, "@sdf_prim=0")
+    defer rest.release()
+    assert((try SdfEdits.count(rest)) == 2 and (try distance(rest, Vector3())) > 0.0 and (try distance(rest, Vector3(3.0, 0.45, 0.0))) > 0.0)
+    let gone = try SdfEdits.without(carved, pick, "*")
+    defer gone.release()
+    assert(set_sdf(try gone.get()) == none)
+    # A pick mesh without tags fails.
+    let bare = try Mesh.cube(1.0)
+    defer bare.release()
+    assert(try refuses(carved, bare, true))
+
+pub func run() -> !:
+    try exercise()
+    print("PASS Edit SDF: primitives with booleans, tagged proxies, moves in world space, booleans and blends, deletes")

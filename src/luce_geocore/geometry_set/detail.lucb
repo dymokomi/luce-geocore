@@ -1,0 +1,104 @@
+## Detail attributes: the set's own values (Houdini's detail domain), one
+## element each, held apart from the components so they exist with no
+## geometry at all (Edit Sketch keeps its plane here before any curve).
+## Copies share their columns; placing a set moves position, vector and
+## normal detail attributes with it; joining keeps the first set's values
+## and adds the second's it lacks; the codec saves them with the set.
+
+extend GeometrySet:
+    ## Replace the detail attributes with `store` (taken, even on failure).
+    mutating func take_detail(store: AttributeStore) -> !:
+        self.detail.close()
+        self.detail = store
+
+    ## Luce's view: how many detail attributes, each name, whether one is
+    ## there, and component `component` of one's value.
+    pub func detail_count() -> i64:
+        return (i64)self.detail.count()
+
+    pub func detail_name(index: i64) -> str!:
+        if index < 0 or (usize)index >= self.detail.count(): error(errors.invalid, "detail attribute index out of range")
+        return self.detail.entry((usize)index).name()
+
+    ## A key of the detail attributes' contents: equal while their columns
+    ## are (what is drawn from them, such as Edit Sketch's plane grid, keeps
+    ## its batch while other components change).
+    pub func detail_key() -> i64:
+        var key: u64 = 0xCBF29CE484222325
+        for index in 0..<self.detail.count():
+            key = (key ^ self.detail.entry(index).data.id()) *% 0x100000001B3
+        return (i64)(key >> 1)
+
+    pub func has_detail(name: str) -> bool:
+        return self.detail.find(name, (i64)(u8)Domain.detail) >= 0
+
+    ## A detail attribute's width (0 when it is missing).
+    pub func detail_width(name: str) -> i64:
+        let index = self.detail.find(name, (i64)(u8)Domain.detail)
+        if index < 0: return 0
+        return (i64)self.detail.entry((usize)index).width
+
+    pub func detail_value(name: str, component: i64 = 0) -> f64!:
+        let index = self.detail.find(name, (i64)(u8)Domain.detail)
+        if index < 0: error(errors.invalid, "no such detail attribute")
+        let entry = self.detail.entry((usize)index)
+        if component < 0 or (usize)component >= entry.width: error(errors.invalid, "detail attribute component out of range")
+        return entry.number(0, (usize)component)
+
+    ## This set with float detail attribute `name` set to `values` (1..4
+    ## components) with `role` (Role: 1 position, 2 vector, 3 normal move
+    ## with a Transform; 0 generic).
+    pub func with_detail(name: str, values: const f64[], role: i64 = 0) -> interop.Reference[GeometrySet]!:
+        if values.length < 1 or values.length > 4 or role < 0 or role > 6: error(errors.invalid, "a detail attribute has 1..4 components and a role 0..6")
+        var attribute = try Attribute.from_numbers(name, Domain.detail, values.length, values, false)
+        attribute.role = Role((u8)role)
+        let storage = self.storage() catch failure:
+            attribute.release()
+            error(failure.code, failure.message)
+        storage.detail.put(attribute) catch failure:
+            dispose_set(storage)
+            error(failure.code, failure.message)
+        return try adopt_set(storage)
+
+    ## This set without detail attribute `name`.
+    pub func without_detail(name: str) -> interop.Reference[GeometrySet]!:
+        let storage = try self.storage()
+        let index = storage.detail.find(name, (i64)(u8)Domain.detail)
+        if index >= 0: storage.detail.remove((usize)index)
+        return try adopt_set(storage)
+
+## The detail attributes of `set`, for Base readers (the codec, sheets).
+pub func set_detail(set: const GeometrySet*) -> const AttributeStore*:
+    return &set.detail
+
+## Put `attribute` (taken) among `set`'s detail attributes.
+pub func set_put_detail(set: GeometrySet*, attribute: Attribute) -> !:
+    try set.detail.put(attribute)
+
+## `store` placed by `matrix`: float position attributes (width 3) move,
+## vectors turn and scale, normals take the inverse transpose; the rest
+## are shared as they are.
+func placed_detail(store: const AttributeStore*, matrix: Matrix4) -> AttributeStore!:
+    var result = try store.shared()
+    errdefer result.close()
+    for index in 0..<result.count():
+        let entry = result.entry(index)
+        if entry.width != 3 or (entry.kind != DataType.float32 and entry.kind != DataType.float64): continue
+        let role = entry.role
+        if role != Role.position and role != Role.vector and role != Role.normal: continue
+        let value = Vector3(entry.number(0, 0), entry.number(0, 1), entry.number(0, 2))
+        var moved = matrix.transform_point(value)
+        if role == Role.vector: moved = matrix.transform_direction(value)
+        elif role == Role.normal: moved = (try matrix.transform_normal(value)) if value.length() > 0.000000001 else value
+        let bytes = try result.writable(index)
+        if entry.kind == DataType.float64:
+            let values = attribute_ops.typed_mut[f64](bytes)
+            values[0] = moved.x
+            values[1] = moved.y
+            values[2] = moved.z
+        else:
+            let values = attribute_ops.typed_mut[f32](bytes)
+            values[0] = (f32)moved.x
+            values[1] = (f32)moved.y
+            values[2] = (f32)moved.z
+    return result

@@ -1,0 +1,254 @@
+## An SDF program as a tree, for editing it primitive by primitive (Edit
+## SDF). The postfix program parses once into nodes: primitives, booleans of
+## two operands, modifiers of one, and transforms whose one operand lies
+## between their start and end ops. An edit is one pass over the ops that
+## keeps, drops, rewrites or wraps each (SdfRewrite), so programs of any
+## size edit in linear time without recursion.
+##
+## A primitive's number is its place among the program's primitives. Its
+## placement is the transform directly around it (through modifiers), which
+## moves compose into; its boolean is the one taking it (with the
+## transforms and modifiers around it) as the second operand.
+
+let no_node: i32 = -1
+
+struct SdfNode:
+    ## The node's op; a transform's start op, `end` its end op (else the
+    ## same op).
+    var start: u32
+    var end: u32
+    var op: u8
+    var first: i32
+    var second: i32
+    var parent: i32
+
+pub struct SdfTree:
+    var nodes: Growing[SdfNode]
+    ## The node of each op (a transform's start and end ops both name it).
+    var owner: Growing[i32]
+    ## Primitive nodes in program order.
+    var primitives: Growing[i32]
+    ## Each node's world placement: the transforms around it composed,
+    ## outermost first (a transform's own is not in its entry).
+    var worlds: Growing[Matrix4]
+    var root: i32
+
+    ## The tree of `sdf`; fails on a transform that does not hold exactly
+    ## one distance (programs Luce's nodes and Edit SDF build always do).
+    pub static func of(sdf: const Sdf*) -> SdfTree!:
+        var tree = SdfTree(Growing[SdfNode](), Growing[i32](), Growing[i32](), Growing[Matrix4](), no_node)
+        errdefer tree.close()
+        let ops = sdf.op_span()
+        let params = sdf.param_span()
+        try tree.owner.fill(ops.length, no_node)
+        var stack: i32[64] = ---
+        var top: usize = 0
+        var frame_starts: u32[64] = ---
+        var frame_heights: usize[64] = ---
+        var frames: usize = 0
+        for at in 0..<ops.length:
+            let op = ops[at]
+            if op <= 4:
+                stack[top] = try tree.add(SdfNode((u32)at, (u32)at, op, no_node, no_node, no_node))
+                top += 1
+            elif op >= 16 and op <= 21:
+                stack[top - 2] = try tree.add(SdfNode((u32)at, (u32)at, op, stack[top - 2], stack[top - 1], no_node))
+                top -= 1
+            elif op == 32:
+                frame_starts[frames] = (u32)at
+                frame_heights[frames] = top
+                frames += 1
+            elif op == 33:
+                frames -= 1
+                if top != frame_heights[frames] + 1: error(errors.invalid, "this SDF program has a transform around more than one shape; it cannot be edited by primitive")
+                stack[top - 1] = try tree.add(SdfNode(frame_starts[frames], (u32)at, 32, stack[top - 1], no_node, no_node))
+                tree.owner.items[frame_starts[frames]] = stack[top - 1]
+            else:
+                stack[top - 1] = try tree.add(SdfNode((u32)at, (u32)at, op, stack[top - 1], no_node, no_node))
+        tree.root = stack[0]
+        # Worlds top down: parents come after their children in postfix, so
+        # the reverse node order visits every parent first.
+        try tree.worlds.fill(tree.nodes.count, Matrix4())
+        var node = tree.nodes.count
+        while node > 0:
+            node -= 1
+            let here = tree.nodes.items[node]
+            var inner = tree.worlds.items[node]
+            if here.op == 32: inner = inner.multiply(try forward(params, (usize)here.start))
+            if here.first >= 0: tree.worlds.items[(usize)here.first] = inner
+            if here.second >= 0: tree.worlds.items[(usize)here.second] = inner
+        return tree
+
+    mutating func add(node: SdfNode) -> i32!:
+        let id = (i32)self.nodes.count
+        try self.nodes.push(node)
+        if node.first >= 0: self.nodes.items[(usize)node.first].parent = id
+        if node.second >= 0: self.nodes.items[(usize)node.second].parent = id
+        self.owner.items[node.end] = id
+        if node.op <= 4: try self.primitives.push(id)
+        return id
+
+    pub func primitive_count() -> usize:
+        return self.primitives.count
+
+    ## Primitive `index`'s node.
+    func primitive(index: usize) -> SdfNode:
+        return self.nodes.items[(usize)self.primitives.items[index]]
+
+    ## Primitive `index`'s world placement (every transform around it).
+    pub func primitive_world(index: usize) -> Matrix4:
+        return self.worlds.items[(usize)self.primitives.items[index]]
+
+    ## The transform placing primitive `index` directly (through modifiers
+    ## only), or no_node.
+    func wrap(index: usize) -> i32:
+        var node = self.primitive(index).parent
+        while node >= 0 and self.nodes.items[(usize)node].op >= 48:
+            node = self.nodes.items[(usize)node].parent
+        if node >= 0 and self.nodes.items[(usize)node].op == 32: return node
+        return no_node
+
+    ## The boolean taking primitive `index` (and what wraps it) as its second
+    ## operand, or no_node (the program's first shape has none).
+    pub func combiner(index: usize) -> i32:
+        var node = self.primitives.items[index]
+        var parent = self.nodes.items[(usize)node].parent
+        while parent >= 0 and (self.nodes.items[(usize)parent].op == 32 or self.nodes.items[(usize)parent].op >= 48):
+            node = parent
+            parent = self.nodes.items[(usize)node].parent
+        if parent >= 0 and self.nodes.items[(usize)parent].second == node: return parent
+        return no_node
+
+    pub mutating func close():
+        self.nodes.close()
+        self.owner.close()
+        self.primitives.close()
+        self.worlds.close()
+
+## The forward matrix of the transform op at `at` (it stores the inverse).
+func forward(params: const f32[], at: usize) -> Matrix4!:
+    let p = params[at * sdf_stride..<(at + 1) * sdf_stride]
+    let inverse = Matrix4(Vector3((f64)p[0], (f64)p[1], (f64)p[2]), Vector3((f64)p[3], (f64)p[4], (f64)p[5]),
+                          Vector3((f64)p[6], (f64)p[7], (f64)p[8]), Vector3((f64)p[9], (f64)p[10], (f64)p[11]))
+    return try affine_inverse(inverse)
+
+## Transform op parameters placing by `matrix`: its inverse and its smallest
+## axis scale (see placed_sdf).
+func transform_params(matrix: Matrix4, out: f32[]) -> !:
+    let inverse = try affine_inverse(matrix)
+    let scale = math.min(matrix.x.length(), math.min(matrix.y.length(), matrix.z.length()))
+    let values: f64[13] = [inverse.x.x, inverse.x.y, inverse.x.z, inverse.y.x, inverse.y.y, inverse.y.z, inverse.z.x, inverse.z.y, inverse.z.z,
+                           inverse.translation.x, inverse.translation.y, inverse.translation.z, scale]
+    for at in 0..<(usize)13: out[at] = (f32)values[at]
+    for at in 13..<sdf_stride: out[at] = 0.0
+
+## One edit of a program: per op, dropped or kept with a (possibly new) op
+## code and parameters, and primitives wrapped in a new transform.
+pub struct SdfRewrite:
+    var codes: Growing[u8]
+    var params: Growing[f32]
+    var dropped: Growing[bool]
+    ## Per op: -1, or the start (in `wraps`) of a transform's parameters to
+    ## wrap the op in.
+    var wrapped: Growing[i64]
+    var wraps: Growing[f32]
+
+    pub static func of(sdf: const Sdf*) -> SdfRewrite!:
+        var result = SdfRewrite(Growing[u8](), Growing[f32](), Growing[bool](), Growing[i64](), Growing[f32]())
+        errdefer result.close()
+        try result.codes.assign(sdf.op_span())
+        try result.params.assign(sdf.param_span())
+        try result.dropped.fill(sdf.op_count(), false)
+        try result.wrapped.fill(sdf.op_count(), -1)
+        return result
+
+    ## Move primitive `index` of `tree` by `delta` in world space: composed
+    ## into the transform placing it, or a new one around it.
+    pub mutating func move(tree: const SdfTree*, index: usize, delta: Matrix4) -> !:
+        let wrap = tree.wrap(index)
+        let node = tree.nodes.items[(usize)(wrap if wrap >= 0 else tree.primitives.items[index])]
+        # The move in the frame the placement lives in: O⁻¹·D·O.
+        let outer = tree.worlds.items[(usize)(wrap if wrap >= 0 else tree.primitives.items[index])]
+        let framed = (try affine_inverse(outer)).multiply(delta).multiply(outer)
+        if wrap >= 0:
+            let placed = framed.multiply(try forward(self.params.view(), (usize)node.start))
+            try transform_params(placed, self.params.items[(usize)node.start * sdf_stride..<((usize)node.start + 1) * sdf_stride])
+            return
+        let start = self.wraps.count
+        try self.wraps.extend(start + sdf_stride, 0.0)
+        try transform_params(framed, self.wraps.items[start..<start + sdf_stride])
+        self.wrapped.items[(usize)node.start] = (i64)start
+
+    ## Primitive `index`'s boolean set to `mode` (0 add, 1 subtract,
+    ## 2 intersect; -1 keeps it), smooth over `blend` when positive (< 0
+    ## keeps the blend). False when it has none (the first shape).
+    pub mutating func combine(tree: const SdfTree*, index: usize, mode: i64, blend: f64) -> bool:
+        let node = tree.combiner(index)
+        if node < 0: return false
+        let at = (usize)tree.nodes.items[(usize)node].start
+        let code = self.codes.items[at]
+        let kept = (i64)((code - 16) % 3)
+        let radius = (f64)self.params.items[at * sdf_stride] if blend < 0.0 else blend
+        let smooth = radius > 0.0
+        self.codes.items[at] = (u8)(16 + (mode if mode >= 0 else kept) + (3 if smooth else 0))
+        self.params.items[at * sdf_stride] = (f32)(radius if smooth else 0.0)
+        return true
+
+    ## The primitives marked in `chosen` removed: with every transform and
+    ## modifier around them, and each boolean left with one operand, which
+    ## takes its place. False when nothing would remain.
+    pub mutating func remove(tree: const SdfTree*, chosen: const bool[]) -> bool!:
+        var removed = Growing[bool]()
+        defer removed.close()
+        try removed.fill(tree.nodes.count, false)
+        for index in 0..<tree.primitives.count:
+            if chosen[index]: removed.items[(usize)tree.primitives.items[index]] = true
+        # Children come first in node order, so one pass settles each node.
+        for node in 0..<tree.nodes.count:
+            let here = tree.nodes.items[node]
+            if here.op >= 16 and here.op <= 21:
+                removed.items[node] = removed.items[(usize)here.first] and removed.items[(usize)here.second]
+            elif here.op > 4:
+                removed.items[node] = removed.items[(usize)here.first]
+        if removed.items[(usize)tree.root]: return false
+        for at in 0..<self.codes.count:
+            let node = tree.owner.items[at]
+            let here = tree.nodes.items[(usize)node]
+            let lone = here.op >= 16 and here.op <= 21 and (removed.items[(usize)here.first] or removed.items[(usize)here.second])
+            if removed.items[(usize)node] or lone: self.dropped.items[at] = true
+        return true
+
+    ## The edited program.
+    pub func finish() -> Sdf*!:
+        var count: usize = 0
+        for at in 0..<self.codes.count:
+            if self.dropped.items[at]: continue
+            count += 3 if self.wrapped.items[at] >= 0 else 1
+        var ops = try Column[u8].allocate(count)
+        errdefer ops.release()
+        var params = try Column[f32].filled(count * sdf_stride, 0.0)
+        errdefer params.release()
+        let out_ops = ops.span()
+        let out = params.span()
+        var next: usize = 0
+        for at in 0..<self.codes.count:
+            if self.dropped.items[at]: continue
+            let wrap = self.wrapped.items[at]
+            if wrap >= 0:
+                out_ops[next] = (u8)SdfOp.transform
+                memory.copy(out[next * sdf_stride..<(next + 1) * sdf_stride], self.wraps.items[(usize)wrap..<(usize)wrap + sdf_stride], sdf_stride)
+                next += 1
+            out_ops[next] = self.codes.items[at]
+            memory.copy(out[next * sdf_stride..<(next + 1) * sdf_stride], self.params.items[at * sdf_stride..<(at + 1) * sdf_stride], sdf_stride)
+            next += 1
+            if wrap >= 0:
+                out_ops[next] = (u8)SdfOp.end_transform
+                next += 1
+        return try new_sdf(ops.take(), params.take())
+
+    pub mutating func close():
+        self.codes.close()
+        self.params.close()
+        self.dropped.close()
+        self.wrapped.close()
+        self.wraps.close()

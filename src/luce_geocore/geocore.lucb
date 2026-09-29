@@ -20,6 +20,7 @@ import luce_geocore.subdivision as subdivision
 import luce_geocore.set_verbs as set_verbs
 import luce_geocore.io as io
 import luce_geocore.fields as fields
+import luce_geocore.curves as curves
 import luce_geocore.errors as errors
 import luce_geocore.core.attributes as attributes
 
@@ -63,6 +64,10 @@ pub type SetAttributes = set_verbs.SetAttributes
 pub type GeometryFile = io.GeometryFile
 ## Volume and SDF previews for the viewport.
 pub type Fields = fields.Fields
+## Edit SDF: a set's SDF edited primitive by primitive, picked on proxies.
+pub type SdfEdits = fields.SdfEdits
+## Edit Sketch: planar sketches as curves, picked on point clouds.
+pub type Sketches = curves.Sketches
 pub let invalid: ErrorCode = errors.invalid
 pub let busy: ErrorCode = errors.busy
 pub let limit: ErrorCode = errors.limit

@@ -157,24 +157,32 @@ func describe_sdf(data: const void*, out: Growing[u8]*) -> !:
 
 # mark: Previews
 
-## Voxels across an SDF's longest side in its preview.
+## Voxels across an SDF's longest side in its preview, and in the quick
+## preview a drag's frames show (about a tenth of the work).
 let preview_voxels: f64 = 128.0
+let quick_voxels: f64 = 40.0
 
-## The SDF's surface preview, built on first use and kept.
-pub func sdf_preview(sdf: const Sdf*) -> const Mesh*?!:
+## The SDF's surface preview, built on first use and kept; `quick`, the
+## coarse one (kept apart, so a full request after a drag builds in full).
+pub func sdf_preview(sdf: const Sdf*, quick: bool = false) -> const Mesh*?!:
     let cache = (Sdf*)sdf
     cache.lock.lock()
     defer cache.lock.unlock()
     if let made = cache.preview: return made
+    if quick:
+        if let made = cache.quick_preview: return made
     let box = sdf.bounds()
     let size = box.maximum.subtract(box.minimum)
     let longest = math.max(size.x, math.max(size.y, size.z))
     if not (longest > 0.0 and math.is_finite(longest)): return none
-    let voxel = longest / preview_voxels
+    let voxel = longest / (quick_voxels if quick else preview_voxels)
     let grid = try sampled_sdf(sdf, voxel, 2.0, "preview")
     defer release_grid(grid)
     if grid.leaf_count() == 0: return none
     let mesh = try surface_mesh(grid, 0.0, sdf)
+    if quick:
+        cache.quick_preview = mesh
+        return mesh
     cache.preview = mesh
     cache.preview_voxel = voxel
     return mesh

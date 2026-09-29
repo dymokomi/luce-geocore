@@ -47,6 +47,8 @@ pub struct Sdf:
     var lock: sync.Mutex
     var preview: Mesh*? = none
     var preview_voxel: f64 = 0.0
+    ## A coarse preview for a drag's frames (made when asked, kept apart).
+    var quick_preview: Mesh*? = none
 
     pub func op_count() -> usize:
         return self.ops.count()
@@ -70,6 +72,8 @@ pub struct Sdf:
         self.params.release()
         if let mesh = self.preview: mesh_dispose(mesh)
         self.preview = none
+        if let mesh = self.quick_preview: mesh_dispose(mesh)
+        self.quick_preview = none
 
 ## A heap SDF owning these columns (taken, even on failure); the program is
 ## checked to leave exactly one distance.
@@ -94,6 +98,7 @@ func empty_sdf() -> Sdf*!:
     sdf.lock = sync.Mutex()
     sdf.preview = none
     sdf.preview_voxel = 0.0
+    sdf.quick_preview = none
     return sdf
 
 pub func share_sdf(sdf: Sdf*) -> Sdf*:
