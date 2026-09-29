@@ -21,7 +21,7 @@ from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
 from luce_geocore.geometries.polygon import with_group_bits, Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, attribute_entry, point_span, mesh_origin, offset_span, corner_span, corner_face_span, edge_span, corner_edge_span, face_normal_span, triangle_span, point_face_span, edge_corner_span, point_edge_span, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute, edge_bits_from_pairs
 from luce_geocore.geometries.polygon_triangulation import area_normal
-from luce_geocore.groups import guess_domain, GroupResult, GroupReport, group_bits, converted, Topology, Selection, adopt_selection, strict_conversion
+from luce_geocore.groups import guess_domain, GroupResult, GroupReport, group_bits, converted, Topology, Selection, adopt_selection, strict_conversion, selection_bits
 
 ## What a Group Type menu names: 0 guess (from the expression, else the
 ## verb's own domain), then points, edges, faces, corners.

@@ -151,6 +151,24 @@ pub func soft_weights(mesh: const Mesh*, group: Bits, radius: f64, falloff: i64,
     var work = SoftWork(points, group, members.view(), &grid, radius, falloff, weights)
     parallel.parallel_for(points.length, 4096, soft_points, (void*)&work)
 
+## Soft weights of every point for a selection's components, as Transform
+## Components weighs them: the selection's points (with their mirrors across
+## `symmetry`, 1..3 for X, Y, Z; 0 none) are the group. The Edit viewport
+## tints points by these while the soft radius is on.
+pub func selection_weights(mesh: const Mesh*, selection: const Selection*, radius: f64, falloff: i64, symmetry: i64, weights: f32[]) -> !:
+    if weights.length != (usize)mesh.point_count(): error(errors.invalid, "soft weights need one slot per point")
+    if not (radius > 0.0) or not math.is_finite(radius): error(errors.invalid, "the soft radius must be positive and finite")
+    if symmetry < 0 or symmetry > 3: error(errors.invalid, "symmetry is 0 (none) or 1..3 (X, Y, Z)")
+    let topology = try Topology.of(mesh)
+    var points = try converted(&topology, selection_bits(selection), Domain((u8)selection.domain()), Domain.point, false)
+    defer points.close()
+    if symmetry > 0:
+        var mirrored = try symmetric(mesh, points.view(), Domain.point, symmetry)
+        defer mirrored.close()
+        try soft_weights(mesh, mirrored.view(), radius, falloff, weights)
+        return
+    try soft_weights(mesh, points.view(), radius, falloff, weights)
+
 struct SoftWork:
     let points: const Float3[]
     let group: Bits

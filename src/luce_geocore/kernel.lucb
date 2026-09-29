@@ -100,6 +100,10 @@ pub let selection_bits = groups.selection_bits
 ## A selection over bits a Base kernel made (a knife stroke's faces).
 pub let adopt_selection = groups.adopt_selection
 
+## Per-point soft weights of a selection (the Edit viewport's falloff tint).
+import luce_geocore.verbs as verbs
+pub let selection_weights = verbs.selection_weights
+
 import luce_geocore.subdivision as subdivision
 ## A subdivided mesh's display mesh (limit surface, cached), or none.
 pub let subdivided_display = subdivision.subdivided_display

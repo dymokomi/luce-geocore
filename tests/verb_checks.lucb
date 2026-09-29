@@ -4,8 +4,9 @@
 ## determinism (the same run gives the same topology and points).
 import interop
 import math
-from geocore import Mesh, MeshPrimitives, AttributeKernels, Verbs, VerbResult, Vector3
-from geocore_kernel import clear_group_cache
+import memory
+from geocore import Mesh, MeshPrimitives, AttributeKernels, Verbs, VerbResult, Vector3, Selection
+from geocore_kernel import clear_group_cache, selection_weights
 
 pub func exercise() -> !:
     defer clear_group_cache()
@@ -250,6 +251,7 @@ func edit_options(mesh: interop.Reference[Mesh]) -> !:
     # Linear falloff (Falloff 0): the weight at 0.5 of a 0.6 radius.
     near((try smooth.value().point(7)).y, 1.0 - 0.5 / 0.6)
     near((try smooth.value().point(0)).y, 0.0)
+    try tint_weights(mesh)
     let kept = try Verbs.run("PolyExtrude", mesh, "5", 3, [1.0], 0, true)
     defer kept.release()
     let carried = try kept.value().selection()
@@ -258,6 +260,23 @@ func edit_options(mesh: interop.Reference[Mesh]) -> !:
     let result = try kept.value().mesh()
     defer result.release()
     assert(result.value().find_attribute(".carried", 2) < 0)
+
+## The viewport's soft tint: face 5's points (6 7 11 12) weigh 1; point 13,
+## 0.5 beyond point 12, weighs 1 - 0.5 / 0.6 (linear); the corner is out of
+## reach. Symmetry across X adds the mirrored points (8 and 13 weigh 1).
+func tint_weights(mesh: interop.Reference[Mesh]) -> !:
+    let face = try Selection.of(mesh, "5", 2)
+    defer face.release()
+    let weights = try alloc f32[25] in memory.heap
+    defer free(weights) in memory.heap
+    try selection_weights(try mesh.get(), try face.get(), 0.6, 0, 0, weights)
+    near((f64)weights[12], 1.0)
+    near((f64)weights[6], 1.0)
+    assert(math.abs((f64)weights[13] - (1.0 - 0.5 / 0.6)) < 0.0001)
+    near((f64)weights[0], 0.0)
+    try selection_weights(try mesh.get(), try face.get(), 0.6, 0, 1, weights)
+    near((f64)weights[8], 1.0)
+    near((f64)weights[13], 1.0)
 
 func registry() -> !:
     assert(Verbs.count() >= 19 and Verbs.index_of("PolyExtrude") >= 0 and Verbs.index_of("nothing") == -1)
