@@ -21,7 +21,7 @@ struct Case:
     let mesh: u8
     let numbers: f64[16]
 
-let case_total: usize = 28
+let case_total: usize = 30
 
 func case_at(index: usize) -> Case:
     let row = "350000-350999"
@@ -53,6 +53,8 @@ func case_at(index: usize) -> Case:
         24: return Case("Fill, a 22-edge hole", "Fill", "", 0, 2, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         25: return Case("Fill, a 22-edge hole as a fan", "Fill", "", 0, 2, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         26: return Case("Split, 1k faces", "Split", row, 3, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        27: return Case("PolyDraw, a quad drawn onto the grid, its corners snapped", "PolyDraw", "", 0, 0, [0.001, 4.0, 135.5, 0.0, -1.5, 136.5, 0.0, -1.5, 136.5, 0.0, -0.5, 135.5, 0.0, -0.5, 0.0, 0.0])
+        28: return Case("PolyDraw, through 4 selected points", "PolyDraw", "350000-350001 350838-350839", 1, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         _: return Case("Clean, everything", "Clean", "*", 0, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 pub func main(arguments: str[]) -> i32!:

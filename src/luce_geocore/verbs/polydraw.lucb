@@ -1,0 +1,210 @@
+## PolyDraw: one new polygon, after Houdini's PolyDraw shelf tool
+## (TopoBuild without a reference surface) and Blender's Make Face.
+##
+## - Drawn: `Corners` positions follow the parameters (x, y, z each, in
+##   order; nodes and tools pass fixed-length numbers, so the count says
+##   how many are drawn). A corner within `Snap distance` of an
+##   existing point uses that point, so new faces join what is there;
+##   consecutive corners landing on one point count once.
+## - From the group: with Corners 0, the corners are
+##   the group's points, ordered around their centroid in their best-fit
+##   plane (a hole's rim, a ring of loose points).
+##
+## The face winds against any existing face sharing one of its edges, so a
+## filled hole faces the way its surroundings do; with none, it faces the
+## average normal of the faces around its points, else along its plane's
+## normal. The new face is the output selection.
+
+let polydraw_parms: ParmSpec[2] = [
+    ParmSpec("Snap distance", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "Drawn corners this close to an existing point use it (0: only where they coincide).", 1.0),
+    ParmSpec("Corners", ParmKind.integer, 0.0, 0.0, 256.0, 1, "", "How many drawn positions follow (x, y, z each); 0 makes the face through the group's points.")]
+
+pub func polydraw_verb() -> Verb:
+    return Verb("PolyDraw", "Modeling", "Add a polygon through drawn positions, or through the group's points", Domain.point, true, polydraw_parms, true, cook_polydraw)
+
+func cook_polydraw(input: const VerbInput*, output: VerbOutput*) -> !:
+    let snap = input.parms.at(0)
+    if not math.is_finite(snap) or snap < 0.0: error(errors.invalid, "PolyDraw's snap distance must be finite and not negative")
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    try builder.copy_faces(mesh, 0, topology.faces())
+    var ring = Growing[i32]()
+    defer ring.close()
+    let drawn = input.parms.at(1)
+    if not (drawn >= 0.0 and drawn <= 256.0) or (drawn > 0.0 and 2 + (usize)drawn * 3 > input.parms.numbers.length):
+        error(errors.invalid, "PolyDraw needs 0..256 corners, and three numbers after its parameters for each")
+    if drawn > 0.0:
+        try drawn_corners(input, builder, snap, (usize)drawn, &ring)
+    else:
+        try group_corners(input, &topology, builder, &ring)
+    if ring.count < 3: error(errors.invalid, "PolyDraw needs at least three distinct corners: draw them, or select three or more points")
+    if ring.count > 256: error(errors.invalid, "PolyDraw makes faces of at most 256 corners")
+    if try winds_backwards(&topology, builder, ring.view()):
+        var low: usize = 0
+        var high = ring.count - 1
+        while low < high:
+            let kept = ring.items[low]
+            ring.items[low] = ring.items[high]
+            ring.items[high] = kept
+            low += 1
+            high -= 1
+    try builder.face(-1)
+    for point in ring.view(): try builder.corner(point, -1)
+    try builder.end_face()
+    output.selection = try BitsBuilder.zeros(builder.face_count())
+    output.selection.set(builder.face_count() - 1)
+    output.selection_domain = Domain.face
+
+## The drawn positions as corners: existing points within `snap`, else new
+## points; a corner equal to the one before it is dropped (and the last
+## when it closes onto the first).
+func drawn_corners(input: const VerbInput*, builder: TopologyBuilder*, snap: f64, drawn: usize, ring: Growing[i32]*) -> !:
+    let existing = (usize)input.mesh.point_count()
+    for at in 0..<drawn:
+        let position = Vector3(input.parms.at(2 + at * 3), input.parms.at(3 + at * 3), input.parms.at(4 + at * 3))
+        if not position.is_finite(): error(errors.invalid, "PolyDraw positions must be finite")
+        var point: i32 = -1
+        var best = snap
+        for candidate in 0..<existing:
+            let distance = builder.position((i32)candidate).subtract(position).length()
+            if distance <= best:
+                best = distance
+                point = (i32)candidate
+        if point < 0: point = try builder.point(position, -1)
+        if ring.count > 0 and ring.items[ring.count - 1] == point: continue
+        try ring.push(point)
+    if ring.count > 1 and ring.items[0] == ring.items[ring.count - 1]: ring.count -= 1
+
+## The group's points ordered by angle around their centroid, in the plane
+## of least spread.
+func group_corners(input: const VerbInput*, topology: const Topology*, builder: TopologyBuilder*, ring: Growing[i32]*) -> !:
+    var sum = Vector3()
+    for point in 0..<topology.points:
+        if not input.group.get(point): continue
+        try ring.push((i32)point)
+        sum = sum.add(builder.position((i32)point))
+    if ring.count < 3: return
+    let center = sum.multiply_scalar(1.0 / (f64)ring.count)
+    let normal = least_spread(builder, ring.view(), center)
+    # In-plane axes, then each point's angle; a stable insertion sort (rims
+    # are small).
+    var u = Vector3(1.0, 0.0, 0.0)
+    if math.abs(normal.x) > 0.9: u = Vector3(0.0, 1.0, 0.0)
+    u = u.subtract(normal.multiply_scalar(u.dot(normal))).normalized() catch failure: recover Vector3(0.0, 0.0, 1.0)
+    let v = normal.cross(u)
+    var angles = Growing[f64]()
+    defer angles.close()
+    for point in ring.view():
+        let offset = builder.position(point).subtract(center)
+        try angles.push(math.atan2(offset.dot(v), offset.dot(u)))
+    for at in 1..<ring.count:
+        var place = at
+        while place > 0 and angles.items[place - 1] > angles.items[place]:
+            let angle = angles.items[place - 1]
+            angles.items[place - 1] = angles.items[place]
+            angles.items[place] = angle
+            let point = ring.items[place - 1]
+            ring.items[place - 1] = ring.items[place]
+            ring.items[place] = point
+            place -= 1
+
+## The unit normal of the plane that fits `points` best: the covariance's
+## eigenvector of least eigenvalue (Jacobi rotations), its largest
+## component positive.
+func least_spread(builder: const TopologyBuilder*, points: const i32[], center: Vector3) -> Vector3:
+    var a: f64[9] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    for point in points:
+        let d = builder.position(point).subtract(center)
+        let values: f64[3] = [d.x, d.y, d.z]
+        for row in 0..<(usize)3:
+            for column in 0..<(usize)3: a[row * 3 + column] += values[row] * values[column]
+    var vectors: f64[9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+    for sweep in 0..<(usize)32:
+        discard(sweep)
+        for (p, q) in [((usize)0, (usize)1), ((usize)0, (usize)2), ((usize)1, (usize)2)]:
+            let apq = a[p * 3 + q]
+            if math.abs(apq) < 1.0e-300: continue
+            let theta = (a[q * 3 + q] - a[p * 3 + p]) / (2.0 * apq)
+            let t = (1.0 if theta >= 0.0 else -1.0) / (math.abs(theta) + math.sqrt(theta * theta + 1.0))
+            let c = 1.0 / math.sqrt(t * t + 1.0)
+            let s = t * c
+            for k in 0..<(usize)3:
+                let akp = a[k * 3 + p]
+                let akq = a[k * 3 + q]
+                a[k * 3 + p] = c * akp - s * akq
+                a[k * 3 + q] = s * akp + c * akq
+            for k in 0..<(usize)3:
+                let apk = a[p * 3 + k]
+                let aqk = a[q * 3 + k]
+                a[p * 3 + k] = c * apk - s * aqk
+                a[q * 3 + k] = s * apk + c * aqk
+            for k in 0..<(usize)3:
+                let vkp = vectors[k * 3 + p]
+                let vkq = vectors[k * 3 + q]
+                vectors[k * 3 + p] = c * vkp - s * vkq
+                vectors[k * 3 + q] = s * vkp + c * vkq
+    var least: usize = 0
+    for k in 1..<(usize)3:
+        if a[k * 3 + k] < a[least * 3 + least]: least = k
+    var normal = Vector3(vectors[least], vectors[3 + least], vectors[6 + least])
+    let big = normal.x if math.abs(normal.x) >= math.max(math.abs(normal.y), math.abs(normal.z)) else (normal.y if math.abs(normal.y) >= math.abs(normal.z) else normal.z)
+    if big < 0.0: normal = normal.multiply_scalar(-1.0)
+    return normal
+
+## Whether the ring, as ordered, winds the wrong way: an existing face uses
+## one of its edges in the same direction (a consistent neighbour uses it
+## the other way), else its normal opposes the faces around its points.
+func winds_backwards(topology: const Topology*, builder: const TopologyBuilder*, ring: const i32[]) -> bool!:
+    var agree: i64 = 0
+    for at in 0..<ring.length:
+        let a = ring[at]
+        let b = ring[(at + 1) % ring.length]
+        if (usize)a >= topology.points or (usize)b >= topology.points: continue
+        for slot in (usize)topology.point_edge_offsets[(usize)a]..<(usize)topology.point_edge_offsets[(usize)a + 1]:
+            let edge = (usize)topology.point_edges[slot]
+            let other = topology.edge_points[edge * 2] if topology.edge_points[edge * 2 + 1] == a else topology.edge_points[edge * 2 + 1]
+            if other != b: continue
+            for use in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                let corner = (usize)topology.edge_corners[use]
+                let face = (usize)topology.corner_faces[corner]
+                let start = (usize)topology.offsets[face]
+                let size = (usize)topology.offsets[face + 1] - start
+                let next = topology.corners[start + (corner - start + 1) % size]
+                if topology.corners[corner] == a and next == b: agree += 1
+                elif topology.corners[corner] == b and next == a: agree -= 1
+    if agree != 0: return agree > 0
+    # No shared edge: compare with the faces around the ring's points.
+    var around = Vector3()
+    for point in ring:
+        if (usize)point >= topology.points: continue
+        for slot in (usize)topology.point_edge_offsets[(usize)point]..<(usize)topology.point_edge_offsets[(usize)point + 1]:
+            let edge = (usize)topology.point_edges[slot]
+            for use in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                let face = (usize)topology.corner_faces[(usize)topology.edge_corners[use]]
+                around = around.add(face_normal_of(topology, builder, face))
+    if around.length() < 1.0e-12: return false
+    return ring_normal(builder, ring).dot(around) < 0.0
+
+## Newell's normal of an existing face (unnormalized).
+func face_normal_of(topology: const Topology*, builder: const TopologyBuilder*, face: usize) -> Vector3:
+    var normal = Vector3()
+    let start = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    for corner in start..<end:
+        let here = builder.position(topology.corners[corner])
+        let next = builder.position(topology.corners[start + (corner - start + 1) % (end - start)])
+        normal = normal.add(Vector3((here.y - next.y) * (here.z + next.z), (here.z - next.z) * (here.x + next.x), (here.x - next.x) * (here.y + next.y)))
+    return normal
+
+## Newell's normal of the ring as ordered.
+func ring_normal(builder: const TopologyBuilder*, ring: const i32[]) -> Vector3:
+    var normal = Vector3()
+    for at in 0..<ring.length:
+        let here = builder.position(ring[at])
+        let next = builder.position(ring[(at + 1) % ring.length])
+        normal = normal.add(Vector3((here.y - next.y) * (here.z + next.z), (here.z - next.z) * (here.x + next.x), (here.x - next.x) * (here.y + next.y)))
+    return normal

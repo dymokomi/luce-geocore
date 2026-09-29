@@ -260,6 +260,13 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
   original.
 - **Spin** (edges): the group's chains swept round an axis in steps into a
   surface of revolution (a full turn closes; points on the axis stay single).
+- **PolyDraw** (points): one new polygon. With Corners > 0, that many drawn
+  positions follow the parameters (x, y, z each); a corner within Snap
+  distance of an existing point uses it. With Corners 0, the face goes
+  through the group's points, ordered by angle around their centroid in
+  their best-fit plane. It winds against any face sharing one of its edges
+  (a refilled hole faces like its surroundings), else like the faces around
+  its points. The new face is the output selection.
 
 New corners inside a face blend that face's corners (the builder's mixed
 corners), so UVs follow insets, slides and cuts; every other attribute and
@@ -303,4 +310,6 @@ and attributes included):
 | Fill, a 22-edge hole | 22.2 ms | 700,560 | Some boundary runs in the group are not closed simple loops and were left open |
 | Fill, a 22-edge hole as a fan | 22.2 ms | 700,581 | Some boundary runs in the group are not closed simple loops and were left open |
 | Split, 1k faces | 19.7 ms | 700,569 |  |
+| PolyDraw, a quad drawn onto the grid, its corners snapped | 45.3 ms | 700,570 |  |
+| PolyDraw, through 4 selected points | 21.9 ms | 700,570 |  |
 | Clean, everything | 28.5 ms | 700,569 |  |

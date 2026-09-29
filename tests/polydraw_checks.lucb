@@ -1,0 +1,135 @@
+## PolyDraw golden checks: exact corner lists of the new face. A cube's
+## top hole refilled from its rim points (the lost face again, same
+## winding); triangles drawn on the 4×4 grid (point z*5+x over -1..1 in XZ)
+## with a corner snapped, in both orders (the face turns up either way); a
+## quad drawn over an existing face (wound against it); a ring of loose
+## points ordered by angle; and too few corners failing.
+import interop
+import math
+import memory
+from geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from geocore_kernel import clear_group_cache, append_number
+from geocore_growing import Growing
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try rim_checks()
+    try drawn_checks()
+    try loose_checks()
+
+pub func run() -> !:
+    try exercise()
+    print("PASS PolyDraw: a hole refilled from its rim, drawn faces snapped and wound up, over a face wound against it, loose points by angle, too few corners")
+
+## Run PolyDraw; its output selection must be the one new face (the last).
+func drawn(mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[Mesh]!:
+    let result = try Verbs.run("PolyDraw", mesh, group, group_type, numbers)
+    defer result.release()
+    let selection = try result.value().selection()
+    defer selection.release()
+    let made = try result.value().mesh()
+    assert(selection.value().count() == 1 and selection.value().next(-1) == made.value().face_count() - 1)
+    return made
+
+## Whether the last face's points are `expected` in order (`rotated`: from
+## any start, the same way round).
+func last_face(mesh: interop.Reference[Mesh], expected: const i64[], rotated: bool = false) -> bool!:
+    let geometry = mesh.value()
+    let face = geometry.face_count() - 1
+    let size = try geometry.face_size(face)
+    if (usize)size != expected.length: return false
+    for shift in 0..<(usize)(size if rotated else 1):
+        var equal = true
+        for at in 0..<(usize)size:
+            if (try geometry.face_point(face, (i64)at)) != expected[(at + shift) % expected.length]: equal = false
+        if equal: return true
+    return false
+
+## The cube without its top face, refilled from the rim's four points: the
+## same corners, the same way round, and a closed surface again.
+func rim_checks() -> !:
+    let cube = try Mesh.cube()
+    defer cube.release()
+    var top: i64 = -1
+    for face in 0..<cube.value().face_count():
+        if (try cube.value().face_center(face)).y > 1.9: top = face
+    var rim: i64[4] = [0, 0, 0, 0]
+    for at in 0..<(usize)4: rim[at] = try cube.value().face_point(top, (i64)at)
+    var text = Growing[u8]()
+    defer text.close()
+    try append_number(&text, (usize)top)
+    let opened = try Verbs.run("Delete", cube, (str)text.view(), 3, [0.0])
+    defer opened.release()
+    let holed = try opened.value().mesh()
+    defer holed.release()
+    assert(holed.value().face_count() == 5 and holed.value().point_count() == 8)
+    text.clear()
+    for at in 0..<(usize)4:
+        if at > 0: try text.push(32)
+        try append_number(&text, (usize)rim[at])
+    let group = (str)text.view()
+    let filled = try drawn(holed, group, 1, [0.0, 0.0])
+    defer filled.release()
+    assert(filled.value().face_count() == 6 and filled.value().point_count() == 8)
+    assert(try last_face(filled, rim[..<4], true))
+    assert((try filled.value().face_normal(5)).y > 0.99)
+
+## Drawn triangles on the grid: a corner on point 24 (1, 0, 1) snaps.
+func drawn_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let forward = try drawn(grid, "", 0, [0.01, 3.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 0.0])
+    defer forward.release()
+    assert(forward.value().point_count() == 27 and forward.value().face_count() == 17)
+    assert(try last_face(forward, [24, 25, 26]))
+    assert(same_point(try forward.value().point(25), Vector3(2.0, 0.0, 1.0)))
+    # Drawn the other way round: it still faces up, like the grid.
+    let backward = try drawn(grid, "", 0, [0.01, 3.0, 2.0, 0.0, 0.0, 2.0, 0.0, 1.0, 1.0, 0.0, 1.0])
+    defer backward.release()
+    assert(try last_face(backward, [24, 26, 25]))
+    # Without snapping a near corner stays its own point.
+    let apart = try drawn(grid, "", 0, [0.0, 3.0, 1.001, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 0.0])
+    defer apart.release()
+    assert(apart.value().point_count() == 28)
+    # Over face 0 (points 0, 5, 6, 1), snapped: wound against it.
+    let over = try drawn(grid, "", 0, [0.01, 4.0, -1.0, 0.0, -1.0, -0.5, 0.0, -1.0, -0.5, 0.0, -0.5, -1.0, 0.0, -0.5])
+    defer over.release()
+    assert(over.value().point_count() == 25 and try last_face(over, [0, 1, 6, 5]))
+    # Two corners landing on one point, and a closing repeat, count once.
+    let repeated = try drawn(grid, "", 0, [0.01, 5.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 0.0, 1.0, 0.0, 1.0])
+    defer repeated.release()
+    assert(try last_face(repeated, [24, 25, 26]))
+    # Too few corners, or too few numbers for the count, fail.
+    assert(try fails(grid, "", 0, [0.01, 3.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0]))
+    assert(try fails(grid, "", 0, [0.0, 3.0, 1.0, 0.0, 1.0]))
+    assert(try fails(grid, "0 1", 1, [0.0, 0.0]))
+
+## Five loose points (no faces) on a circle in XZ, given out of order: the
+## face goes round them by angle, facing +Y.
+func loose_checks() -> !:
+    var points: Vector3[5] = ---
+    let order: i64[5] = [3, 0, 4, 1, 2]
+    for at in 0..<(usize)5:
+        let angle = (f64)order[at] * 2.0 * 3.141592653589793 / 5.0
+        points[at] = Vector3(math.cos(angle), 0.0, -math.sin(angle))
+    let no_ids: i64[1] = [0]
+    let no_values: f64[1] = [0.0]
+    let cloud = try Mesh.from_corner_data(points[..<5], no_ids[..<0], no_ids[..<0], no_values[..<0], no_values[..<0])
+    defer cloud.release()
+    let ring = try drawn(cloud, "*", 1, [0.0, 0.0])
+    defer ring.release()
+    assert((try ring.value().face_normal(0)).y > 0.99)
+    # Counterclockwise seen from +Y: angle order 0, 1, 2, 3, 4 is points
+    # 1, 3, 4, 0, 2.
+    assert(try last_face(ring, [1, 3, 4, 0, 2], true))
+
+func same_point(a: Vector3, b: Vector3) -> bool:
+    return a.subtract(b).length() < 0.000001
+
+## Whether PolyDraw refuses (other than for memory, which propagates).
+func fails(mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[]) -> bool!:
+    let result = Verbs.run("PolyDraw", mesh, group, group_type, numbers) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
+        return true
+    result.release()
+    return false
