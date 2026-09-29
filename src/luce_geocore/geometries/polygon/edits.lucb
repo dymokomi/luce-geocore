@@ -133,6 +133,8 @@ extend PolygonMesh:
         let reuse_triangles = edit.triangles.is_empty()
         let queries = try QueryCache.after(self.queries)
         errdefer release_query(queries)
+        let shading = try ShadingCache.after(self.shading, moved)
+        errdefer release_shading(shading)
         let storage = try alloc PolygonMesh[1] in memory.heap
         storage[0] = self.shared_columns()
         # Record provenance: caches keyed on the old positions update in place.
@@ -148,6 +150,7 @@ extend PolygonMesh:
         storage[0].extent = edit.extent
         storage[0].attributes = attributes
         storage[0].queries = queries
+        storage[0].shading = shading
         discard(self.topology.users.add(1, .relaxed))
         return storage.data
 

@@ -27,6 +27,7 @@ import luce_geocore.core.attribute_ops as attribute_ops
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
 from luce_geocore.geometries.query_cache import QueryCache, release_query
+from luce_geocore.geometries.shading_cache import ShadingCache, Surface, release_shading
 from luce_geocore.geometries.triangle_index import TriangleIndex
 from luce_geocore.geometries.topology_cache import TopologyCache
 from luce_geocore.geometries.polygon_triangulation import triangulate, area_normal
@@ -55,6 +56,8 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
     var attributes: AttributeStore
     var topology: TopologyCache*
     var queries: QueryCache*
+    ## Smooth shading normals, lazy and shared like `queries`.
+    var shading: ShadingCache*
 
     ## Optional display indices are grouped by polygon, 3*(size-2) entries each.
     ## A wholly -1 face requests ordinary triangulation. Explicit triangles are
@@ -113,6 +116,8 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         let topology = try new TopologyCache() in memory.heap
         errdefer free(topology) in memory.heap
         let queries = try new QueryCache() in memory.heap
+        errdefer free(queries) in memory.heap
+        let shading = try new ShadingCache() in memory.heap
         self.positions = position_column
         self.origin = origin
         self.offsets = offset_column
@@ -124,9 +129,11 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         self.attributes = AttributeStore()
         self.topology = topology
         self.queries = queries
+        self.shading = shading
 
-    ## This mesh with every column shared. Its `attributes`, `topology` and
-    ## `queries` still name this mesh's: the caller replaces or shares them.
+    ## This mesh with every column shared. Its `attributes`, `topology`,
+    ## `queries` and `shading` still name this mesh's: the caller replaces or
+    ## shares them.
     func shared_columns() -> PolygonMesh:
         var copy = self
         copy.positions = self.positions.share()
@@ -146,6 +153,7 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         storage[0].attributes = attributes
         discard(self.topology.users.add(1, .relaxed))
         discard(self.queries.owners.add(1, .relaxed))
+        discard(self.shading.owners.add(1, .relaxed))
         return storage.data
 
     func snapshot() -> interop.Reference[PolygonMesh]!:
@@ -173,6 +181,7 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         self.triangles.release()
         self.precise.release()
         release_query(self.queries)
+        release_shading(self.shading)
         if self.topology.users.sub(1, .acq_rel) == 1:
             self.topology.close()
             free(self.topology) in memory.heap

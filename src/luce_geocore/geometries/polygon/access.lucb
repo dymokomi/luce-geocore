@@ -129,7 +129,8 @@ extend PolygonMesh:
         let at = (usize)index - (usize)self.offsets.view()[face]
         let point = (usize)self.corners.view()[(usize)index]
         var color = Vector3(1.0, 1.0, 1.0)
-        let normal = self.shading_normal((usize)index, face)
+        let normal = self.shading_normal((usize)index, face) catch failure:
+            return errors.failure[Vertex](failure.code, failure.message)
         var u = 1.0 if at == 1 or at == 2 else 0.0
         var v = 1.0 if at >= 2 else 0.0
         # Houdini-style corner > point > primitive > detail lookup precedence.
@@ -151,12 +152,14 @@ extend PolygonMesh:
     ## overlay extraction calls it for every corner.
     pub func corner_normal(corner: i64) -> Vector3!:
         try checked(corner, self.corners.count())
-        return self.shading_normal((usize)corner, (usize)(try self.corner_faces())[(usize)corner])
+        return try self.shading_normal((usize)corner, (usize)(try self.corner_faces())[(usize)corner])
 
     ## The N attribute by corner > point > primitive > detail precedence,
-    ## else the face normal.
-    func shading_normal(corner: usize, face: usize) -> Vector3:
-        var normal = self.normals.view()[face].vector()
+    ## else the smooth normal (see ShadingCache).
+    func shading_normal(corner: usize, face: usize) -> Vector3!:
+        var normal = Vector3()
+        if not self.has_normals():
+            return (try self.smooth_normals())[corner].vector()
         let domains: usize[4] = [3, 2, 0, 1]
         for domain in domains:
             let ni = self.attributes.normals[domain]
@@ -167,7 +170,20 @@ extend PolygonMesh:
             let provided = Vector3(entry.number(element, 0), entry.number(element, 1), entry.number(element, 2))
             if provided.length() > 0.000000001:
                 normal = provided.multiply_scalar(1.0 / provided.length())
-        return normal
+        return normal if normal.length() > 0.0 else self.normals.view()[face].vector()
+
+    ## Whether an authored N (three components) exists on any domain.
+    func has_normals() -> bool:
+        for domain in 0..<(usize)4:
+            let index = self.attributes.normals[domain]
+            if index >= 0 and self.attributes.entry((usize)index).width == 3: return true
+        return false
+
+    ## The smooth normal of every corner, computed on first use.
+    func smooth_normals() -> const Float3[]!:
+        let incidence = try self.incidence()
+        let shape = Surface(self.positions.view(), self.offsets.view(), self.corners.view(), self.normals.view(), incidence.0, incidence.1)
+        return try self.shading.get(&shape)
 
     pub func index(offset: i64) -> interop.Outcome[i64]:
         if offset < 0 or (usize)offset >= self.triangles.count():
@@ -247,3 +263,12 @@ pub func points_parent(mesh: const PolygonMesh*) -> u64:
     return mesh.positions.parent()
 pub func normals_parent(mesh: const PolygonMesh*) -> u64:
     return mesh.normals.parent()
+
+## Smooth corner normals (the shading of a mesh without N), computed on first
+## use; and the id of their column, stable while the geometry is.
+pub func smooth_normal_span(mesh: const PolygonMesh*) -> const Float3[]!:
+    return try mesh.smooth_normals()
+
+pub func smooth_normals_ids(mesh: const PolygonMesh*) -> (u64, u64)!:
+    discard(try mesh.smooth_normals())
+    return (mesh.shading.id(), mesh.shading.parent())

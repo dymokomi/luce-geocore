@@ -1,0 +1,40 @@
+## Smooth shading normals for meshes without N: hard edges past the cusp
+## angle stay hard, smooth surfaces average, and a Move updates only what it
+## touched to the same values a fresh mesh computes.
+import math
+import memory
+from geocore import PolygonMesh, Vector3, MeshPrimitives
+
+func same(a: Vector3, b: Vector3):
+    assert(a.subtract(b).length() < 0.00001)
+
+pub func exercise() -> !:
+    let cube = try PolygonMesh.cube(2.0)
+    defer cube.release()
+    let c = cube.value()
+    for corner in 0..<c.vertex_count():
+        same(try c.corner_normal(corner), try c.face_normal(try c.corner_face(corner)))
+    let sphere = try MeshPrimitives.sphere(1.0, 24)
+    defer sphere.release()
+    let s = sphere.value()
+    # Away from the poles a smooth corner normal points out from the centre.
+    for corner in 0..<s.vertex_count():
+        let p = (try s.point(try s.corner_point(corner))).subtract(Vector3(0.0, 1.0, 0.0))
+        if math.abs(p.y) < 0.9: assert((try s.corner_normal(corner)).dot(try p.normalized()) > 0.999)
+    let moved = try s.moved_points([100, 101, 102], Vector3(0.05, 0.1, 0.0))
+    defer moved.release()
+    # The moved mesh updated its predecessor's normals; a new mesh computes all.
+    let m = moved.value()
+    let points = try alloc Vector3[(usize)m.point_count()] in memory.heap
+    defer free(points) in memory.heap
+    for at in 0..<points.length: points[at] = try m.point((i64)at)
+    let sizes = try alloc i64[(usize)m.face_count()] in memory.heap
+    defer free(sizes) in memory.heap
+    for face in 0..<sizes.length: sizes[face] = try m.face_size((i64)face)
+    let corners = try alloc i64[(usize)m.vertex_count()] in memory.heap
+    defer free(corners) in memory.heap
+    for corner in 0..<corners.length: corners[corner] = try m.corner_point((i64)corner)
+    var fresh = try PolygonMesh(points, sizes, corners)
+    defer fresh.close()
+    for corner in 0..<m.vertex_count():
+        same(try m.corner_normal(corner), try fresh.corner_normal(corner))
