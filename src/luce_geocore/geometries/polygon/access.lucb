@@ -1,8 +1,8 @@
-## Element access, the per-vertex Geometry interface, lazy topology caches and
+## Element access, per-corner vertices, lazy topology caches and
 ## spatial queries.
 
-extend PolygonMesh:
-    pub static func cube(size: f64 = 2.0) -> interop.Reference[PolygonMesh]!:
+extend Mesh:
+    pub static func cube(size: f64 = 2.0) -> interop.Reference[Mesh]!:
         if not (size > 0.0 and size <= 100000.0):
             error(errors.invalid, "cube size must be in (0,100000]")
         let h = size * 0.5
@@ -12,7 +12,7 @@ extend PolygonMesh:
         let corners: i64[24] = [1, 2, 6, 5, 4, 7, 3, 0, 3, 7, 6, 2, 0, 1, 5, 4, 5, 6, 7, 4, 0, 3, 2, 1]
         return try make_mesh(points, sizes, corners)
 
-    pub static func empty() -> interop.Reference[PolygonMesh]!:
+    pub static func empty() -> interop.Reference[Mesh]!:
         var points: Vector3[]
         var sizes: i64[]
         var corners: i64[]
@@ -80,7 +80,7 @@ extend PolygonMesh:
         try checked(index, self.positions.count())
         return self.point_at((usize)index)
 
-    ## Whether this mesh keeps f64 points (see PolygonMesh).
+    ## Whether this mesh keeps f64 points (see Mesh).
     pub func is_precise() -> bool:
         return not self.precise.is_empty()
 
@@ -265,55 +265,55 @@ extend PolygonMesh:
 ## Whole arrays for Base kernels, valid while `mesh` is. Free functions, not
 ## methods: spans cannot cross into Luce. Positions are relative to
 ## `mesh_origin(mesh)`.
-pub func point_span(mesh: const PolygonMesh*) -> const Float3[]:
+pub func point_span(mesh: const Mesh*) -> const Float3[]:
     return mesh.positions.view()
-pub func mesh_origin(mesh: const PolygonMesh*) -> Vector3:
+pub func mesh_origin(mesh: const Mesh*) -> Vector3:
     return mesh.origin
-pub func offset_span(mesh: const PolygonMesh*) -> const i32[]:
+pub func offset_span(mesh: const Mesh*) -> const i32[]:
     return mesh.offsets.view()
-pub func corner_span(mesh: const PolygonMesh*) -> const i32[]:
+pub func corner_span(mesh: const Mesh*) -> const i32[]:
     return mesh.corners.view()
-pub func corner_face_span(mesh: const PolygonMesh*) -> const i32[]!:
+pub func corner_face_span(mesh: const Mesh*) -> const i32[]!:
     return try mesh.corner_faces()
-pub func face_normal_span(mesh: const PolygonMesh*) -> const Float3[]:
+pub func face_normal_span(mesh: const Mesh*) -> const Float3[]:
     return mesh.normals.view()
-pub func triangle_span(mesh: const PolygonMesh*) -> const i32[]:
+pub func triangle_span(mesh: const Mesh*) -> const i32[]:
     return mesh.triangles.view()
-pub func edge_span(mesh: const PolygonMesh*) -> const i32[]!:
+pub func edge_span(mesh: const Mesh*) -> const i32[]!:
     return (try mesh.edge_arrays()).0
-pub func corner_edge_span(mesh: const PolygonMesh*) -> const i32[]!:
+pub func corner_edge_span(mesh: const Mesh*) -> const i32[]!:
     return (try mesh.edge_arrays()).1
 
 ## Attribute `index` of `mesh`, for Base readers.
-pub func attribute_entry(mesh: const PolygonMesh*, index: i64) -> const Attribute*!:
+pub func attribute_entry(mesh: const Mesh*, index: i64) -> const Attribute*!:
     try checked(index, mesh.attributes.count())
     return mesh.attributes.entry((usize)index)
 
 ## The arrays a position edit derived positions and face normals from, or 0.
-pub func points_parent(mesh: const PolygonMesh*) -> u64:
+pub func points_parent(mesh: const Mesh*) -> u64:
     return mesh.positions.parent()
-pub func normals_parent(mesh: const PolygonMesh*) -> u64:
+pub func normals_parent(mesh: const Mesh*) -> u64:
     return mesh.normals.parent()
 
 ## Smooth normals (the shading of a mesh without N), per point or per corner
 ## (`smooth_normals_corner_domain`), computed on first use; and the id of
 ## their column and the one it was updated from.
-pub func smooth_normal_span(mesh: const PolygonMesh*) -> const Float3[]!:
+pub func smooth_normal_span(mesh: const Mesh*) -> const Float3[]!:
     return try mesh.smooth_normals()
 
-pub func smooth_normals_corner_domain(mesh: const PolygonMesh*) -> bool!:
+pub func smooth_normals_corner_domain(mesh: const Mesh*) -> bool!:
     discard(try mesh.smooth_normals())
     return mesh.shading.corner_domain()
 
-pub func smooth_normals_ids(mesh: const PolygonMesh*) -> (u64, u64)!:
+pub func smooth_normals_ids(mesh: const Mesh*) -> (u64, u64)!:
     discard(try mesh.smooth_normals())
     return (mesh.shading.id(), mesh.shading.parent())
 
 ## k1 and k2 of every point (discrete principal curvatures), computed on first
 ## use; and the id of their column.
-pub func curvature_span(mesh: const PolygonMesh*) -> const f32[]!:
+pub func curvature_span(mesh: const Mesh*) -> const f32[]!:
     return try mesh.curvatures()
 
-pub func curvature_id(mesh: const PolygonMesh*) -> u64!:
+pub func curvature_id(mesh: const Mesh*) -> u64!:
     discard(try mesh.curvatures())
     return mesh.shading.curvature_id()

@@ -5,12 +5,12 @@ import math
 import luce_geocore.errors as errors
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
-from luce_geocore.geometries.polygon import PolygonMesh
+from luce_geocore.geometries.polygon import Mesh
 from luce_geocore.geometries.builder import MeshBuilder, selection_mask
 
 pub struct MeshOps:
     let reserved: u8 = 0
-    pub static func delete_points(source: interop.Reference[PolygonMesh], selection: const i64[]) -> interop.Reference[PolygonMesh]!:
+    pub static func delete_points(source: interop.Reference[Mesh], selection: const i64[]) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let marked = try selection_mask(selection, mesh.point_count())
         defer free(marked) in memory.heap
@@ -34,7 +34,7 @@ pub struct MeshOps:
         return try out.finish(mesh)
 
     ## Remove unused points without altering faces, display triangles or normals.
-    pub static func compact(source: interop.Reference[PolygonMesh]) -> interop.Reference[PolygonMesh]!:
+    pub static func compact(source: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let used = try alloc bool[(usize)mesh.point_count()] in memory.heap
         defer free(used) in memory.heap
@@ -58,7 +58,7 @@ pub struct MeshOps:
         return try out.finish(mesh,true)
     ## 0 delete faces, 1 reverse, 2 triangulate, 3 individual-face inset,
     ## 4 duplicate faces with normal offset, 5 split selected faces apart.
-    pub static func faces(source: interop.Reference[PolygonMesh], selection: const i64[], operation: i64, amount: f64 = 0.2) -> interop.Reference[PolygonMesh]!:
+    pub static func faces(source: interop.Reference[Mesh], selection: const i64[], operation: i64, amount: f64 = 0.2) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         if operation < 0 or operation > 5 or not math.is_finite(amount):
             error(errors.invalid, "unknown face operation or nonfinite amount")
@@ -124,7 +124,7 @@ pub struct MeshOps:
 
     ## 0 Laplacian relax; 1 deterministic noise; 2 normal offset; 3 flatten Y;
     ## 4 rotate around selection centroid (radians); 5 scale; 6 grid snap.
-    pub static func points(source: interop.Reference[PolygonMesh], selection: const i64[], operation: i64, amount: f64 = 0.2, vector: Vector3 = Vector3()) -> interop.Reference[PolygonMesh]!:
+    pub static func points(source: interop.Reference[Mesh], selection: const i64[], operation: i64, amount: f64 = 0.2, vector: Vector3 = Vector3()) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         if operation < 0 or operation > 6 or not math.is_finite(amount) or not vector.is_finite():
             error(errors.invalid, "invalid point operation")
@@ -186,7 +186,7 @@ pub struct MeshOps:
         return try mesh.with_positions(points)
 
     ## Shared quad subdivision; optional Catmull-Clark position rules.
-    pub static func subdivide(source: interop.Reference[PolygonMesh], smooth: bool = false) -> interop.Reference[PolygonMesh]!:
+    pub static func subdivide(source: interop.Reference[Mesh], smooth: bool = false) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         if mesh.point_count() + (try mesh.edge_count()) + mesh.face_count() > 16384 or mesh.vertex_count() * 4 > 65536:
             error(errors.limit, "subdivision would exceed mesh limits")
@@ -261,7 +261,7 @@ pub struct MeshOps:
         return result
 
     ## Spatially hashed weld, deterministic first-point attribute ownership.
-    pub static func fuse(source: interop.Reference[PolygonMesh], selection: const i64[], tolerance: f64 = 0.001) -> interop.Reference[PolygonMesh]!:
+    pub static func fuse(source: interop.Reference[Mesh], selection: const i64[], tolerance: f64 = 0.001) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         if not (tolerance >= 0.000001 and tolerance <= 100000.0):
             error(errors.invalid, "Fuse tolerance must be in 1e-6..1e5")
@@ -327,7 +327,7 @@ func hash_cell(x: i64, y: i64, z: i64) -> usize:
 
 ## Catmull-Clark without creases: interior (F + 2R + (n-3)P)/n,
 ## boundary 3/4 P + 1/8 each boundary neighbor. Edge attributes remain linear.
-func smooth_subdivision(mesh: const PolygonMesh*, out: MeshBuilder*) -> !:
+func smooth_subdivision(mesh: const Mesh*, out: MeshBuilder*) -> !:
     let np = (usize)mesh.point_count()
     let ne = (usize)(try mesh.edge_count())
     let sums = try alloc Vector3[np * 3 + ne] in memory.heap

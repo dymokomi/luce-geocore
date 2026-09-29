@@ -3,10 +3,10 @@ import geocore
 import math
 import interop
 import memory
-from geocore import PolygonMesh, Vector3
+from geocore import Mesh, Vector3
 
 pub func exercise() -> !:
-    let source = try PolygonMesh.cube()
+    let source = try Mesh.cube()
     defer source.release()
     let tagged = try source.value().with_attribute("weight", 0, 1, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
     defer tagged.release()
@@ -29,7 +29,7 @@ pub func exercise() -> !:
     tagged.close()
     assert(stripped.value().face_count() == 6 and stripped.value().attribute_count() == 0)
     assert((try stripped.value().ray_face(Vector3(0.0, 3.0, 0.0), Vector3(0.0, -1.0, 0.0))) == 2)
-    let empty = try PolygonMesh.empty()
+    let empty = try Mesh.empty()
     defer empty.release()
     assert((try empty.value().surface_distance(Vector3())) == -1.0)
     assert((try empty.value().closest_face(Vector3())) == -1)
@@ -46,6 +46,6 @@ pub func exercise() -> !:
         points[at * 3 + 2] = Vector3(x, y + 1.0, 0.0)
         sizes[at] = 3
         for corner in 0..<(usize)3: corners[at * 3 + corner] = (i64)(at * 3 + corner)
-    var mesh = try PolygonMesh(points, sizes, corners)
+    var mesh = try Mesh(points, sizes, corners)
     defer mesh.close()
     assert(math.abs((try mesh.surface_distance(Vector3(0.2, 0.2, 3.0))) - 3.0) < 0.00000001)

@@ -6,7 +6,7 @@ import math
 import luce_geocore.errors as errors
 from luce_geocore.math.vector import Vector3
 from luce_geocore.core.polygon_topology import PolygonTopology
-from luce_geocore.geometries.polygon import PolygonMesh
+from luce_geocore.geometries.polygon import Mesh
 from luce_geocore.geometries.builder import MeshBuilder
 from luce_geocore.geometries.polygon_triangulation import area_normal
 import luce_geocore.geometries.display_triangulation as display_triangles
@@ -19,7 +19,7 @@ struct Face:
     var active: bool = true
 
 pub struct DissolveWorkspace: PolygonTopology:
-    let source: const PolygonMesh*
+    let source: const Mesh*
     let points: Vector3[]
     let faces: Face[]
     let corners: i64[]
@@ -35,7 +35,7 @@ pub struct DissolveWorkspace: PolygonTopology:
 
     ## Borrows source until close; its caller must keep it alive. At most 128
     ## edits, no input mutation, and no managed owners inside native scratch.
-    pub func init(mesh: const PolygonMesh*, edits: usize = 128) -> !:
+    pub func init(mesh: const Mesh*, edits: usize = 128) -> !:
         if edits > 128: error(errors.limit,"dissolve workspace exceeds edit budget")
         let nf = (usize)mesh.face_count()
         let nc = (usize)mesh.vertex_count()
@@ -168,7 +168,7 @@ pub struct DissolveWorkspace: PolygonTopology:
                 if mapped == count: error(errors.invalid,"dissolve lost a source triangle corner")
                 self.triangles[self.nt+triangles] = (i64)(self.nc+mapped)
                 triangles += 1
-        # Match PolygonMesh's validation for the changed face only. Every other
+        # Match Mesh's validation for the changed face only. Every other
         # face was already validated; the full output is validated again at finish.
         let origin = self.points[(usize)self.corners[self.nc]]
         var normal = Vector3()
@@ -194,7 +194,7 @@ pub struct DissolveWorkspace: PolygonTopology:
         self.nt += triangles
 
     ## Materialize once in the same order as sequential immutable dissolves.
-    pub func finish() -> interop.Reference[PolygonMesh]!:
+    pub func finish() -> interop.Reference[Mesh]!:
         var out = try MeshBuilder()
         defer out.close()
         try out.copy_points(self.source)

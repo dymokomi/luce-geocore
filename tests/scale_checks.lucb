@@ -2,7 +2,7 @@
 ## Expressing the same valid face in smaller units must not collapse it.
 import math
 import geocore
-from geocore import Vector3, MeshBuilder, PolygonMesh
+from geocore import Vector3, MeshBuilder, Mesh
 
 pub func exercise() -> !:
     for scale in [1e-7,1e-3,1.0,1e2]:
@@ -10,14 +10,14 @@ pub func exercise() -> !:
             for axis in [0,1,2]:
                 for reverse in [false,true]: try concave(scale,offset,axis,reverse)
     # The tiny area here comes from a narrow UV sliver, not merely unit scale.
-    var wedge = try PolygonMesh([Vector3(),Vector3(7e-5,0.0,0.0),Vector3(7e-5,7e-9,0.0)],[3],[0,1,2])
+    var wedge = try Mesh([Vector3(),Vector3(7e-5,0.0,0.0),Vector3(7e-5,7e-9,0.0)],[3],[0,1,2])
     defer wedge.close()
     assert((try wedge.face_normal(0)).z == 1.0)
     var rejected = false
-    var bad = PolygonMesh([Vector3(),Vector3(1e-8,0.0,0.0),Vector3(2e-8,0.0,0.0)],[3],[0,1,2]) catch failure:
+    var bad = Mesh([Vector3(),Vector3(1e-8,0.0,0.0),Vector3(2e-8,0.0,0.0)],[3],[0,1,2]) catch failure:
         if failure.code != geocore.invalid: error(failure.code,failure.message)
         rejected = true
-        recover try PolygonMesh([Vector3(),Vector3(1.0,0.0,0.0),Vector3(0.0,1.0,0.0)],[3],[0,1,2])
+        recover try Mesh([Vector3(),Vector3(1.0,0.0,0.0),Vector3(0.0,1.0,0.0)],[3],[0,1,2])
     defer bad.close()
     assert(rejected)
 
@@ -34,7 +34,7 @@ func concave(scale: f64, offset: f64, axis: i64, reverse: bool) -> !:
         corners[at] = (i64)(4-at if reverse else at)
         discard(try builder.point(points[at]))
         try builder.corner(corners[at])
-    var direct = try PolygonMesh(points,[5],corners)
+    var direct = try Mesh(points,[5],corners)
     defer direct.close()
     var indices: i64[9]
     try builder.triangulate_last(indices)

@@ -127,7 +127,7 @@ func corners_at_range(context: void*?, first: usize, end: usize):
 
 ## A point's angle-weighted average over all its faces, and whether any two
 ## of them lie past the cusp of each other.
-func point_normal(shape: const Surface*, point: usize) -> (Vector3, bool):
+pub func point_normal(shape: const Surface*, point: usize) -> (Vector3, bool):
     let first = (usize)shape.incident_offsets[point]
     let end = (usize)shape.incident_offsets[point + 1]
     var sum = Vector3()
@@ -145,7 +145,7 @@ func point_normal(shape: const Surface*, point: usize) -> (Vector3, bool):
 
 ## The angle-weighted normal of `corner` (of `face`) over the faces around its
 ## point within the cusp angle; the face normal when they cancel.
-func corner_normal(shape: const Surface*, face: usize, corner: usize) -> Vector3:
+pub func corner_normal(shape: const Surface*, face: usize, corner: usize) -> Vector3:
     let own = shape.normals[face].vector()
     let point = (usize)shape.corners[corner]
     var sum = Vector3()

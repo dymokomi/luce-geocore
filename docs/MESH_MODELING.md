@@ -1,6 +1,6 @@
 # Immutable polygon modeling
 
-`PolygonMesh` supports point clouds and indexed polygon surfaces. A polygon's
+`Mesh` supports point clouds and indexed polygon surfaces. A polygon's
 vertices are face corners, distinct from shared spatial points. Mesh results
 own topology, derived triangulation/edges/normals, numeric attributes and a
 lazy triangle-BVH cache. Algorithms return new meshes; callers retain ownership

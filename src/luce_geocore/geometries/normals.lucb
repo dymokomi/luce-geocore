@@ -1,13 +1,13 @@
 ## Per-corner shading normals, grouped by analytic face when requested.
 import interop
 import memory
-from luce_geocore.geometries.polygon import PolygonMesh
+from luce_geocore.geometries.polygon import Mesh
 from luce_geocore.math.vector import Vector3
 from luce_geocore.errors import invalid
 
 pub struct MeshNormals:
     let reserved: u8 = 0
-    pub static func generate(source: interop.Reference[PolygonMesh], groups: const i64[]) -> interop.Reference[PolygonMesh]!:
+    pub static func generate(source: interop.Reference[Mesh], groups: const i64[]) -> interop.Reference[Mesh]!:
         let mesh = source.value()
         if groups.length != 0 and groups.length != (usize)mesh.face_count():
             error(invalid, "normal groups must match polygon faces")

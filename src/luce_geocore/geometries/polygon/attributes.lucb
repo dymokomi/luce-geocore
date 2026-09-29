@@ -2,7 +2,7 @@
 ## columns, the query index and every other attribute's column: adding one
 ## costs that column alone.
 
-extend PolygonMesh:
+extend Mesh:
     pub func attribute_count() -> i64:
         return (i64)self.attributes.count()
     pub func find_attribute(name: str, domain: i64) -> i64:
@@ -38,14 +38,14 @@ extend PolygonMesh:
         return entry.number((usize)element, (usize)component)
 
     ## `float32` stores the values as f32 instead of f64.
-    pub func with_attribute(name: str, domain: i64, width: i64, values: const f64[], integer: bool = false, float32: bool = false) -> interop.Reference[PolygonMesh]!:
+    pub func with_attribute(name: str, domain: i64, width: i64, values: const f64[], integer: bool = false, float32: bool = false) -> interop.Reference[Mesh]!:
         let count = try self.domain_count(domain)
         if width < 1 or width > 4 or values.length != (usize)(count * width):
             error(errors.invalid, "attribute length must match its geometry domain")
         return try self.with_entry(try Attribute.from_numbers(name, Domain((u8)domain), (usize)width, values, integer, Storage.array, float32))
 
     ## One value for the whole domain: O(1) whatever the domain's size.
-    pub func with_single_attribute(name: str, domain: i64, values: const f64[], integer: bool = false) -> interop.Reference[PolygonMesh]!:
+    pub func with_single_attribute(name: str, domain: i64, values: const f64[], integer: bool = false) -> interop.Reference[Mesh]!:
         let count = try self.domain_count(domain)
         if values.length < 1 or values.length > 4:
             error(errors.invalid, "a single attribute value has 1..4 components")
@@ -55,7 +55,7 @@ extend PolygonMesh:
 
     ## A snapshot with `attribute` added or replacing its (name, domain).
     ## Takes the attribute's share.
-    func with_entry(attribute: Attribute) -> interop.Reference[PolygonMesh]!:
+    func with_entry(attribute: Attribute) -> interop.Reference[Mesh]!:
         var owned = attribute
         let result = self.snapshot() catch failure:
             owned.release()
@@ -64,13 +64,13 @@ extend PolygonMesh:
         try result.value().attributes.put(owned)
         return result
 
-    pub func without_attribute(name: str, domain: i64) -> interop.Reference[PolygonMesh]!:
+    pub func without_attribute(name: str, domain: i64) -> interop.Reference[Mesh]!:
         let result = try self.snapshot()
         let found = result.value().attributes.find(name, domain)
         if found >= 0: result.value().attributes.remove((usize)found)
         return result
 
-    pub func renamed_attribute(name: str, replacement: str, domain: i64) -> interop.Reference[PolygonMesh]!:
+    pub func renamed_attribute(name: str, replacement: str, domain: i64) -> interop.Reference[Mesh]!:
         let index = self.attributes.find(name, domain)
         if index < 0:
             error(errors.invalid, "attribute to rename does not exist")
@@ -83,7 +83,7 @@ extend PolygonMesh:
 
     ## Numeric domain conversion: continuous values average incident source
     ## elements, integers keep the first contributor. Isolated targets get zero.
-    pub func promoted_attribute(name: str, domain: i64, target: i64) -> interop.Reference[PolygonMesh]!:
+    pub func promoted_attribute(name: str, domain: i64, target: i64) -> interop.Reference[Mesh]!:
         let index = self.attributes.find(name, domain)
         if index < 0:
             error(errors.invalid, "attribute to promote does not exist")
@@ -120,7 +120,7 @@ extend PolygonMesh:
 
     ## Construct topology and its imported corner data once, without rebuilding
     ## triangulation, edge tables and BVH for each attribute. Empty spans omit it.
-    pub static func from_corner_data(points: const Vector3[], sizes: const i64[], corners: const i64[], uv: const f64[], normals: const f64[]) -> interop.Reference[PolygonMesh]!:
+    pub static func from_corner_data(points: const Vector3[], sizes: const i64[], corners: const i64[], uv: const f64[], normals: const f64[]) -> interop.Reference[Mesh]!:
         if (uv.length != 0 and uv.length != corners.length * 2) or (normals.length != 0 and normals.length != corners.length * 3):
             error(errors.invalid, "imported corner attribute size mismatch")
         let result = try make_mesh(points, sizes, corners)
@@ -137,5 +137,5 @@ extend PolygonMesh:
 
 ## A snapshot of `mesh` with `attribute` added (taking its share), for Base
 ## kernels; Attribute cannot cross into Luce, so this is not a method.
-pub func with_attribute_entry(mesh: const PolygonMesh*, attribute: Attribute) -> interop.Reference[PolygonMesh]!:
+pub func with_attribute_entry(mesh: const Mesh*, attribute: Attribute) -> interop.Reference[Mesh]!:
     return try mesh.with_entry(attribute)

@@ -3,7 +3,7 @@
 ## domain through topology changes, merges that widen types, and the kernels.
 import math
 import geocore
-from geocore import PolygonMesh, Vector3, AttributeKernels, MeshPrimitives
+from geocore import Mesh, Vector3, AttributeKernels, MeshPrimitives
 
 func near(a: f64, b: f64):
     assert(math.abs(a - b) < 0.000000001)

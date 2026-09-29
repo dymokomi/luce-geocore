@@ -4,14 +4,14 @@ import interop
 import math
 import memory
 import geocore
-from geocore import Vector3, Matrix4, PolygonMesh, MeshOps
+from geocore import Vector3, Matrix4, Mesh, MeshOps
 
-func index(mesh: const PolygonMesh*, at: i64) -> i64!:
+func index(mesh: const Mesh*, at: i64) -> i64!:
     let value = mesh.index(at)
     defer value.release()
     return try value.get()
 
-func same_triangles(mesh: const PolygonMesh*, expected: const i64[]) -> !:
+func same_triangles(mesh: const Mesh*, expected: const i64[]) -> !:
     assert(mesh.index_count() == (i64)expected.length)
     for at in 0..<expected.length: assert((try index(mesh, (i64)at)) == expected[at])
 
@@ -31,13 +31,13 @@ func band(points: Vector3[], corners: i64[], display: i64[]):
         for at in 0..<(usize)6: display[strip * 6 + at] = values[at]
 
 func triangulable(points: const Vector3[], corners: const i64[]) -> bool:
-    var mesh = PolygonMesh(points, [16], corners) catch failure:
+    var mesh = Mesh(points, [16], corners) catch failure:
         return false
     mesh.close()
     return true
 
-func tagged_move(points: const Vector3[], corners: const i64[], display: const i64[]) -> interop.Reference[PolygonMesh]!:
-    let mesh = try interop.Reference[PolygonMesh].adopt(try new PolygonMesh(points, [16], corners, display) in memory.heap, geocore.polygon_mesh_type, memory.heap)
+func tagged_move(points: const Vector3[], corners: const i64[], display: const i64[]) -> interop.Reference[Mesh]!:
+    let mesh = try interop.Reference[Mesh].adopt(try new Mesh(points, [16], corners, display) in memory.heap, geocore.mesh_type, memory.heap)
     defer mesh.release()
     let tagged = try mesh.value().with_attribute("tag", 0, 1, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0])
     defer tagged.release()
@@ -81,7 +81,7 @@ pub func exercise() -> !:
 ## Ordinary meshes still re-triangulate a face whose kept triangles fold.
 func folding() -> !:
     let square = [Vector3(), Vector3(1.0, 0.0, 0.0), Vector3(1.0, 1.0, 0.0), Vector3(0.0, 1.0, 0.0)]
-    let mesh = try interop.Reference[PolygonMesh].adopt(try new PolygonMesh(square, [4], [0, 1, 2, 3]) in memory.heap, geocore.polygon_mesh_type, memory.heap)
+    let mesh = try interop.Reference[Mesh].adopt(try new Mesh(square, [4], [0, 1, 2, 3]) in memory.heap, geocore.mesh_type, memory.heap)
     defer mesh.release()
     for corner in 0..<(i64)4:
         # Pull each corner past the opposite diagonal: one kept triangle folds.

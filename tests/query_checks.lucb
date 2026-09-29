@@ -4,7 +4,7 @@ import memory
 import ownership
 import sync
 import thread
-from geocore import PolygonMesh, Vector3, polygon_mesh_type, detached_mesh
+from geocore import Mesh, Vector3, mesh_type, detached_mesh
 
 struct Gate: memory.Allocator:
     let upstream: memory.Allocator
@@ -39,7 +39,7 @@ struct Gate: memory.Allocator:
 func restore(previous: memory.Allocator):
     memory.heap = previous
 
-func grid() -> interop.Reference[PolygonMesh]!:
+func grid() -> interop.Reference[Mesh]!:
     let points = try alloc Vector3[192] in memory.heap
     defer free(points) in memory.heap
     var sizes: i64[64]
@@ -52,9 +52,9 @@ func grid() -> interop.Reference[PolygonMesh]!:
         points[at * 3 + 2] = Vector3(x,y+1.0,0.0)
         sizes[at] = 3
         for corner in 0..<(usize)3: corners[at*3+corner] = (i64)(at*3+corner)
-    return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(points,sizes,corners) in memory.heap,polygon_mesh_type,memory.heap)
+    return try interop.Reference[Mesh].adopt(new Mesh(points,sizes,corners) in memory.heap,mesh_type,memory.heap)
 
-func queries(mesh: const PolygonMesh*) -> !:
+func queries(mesh: const Mesh*) -> !:
     try mesh.prepare_queries()
     let p = Vector3(0.2,0.2,3.0)
     let d = Vector3(0.0,0.0,-1.0)
@@ -94,7 +94,7 @@ func clear_limit(gate: Gate*):
     gate.remaining = none
 
 struct Readers:
-    let mesh: const PolygonMesh*
+    let mesh: const Mesh*
     var waiting: @u32
     var start: @u32
     var failures: @u32
@@ -139,7 +139,7 @@ func display_surface() -> !:
     let direction = Vector3(0.0,0.0,-1.0)
     for raised in [false,true]:
         let display: i64[6] = [0,1,2,0,2,3] if raised else [0,1,3,1,2,3]
-        var raw = try PolygonMesh(points,[4],[0,1,2,3],display)
+        var raw = try Mesh(points,[4],[0,1,2,3],display)
         defer raw.close()
         let snapshot = try raw.without_attribute("absent",0)
         defer snapshot.release()

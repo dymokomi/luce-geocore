@@ -18,7 +18,7 @@ import math
 import memory
 import luce_geocore.errors as errors
 import luce_geocore.core.parallel as parallel
-from luce_geocore.core.geometry import Geometry, Vertex, Bounds
+from luce_geocore.core.geometry import Vertex, Bounds
 from luce_geocore.core.polygon_topology import PolygonTopology
 from luce_geocore.core.shared import Column
 from luce_geocore.core.float3 import Float3
@@ -29,6 +29,7 @@ from luce_geocore.math.matrix import Matrix4
 from luce_geocore.geometries.query_cache import QueryCache, release_query
 from luce_geocore.geometries.shading_cache import ShadingCache, release_shading
 from luce_geocore.geometries.smooth_normals import Surface
+from luce_geocore.geometries.normal_refresh import refresh_normals
 from luce_geocore.geometries.curvature import CurvatureShape
 from luce_geocore.geometries.triangle_index import TriangleIndex
 from luce_geocore.geometries.topology_cache import TopologyCache
@@ -42,7 +43,9 @@ import luce_geocore.geometries.position_edit as position_edit
 let origin_limit: f64 = 4096.0
 let origin_ratio: f64 = 8.0
 
-pub struct PolygonMesh: Geometry, PolygonTopology:
+## The geometry core's polygon mesh. It is not a per-vertex `Geometry`:
+## renderers draw its arrays (luce-3d wraps it for the per-vertex path).
+pub struct Mesh: PolygonTopology:
     var positions: Column[Float3]
     ## Added to every position; zero for models near the world origin.
     var origin: Vector3
@@ -136,7 +139,7 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
     ## This mesh with every column shared. Its `attributes`, `topology`,
     ## `queries` and `shading` still name this mesh's: the caller replaces or
     ## shares them.
-    func shared_columns() -> PolygonMesh:
+    func shared_columns() -> Mesh:
         var copy = self
         copy.positions = self.positions.share()
         copy.offsets = self.offsets.share()
@@ -147,10 +150,10 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         return copy
 
     ## A heap snapshot sharing every column, cache and attribute: O(columns).
-    func snapshot_storage() -> PolygonMesh*!:
+    func snapshot_storage() -> Mesh*!:
         var attributes = try self.attributes.shared()
         errdefer attributes.close()
-        let storage = try alloc PolygonMesh[1] in memory.heap
+        let storage = try alloc Mesh[1] in memory.heap
         storage[0] = self.shared_columns()
         storage[0].attributes = attributes
         discard(self.topology.users.add(1, .relaxed))
@@ -158,12 +161,12 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
         discard(self.shading.owners.add(1, .relaxed))
         return storage.data
 
-    func snapshot() -> interop.Reference[PolygonMesh]!:
+    func snapshot() -> interop.Reference[Mesh]!:
         return try adopt_storage(try self.snapshot_storage())
 
     ## This mesh without its f64 points: what B-rep tessellation publishes
     ## once its precise work is done. Shares everything else; O(columns).
-    pub func without_precision() -> interop.Reference[PolygonMesh]!:
+    pub func without_precision() -> interop.Reference[Mesh]!:
         let storage = try self.snapshot_storage()
         storage.precise.release()
         return try adopt_storage(storage)
@@ -171,7 +174,7 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
     ## Native owner for a worker mailbox: it shares the immutable columns and
     ## caches through atomic counts. No ARC owners, callbacks or borrowed spans
     ## cross threads; the receiver adopts it on its thread.
-    func detached_copy() -> PolygonMesh*!:
+    func detached_copy() -> Mesh*!:
         return try self.snapshot_storage()
 
     pub mutating func close():
@@ -188,22 +191,22 @@ pub struct PolygonMesh: Geometry, PolygonTopology:
             self.topology.close()
             free(self.topology) in memory.heap
 
-pub let polygon_mesh_type: interop.Type[PolygonMesh] = interop.Type[PolygonMesh]("PolygonMesh", PolygonMesh.close, closeable = true)
+pub let mesh_type: interop.Type[Mesh] = interop.Type[Mesh]("Mesh", Mesh.close, closeable = true)
 
 ## Base-only transfer API; receiver exclusively owns the returned heap storage.
-pub func detached_mesh(source: interop.Reference[PolygonMesh]) -> PolygonMesh*!:
+pub func detached_mesh(source: interop.Reference[Mesh]) -> Mesh*!:
     return try source.value().detached_copy()
 
-func dispose_detached(mesh: PolygonMesh*):
+func dispose_detached(mesh: Mesh*):
     mesh.close()
     free(mesh) in memory.heap
 
-func make_mesh(points: const Vector3[], sizes: const i64[], corners: const i64[], display: const i64[]? = none, precise: bool = false) -> interop.Reference[PolygonMesh]!:
-    return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(points, sizes, corners, display, precise) in memory.heap, polygon_mesh_type, memory.heap)
+func make_mesh(points: const Vector3[], sizes: const i64[], corners: const i64[], display: const i64[]? = none, precise: bool = false) -> interop.Reference[Mesh]!:
+    return try interop.Reference[Mesh].adopt(new Mesh(points, sizes, corners, display, precise) in memory.heap, mesh_type, memory.heap)
 
 ## Adoption disposes the storage itself when it fails.
-func adopt_storage(storage: PolygonMesh*) -> interop.Reference[PolygonMesh]!:
-    return try interop.Reference[PolygonMesh].adopt(storage, polygon_mesh_type, memory.heap)
+func adopt_storage(storage: Mesh*) -> interop.Reference[Mesh]!:
+    return try interop.Reference[Mesh].adopt(storage, mesh_type, memory.heap)
 
 func checked(index: i64, length: usize) -> !:
     if index < 0 or (usize)index >= length:

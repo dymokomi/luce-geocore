@@ -10,33 +10,33 @@ import luce_geocore.geometries.polygon as polygon
 from luce_geocore.math.vector import Vector3
 from luce_geocore.core.attributes import DataType
 from luce_geocore.core.float3 import Float3
-from luce_geocore.geometries.polygon import PolygonMesh, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, edge_span, attribute_entry, mesh_origin, smooth_normal_span, smooth_normals_ids, smooth_normals_corner_domain, curvature_span, curvature_id
+from luce_geocore.geometries.polygon import Mesh, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, edge_span, attribute_entry, mesh_origin, smooth_normal_span, smooth_normals_ids, smooth_normals_corner_domain, curvature_span, curvature_id
 
 ## Positions as x, y, z f32 triples relative to `origin(mesh)`; `out` holds
 ## 3 per point. Positions are stored this way, so this is a copy.
-pub func pack_positions(mesh: const PolygonMesh*, out: f32[]) -> !:
+pub func pack_positions(mesh: const Mesh*, out: f32[]) -> !:
     let points = point_span(mesh)
     if out.length != points.length * 3: error(errors.invalid, "position output needs three values per point")
     memory.copy(Float3[]((Float3*)out.data, points.length), points, points.length)
 
 ## Where stored positions are measured from.
-pub func origin(mesh: const PolygonMesh*) -> Vector3:
+pub func origin(mesh: const Mesh*) -> Vector3:
     return mesh_origin(mesh)
 
 ## The corner of each vertex of triangles first..<first + out.length / 3.
-pub func pack_triangles(mesh: const PolygonMesh*, first: usize, out: u32[]) -> !:
+pub func pack_triangles(mesh: const Mesh*, first: usize, out: u32[]) -> !:
     let triangles = triangle_span(mesh)
     if first * 3 + out.length > triangles.length: error(errors.invalid, "triangle range leaves the mesh")
     memory.copy(i32[]((i32*)out.data, out.length), triangles[first * 3..<first * 3 + out.length], out.length)
 
 ## The point of every corner.
-pub func pack_corner_points(mesh: const PolygonMesh*, out: u32[]) -> !:
+pub func pack_corner_points(mesh: const Mesh*, out: u32[]) -> !:
     let corners = corner_span(mesh)
     if out.length != corners.length: error(errors.invalid, "corner output needs one value per corner")
     memory.copy(i32[]((i32*)out.data, out.length), corners, corners.length)
 
 ## The face of each of triangles first..<first + out.length.
-pub func pack_triangle_faces(mesh: const PolygonMesh*, first: usize, out: u32[]) -> !:
+pub func pack_triangle_faces(mesh: const Mesh*, first: usize, out: u32[]) -> !:
     let triangles = triangle_span(mesh)
     let faces = try corner_face_span(mesh)
     if (first + out.length) * 3 > triangles.length: error(errors.invalid, "triangle range leaves the mesh")
@@ -44,51 +44,64 @@ pub func pack_triangle_faces(mesh: const PolygonMesh*, first: usize, out: u32[])
         out[at] = (u32)faces[(usize)triangles[(first + at) * 3]]
 
 ## Face normals as f32 triples.
-pub func pack_face_normals(mesh: const PolygonMesh*, out: f32[]) -> !:
+pub func pack_face_normals(mesh: const Mesh*, out: f32[]) -> !:
     let normals = face_normal_span(mesh)
     if out.length != normals.length * 3: error(errors.invalid, "normal output needs three values per face")
     memory.copy(Float3[]((Float3*)out.data, normals.length), normals, normals.length)
 
 ## Smooth normals (the shading of a mesh without N) as f32 triples, one per
 ## point or per corner (`smooth_domain`), computed on first use.
-pub func pack_smooth_normals(mesh: const PolygonMesh*, out: f32[]) -> !:
+pub func pack_smooth_normals(mesh: const Mesh*, out: f32[]) -> !:
     let normals = try smooth_normal_span(mesh)
     if out.length != normals.length * 3: error(errors.invalid, "normal output needs three values per normal")
     memory.copy(Float3[]((Float3*)out.data, normals.length), normals, normals.length)
 
 ## The domain of the smooth normals: 1 (corner) or 0 (point).
-pub func smooth_domain(mesh: const PolygonMesh*) -> i64!:
+pub func smooth_domain(mesh: const Mesh*) -> i64!:
     return 1 if (try smooth_normals_corner_domain(mesh)) else 0
 
 ## The smooth normals' column id and the id it was updated from (0: none).
-pub func smooth_ids(mesh: const PolygonMesh*) -> (u64, u64)!:
+pub func smooth_ids(mesh: const Mesh*) -> (u64, u64)!:
     return try smooth_normals_ids(mesh)
 
 ## The two points of every edge.
-pub func pack_edges(mesh: const PolygonMesh*, out: u32[]) -> !:
+pub func pack_edges(mesh: const Mesh*, out: u32[]) -> !:
     let edges = try edge_span(mesh)
     if out.length != edges.length: error(errors.invalid, "edge output needs two values per edge")
     memory.copy(i32[]((i32*)out.data, out.length), edges, edges.length)
 
 ## The first three components of attribute `index` per stored tuple (one for
 ## single storage), as f32; `out` holds 3 per tuple.
-pub func pack_attribute3(mesh: const PolygonMesh*, index: i64, out: f32[]) -> !:
+pub func pack_attribute3(mesh: const Mesh*, index: i64, out: f32[]) -> !:
     let entry = try attribute_entry(mesh, index)
     if entry.width < 3 or entry.kind == DataType.boolean: error(errors.invalid, "packing needs a numeric attribute of three components")
     let tuples = out.length // 3
+    let bytes = entry.data.view()
+    let single = (u8)entry.storage == 1
+    if entry.width == 3 and entry.kind == DataType.float32 and not single:
+        memory.copy(out, f32[]((f32*)bytes.data, tuples * 3), tuples * 3)
+        return
+    if entry.width == 3 and entry.kind == DataType.float64 and not single:
+        let values = f64[]((f64*)bytes.data, tuples * 3)
+        for at in 0..<tuples * 3: out[at] = (f32)values[at]
+        return
     for at in 0..<tuples:
         for component in 0..<(usize)3:
             out[at * 3 + component] = (f32)entry.number(at, component)
 
+## The column attribute `index` was written from (a copy-on-write edit), or 0.
+pub func attribute_parent(mesh: const Mesh*, index: i64) -> u64!:
+    return (try attribute_entry(mesh, index)).data.parent()
+
 ## Tuples attribute `index` stores: its domain's size, or 1 for single storage.
-pub func attribute_tuples(mesh: const PolygonMesh*, index: i64) -> usize!:
+pub func attribute_tuples(mesh: const Mesh*, index: i64) -> usize!:
     let entry = try attribute_entry(mesh, index)
     return 1 if (u8)entry.storage == 1 else entry.elements
 
 ## The arrays a position edit derived positions and face normals from, or 0.
-pub func points_parent(mesh: const PolygonMesh*) -> u64:
+pub func points_parent(mesh: const Mesh*) -> u64:
     return polygon.points_parent(mesh)
-pub func normals_parent(mesh: const PolygonMesh*) -> u64:
+pub func normals_parent(mesh: const Mesh*) -> u64:
     return polygon.normals_parent(mesh)
 
 # mark: Curvature =============================================================================
@@ -102,7 +115,7 @@ pub struct CurvatureSource:
     let k1: i64
     let k2: i64
 
-pub func curvature_source(mesh: const PolygonMesh*) -> CurvatureSource!:
+pub func curvature_source(mesh: const Mesh*) -> CurvatureSource!:
     let k1 = mesh.find_attribute("curvature.k1", 1)
     let k2 = mesh.find_attribute("curvature.k2", 1)
     if k1 >= 0 and k2 >= 0:
@@ -111,7 +124,7 @@ pub func curvature_source(mesh: const PolygonMesh*) -> CurvatureSource!:
     return CurvatureSource(0, try curvature_id(mesh), -1, -1)
 
 ## (k1, k2, 0) per element of the source's domain into `out`.
-pub func pack_curvature(mesh: const PolygonMesh*, source: const CurvatureSource*, out: f32[]) -> !:
+pub func pack_curvature(mesh: const Mesh*, source: const CurvatureSource*, out: f32[]) -> !:
     if source.k1 >= 0:
         let k1 = try attribute_entry(mesh, source.k1)
         let k2 = try attribute_entry(mesh, source.k2)
@@ -131,7 +144,7 @@ pub func pack_curvature(mesh: const PolygonMesh*, source: const CurvatureSource*
 ## The 98th percentile of |value| over the source, where `kind` picks the
 ## value from (k1, k2): 0 mean, 1 Gaussian, 2 k1, 3 k2, 4 the larger |k|.
 ## The colour map spans it, so a few extreme points do not wash it out.
-pub func curvature_range(mesh: const PolygonMesh*, source: const CurvatureSource*, kind: i64) -> f64!:
+pub func curvature_range(mesh: const Mesh*, source: const CurvatureSource*, kind: i64) -> f64!:
     var count: usize = 0
     if source.k1 >= 0: count = (try attribute_entry(mesh, source.k1)).elements
     else: count = (try curvature_span(mesh)).length // 2

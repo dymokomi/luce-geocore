@@ -1,9 +1,9 @@
 ## Local edit workspace must match sequential immutable dissolves exactly.
 import interop
 import memory
-from geocore import PolygonMesh, MeshBuilder, TopologyTools, DissolveWorkspace, Vector3, invalid
+from geocore import Mesh, MeshBuilder, TopologyTools, DissolveWorkspace, Vector3, invalid
 
-func equal(a: const PolygonMesh*, b: const PolygonMesh*) -> !:
+func equal(a: const Mesh*, b: const Mesh*) -> !:
     assert(a.point_count() == b.point_count() and a.face_count() == b.face_count())
     assert(a.vertex_count() == b.vertex_count() and a.index_count() == b.index_count() and (try a.edge_count()) == (try b.edge_count()))
     for at in 0..<a.point_count(): assert((try a.point(at)) == (try b.point(at)))
@@ -27,7 +27,7 @@ func equal(a: const PolygonMesh*, b: const PolygonMesh*) -> !:
             for component in 0..<(try a.attribute_width(at)):
                 assert((try a.attribute_value(at,element,component)) == (try b.attribute_value(other,element,component)))
 
-func make(bent: bool, reverse: bool) -> interop.Reference[PolygonMesh]!:
+func make(bent: bool, reverse: bool) -> interop.Reference[Mesh]!:
     var builder = try MeshBuilder()
     defer builder.close()
     for row in 0..<3:
@@ -55,7 +55,7 @@ func make(bent: bool, reverse: bool) -> interop.Reference[PolygonMesh]!:
     mesh = shaded
     return mesh
 
-func find(mesh: const PolygonMesh*, a: i64, b: i64) -> i64!:
+func find(mesh: const Mesh*, a: i64, b: i64) -> i64!:
     for edge in 0..<(try mesh.edge_count()):
         if (try mesh.edge_point(edge,0)) == a and (try mesh.edge_point(edge,1)) == b: return edge
     return -1
@@ -74,7 +74,7 @@ pub func single(bent: bool = false, reverse: bool = false) -> !:
         let b = try source.value().edge_point(edge,1)
         let id = try find(current.value(),a,b)
         if id < 0: continue
-        let next: interop.Reference[PolygonMesh]? = TopologyTools.dissolve(current,id) catch failure:
+        let next: interop.Reference[Mesh]? = TopologyTools.dissolve(current,id) catch failure:
             if failure.code != invalid: error(failure.code,failure.message)
             recover none
         if let result = next:
@@ -189,7 +189,7 @@ func boundaries() -> !:
     for nonmanifold in [false,true]:
         let sizes = [3,3,3]
         let corners = [0,1,2,0,1,4,1,0,3]
-        var raw = try PolygonMesh(points,sizes[..<(3 if nonmanifold else (usize)2)],corners[..<(9 if nonmanifold else (usize)6)])
+        var raw = try Mesh(points,sizes[..<(3 if nonmanifold else (usize)2)],corners[..<(9 if nonmanifold else (usize)6)])
         defer raw.close()
         var scratch = try DissolveWorkspace(&raw)
         defer scratch.close()

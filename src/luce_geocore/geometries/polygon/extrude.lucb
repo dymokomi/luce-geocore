@@ -1,10 +1,10 @@
 ## Region extrusion, and joining two meshes' attributes for `merged`.
 
-extend PolygonMesh:
+extend Mesh:
     ## Region extrusion: duplicate selected points once, replace caps in place,
     ## and create walls only at the region boundary (never between selected faces).
     ## Face IDs of caps are stable so repeated extrusions keep their selection.
-    pub func extruded_faces(selection: const i64[], distance: f64) -> interop.Reference[PolygonMesh]!:
+    pub func extruded_faces(selection: const i64[], distance: f64) -> interop.Reference[Mesh]!:
         if selection.length == 0 or not math.is_finite(distance) or math.abs(distance) < 0.000001:
             error(errors.invalid, "extrusion needs selected faces and a finite nonzero distance")
         let old_points = try self.world_points(Matrix4())
@@ -112,7 +112,7 @@ extend PolygonMesh:
 
 ## `output`'s attributes: each (name, domain) of either input, `a`'s elements
 ## first. A side without the attribute contributes zeros.
-func merge_attributes(a: const PolygonMesh*, b: const PolygonMesh*, output: PolygonMesh*) -> !:
+func merge_attributes(a: const Mesh*, b: const Mesh*, output: Mesh*) -> !:
     for index in 0..<a.attributes.count():
         let entry = a.attributes.entry(index)
         let found = b.attributes.find(entry.name(), (i64)(u8)entry.domain)

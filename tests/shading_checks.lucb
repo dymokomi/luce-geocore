@@ -5,13 +5,14 @@
 ## boundary reads zero.
 import math
 import memory
-from geocore import PolygonMesh, Vector3, MeshPrimitives
+import geocore
+from geocore import Mesh, Vector3, MeshPrimitives, MeshNormals
 
 func same(a: Vector3, b: Vector3):
     assert(a.subtract(b).length() < 0.00001)
 
 pub func exercise() -> !:
-    let cube = try PolygonMesh.cube(2.0)
+    let cube = try Mesh.cube(2.0)
     defer cube.release()
     let c = cube.value()
     for corner in 0..<c.vertex_count():
@@ -36,7 +37,7 @@ pub func exercise() -> !:
     let corners = try alloc i64[(usize)m.vertex_count()] in memory.heap
     defer free(corners) in memory.heap
     for corner in 0..<corners.length: corners[corner] = try m.corner_point((i64)corner)
-    var fresh = try PolygonMesh(points, sizes, corners)
+    var fresh = try Mesh(points, sizes, corners)
     defer fresh.close()
     for corner in 0..<m.vertex_count():
         same(try m.corner_normal(corner), try fresh.corner_normal(corner))
@@ -56,3 +57,45 @@ func curvature() -> !:
     for point in 0..<plane.value().point_count():
         let k = try plane.value().point_curvature(point)
         assert(math.abs(k.x) < 0.000001 and math.abs(k.y) < 0.000001)
+    try refreshed()
+
+## A Move keeps authored corner normals away from the moved points and gives
+## those around them the new shape's smooth normals.
+func refreshed() -> !:
+    let sphere = try MeshPrimitives.sphere(1.0, 24)
+    defer sphere.release()
+    var groups: i64[]
+    let authored = try MeshNormals.generate(sphere, groups)
+    defer authored.release()
+    let a = authored.value()
+    let moved = try a.moved_points([100], Vector3(0.0, 0.2, 0.0))
+    defer moved.release()
+    let m = moved.value()
+    let n = m.find_attribute("N", 1)
+    assert(n >= 0)
+    var kept: usize = 0
+    for corner in 0..<m.vertex_count():
+        let point = try m.corner_point(corner)
+        let now = Vector3(try m.attribute_value(n, corner, 0), try m.attribute_value(n, corner, 1), try m.attribute_value(n, corner, 2))
+        let before = try a.corner_normal(corner)
+        if (try m.point(point)).subtract(try a.point(point)).length() > 0.0 or (try near_moved(m, point)):
+            continue
+        same(now, before)
+        kept += 1
+    assert(kept > 1000)
+    # The moved point's corners face along the new surface, not the old.
+    let face = try m.corner_face(try first_corner_of(m, 100))
+    assert((try m.corner_normal(try first_corner_of(m, 100))).dot(try m.face_normal(face)) > 0.5)
+
+func near_moved(mesh: const Mesh*, point: i64) -> bool!:
+    for corner in 0..<mesh.vertex_count():
+        if (try mesh.corner_point(corner)) != 100: continue
+        let face = try mesh.corner_face(corner)
+        for at in 0..<(try mesh.face_size(face)):
+            if (try mesh.face_point(face, at)) == point: return true
+    return false
+
+func first_corner_of(mesh: const Mesh*, point: i64) -> i64!:
+    for corner in 0..<mesh.vertex_count():
+        if (try mesh.corner_point(corner)) == point: return corner
+    error(geocore.invalid, "point has no corner")

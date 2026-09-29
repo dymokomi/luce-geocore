@@ -11,16 +11,16 @@ attribute domains, topology operators, primitive generators and BVH picking.
 | `Vector3(x=0,y=0,z=0)` | Immutable operations `add`, `subtract`, `multiply_scalar`, `dot`, `cross`, `length`, `normalized`, `rotated`; public coordinates are values. |
 | `Matrix4` | Affine column vectors and translation, implicit final row `(0,0,0,1)`; `compose`, `multiply`, `transform_point`, `transform_direction`, `transform_normal`. |
 | `Vertex`, `Bounds`, `Geometry` | The per-vertex drawing interface a renderer consumes (luce-3d), and axis-aligned bounds. |
-| `PolygonMesh(points,sizes,corners,display=none,precise=false)` | Immutable shared-point polygon topology implementing Geometry. Optional validated display triangles are independent of wire edges (see below). `cube(size=2)` builds a grounded cube; `empty()` builds an empty result. `point_count`, `point`, `face_count`, `face_size`, `face_point`, `face_normal`, `face_center`, `edge_count` (fallible: edges are a lazy cache), `edge_point`, `triangle_face` expose topology. `is_precise`, `without_precision` (see storage below). |
-| `PolygonMesh.transformed(translation,rotation,scale)` | Returns a new mesh with transformed points and regenerated normals. Rotation is XYZ radians; scale must be nonsingular. Reflections reverse winding. |
-| `PolygonMesh.moved_points(selection,delta)` / `merged(other)` | Return a new displaced or concatenated mesh without modifying either input. |
-| `PolygonMesh.extruded_faces(selection,distance)` | Extrudes a face region along averaged selected-face normals. Shares new points across selected faces and adds walls only on boundary edges; cap face IDs remain stable. Requires a nonzero distance and a region boundary. |
-| `PolygonMesh.ray_face(origin,direction)` / `ray_distance(origin,direction)` | Fallible nearest two-sided intersection, or `-1`. Normalize direction for world-space distances. |
-| `PolygonMesh.surface_distance(point)` / `closest_face(point)` | BVH nearest surface distance / primitive ID; `-1` for empty geometry. Points must be finite. |
-| `PolygonMesh.prepare_queries()` | Builds the shared spatial index before first use, e.g. on a worker before handing a final viewport mesh to the UI. Idempotent and fallible; no topology change. |
+| `Mesh(points,sizes,corners,display=none,precise=false)` | Immutable shared-point polygon topology (the geometry core's mesh; not a per-vertex `Geometry`: renderers draw its arrays, and luce-3d's `MeshGeometry` wraps it for the per-vertex path). `vertex`/`index` give per-corner vertices and display indices. Optional validated display triangles are independent of wire edges (see below). `cube(size=2)` builds a grounded cube; `empty()` builds an empty result. `point_count`, `point`, `face_count`, `face_size`, `face_point`, `face_normal`, `face_center`, `edge_count` (fallible: edges are a lazy cache), `edge_point`, `triangle_face` expose topology. `is_precise`, `without_precision` (see storage below). |
+| `Mesh.transformed(translation,rotation,scale)` | Returns a new mesh with transformed points and regenerated normals. Rotation is XYZ radians; scale must be nonsingular. Reflections reverse winding. |
+| `Mesh.moved_points(selection,delta)` / `merged(other)` | Return a new displaced or concatenated mesh without modifying either input. |
+| `Mesh.extruded_faces(selection,distance)` | Extrudes a face region along averaged selected-face normals. Shares new points across selected faces and adds walls only on boundary edges; cap face IDs remain stable. Requires a nonzero distance and a region boundary. |
+| `Mesh.ray_face(origin,direction)` / `ray_distance(origin,direction)` | Fallible nearest two-sided intersection, or `-1`. Normalize direction for world-space distances. |
+| `Mesh.surface_distance(point)` / `closest_face(point)` | BVH nearest surface distance / primitive ID; `-1` for empty geometry. Points must be finite. |
+| `Mesh.prepare_queries()` | Builds the shared spatial index before first use, e.g. on a worker before handing a final viewport mesh to the UI. Idempotent and fallible; no topology change. |
 | `MeshBuilder(precise=false)` | Bounded Base topology staging: `point`, `face`, `corner`, `finish`, `close`. Importers and operators share the same mesh limits. Copying a precise mesh's points makes the result precise. |
 | `PolygonTopology` | Borrowed read interface for points, polygon corners and edge endpoints. Numbering/lifetime are defined by the implementation. |
-| `DissolveWorkspace(source,edits=128)` | Base-only local edge-dissolve staging over a borrowed immutable `PolygonMesh*`. `face_slots`, `active`, `neighbor`, `dissolve`, `finish`, `close`; see lifetime and ordering below. |
+| `DissolveWorkspace(source,edits=128)` | Base-only local edge-dissolve staging over a borrowed immutable `Mesh*`. `face_slots`, `active`, `neighbor`, `dissolve`, `finish`, `close`; see lifetime and ordering below. |
 | `MeshOps`, `TopologyTools`, `MeshNormals`, `MeshPrimitives` | Modeling kernels returning new meshes: point/face operators, subdivision, fuse; bevel, fill, dissolve; grouped corner normals; grid, sphere, cylinder, torus. |
 
 ## Storage and precision
@@ -58,7 +58,7 @@ operators are CPU geometry operations. Face UVs are provisional local coordinate
 attribute contracts are detailed in MESH_MODELING.md; cross-face self-intersection
 cleanup is not implemented. Attribute-only edits share immutable topology/BVH on
 one thread; detached worker transfers remain independent copies.
-`polygon_mesh_type` is the Base ownership descriptor.
+`mesh_type` is the Base ownership descriptor.
 
 The BVH is lazy: constructing, rendering or editing an unqueried mesh does not
 build it. The first ray/distance query (or `prepare_queries`) builds and publishes

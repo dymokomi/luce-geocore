@@ -3,18 +3,18 @@ import interop
 import memory
 import math
 import geocore
-from geocore import Vector3, Matrix4, PolygonMesh, MeshBuilder, MeshOps, TopologyTools, detached_mesh
+from geocore import Vector3, Matrix4, Mesh, MeshBuilder, MeshOps, TopologyTools, detached_mesh
 
-func index(mesh: const PolygonMesh*, at: i64) -> i64!:
+func index(mesh: const Mesh*, at: i64) -> i64!:
     let value = mesh.index(at)
     defer value.release()
     return try value.get()
 
-func indices(mesh: const PolygonMesh*, expected: const i64[]) -> !:
+func indices(mesh: const Mesh*, expected: const i64[]) -> !:
     assert(mesh.index_count() == (i64)expected.length)
     for at in 0..<expected.length: assert((try index(mesh,(i64)at)) == expected[at])
 
-func oriented(mesh: const PolygonMesh*) -> !:
+func oriented(mesh: const Mesh*) -> !:
     for triangle in 0..<mesh.index_count()//3:
         let av = mesh.vertex(try index(mesh,triangle*3))
         defer av.release()
@@ -38,7 +38,7 @@ pub func exercise() -> !:
     let points = [Vector3(1.0,0.0,0.0),Vector3(math.cos(0.2),math.sin(0.2),0.0),Vector3(math.cos(0.4),math.sin(0.4),0.0),Vector3(math.cos(0.4),math.sin(0.4),1.0),Vector3(1.0,0.0,1.0)]
     let corners: i64[5] = [1,2,3,4,0]
     let display: i64[9] = [3,4,0,0,1,2,0,2,3]
-    var raw = try PolygonMesh(points,[5],corners,display)
+    var raw = try Mesh(points,[5],corners,display)
     defer raw.close()
     try indices(&raw,display)
     assert(raw.face_count() == 1 and (try raw.edge_count()) == 5)
@@ -99,7 +99,7 @@ pub func exercise() -> !:
     for corner in corners: try builder.corner(corner)
     let rebuilt = try builder.finish()
     defer rebuilt.release()
-    var generic = try PolygonMesh(points,[5],corners)
+    var generic = try Mesh(points,[5],corners)
     defer generic.close()
     var projected: i64[9]
     try builder.triangulate_last(projected)
@@ -108,7 +108,7 @@ pub func exercise() -> !:
     # Validation rejects partial, reversed, repeated and cross-face indices.
     for bad in [[3,4,0,0,1,2,0,2,9],[-1,4,0,0,1,2,0,2,3],[3,0,4,0,1,2,0,2,3],[3,4,0,3,4,0,0,2,3]]:
         var rejected = false
-        var candidate: PolygonMesh? = PolygonMesh(points,[5],corners,bad) catch failure:
+        var candidate: Mesh? = Mesh(points,[5],corners,bad) catch failure:
             if failure.code != geocore.invalid: error(failure.code,failure.message)
             rejected = true
             recover none

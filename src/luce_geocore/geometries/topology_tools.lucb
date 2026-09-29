@@ -3,7 +3,7 @@ import interop
 import memory
 import luce_geocore.errors as errors
 from luce_geocore.math.vector import Vector3
-from luce_geocore.geometries.polygon import PolygonMesh
+from luce_geocore.geometries.polygon import Mesh
 from luce_geocore.geometries.builder import MeshBuilder, selection_mask
 
 pub struct TopologyTools:
@@ -11,7 +11,7 @@ pub struct TopologyTools:
 
     ## Chamfer all edges of an oriented closed manifold. Width is face-centroid
     ## fraction, not constant world-space distance; there are no round segments.
-    pub static func bevel(source: interop.Reference[PolygonMesh], fraction: f64 = 0.15) -> interop.Reference[PolygonMesh]!:
+    pub static func bevel(source: interop.Reference[Mesh], fraction: f64 = 0.15) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         if not (fraction > 0.0 and fraction < 0.9):
             error(errors.invalid, "Bevel fraction must be between 0 and 0.9")
@@ -72,7 +72,7 @@ pub struct TopologyTools:
 
     ## Fill one selected, simple boundary loop. Parentless new face attributes
     ## are zero; corner attributes inherit the existing boundary corners.
-    pub static func fill(source: interop.Reference[PolygonMesh], selection: const i64[]) -> interop.Reference[PolygonMesh]!:
+    pub static func fill(source: interop.Reference[Mesh], selection: const i64[]) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         if selection.length < 3 or selection.length > 256:
             error(errors.invalid, "Fill needs 3..256 boundary edges forming one loop")
@@ -122,7 +122,7 @@ pub struct TopologyTools:
         return try out.finish(mesh)
 
     ## Dissolve a single internal edge by joining its two incident polygons.
-    pub static func dissolve(source: interop.Reference[PolygonMesh], edge: i64) -> interop.Reference[PolygonMesh]!:
+    pub static func dissolve(source: interop.Reference[Mesh], edge: i64) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let opposite = try opposite_corners(mesh, false)
         defer free(opposite) in memory.heap
@@ -179,18 +179,18 @@ pub struct TopologyTools:
         try out.set_last_display(indices[..<written])
         return try out.finish(mesh)
 
-func next_corner(mesh: const PolygonMesh*, corner: i64) -> i64!:
+func next_corner(mesh: const Mesh*, corner: i64) -> i64!:
     let face = try mesh.corner_face(corner)
     let offset = try mesh.face_offset(face)
     return offset + (corner - offset + 1) % (try mesh.face_size(face))
 
-func previous_corner(mesh: const PolygonMesh*, corner: i64) -> i64!:
+func previous_corner(mesh: const Mesh*, corner: i64) -> i64!:
     let face = try mesh.corner_face(corner)
     let offset = try mesh.face_offset(face)
     let count = try mesh.face_size(face)
     return offset + (corner - offset + count - 1) % count
 
-func opposite_corners(mesh: const PolygonMesh*, closed: bool) -> i64[]!:
+func opposite_corners(mesh: const Mesh*, closed: bool) -> i64[]!:
     let result = try alloc i64[(usize)mesh.vertex_count()] in memory.heap
     errdefer free(result) in memory.heap
     let first = try alloc i64[(usize)(try mesh.edge_count())] in memory.heap

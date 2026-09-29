@@ -8,13 +8,13 @@ import luce_geocore.errors as errors
 from luce_geocore.math.vector import Vector3
 from luce_geocore.core.attributes import Attribute, Domain, DataType, Storage
 from luce_geocore.core.attribute_ops import typed_mut
-from luce_geocore.geometries.polygon import PolygonMesh, with_attribute_entry, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, mesh_origin
+from luce_geocore.geometries.polygon import Mesh, with_attribute_entry, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, mesh_origin
 
 pub struct AttributeKernels:
     let reserved: u8 = 0
 
     ## Corner uv = (x, z) * scale of each corner's point.
-    pub static func uv_project(source: interop.Reference[PolygonMesh], scale: f64) -> interop.Reference[PolygonMesh]!:
+    pub static func uv_project(source: interop.Reference[Mesh], scale: f64) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         if not math.is_finite(scale): error(errors.invalid, "UV scale must be finite")
         let corners = corner_span(mesh)
@@ -30,7 +30,7 @@ pub struct AttributeKernels:
 
     ## N on faces (the face normals) or points (the normalized sum of the
     ## incident face normals; zero for isolated points).
-    pub static func normals(source: interop.Reference[PolygonMesh], domain: i64) -> interop.Reference[PolygonMesh]!:
+    pub static func normals(source: interop.Reference[Mesh], domain: i64) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let face_domain = domain == 2
         let normals = face_normal_span(mesh)
@@ -63,7 +63,7 @@ pub struct AttributeKernels:
         return try with_attribute_entry(mesh, attribute)
 
     ## Face "area": the summed area of each face's display triangles.
-    pub static func face_areas(source: interop.Reference[PolygonMesh]) -> interop.Reference[PolygonMesh]!:
+    pub static func face_areas(source: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let points = point_span(mesh)
         let corners = corner_span(mesh)
@@ -82,7 +82,7 @@ pub struct AttributeKernels:
     ## `name` = `values` (1..4 components) on every element, optionally scaled
     ## per element and component by a deterministic hash of the element id and
     ## `seed`. Unscaled values are stored once for the whole domain.
-    pub static func filled(source: interop.Reference[PolygonMesh], name: str, domain: i64, values: const f64[], integer: bool, randomize: bool, seed: f64) -> interop.Reference[PolygonMesh]!:
+    pub static func filled(source: interop.Reference[Mesh], name: str, domain: i64, values: const f64[], integer: bool, randomize: bool, seed: f64) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let count = (usize)(try mesh.domain_count(domain))
         let width = values.length
@@ -102,7 +102,7 @@ pub struct AttributeKernels:
         return try mesh.with_attribute(name, domain, (i64)width, generated, integer)
 
     ## An integer `name` that is 1 on `members` of `domain` and 0 elsewhere.
-    pub static func membership(source: interop.Reference[PolygonMesh], name: str, domain: i64, members: const i64[]) -> interop.Reference[PolygonMesh]!:
+    pub static func membership(source: interop.Reference[Mesh], name: str, domain: i64, members: const i64[]) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let count = (usize)(try mesh.domain_count(domain))
         var attribute = try Attribute.create(name, Domain((u8)domain), DataType.int32, 1, count)

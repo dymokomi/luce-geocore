@@ -1,0 +1,53 @@
+## Authored normals (N) after a position edit: the points, corners or faces
+## around the moved points take the smooth normals of the new shape (the rule
+## of smooth_normals.lucb: angle-weighted, split at a 60-degree cusp), and
+## everything else keeps its authored value. CAD shading survives a local
+## Move instead of falling back to a recomputed surface. The columns are
+## written copy-on-write, so snapshots sharing them keep theirs, and the new
+## column names the old one as its parent (GPU copies update in place).
+import memory
+from luce_geocore.core.attributes import AttributeStore, DataType, Domain
+from luce_geocore.core.attribute_ops import typed_mut
+from luce_geocore.math.vector import Vector3
+from luce_geocore.geometries.smooth_normals import Surface, affected_points, point_normal, corner_normal
+
+pub func refresh_normals(attributes: AttributeStore*, shape: const Surface*, moved: const u32[]) -> !:
+    if moved.length == 0: return
+    var affected: u32[]
+    defer:
+        if affected.length > 0: free(affected) in memory.heap
+    for index in 0..<attributes.count():
+        let entry = attributes.entry(index)
+        if entry.name() != "N" or entry.width != 3 or (entry.kind != DataType.float64 and entry.kind != DataType.float32): continue
+        if entry.domain == Domain.detail or entry.domain == Domain.edge or (u8)entry.storage == 1: continue
+        if affected.length == 0: affected = try affected_points(shape, moved)
+        let domain = entry.domain
+        let wide = entry.kind == DataType.float64
+        let bytes = try attributes.writable(index)
+        if domain == Domain.point:
+            for point in affected:
+                write(bytes, wide, (usize)point, point_normal(shape, (usize)point).0)
+        elif domain == Domain.corner:
+            for point in affected:
+                for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
+                    let face = (usize)shape.incident_faces[at]
+                    for corner in (usize)shape.offsets[face]..<(usize)shape.offsets[face + 1]:
+                        if (u32)shape.corners[corner] == point:
+                            write(bytes, wide, corner, corner_normal(shape, face, corner))
+        else:
+            for point in moved:
+                for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
+                    let face = (usize)shape.incident_faces[at]
+                    write(bytes, wide, face, shape.normals[face].vector())
+
+func write(bytes: u8[], wide: bool, element: usize, normal: Vector3):
+    if wide:
+        let values = typed_mut[f64](bytes)
+        values[element * 3] = normal.x
+        values[element * 3 + 1] = normal.y
+        values[element * 3 + 2] = normal.z
+    else:
+        let values = typed_mut[f32](bytes)
+        values[element * 3] = (f32)normal.x
+        values[element * 3 + 1] = (f32)normal.y
+        values[element * 3 + 2] = (f32)normal.z

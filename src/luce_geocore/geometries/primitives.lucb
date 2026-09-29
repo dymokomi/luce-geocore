@@ -3,13 +3,13 @@ import interop
 import math
 import luce_geocore.errors as errors
 from luce_geocore.math.vector import Vector3
-from luce_geocore.geometries.polygon import PolygonMesh
+from luce_geocore.geometries.polygon import Mesh
 from luce_geocore.geometries.builder import MeshBuilder
 
 pub struct MeshPrimitives:
     let reserved: u8 = 0
 
-    pub static func grid(size: f64 = 2.0, divisions: i64 = 4) -> interop.Reference[PolygonMesh]!:
+    pub static func grid(size: f64 = 2.0, divisions: i64 = 4) -> interop.Reference[Mesh]!:
         try parameters(size, divisions)
         var out = try MeshBuilder()
         defer out.close()
@@ -26,7 +26,7 @@ pub struct MeshPrimitives:
                 try out.corner(a + 1)
         return try out.finish()
 
-    pub static func sphere(radius: f64 = 1.0, segments: i64 = 16) -> interop.Reference[PolygonMesh]!:
+    pub static func sphere(radius: f64 = 1.0, segments: i64 = 16) -> interop.Reference[Mesh]!:
         try parameters(radius, segments)
         if segments < 4:
             error(errors.invalid, "Sphere needs at least four segments")
@@ -59,7 +59,7 @@ pub struct MeshPrimitives:
             try out.corner(1 + (rows - 2) * segments + next)
         return try out.finish()
 
-    pub static func cylinder(radius: f64 = 1.0, height: f64 = 2.0, segments: i64 = 16, cone: bool = false) -> interop.Reference[PolygonMesh]!:
+    pub static func cylinder(radius: f64 = 1.0, height: f64 = 2.0, segments: i64 = 16, cone: bool = false) -> interop.Reference[Mesh]!:
         try parameters(radius, segments)
         if segments < 3 or not (height > 0.0 and height <= 100000.0):
             error(errors.invalid, "Cylinder needs positive height and at least three sides")
@@ -88,7 +88,7 @@ pub struct MeshPrimitives:
             try out.corner(next)
         return try out.finish()
 
-    pub static func torus(radius: f64 = 1.0, tube: f64 = 0.3, segments: i64 = 16) -> interop.Reference[PolygonMesh]!:
+    pub static func torus(radius: f64 = 1.0, tube: f64 = 0.3, segments: i64 = 16) -> interop.Reference[Mesh]!:
         try parameters(radius, segments)
         if segments < 4 or not (tube > 0.0 and tube < radius):
             error(errors.invalid, "Torus tube must be smaller than its radius")

@@ -4,7 +4,7 @@ import memory
 import math
 import luce_geocore.errors as errors
 from luce_geocore.math.vector import Vector3
-from luce_geocore.geometries.polygon import PolygonMesh, polygon_mesh_type
+from luce_geocore.geometries.polygon import Mesh, mesh_type
 from luce_geocore.geometries.polygon_triangulation import triangulate, area_normal
 
 pub struct MeshBuilder:
@@ -21,7 +21,7 @@ pub struct MeshBuilder:
     pub var np: usize
     pub var nf: usize
     pub var nc: usize
-    ## Build a precise mesh (f64 points kept; see PolygonMesh). Copying a
+    ## Build a precise mesh (f64 points kept; see Mesh). Copying a
     ## precise mesh's points turns it on.
     pub var precise: bool
 
@@ -86,12 +86,12 @@ pub struct MeshBuilder:
         self.corner_parents[self.nc] = parent
         self.nc += 1
 
-    pub mutating func copy_points(mesh: const PolygonMesh*) -> !:
+    pub mutating func copy_points(mesh: const Mesh*) -> !:
         if mesh.is_precise(): self.precise = true
         for id in 0..<mesh.point_count():
             discard(try self.point(try mesh.point(id), id))
 
-    pub mutating func copy_face(mesh: const PolygonMesh*, id: i64) -> !:
+    pub mutating func copy_face(mesh: const Mesh*, id: i64) -> !:
         let count = try mesh.face_size(id)
         let offset = try mesh.face_offset(id)
         try self.face(count, id)
@@ -105,7 +105,7 @@ pub struct MeshBuilder:
                 let b = try mesh.point(point)
                 unchanged = unchanged and a.x == b.x and a.y == b.y and a.z == b.z
         # Subsets retain the surface tessellation; arbitrary point edits must
-        # rebuild it. Affine transforms preserve it explicitly in PolygonMesh.
+        # rebuild it. Affine transforms preserve it explicitly in Mesh.
         if unchanged: try self.copy_last_display(mesh,id)
 
     ## Supply local corner indices for the most recently completed polygon.
@@ -143,7 +143,7 @@ pub struct MeshBuilder:
 
     ## Copy triangles when polygon corner order is unchanged but point IDs may
     ## have been remapped (worker assembly, subsets and CAD boundary stitching).
-    pub mutating func copy_last_display(mesh: const PolygonMesh*, face: i64, reversed: bool = false) -> !:
+    pub mutating func copy_last_display(mesh: const Mesh*, face: i64, reversed: bool = false) -> !:
         let count = try mesh.face_size(face)
         if self.nf == 0 or self.sizes[self.nf-1] != count: error(errors.invalid,"display copy requires matching polygon sizes")
         let offset = try mesh.face_offset(face)
@@ -171,12 +171,12 @@ pub struct MeshBuilder:
 
     ## Preserve authored normals only when the caller keeps their geometry valid.
     ## Ordinary modeling edits retain the default invalidation behavior.
-    pub func finish(source: const PolygonMesh*? = none, preserve_normals: bool = false) -> interop.Reference[PolygonMesh]!:
+    pub func finish(source: const Mesh*? = none, preserve_normals: bool = false) -> interop.Reference[Mesh]!:
         var triangles: const i64[]? = none
         if self.display.length > 0: triangles = self.display[..<(self.nc-self.nf*2)*3]
         if let original = source:
             return try original.remapped(self.points[..<self.np], self.sizes[..<self.nf], self.corners[..<self.nc], self.point_parents[..<self.np], self.face_parents[..<self.nf], self.corner_parents[..<self.nc], preserve_normals, triangles, self.precise)
-        return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(self.points[..<self.np], self.sizes[..<self.nf], self.corners[..<self.nc], triangles, self.precise) in memory.heap, polygon_mesh_type, memory.heap)
+        return try interop.Reference[Mesh].adopt(new Mesh(self.points[..<self.np], self.sizes[..<self.nf], self.corners[..<self.nc], triangles, self.precise) in memory.heap, mesh_type, memory.heap)
 
     pub mutating func close():
         free(self.points) in memory.heap

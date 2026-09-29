@@ -1,7 +1,7 @@
 ## Precise meshes keep f64 points through construction, builders, derived
 ## meshes and position edits; ordinary meshes store f32 relative to an origin.
 import geocore
-from geocore import Vector3, Matrix4, MeshBuilder, MeshOps, PolygonMesh
+from geocore import Vector3, Matrix4, MeshBuilder, MeshOps, Mesh
 
 pub func exercise() -> !:
     # A 1e-12 sliver 3 units from zero: below f32 spacing, exact in f64.
@@ -17,7 +17,7 @@ pub func exercise() -> !:
     for at in 0..<4: assert((try mesh.value().point(at)) == points[(usize)at])
     # The f32 positions cannot hold the sliver, so an ordinary mesh rejects it.
     var rejected = false
-    var ordinary: PolygonMesh? = PolygonMesh(points,[4],[0,1,2,3]) catch failure:
+    var ordinary: Mesh? = Mesh(points,[4],[0,1,2,3]) catch failure:
         if failure.code != geocore.invalid: error(failure.code,failure.message)
         rejected = true
         recover none
@@ -44,6 +44,6 @@ pub func exercise() -> !:
     assert(not display.value().is_precise() and display.value().face_count() == 1)
     # Far from zero, an ordinary mesh keeps f32 precision relative to itself.
     let far = [Vector3(90000.0,0.0,0.0),Vector3(90000.001,0.0,0.0),Vector3(90000.0,0.001,0.0)]
-    var nearby = try PolygonMesh(far,[3],[0,1,2])
+    var nearby = try Mesh(far,[3],[0,1,2])
     defer nearby.close()
     assert((try nearby.point(1)).subtract(far[1]).length() < 1e-9)
