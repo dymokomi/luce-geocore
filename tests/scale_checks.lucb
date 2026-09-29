@@ -13,13 +13,11 @@ pub func exercise() -> !:
     var wedge = try Mesh([Vector3(),Vector3(7e-5,0.0,0.0),Vector3(7e-5,7e-9,0.0)],[3],[0,1,2])
     defer wedge.close()
     assert((try wedge.face_normal(0)).z == 1.0)
-    var rejected = false
-    var bad = Mesh([Vector3(),Vector3(1e-8,0.0,0.0),Vector3(2e-8,0.0,0.0)],[3],[0,1,2]) catch failure:
-        if failure.code != geocore.invalid: error(failure.code,failure.message)
-        rejected = true
-        recover try Mesh([Vector3(),Vector3(1.0,0.0,0.0),Vector3(0.0,1.0,0.0)],[3],[0,1,2])
-    defer bad.close()
-    assert(rejected)
+    # Collinear corners: the face stays, with a zero normal.
+    var flat = try Mesh([Vector3(),Vector3(1e-8,0.0,0.0),Vector3(2e-8,0.0,0.0)],[3],[0,1,2])
+    defer flat.close()
+    let zero = try flat.face_normal(0)
+    assert(flat.face_count() == 1 and zero.x == 0.0 and zero.y == 0.0 and zero.z == 0.0)
 
 func concave(scale: f64, offset: f64, axis: i64, reverse: bool) -> !:
     var points = [Vector3(),Vector3(),Vector3(),Vector3(),Vector3()]

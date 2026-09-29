@@ -53,7 +53,12 @@ mesh rebuild it.
 
 Polygon meshes allow 8,388,608 points/faces, 33,554,432 corners, and 3–256 corners per
 face. Their topology and triangulation are copied/owned; concave faces use ear
-clipping, and degenerate input is rejected. A corner indexes a shared point;
+clipping. A face is never rejected for its shape: a self-intersecting or folded
+face that ear clipping cannot finish gets a fan as its display, and a face
+without an area (coincident or collinear points) is kept with a zero normal and
+zero-area display triangles. Repeated consecutive corners (a collapsed edge)
+are still invalid topology. Modeling verbs that would make new faces without
+an area pass their input through with a warning. A corner indexes a shared point;
 `sizes` partitions the flattened `corners` array into ordered polygons. Empty
 results are valid data but should not be submitted as renderable meshes. These
 operators are CPU geometry operations. Face UVs are provisional local coordinates;
@@ -76,7 +81,8 @@ Display indices address the flattened **corner** array, not shared point IDs.
 Each face occupies `3*(size-2)` entries, in face order. A wholly `-1` face asks
 for ordinary projected ear clipping; an explicit face must cover its oriented
 boundary exactly once, pair interior edges in opposite directions, and contain
-only nondegenerate triangles within that face. This is a triangulation contract,
+only nondegenerate triangles within that face (any triangles, for a face
+without an area). This is a triangulation contract,
 not a CAD-support or global self-intersection validator. Geometry producers remain
 responsible for checking their support, trimming and approximation error.
 

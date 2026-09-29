@@ -255,7 +255,12 @@ func finish(source: const Mesh*, output: VerbOutput*) -> Mesh*!:
             if failure.code != errors.invalid: error(failure.code, failure.message)
             output.warning = "The operation would make degenerate faces; the input passes through"
             recover none
-        if let made = built: return made
+        if let made = built:
+            # Meshes keep faces without an area; a verb making new ones
+            # still refuses.
+            if degenerate_faces(made) <= degenerate_faces(source): return made
+            mesh_dispose(made)
+            output.warning = "The operation would make degenerate faces; the input passes through"
         output.selection.close()
         output.selection = try BitsBuilder.zeros(0)
         output.builder.selected_edges.clear()
@@ -295,3 +300,10 @@ func blank(text: str) -> bool:
     for byte in text.bytes:
         if byte != 32 and byte != 9 and byte != 10: return false
     return true
+
+## How many faces have no area (a zero normal).
+func degenerate_faces(mesh: const Mesh*) -> usize:
+    var count: usize = 0
+    for normal in face_normal_span(mesh):
+        if normal.x == 0.0 and normal.y == 0.0 and normal.z == 0.0: count += 1
+    return count

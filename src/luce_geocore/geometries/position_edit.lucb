@@ -15,7 +15,7 @@ from luce_geocore.core.attributes import AttributeStore, DataType
 from luce_geocore.core.attribute_ops import typed_mut
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
-from luce_geocore.geometries.polygon_triangulation import triangulate, area_normal
+from luce_geocore.geometries.polygon_triangulation import triangulate, area_normal, is_degenerate
 
 ## Owned columns for the new mesh. `triangles` is empty when the previous
 ## triangles remain valid and are shared.
@@ -116,7 +116,8 @@ pub func reposition(shape: const Shape*, normals: Column[Float3], moved: const u
     parallel.parallel_for(list.length, 2048, face_normals, (void*)&work)
     if work.failed.load(.acquire) != 0:
         # A serial pass reports the first failing face's own error.
-        for face in list: discard(try face_normal(shape, (usize)face))
+        for face in list:
+            if not is_degenerate(output[(usize)face].vector()): discard(try face_normal(shape, (usize)face))
     var triangles: Column[i32]
     errdefer triangles.release()
     if work.folded.load(.acquire) != 0:
@@ -141,7 +142,9 @@ func face_normals(context: void*?, first: usize, end: usize):
         let face = (usize)work.list[at]
         let normal = face_normal(work.shape, face) catch failure:
             discard(failure)
-            work.failed.store(1, .relaxed)
+            # A face that had no area keeps its zero normal; one that
+            # collapses now fails the edit.
+            if not is_degenerate(work.normals[face].vector()): work.failed.store(1, .relaxed)
             continue
         work.normals[face] = Float3.of(normal)
         if not work.rigid and folded(work.shape, face):

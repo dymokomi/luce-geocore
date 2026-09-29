@@ -39,7 +39,7 @@ from luce_geocore.geometries.normal_refresh import refresh_normals
 from luce_geocore.geometries.curvature import CurvatureShape
 from luce_geocore.geometries.triangle_index import TriangleIndex
 from luce_geocore.geometries.topology_cache import TopologyCache
-from luce_geocore.geometries.polygon_triangulation import triangulate, area_normal
+from luce_geocore.geometries.polygon_triangulation import triangulate, unit_or_zero, is_degenerate
 import luce_geocore.geometries.display_triangulation as display_triangles
 import luce_geocore.geometries.position_edit as position_edit
 
@@ -310,7 +310,8 @@ func build_face(work: BuildWork*, face: usize) -> !:
         let delta = points[at].subtract(origin)
         extent2 = math.max(extent2, delta.dot(delta))
         normal = normal.add(delta.cross(points[(at + 1) % count].subtract(origin)))
-    let face_unit = try area_normal(normal, extent2)
+    # A face without an area stays, with a zero normal (unit_or_zero).
+    let face_unit = unit_or_zero(normal, extent2)
     work.normals[face] = Float3.of(face_unit)
     let first = (start - face * 2) * 3
     let size = (count - 2) * 3
@@ -322,7 +323,8 @@ func build_face(work: BuildWork*, face: usize) -> !:
             for at in 0..<size:
                 if part[at] < (i64)start or part[at] >= (i64)(start + count): error(errors.invalid, "display triangle leaves its polygon")
                 output[at] = part[at] - (i64)start
-            try display_triangles.validate(points[..<count], indices[..<count], 0, count, output[..<size])
+            # A face without an area has no triangles with one to check.
+            if not is_degenerate(face_unit): try display_triangles.validate(points[..<count], indices[..<count], 0, count, output[..<size])
             provided = true
         else:
             for index in part:

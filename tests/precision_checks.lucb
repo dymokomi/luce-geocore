@@ -16,16 +16,12 @@ pub func exercise() -> !:
     defer mesh.release()
     assert(mesh.value().is_precise())
     for at in 0..<4: assert((try mesh.value().point(at)) == points[(usize)at])
-    # The f32 positions cannot hold the sliver, so an ordinary mesh rejects it.
-    var rejected = false
-    var ordinary: Mesh? = Mesh(points,[4],[0,1,2,3]) catch failure:
-        if failure.code != geocore.invalid: error(failure.code,failure.message)
-        rejected = true
-        recover none
-    if let value = ordinary:
-        var copy = value
-        copy.close()
-    assert(rejected)
+    # The f32 positions cannot hold the sliver: an ordinary mesh keeps the
+    # face without an area (a zero normal).
+    var ordinary = try Mesh(points,[4],[0,1,2,3])
+    defer ordinary.close()
+    let flat = try ordinary.face_normal(0)
+    assert(ordinary.face_count() == 1 and flat.x == 0.0 and flat.y == 0.0 and flat.z == 0.0)
     # Derived meshes stay precise.
     let reversed = try verb_mesh("Reverse",mesh,"0",3,[0.0])
     defer reversed.release()

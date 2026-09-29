@@ -26,11 +26,11 @@ pub func assembled(positions: Column[Float3], origin: Vector3, offsets: Column[i
         owned_normals = try Column[Float3].allocate(faces)
         var work = FinishWork(owned_positions.view(), owned_precise.view(), owned_corners.view(), owned_offsets.view(), owned_triangles.span(), owned_normals.span(), true)
         parallel.parallel_for(faces, 1024, finish_faces, (void*)&work)
-        if work.failed.load(.acquire) != 0: error(errors.invalid, "a polygon has degenerate area")
+        if work.failed.load(.acquire) != 0: error(errors.limit, "a polygon could not be triangulated")
     else:
         var work = FinishWork(owned_positions.view(), owned_precise.view(), owned_corners.view(), owned_offsets.view(), owned_triangles.span(), owned_normals.span(), false)
         parallel.parallel_for(faces, 1024, finish_faces, (void*)&work)
-        if work.failed.load(.acquire) != 0: error(errors.invalid, "a polygon has degenerate area")
+        if work.failed.load(.acquire) != 0: error(errors.limit, "a polygon could not be triangulated")
     let extent = positions_bounds(owned_positions.view(), origin)
     let topology = try new TopologyCache() in memory.heap
     errdefer free(topology) in memory.heap
@@ -91,7 +91,8 @@ func finish_face(work: FinishWork*, face: usize) -> !:
         let delta = points[at].subtract(origin)
         extent2 = math.max(extent2, delta.dot(delta))
         normal = normal.add(delta.cross(points[(at + 1) % count].subtract(origin)))
-    let facing = try area_normal(normal, extent2)
+    # A face without an area keeps a zero normal and a fan (unit_or_zero).
+    let facing = unit_or_zero(normal, extent2)
     if work.all_normals: work.normals[face] = Float3.of(facing)
     if missing:
         var output: i64[762] = ---

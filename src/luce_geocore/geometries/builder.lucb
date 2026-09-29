@@ -5,7 +5,7 @@ import math
 import luce_geocore.errors as errors
 from luce_geocore.math.vector import Vector3
 from luce_geocore.geometries.polygon import Mesh, mesh_type
-from luce_geocore.geometries.polygon_triangulation import triangulate, area_normal
+from luce_geocore.geometries.polygon_triangulation import triangulate, unit_or_zero
 
 pub struct MeshBuilder:
     pub var points: Vector3[]
@@ -139,7 +139,7 @@ pub struct MeshBuilder:
             let b = self.points[(usize)corners[(at+1)%count]].subtract(origin)
             normal = normal.add(a.cross(b))
             extent2 = math.max(extent2,a.dot(a))
-        try triangulate(self.points[..<self.np],corners,0,count,try area_normal(normal,extent2),indices)
+        try triangulate(self.points[..<self.np],corners,0,count,unit_or_zero(normal,extent2),indices)
 
     ## Copy triangles when polygon corner order is unchanged but point IDs may
     ## have been remapped (worker assembly, subsets and CAD boundary stitching).

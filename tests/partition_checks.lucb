@@ -14,15 +14,16 @@ pub func exercise() -> !:
                 for start in 0..<7:
                     for noise in [-1e-11,0.0,1e-11]:
                         try chain(scale,pose,reverse,start,noise)
-    # A bow tie must remain invalid; a complete partition is not permission
-    # to ignore crossed constraints or to discard any supplied corner.
-    var rejected = false
-    var bad = Mesh([Vector3(),Vector3(2.0,2.0,0.0),Vector3(0.0,2.0,0.0),Vector3(2.0,0.0,0.0)],[4],[0,1,2,3]) catch failure:
-        if failure.code != geocore.invalid: error(failure.code,failure.message)
-        rejected = true
-        recover try Mesh([Vector3(),Vector3(1.0,0.0,0.0),Vector3(0.0,1.0,0.0)],[3],[0,1,2])
-    defer bad.close()
-    assert(rejected)
+    # A bow tie is kept as one face: its display falls back to a fan (a
+    # complete partition is not permission to ignore crossed constraints or
+    # to discard any supplied corner).
+    var bow = try Mesh([Vector3(),Vector3(2.0,2.0,0.0),Vector3(0.0,2.0,0.0),Vector3(2.0,0.0,0.0)],[4],[0,1,2,3])
+    defer bow.close()
+    assert(bow.face_count() == 1 and bow.index_count() == 6)
+    # A self-intersecting n-gon (as real assets hold) keeps its corners.
+    var star = try Mesh([Vector3(),Vector3(2.0,0.0,0.0),Vector3(0.0,1.0,0.0),Vector3(2.0,1.0,0.0),Vector3(1.0,-1.0,0.0),Vector3(1.0,2.0,0.0)],[6],[0,1,2,3,4,5])
+    defer star.close()
+    assert(star.face_count() == 1 and star.index_count() == 12 and (try star.face_size(0)) == 6)
 
 func chain(scale: f64, pose: i64, reverse: bool, start: i64, noise: f64) -> !:
     let original = [Vector3(0.0,1.0,0.0),Vector3(4.0,1.0,0.0),Vector3(4.0,0.0,0.0),

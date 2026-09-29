@@ -17,7 +17,8 @@ func same_triangles(mesh: const Mesh*, expected: const i64[]) -> !:
     for at in 0..<expected.length: assert((try index(mesh, (i64)at)) == expected[at])
 
 ## A 300-degree band: one 16-gon whose average-plane projection overlaps
-## itself, so ear clipping fails, with explicit strip triangles like CAD's.
+## itself, so ear clipping fails (the face alone gets a fan), with explicit
+## strip triangles like CAD's.
 func band(points: Vector3[], corners: i64[], display: i64[]):
     for at in 0..<(usize)8:
         let angle = (f64)at * (300.0 / 7.0) * math.pi / 180.0
@@ -31,11 +32,12 @@ func band(points: Vector3[], corners: i64[], display: i64[]):
         let values: i64[6] = [i, i + 1, 14 - i, i, 14 - i, 15 - i]
         for at in 0..<(usize)6: display[strip * 6 + at] = values[at]
 
-func triangulable(points: const Vector3[], corners: const i64[]) -> bool:
-    var mesh = Mesh(points, [16], corners) catch failure:
-        return false
-    mesh.close()
-    return true
+## Without explicit triangles the band is still one face; its display
+## falls back to a fan.
+func fanned(points: const Vector3[], corners: const i64[]) -> bool!:
+    var mesh = try Mesh(points, [16], corners)
+    defer mesh.close()
+    return mesh.face_count() == 1 and mesh.index_count() == 42
 
 func tagged_move(points: const Vector3[], corners: const i64[], display: const i64[]) -> interop.Reference[Mesh]!:
     let mesh = try interop.Reference[Mesh].adopt(try new Mesh(points, [16], corners, display) in memory.heap, geocore.mesh_type, memory.heap)
@@ -55,7 +57,7 @@ pub func exercise() -> !:
     let display = try alloc i64[42] in memory.heap
     defer free(display) in memory.heap
     band(points, corners, display)
-    assert(not triangulable(points, corners))
+    assert(try fanned(points, corners))
     # The edited mesh outlives the meshes whose topology it shares.
     let moved = try tagged_move(points, corners, display)
     defer moved.release()

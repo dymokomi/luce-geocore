@@ -11,9 +11,27 @@ pub func area_normal(area: Vector3, extent2: f64) -> Vector3!:
         error(errors.invalid,"polygon has degenerate area")
     return area.multiply_scalar(1.0/length)
 
-## Ear clipping in the face's normal plane supports concave polygons created
-## by point editing. A self-intersecting/collapsed polygon is rejected atomically.
+## A face's unit normal, or the zero vector for a face without an area (its
+## points coincide or lie on a line). Meshes keep such faces: they are
+## topology, and only their display has no area.
+pub func unit_or_zero(area: Vector3, extent2: f64) -> Vector3:
+    let length = area.length()
+    if not math.is_finite(length) or not math.is_finite(extent2) or length <= math.max(1e-30,extent2*1e-14): return Vector3()
+    return area.multiply_scalar(1.0/length)
+
+## Whether a face normal marks a face without an area.
+pub func is_degenerate(normal: Vector3) -> bool:
+    return normal.x == 0.0 and normal.y == 0.0 and normal.z == 0.0
+
+## Display triangles in the face's normal plane: ear clipping supports
+## concave polygons created by point editing; what ear clipping and the
+## partition cannot finish (a self-intersecting or folded polygon, or one
+## without an area, whose normal is zero) is finished as a fan. The face
+## itself is never rejected: only its display is approximate.
 pub func triangulate(points: const Vector3[], corners: const i64[], start: usize, count: usize, normal: Vector3, output: i64[]) -> !:
+    if is_degenerate(normal):
+        fan(start, count, output)
+        return
     let origin = points[(usize)corners[start]]
     var extent2: f64 = 0.0
     for index in 0..<count:
@@ -83,12 +101,19 @@ pub func triangulate(points: const Vector3[], corners: const i64[], start: usize
             # Greedy ears can strand a rounded, nearly straight trim chain.
             # Solve the original polygon transactionally, not the stranded tail.
             if try partition(points,corners,start,count,normal,epsilon,output): return
-            error(errors.invalid, "cannot triangulate a collapsed or self-intersecting polygon")
-    let a = points[(usize)corners[remaining[0]]]
-    let b = points[(usize)corners[remaining[1]]]
-    let c = points[(usize)corners[remaining[2]]]
-    if b.subtract(a).cross(c.subtract(a)).dot(normal) <= epsilon:
-        error(errors.invalid, "polygon has a degenerate triangle")
+            # Self-intersecting or folded: the whole face as a fan (the
+            # partition may have written over the ears clipped so far).
+            fan(start, count, output)
+            return
     output[written] = (i64)remaining[0]
     output[written + 1] = (i64)remaining[1]
     output[written + 2] = (i64)remaining[2]
+
+## Triangles (start, start+k, start+k+1): a fan from the face's first corner.
+func fan(start: usize, count: usize, output: i64[]):
+    var written: usize = 0
+    for at in 1..<count - 1:
+        output[written] = (i64)start
+        output[written + 1] = (i64)(start + at)
+        output[written + 2] = (i64)(start + at + 1)
+        written += 3
