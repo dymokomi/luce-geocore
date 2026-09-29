@@ -13,10 +13,13 @@
 ## a worker runs inline there, in that item's context (an item's objects never
 ## reach another thread's context, and nesting never waits on a busy pool).
 ## Workers have deep stacks: B-rep tessellation runs whole faces as items.
+import c
 import os
 import sync
 import thread
 import ownership
+
+extern func getenv(name: c.str) -> c.str?
 
 ## The most workers the pool keeps.
 let most_workers: usize = 63
@@ -196,7 +199,16 @@ func ensure_workers():
     started = true
     let processors = (usize)os.cpus()
     let spare = processors - 1 if processors > 1 else 0
-    let wanted = most_workers if spare > most_workers else spare
+    var wanted = most_workers if spare > most_workers else spare
+    # LUCE_POOL_WORKERS caps the pool (tests of small machines).
+    if let found = getenv("LUCE_POOL_WORKERS"):
+        let text = (u8*)found
+        var cap: usize = 0
+        var at: usize = 0
+        while text[at] >= 48 and text[at] <= 57 and at < 4:
+            cap = cap * 10 + (usize)(text[at] - 48)
+            at += 1
+        if at > 0 and cap < wanted: wanted = cap
     for _ in 0..<wanted:
         let handle = thread.spawn(worker_main, none, stack = worker_stack, name = "luce-pool") catch failure:
             # Fewer workers only means less help: callers do the rest.
