@@ -3,13 +3,14 @@
 ## these are free functions in their own export, which Luce code never imports.
 ## The pack functions write a mesh's arrays in the GPU's layout (f32 vectors,
 ## u32 indices); their cost is a plain pass over the array.
+import math
 import memory
 import luce_geocore.errors as errors
 import luce_geocore.geometries.polygon as polygon
 from luce_geocore.math.vector import Vector3
 from luce_geocore.core.attributes import DataType
 from luce_geocore.core.float3 import Float3
-from luce_geocore.geometries.polygon import PolygonMesh, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, edge_span, attribute_entry, mesh_origin, smooth_normal_span, smooth_normals_ids
+from luce_geocore.geometries.polygon import PolygonMesh, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, edge_span, attribute_entry, mesh_origin, smooth_normal_span, smooth_normals_ids, curvature_span, curvature_id
 
 ## Positions as x, y, z f32 triples relative to `origin(mesh)`; `out` holds
 ## 3 per point. Positions are stored this way, so this is a copy.
@@ -85,3 +86,71 @@ pub func points_parent(mesh: const PolygonMesh*) -> u64:
     return polygon.points_parent(mesh)
 pub func normals_parent(mesh: const PolygonMesh*) -> u64:
     return polygon.normals_parent(mesh)
+
+# mark: Curvature =============================================================================
+
+## Where a mesh's principal curvatures come from: the analytic CAD attributes
+## curvature.k1/k2 (corner domain) when present, else the discrete estimate
+## per point. `key` names the data for GPU caches.
+pub struct CurvatureSource:
+    pub let domain: i64
+    pub let key: u64
+    let k1: i64
+    let k2: i64
+
+pub func curvature_source(mesh: const PolygonMesh*) -> CurvatureSource!:
+    let k1 = mesh.find_attribute("curvature.k1", 1)
+    let k2 = mesh.find_attribute("curvature.k2", 1)
+    if k1 >= 0 and k2 >= 0:
+        let key = (try mesh.attribute_id(k1)) *% 0x9E3779B97F4A7C15 ^ (try mesh.attribute_id(k2))
+        return CurvatureSource(1, key, k1, k2)
+    return CurvatureSource(0, try curvature_id(mesh), -1, -1)
+
+## (k1, k2, 0) per element of the source's domain into `out`.
+pub func pack_curvature(mesh: const PolygonMesh*, source: const CurvatureSource*, out: f32[]) -> !:
+    if source.k1 >= 0:
+        let k1 = try attribute_entry(mesh, source.k1)
+        let k2 = try attribute_entry(mesh, source.k2)
+        if out.length != k1.elements * 3: error(errors.invalid, "curvature output needs three values per corner")
+        for at in 0..<k1.elements:
+            out[at * 3] = (f32)k1.number(at, 0)
+            out[at * 3 + 1] = (f32)k2.number(at, 0)
+            out[at * 3 + 2] = 0.0
+        return
+    let values = try curvature_span(mesh)
+    if out.length != values.length // 2 * 3: error(errors.invalid, "curvature output needs three values per point")
+    for at in 0..<values.length // 2:
+        out[at * 3] = values[at * 2]
+        out[at * 3 + 1] = values[at * 2 + 1]
+        out[at * 3 + 2] = 0.0
+
+## The 98th percentile of |value| over the source, where `kind` picks the
+## value from (k1, k2): 0 mean, 1 Gaussian, 2 k1, 3 k2, 4 the larger |k|.
+## The colour map spans it, so a few extreme points do not wash it out.
+pub func curvature_range(mesh: const PolygonMesh*, source: const CurvatureSource*, kind: i64) -> f64!:
+    var count: usize = 0
+    if source.k1 >= 0: count = (try attribute_entry(mesh, source.k1)).elements
+    else: count = (try curvature_span(mesh)).length // 2
+    if count == 0: return 1.0
+    let packed = try alloc f32[count * 3] in memory.heap
+    defer free(packed) in memory.heap
+    try pack_curvature(mesh, source, packed)
+    let values = try alloc f64[count] in memory.heap
+    defer free(values) in memory.heap
+    var largest: f64 = 0.0
+    for at in 0..<count:
+        let k1 = (f64)packed[at * 3]
+        let k2 = (f64)packed[at * 3 + 1]
+        let value = (k1 + k2) * 0.5 if kind == 0 else (k1 * k2 if kind == 1 else (k1 if kind == 2 else (k2 if kind == 3 else math.max(math.abs(k1), math.abs(k2)))))
+        values[at] = math.abs(value) if math.is_finite(value) else 0.0
+        largest = math.max(largest, values[at])
+    if largest <= 1e-12: return 1.0
+    # A 4096-bucket histogram of |value| finds the percentile in one pass.
+    var buckets: u32[4096]
+    for value in values: buckets[(usize)math.min(4095.0, value / largest * 4096.0)] += 1
+    let wanted = count * 98 // 100
+    var seen: usize = 0
+    for bucket in 0..<(usize)4096:
+        seen += (usize)buckets[bucket]
+        if seen > wanted: return largest * (f64)(bucket + 1) / 4096.0
+    return largest

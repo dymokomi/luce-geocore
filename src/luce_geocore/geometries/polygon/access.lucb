@@ -179,6 +179,35 @@ extend PolygonMesh:
             if index >= 0 and self.attributes.entry((usize)index).width == 3: return true
         return false
 
+    ## k1 and k2 of every point (discrete; see curvature.lucb), computed on
+    ## first use.
+    func curvatures() -> const f32[]!:
+        if self.shading.has_curvatures(): return self.shading.built_curvatures()
+        # Points on an edge used once are boundary points.
+        let points = self.positions.count()
+        let edges = try self.edge_arrays()
+        let uses = try alloc u32[edges.0.length // 2] in memory.heap
+        defer free(uses) in memory.heap
+        memory.set(u8[]((u8*)uses.data, uses.length * 4), 0)
+        for edge in edges.1: uses[(usize)edge] += 1
+        let boundary = try alloc bool[points] in memory.heap
+        defer free(boundary) in memory.heap
+        memory.set(u8[]((u8*)boundary.data, points), 0)
+        for edge in 0..<uses.length:
+            if uses[edge] == 1:
+                boundary[(usize)edges.0[edge * 2]] = true
+                boundary[(usize)edges.0[edge * 2 + 1]] = true
+        let incidence = try self.incidence()
+        let shape = CurvatureShape(self.positions.view(), self.offsets.view(), self.corners.view(), self.triangles.view(), self.normals.view(), incidence.0, incidence.1, boundary)
+        return try self.shading.curvatures(&shape)
+
+    ## The discrete principal curvatures (k1, k2, 0) at `point`: positive
+    ## where the surface bends away from its normals; zero on a boundary.
+    pub func point_curvature(point: i64) -> Vector3!:
+        try checked(point, self.positions.count())
+        let values = try self.curvatures()
+        return Vector3((f64)values[(usize)point * 2], (f64)values[(usize)point * 2 + 1], 0.0)
+
     ## The smooth normal of every corner, computed on first use.
     func smooth_normals() -> const Float3[]!:
         let incidence = try self.incidence()
@@ -272,3 +301,12 @@ pub func smooth_normal_span(mesh: const PolygonMesh*) -> const Float3[]!:
 pub func smooth_normals_ids(mesh: const PolygonMesh*) -> (u64, u64)!:
     discard(try mesh.smooth_normals())
     return (mesh.shading.id(), mesh.shading.parent())
+
+## k1 and k2 of every point (discrete principal curvatures), computed on first
+## use; and the id of their column.
+pub func curvature_span(mesh: const PolygonMesh*) -> const f32[]!:
+    return try mesh.curvatures()
+
+pub func curvature_id(mesh: const PolygonMesh*) -> u64!:
+    discard(try mesh.curvatures())
+    return mesh.shading.curvature_id()

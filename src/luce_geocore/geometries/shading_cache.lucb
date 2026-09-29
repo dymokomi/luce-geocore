@@ -4,7 +4,8 @@
 ## the faces within the cusp angle of its own face (60 degrees, as Houdini's
 ## default), so hard edges stay hard. A mesh made by moving points keeps the
 ## previous geometry's cache as its source and updates only the corners around
-## the moved points.
+## the moved points. The same cache holds the points' discrete principal
+## curvatures (curvature.lucb) once asked for.
 import math
 import memory
 import sync
@@ -12,6 +13,7 @@ import luce_geocore.core.parallel as parallel
 from luce_geocore.core.float3 import Float3
 from luce_geocore.core.shared import Column
 from luce_geocore.math.vector import Vector3
+from luce_geocore.geometries.curvature import CurvatureShape, point_curvatures
 
 ## cos(60 degrees): faces meeting at a sharper angle keep separate normals.
 let cusp_cosine: f64 = 0.5
@@ -25,6 +27,9 @@ pub struct ShadingCache:
     ## points that moved since.
     var source: ShadingCache*? = none
     var moved: u32[]
+    ## k1 and k2 of every point.
+    var curvature_ready: @u32
+    var curvature: Column[f32]
 
     ## A cache for a mesh whose points `moved` over `previous`'s geometry.
     ## Only a built `previous` is kept; otherwise this one computes afresh.
@@ -65,6 +70,28 @@ pub struct ShadingCache:
     pub func is_ready() -> bool:
         return self.ready.load(.acquire) != 0
 
+    ## k1 and k2 of every point, computed on first use.
+    pub mutating func curvatures(shape: const CurvatureShape*) -> const f32[]!:
+        if self.curvature_ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.curvature_ready.load(.acquire) == 0:
+                var column = try Column[f32].allocate(shape.positions.length * 2)
+                point_curvatures(shape, column.span())
+                self.curvature = column
+                self.curvature_ready.store(1, .release)
+        return self.curvature.view()
+
+    pub func has_curvatures() -> bool:
+        return self.curvature_ready.load(.acquire) != 0
+
+    ## The curvatures once `has_curvatures`.
+    pub func built_curvatures() -> const f32[]:
+        return self.curvature.view()
+
+    pub func curvature_id() -> u64:
+        return self.curvature.id()
+
     ## The smooth column's id and the column it was derived from (0: none);
     ## meaningful once built.
     pub func id() -> u64:
@@ -85,6 +112,7 @@ pub struct ShadingCache:
     ## Called by the last owner, after every reader.
     mutating func close():
         self.smooth.release()
+        self.curvature.release()
         self.drop_source()
 
 ## Give up one owner of `cache`; the last frees it.

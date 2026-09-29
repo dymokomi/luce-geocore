@@ -1,6 +1,8 @@
 ## Smooth shading normals for meshes without N: hard edges past the cusp
 ## angle stay hard, smooth surfaces average, and a Move updates only what it
-## touched to the same values a fresh mesh computes.
+## touched to the same values a fresh mesh computes. Discrete curvature: a
+## sphere of radius r has k1 = k2 = 1/r; a plane's interior is flat and its
+## boundary reads zero.
 import math
 import memory
 from geocore import PolygonMesh, Vector3, MeshPrimitives
@@ -38,3 +40,19 @@ pub func exercise() -> !:
     defer fresh.close()
     for corner in 0..<m.vertex_count():
         same(try m.corner_normal(corner), try fresh.corner_normal(corner))
+    try curvature()
+
+func curvature() -> !:
+    let sphere = try MeshPrimitives.sphere(2.0, 48)
+    defer sphere.release()
+    let s = sphere.value()
+    for point in 0..<s.point_count():
+        let p = (try s.point(point)).subtract(Vector3(0.0, 2.0, 0.0))
+        if math.abs(p.y) > 1.6: continue
+        let k = try s.point_curvature(point)
+        assert(math.abs(k.x - 0.5) < 0.03 and math.abs(k.y - 0.5) < 0.03)
+    let plane = try MeshPrimitives.grid(2.0, 4)
+    defer plane.release()
+    for point in 0..<plane.value().point_count():
+        let k = try plane.value().point_curvature(point)
+        assert(math.abs(k.x) < 0.000001 and math.abs(k.y) < 0.000001)
