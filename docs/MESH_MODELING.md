@@ -44,17 +44,19 @@ preserves left detail values.
 Transforms preserve generic stored values; they do not implicitly reinterpret
 numeric tuples as normals or directions.
 
-Rendering consumes Cd and uv with corner > point > face > detail precedence.
-Normals used for shading are currently derived face normals, not stored N.
+Rendering consumes Cd, uv and N with corner > point > face > detail
+precedence; without an authored N, shading uses smooth normals (split at
+cusps) computed on first use.
 
 ## Operators
 
 - `MeshPrimitives`: grid, sphere, cylinder (including cone), torus.
 - Every modeling operation is a verb run through `Verbs.run` (see API.md,
   Verbs): point verbs (Transform Components, Smooth, Mountain, Peak, Flatten,
-  Snap), face verbs (Delete, Reverse, Triangulate, Duplicate, Split, Inset,
-  PolyExtrude, Subdivide) and topology verbs (PolyBevel, Loop Cut, Bridge,
-  Fill, Dissolve, Fuse, Merge Points, Clean).
+  Snap, Edge Slide), face verbs (Delete, Reverse, Triangulate, Duplicate,
+  Split, Inset, PolyExtrude, Subdivide), topology verbs (PolyBevel, Loop Cut,
+  Bridge, Fill, Dissolve, Fuse, Merge Points, Clean, Clip, Connect,
+  PolyMirror, Spin, PolyDraw) and display verbs (Subdivision, Crease).
 - `without_faces` / `compacted` give face subsets and drop unused points;
   `dissolve_edge` and `DissolveWorkspace` join faces keeping their display
   triangles (CAD trim cells).
@@ -62,10 +64,9 @@ Normals used for shading are currently derived face normals, not stored N.
 
 No editor commands, node graph state or selection UI live in these modules.
 Limits are 8,388,608 points/faces, 33,554,432 corners and 256 corners per polygon.
-Attribute budgets count tuples, not scalar components. Attribute-only changes
-share immutable topology and BVH; cross-thread transfers remain deep native copies.
-There are at most 32 attributes with 262,144 values each. Invalid topology,
-cardinality and capacity violations return checked errors.
+An attribute holds at most 33,554,432 tuples (budgets count tuples, not scalar
+components). Attribute-only changes share immutable topology and BVH. Invalid
+topology, cardinality and capacity violations return checked errors.
 
 `ray_face` and `ray_distance` use the immutable triangle BVH. They accept world
 geometry-space rays; callers should normalize directions for metric distances.

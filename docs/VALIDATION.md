@@ -46,3 +46,11 @@ stage, and must leave no allocation live.
   and boundary candidates. 4,334 primitive queries cover thin triangles,
   vertex permutations, scales, translations, axis planes, known interior/edge/
   exterior projections, nonzero normal distances, and degenerate vertices.
+- Verbs: golden checks of every verb on a 4 by 4 grid carrying uvs, groups
+  and ids (`verb_checks`: counts, output selections, propagation,
+  determinism, the Edit engine's symmetry, soft falloff, soft weights and
+  kept selections); the G6 verbs' element counts and closed surfaces
+  (`g6_checks`); PolyDraw (`polydraw_checks`); subdivision and creases
+  (`subdivision_checks`).
+- Groups: every row of Houdini's group-syntax table
+  (`group_language_checks`), selections and their encoder round trips.

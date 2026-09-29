@@ -1,8 +1,10 @@
 # Luce Geocore
 
 Shared geometry for Luce, with no GPU or UI dependency: polygon meshes, their
-attributes, modeling kernels (point and face operators, subdivision, bevel, fill,
-dissolve, fuse), primitives, and CPU spatial queries (a lazy triangle BVH).
+attributes, groups and selections (Houdini's group syntax), modeling verbs
+(point, face and topology operators such as extrude, bevel, loop cut, clip,
+mirror and spin, run through one verb framework), subdivision, primitives, and
+CPU spatial queries (a lazy triangle BVH).
 Importers, CAD tessellation and editors produce and share these meshes; the
 renderer in [luce-3d](https://github.com/dymokomi/luce-3d) draws them.
 
@@ -21,10 +23,13 @@ def dependency "luce-geocore" {
 }
 ```
 
-Import `geocore` (`from geocore import Mesh, MeshBuilder, Vector3`).
-Base code in other packages reads a mesh's arrays through `geocore_native`
-(spans, and packing into GPU layouts, which Luce cannot call), and
-`geocore_growing` exports `Growing`, a heap array that keeps its capacity.
+Import `geocore` (`from geocore import Mesh, MeshBuilder, Vector3`). Base
+code in other packages also has `geocore_kernel` (bit sets, groups and
+selections, mesh assembly, the geometry set's component protocol, the codec
+registry, curves), `geocore_native` (spans, and packing into GPU layouts,
+which Luce cannot call), `geocore_parallel` (the shared worker pool),
+`geocore_shared` (shared columns) and `geocore_growing` (`Growing`, a heap
+array that keeps its capacity).
 
 Use the compiler revisions in `bootstrap/PACKAGES`, checked out beside this
 repository, and run `./test.sh`: the Base checks at native optimization levels

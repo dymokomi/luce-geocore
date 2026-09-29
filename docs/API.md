@@ -58,8 +58,9 @@ clipping, and degenerate input is rejected. A corner indexes a shared point;
 results are valid data but should not be submitted as renderable meshes. These
 operators are CPU geometry operations. Face UVs are provisional local coordinates;
 attribute contracts are detailed in MESH_MODELING.md; cross-face self-intersection
-cleanup is not implemented. Attribute-only edits share immutable topology/BVH on
-one thread; detached worker transfers remain independent copies.
+cleanup is not implemented. Attribute-only edits share immutable topology/BVH;
+a detached worker transfer (`detached_mesh`) shares the immutable columns and
+caches through atomic counts, and the receiver adopts it on its own thread.
 `mesh_type` is the Base ownership descriptor.
 
 The BVH is lazy: constructing, rendering or editing an unqueried mesh does not
@@ -226,6 +227,15 @@ selection and a warning. `Verbs.count`, `name`, `category`, `description`,
 `domain` and `parm_*` describe the verbs, and luced-3d generates its node
 catalog from them.
 
+`Verbs.run(name, mesh, group, group_type, numbers, symmetry=0, keep=false)`
+also carries the Edit engine's options: `symmetry` (1..3) adds the mirror of
+every group member across the X, Y or Z plane through the origin, and `keep`
+makes the output selection the group carried through the verb instead of what
+it made. Transform Components' Soft radius and Falloff move the points near
+the group by a weight (1 in the group, falling off with the distance to its
+nearest member); `selection_weights` in `geocore_kernel` computes the same
+weights for a selection, which the Edit viewport tints points by.
+
 The modeling verbs, after Houdini's SOPs and Blender's tools:
 
 - **PolyBevel** (edges): strips offset a constant distance into the faces
@@ -247,7 +257,8 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
 - **Dissolve** (edges, points, faces strictly): one face per joined region;
   points left between two edges go.
 - **Clip** (faces): cut by an axis-aligned plane (optionally through the
-  group's centroid) and keep the side above, below, or both (a knife cut);
+  group's centroid) or any plane given by a point and a normal (the editor's
+  knife stroke), and keep the side above, below, or both (a knife cut);
   one cut point per crossed edge, which neighbours outside the group take
   into their boundaries; a face on the plane counts as above, once.
 - **Connect** (edges or points): two of the group's points across a face
