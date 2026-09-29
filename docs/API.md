@@ -151,3 +151,37 @@ and the component protocol (`set_find`, `set_put`, `set_remove`,
 `set_storage`, the built-in families). Import its names with
 `from geocore_kernel import …`: a qualified call of a re-exported function
 value does not compile (reported to the compiler owners).
+
+## Group expressions and selections
+
+Group parameters and stored selections use Houdini's group syntax (22.0):
+numbers, ranges with steps (`0-100:2`, `0-100:1,3`, open `12-`), names and
+globs (`top`, `arm*`, `{arm* ^arm3*}`, `?*`), `!`, `^` and `&`, attribute tests
+(`@P.y>0`, `@Cd[2]<0.5`, `@id=1,2,90`, `@id="0-4 78"`, `@name=piece*`,
+`@flags&4`, `@ptnum<100`, `@primnum`, `@elemnum`) and edge forms (`p3`,
+`p3-4`, `p3-4-5`, `7e2`, and on an edge target a number names a face's
+edges). Our functions, which cannot clash with group names: `grow(x, n)`,
+`shrink(x, n)`, `border(x)`, `connected(x)`, `loop(x)`, `ring(x)` and
+`convert(x, n)` (n = 0: all related elements, 1: any). `groups/program.lucb`
+states the grammar, and `tests/group_language_checks.lucb` checks every row of
+Houdini's table.
+
+An expression compiles once and evaluates to bits in Base: ranges are word
+fills, names share their group's bits, `@` tests run in parallel, and edge
+forms, conversions and the functions use lazy connectivity caches shared by
+every mesh with the same topology (edges, and point-face, point-edge and
+edge-corner lists). Results are cached process-wide by the expression and the
+change ids of everything they could read. Numbers that name no element match
+nothing (as in Houdini) and are counted; names found only on another domain
+are converted (a face is in a point group when all its points are).
+
+`Selection` is the Luce-side selection: bits over one domain with the
+connectivity hash they index. `Selection.of(mesh, expression, domain)`,
+`count`, `contains`, `next`, `changed` (add, remove, toggle, only),
+`filled`, `inverted`, `combined`, `walked` (grow, shrink, border, flood,
+loop, ring), `on_domain`, `points`, `center`, `fits` and `expression`, the
+encoder: runs (`0-5 12`), strides (`1-9:2`), a group's name when the bits are
+exactly its members, and edges as chained point pairs (`p3-4-5`), all read back
+to the same bits. `Groups.with_group` makes a flagged group from an
+expression, `Groups.count` counts one, and `Groups.check` returns a syntax
+error or "".

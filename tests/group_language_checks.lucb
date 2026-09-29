@@ -1,0 +1,174 @@
+## The group expression language against Houdini's documented syntax (every
+## row of its group syntax table), our functions, domain conversion, and the
+## selection encoder's round trip. A 4 by 4 grid: point z*5+x, face z*4+x.
+import interop
+import math
+import memory
+from geocore import Mesh, MeshPrimitives, Selection, Groups
+from geocore_kernel import clear_group_cache
+
+struct Row:
+    let expression: str
+    let domain: i64
+    let expected: i64
+
+pub func exercise() -> !:
+    # The process-wide group cache holds results; empty it on every path.
+    defer clear_group_cache()
+    try table()
+    try members()
+    try round_trips()
+    try errors_and_reports()
+
+func grid() -> interop.Reference[Mesh]!:
+    let base = try MeshPrimitives.grid(2.0, 4)
+    defer base.release()
+    let top = try base.value().with_group("top", 2, [12, 13, 14, 15])
+    defer top.release()
+    let left = try top.value().with_group("left", 2, [0, 4, 8, 12])
+    defer left.release()
+    let arms = try left.value().with_group("arm1", 2, [5])
+    defer arms.release()
+    let arm3 = try arms.value().with_group("arm3", 2, [10])
+    defer arm3.release()
+    var ids: f64[16]
+    var flags: f64[16]
+    var blue: f64[48]
+    var names: i64[16]
+    for face in 0..<(usize)16:
+        ids[face] = (f64)face * 10.0
+        flags[face] = (f64)face
+        blue[face * 3 + 2] = (f64)face / 16.0
+        names[face] = 0 if face < 8 else 1
+    let with_ids = try arm3.value().with_attribute("id", 2, 1, ids, true)
+    defer with_ids.release()
+    let with_flags = try with_ids.value().with_attribute("flags", 2, 1, flags, true)
+    defer with_flags.release()
+    let colored = try with_flags.value().with_attribute("Cd", 2, 3, blue)
+    defer colored.release()
+    return try colored.value().with_text_values("name", 2, "piece_a\nother", names)
+
+func count(mesh: interop.Reference[Mesh], expression: str, domain: i64) -> i64!:
+    return try Groups.count(mesh, expression, domain)
+
+func table() -> !:
+    let mesh = try grid()
+    defer mesh.release()
+    let rows: Row[43] = [
+        # Numbers, ranges, steps, all and none.
+        Row("*", 2, 16), Row("!*", 2, 0), Row("3", 2, 1), Row("2-5", 2, 4), Row("0-10:2", 2, 6),
+        Row("0-15:2,4", 2, 8), Row("12-", 2, 4), Row("3 5 7", 2, 3), Row("40", 2, 0),
+        # Names, globs, brace filters and anything in a group.
+        Row("top", 2, 4), Row("t*", 2, 4), Row("{arm* ^arm3*}", 2, 1), Row("?*", 2, 9), Row("arm?", 2, 2),
+        # Combining: union, all but, remove, intersect.
+        Row("top left", 2, 7), Row("top ^left", 2, 3), Row("top &left", 2, 1), Row("!top", 2, 12), Row("0-3 !top", 2, 12),
+        # Attribute tests.
+        Row("@P.x>0", 0, 10), Row("@P.x>=0", 0, 15), Row("@Cd[2]<0.5", 2, 8), Row("@Cd.b<0.5", 2, 8),
+        Row("@id=10-30", 2, 3), Row("@id=\"0-10 150\"", 2, 3), Row("@id=0,20,90", 2, 3), Row("@id!=0", 2, 15),
+        Row("@id==150", 2, 1), Row("@flags&4", 2, 8), Row("@name=piece*", 2, 8), Row("@name!=piece*", 2, 8), Row("@top", 2, 4),
+        # Element numbers (Houdini 22) on their domain and converted.
+        Row("@ptnum<5", 2, 4), Row("@primnum>=14", 2, 2), Row("@elemnum<3", 0, 3), Row("@intrinsic:indexorder<3", 2, 3),
+        # Edge forms: a face's edges, a point's, a pair, a chain, a face's side.
+        Row("0", 4, 4), Row("p0", 4, 2), Row("p0-1", 4, 1), Row("p0-1-2", 4, 2), Row("0e0", 4, 1), Row("p0-6", 4, 0),
+        # Names converted to other domains.
+        Row("top", 0, 10)]
+    for row in rows:
+        let found = try count(mesh, row.expression, row.domain)
+        if found != row.expected:
+            print(f"group expression {row.expression} on domain {row.domain}: {found} != {row.expected}")
+            assert(false)
+    let more: Row[12] = [
+        Row("top", 4, 13), Row("grow(3)", 2, 3), Row("grow(5, 2)", 2, 11), Row("shrink(top)", 2, 0), Row("shrink(0-15)", 2, 16),
+        Row("border(5 6 9 10)", 2, 4), Row("border(0-7)", 2, 4), Row("connected(0)", 2, 16), Row("loop(p5-6)", 4, 4), Row("ring(p5-6)", 4, 5),
+        Row("convert(top, 0)", 0, 5), Row("convert(top, 1)", 0, 10)]
+    for row in more:
+        let found = try count(mesh, row.expression, row.domain)
+        if found != row.expected:
+            print(f"group expression {row.expression} on domain {row.domain}: {found} != {row.expected}")
+            assert(false)
+
+func members() -> !:
+    let mesh = try grid()
+    defer mesh.release()
+    let ring = try Selection.of(mesh, "ring(p5-6)", 4)
+    defer ring.release()
+    let points = try ring.value().points(mesh)
+    defer points.release()
+    assert(points.value().count() == 10 and points.value().contains(0) and points.value().contains(21))
+    var ids: i64[5]
+    try ring.value().members(ids)
+    assert(ids[0] < ids[1] and ring.value().member(4) == ids[4] and ring.value().member(5) == -1)
+    # Clicks, fills and inversion.
+    let one = try ring.value().changed(ids[0], 2)
+    defer one.release()
+    assert(one.value().count() == 4 and not one.value().contains(ids[0]))
+    let only = try one.value().changed(7, 3)
+    defer only.release()
+    assert(only.value().count() == 1 and only.value().contains(7))
+    let everything = try only.value().inverted()
+    defer everything.release()
+    assert(everything.value().count() == everything.value().size() - 1)
+    let loops = try only.value().walked(mesh, 4)
+    defer loops.release()
+    assert(loops.value().count() >= 1)
+    let faces = try Selection.of(mesh, "top", 2)
+    defer faces.release()
+    let grown = try faces.value().walked(mesh, 0, 1)
+    defer grown.release()
+    assert(grown.value().count() == 8 and (try grown.value().fits(mesh)))
+    let center = try faces.value().center(mesh)
+    assert(math.abs(center.z - 0.75) < 0.000001 and math.abs(center.x) < 0.000001)
+    # A Group node's result: a flagged group from an expression.
+    let grouped = try Groups.with_group(mesh, "front", 2, "0-3")
+    defer grouped.release()
+    assert(grouped.value().group_size("front", 2) == 4)
+
+## Bits to text and back, for runs, strides, names and edge chains.
+func round_trips() -> !:
+    let mesh = try grid()
+    defer mesh.release()
+    let cases: Row[9] = [Row("0-5 9", 2, 7), Row("0-12:3", 2, 5), Row("top", 2, 4), Row("*", 2, 16), Row("1 4 7 8", 0, 4),
+                         Row("loop(p5-6)", 4, 4), Row("ring(p5-6)", 4, 5), Row("0-63:5", 1, 13), Row("p0 p24", 4, 4)]
+    for row in cases:
+        let selection = try Selection.of(mesh, row.expression, row.domain)
+        defer selection.release()
+        assert(selection.value().count() == row.expected)
+        let text = try selection.value().expression(mesh)
+        defer text.release()
+        let back = try Selection.of(mesh, text.value, row.domain)
+        defer back.release()
+        assert(back.value().count() == row.expected)
+        for element in 0..<selection.value().size():
+            assert(back.value().contains(element) == selection.value().contains(element))
+    let named = try Selection.of(mesh, "12-15", 2)
+    defer named.release()
+    let text = try named.value().expression(mesh)
+    defer text.release()
+    assert(text.value == "top")
+    let chain = try Selection.of(mesh, "loop(p5-6)", 4)
+    defer chain.release()
+    let chained = try chain.value().expression(mesh)
+    defer chained.release()
+    assert(chained.value == "p5-6-7-8-9" or chained.value == "p9-8-7-6-5")
+
+func errors_and_reports() -> !:
+    let mesh = try grid()
+    defer mesh.release()
+    let bad: str[6] = ["3-", "@", "grow(3", "unknown(3)", "@id=", "5x"]
+    for text in bad[1..]:
+        let message = try Groups.check(text)
+        defer message.release()
+        assert(message.value != "")
+    let good = try Groups.check("grow(top ^left, 2) @P.y>0 p3-4 7e1")
+    defer good.release()
+    assert(good.value == "")
+    let missing = try Selection.of(mesh, "3 90 nope", 2)
+    defer missing.release()
+    assert(missing.value().count() == 1 and missing.value().misses() == 1 and missing.value().unknown_names() == 1)
+    let converted = try Selection.of(mesh, "top", 0)
+    defer converted.release()
+    assert(converted.value().converted())
+    var failed = false
+    discard(Selection.of(mesh, "@nothing>0", 2)) catch failure:
+        failed = true
+    assert(failed)

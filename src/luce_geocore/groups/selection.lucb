@@ -1,0 +1,243 @@
+## A component selection: bits over one domain of one mesh's topology, the
+## interaction state the viewport edits and tools read (points, edges, faces
+## or corners). It never enters node stamps. Every operation returns a new
+## selection sharing nothing mutable; setting a million bits costs a word
+## fill, and a click copies 88 KB for a 700k-face mesh.
+
+pub struct Selection:
+    var bits: Column[u64]
+    var elements: usize
+    var domain_value: Domain
+    ## The connectivity hash of the mesh the bits index (a durable guard).
+    var topology: u64
+    var report: GroupReport
+
+    ## Nothing selected on `domain` of `mesh`.
+    pub static func empty(mesh: interop.Reference[Mesh], domain: i64) -> interop.Reference[Selection]!:
+        let geometry = try mesh.get()
+        let target = try domain_of(domain)
+        var bits = try BitsBuilder.zeros((usize)(try geometry.domain_count(domain)))
+        return try adopt_selection(bits.finish(), bits.count, target, (u64)geometry.topology_hash(), GroupReport())
+
+    ## The elements of `domain` a group expression names.
+    pub static func of(mesh: interop.Reference[Mesh], expression: str, domain: i64) -> interop.Reference[Selection]!:
+        let geometry = try mesh.get()
+        let target = try domain_of(domain)
+        var result = try group_bits(geometry, expression, target)
+        let elements = (usize)(geometry.domain_count(domain) catch failure:
+            result.bits.release()
+            error(failure.code, failure.message))
+        return try adopt_selection(result.bits, elements, target, (u64)geometry.topology_hash(), result.report)
+
+    ## 0 points, 1 corners, 2 faces, 4 edges.
+    pub func domain() -> i64:
+        return (i64)(u8)self.domain_value
+
+    ## Elements selected, and elements there are.
+    pub func count() -> i64:
+        return (i64)self.view().population()
+
+    pub func size() -> i64:
+        return (i64)self.elements
+
+    pub func contains(element: i64) -> bool:
+        return element >= 0 and (usize)element < self.elements and self.view().get((usize)element)
+
+    ## Whether the bits index `mesh` (same element count and connectivity).
+    pub func fits(mesh: interop.Reference[Mesh]) -> bool!:
+        let geometry = try mesh.get()
+        return (usize)(try geometry.domain_count(self.domain())) == self.elements and (u64)geometry.topology_hash() == self.topology
+
+    ## What evaluating an expression noticed: numbers that named nothing,
+    ## unknown group names, and whether anything came from another domain.
+    pub func misses() -> i64:
+        return (i64)self.report.misses
+
+    pub func unknown_names() -> i64:
+        return (i64)self.report.unknown_names
+
+    pub func converted() -> bool:
+        return self.report.converted
+
+    ## The `index`-th selected element (ascending), or -1.
+    pub func member(index: i64) -> i64:
+        var remaining = index
+        let words = self.bits.view()
+        for word in 0..<words.length:
+            let count = (i64)popcount(words[word])
+            if remaining >= count:
+                remaining -= count
+                continue
+            var bits = words[word]
+            for _ in 0..<remaining: bits = bits & (bits - 1)
+            return (i64)(word * 64 + (usize)trailing_zeros(bits))
+        return -1
+
+    ## The first selected element after `element` (-1: from the start), or
+    ## -1: `while (at = s.next(at)) >= 0` visits the members in O(n) total.
+    pub func next(element: i64) -> i64:
+        let words = self.bits.view()
+        var at = (usize)(element + 1) if element >= -1 else 0
+        while at < self.elements:
+            let word = words[at >> 6] >> (u64)(at & 63)
+            if word != 0: return (i64)(at + (usize)trailing_zeros(word))
+            at = (at | 63) + 1
+        return -1
+
+    ## The selected elements into `out` (which holds `count()` of them).
+    pub func members(out: i64[]) -> !:
+        if out.length != self.view().population(): error(errors.invalid, "members needs room for every selected element")
+        self.view().indices(out)
+
+    # -- New selections.
+
+    ## With `element` set, cleared or flipped (op 0, 1, 2), or only it
+    ## selected (op 3). Elements out of range change nothing.
+    pub func changed(element: i64, operation: i64) -> interop.Reference[Selection]!:
+        var bits = try BitsBuilder.copy_of(self.view())
+        if element >= 0 and (usize)element < self.elements:
+            let at = (usize)element
+            if operation == 3:
+                bits.close()
+                bits = try BitsBuilder.zeros(self.elements)
+                bits.set(at)
+            elif operation == 0 or (operation == 2 and not self.view().get(at)): bits.set(at)
+            else: bits.clear(at)
+        return try self.with_bits(bits.finish())
+
+    ## Every element, or none.
+    pub func filled(all: bool) -> interop.Reference[Selection]!:
+        var bits = (try BitsBuilder.ones(self.elements)) if all else (try BitsBuilder.zeros(self.elements))
+        return try self.with_bits(bits.finish())
+
+    pub func inverted() -> interop.Reference[Selection]!:
+        var bits = try BitsBuilder.copy_of(self.view())
+        bits.invert()
+        return try self.with_bits(bits.finish())
+
+    ## Also the elements of `expression` (0 add, 1 remove, 2 intersect).
+    pub func combined(mesh: interop.Reference[Mesh], expression: str, operation: i64) -> interop.Reference[Selection]!:
+        let geometry = try mesh.get()
+        var result = try group_bits(geometry, expression, self.domain_value)
+        defer result.bits.release()
+        var bits = try BitsBuilder.copy_of(self.view())
+        let other = Bits(result.bits.view(), self.elements)
+        if operation == 0: bits.unite(other)
+        elif operation == 1: bits.subtract(other)
+        else: bits.intersect(other)
+        return try self.with_bits(bits.finish())
+
+    ## Grown, shrunk, bordered or flood filled (op 0..3; `steps` for the
+    ## first two), or edge loops and rings (op 4, 5) of an edge selection.
+    pub func walked(mesh: interop.Reference[Mesh], operation: i64, steps: i64 = 1) -> interop.Reference[Selection]!:
+        let topology = try Topology.of(try mesh.get())
+        let count = (usize)(steps if steps > 0 else 0)
+        var bits = BitsBuilder()
+        match operation:
+            0: bits = try grown(&topology, self.view(), self.domain_value, count)
+            1: bits = try shrunk(&topology, self.view(), self.domain_value, count)
+            2: bits = try bordered(&topology, self.view(), self.domain_value)
+            3: bits = try connected(&topology, self.view(), self.domain_value)
+            _:
+                if self.domain_value != Domain.edge: error(errors.invalid, "loops and rings need an edge selection")
+                bits = (try looped(&topology, self.view())) if operation == 4 else (try ringed(&topology, self.view()))
+        return try self.with_bits(bits.finish())
+
+    ## The same components on another domain (see `converted` in convert:
+    ## `all` needs every related element, else any).
+    pub func on_domain(mesh: interop.Reference[Mesh], domain: i64, all: bool) -> interop.Reference[Selection]!:
+        let geometry = try mesh.get()
+        let target = try domain_of(domain)
+        let topology = try Topology.of(geometry)
+        var bits = try converted(&topology, self.view(), self.domain_value, target, all)
+        let count = bits.count
+        return try adopt_selection(bits.finish(), count, target, self.topology, GroupReport())
+
+    ## The points of the selected components, for point tools.
+    pub func points(mesh: interop.Reference[Mesh]) -> interop.Reference[Selection]!:
+        return try self.on_domain(mesh, 0, false)
+
+    ## A group expression that names exactly these components (see encode).
+    pub func expression(mesh: interop.Reference[Mesh]) -> interop.Owned[str]!:
+        var text = Growing[u8]()
+        defer text.close()
+        try encode(try mesh.get(), self.view(), self.domain_value, &text)
+        return try interop.copy_text((str)text.view())
+
+    ## The average of the selected components' points; `none` selected: the
+    ## bounds center.
+    pub func center(mesh: interop.Reference[Mesh]) -> Vector3!:
+        let geometry = try mesh.get()
+        let topology = try Topology.of(geometry)
+        var points = try converted(&topology, self.view(), self.domain_value, Domain.point, false)
+        defer points.close()
+        let positions = point_span(geometry)
+        var sum = Vector3()
+        var count: usize = 0
+        let words = points.view().words
+        for word in 0..<words.length:
+            var pending = words[word]
+            while pending != 0:
+                let point = word * 64 + (usize)trailing_zeros(pending)
+                pending = pending & (pending - 1)
+                sum = sum.add(positions[point].vector())
+                count += 1
+        if count == 0:
+            let box = geometry.bounds()
+            return box.minimum.add(box.maximum).multiply_scalar(0.5)
+        return sum.multiply_scalar(1.0 / (f64)count).add(mesh_origin(geometry))
+
+    func view() -> Bits:
+        return Bits(self.bits.view(), self.elements)
+
+    func with_bits(column: Column[u64]) -> interop.Reference[Selection]!:
+        return try adopt_selection(column, self.elements, self.domain_value, self.topology, GroupReport())
+
+    pub mutating func close():
+        self.bits.release()
+
+pub let selection_type: interop.Type[Selection] = interop.Type[Selection]("Selection", Selection.close, closeable = true)
+
+## A selection owning `column` (taken, released on failure).
+func adopt_selection(column: Column[u64], elements: usize, domain: Domain, topology: u64, report: GroupReport) -> interop.Reference[Selection]!:
+    var owned = column
+    let storage = alloc Selection[1] in memory.heap catch failure:
+        owned.release()
+        error(failure.code, failure.message)
+    storage[0] = Selection(owned, elements, domain, topology, report)
+    return try interop.Reference[Selection].adopt(storage.data, selection_type, memory.heap)
+
+## The bits of a selection, for Base kernels (verbs, overlays).
+pub func selection_bits(selection: const Selection*) -> Bits:
+    return selection.view()
+
+pub func domain_of(value: i64) -> Domain!:
+    if value < 0 or value > 4 or value == 3: error(errors.invalid, "a selection is of points (0), corners (1), faces (2) or edges (4)")
+    return Domain((u8)value)
+
+## Group expressions from Luce, beyond selections.
+pub struct Groups:
+    let reserved: u8 = 0
+
+    ## "" when `expression` parses, else the error, with its byte offset.
+    pub static func check(expression: str) -> interop.Owned[str]!:
+        var program = GroupProgram.parse(expression) catch failure:
+            return try interop.copy_text(failure.message)
+        program.close()
+        return interop.Owned[str]("")
+
+    ## A snapshot of `mesh` with group `name` holding what `expression`
+    ## names on `domain` (the Group node).
+    pub static func with_group(mesh: interop.Reference[Mesh], name: str, domain: i64, expression: str) -> interop.Reference[Mesh]!:
+        let geometry = try mesh.get()
+        let target = try domain_of(domain)
+        var result = try group_bits(geometry, expression, target)
+        defer result.bits.release()
+        return try with_group_bits(geometry, name, target, Bits(result.bits.view(), (usize)(try geometry.domain_count(domain))))
+
+    ## Elements `expression` names on `domain`.
+    pub static func count(mesh: interop.Reference[Mesh], expression: str, domain: i64) -> i64!:
+        let geometry = try mesh.get()
+        var result = try group_bits(geometry, expression, try domain_of(domain))
+        defer result.bits.release()
+        return (i64)Bits(result.bits.view(), (usize)(try geometry.domain_count(domain))).population()

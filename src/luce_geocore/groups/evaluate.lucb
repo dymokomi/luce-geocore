@@ -1,0 +1,340 @@
+## Running a group program on a mesh: every term to bits on the target
+## domain, combined left to right. Ranges are word fills, names share their
+## group's bits, `@` tests run over the elements in parallel, and edge forms,
+## conversions and the functions use the topology caches (built only when a
+## term needs them).
+
+## What evaluation noticed without failing: numbers or point pairs that name
+## no element (Houdini ignores them; nodes warn), group names that matched
+## nothing, and names or attributes read from another domain and converted.
+pub struct GroupReport:
+    pub var misses: usize = 0
+    pub var unknown_names: usize = 0
+    pub var converted: bool = false
+
+## Whether a conversion to `destination` needs "all" related elements: a face is in
+## a point or edge group when all its points or edges are; an edge when both
+## its points are; a point or corner when any of its faces or edges is.
+pub func strict_conversion(source: Domain, destination: Domain) -> bool:
+    if destination == Domain.face: return true
+    return destination == Domain.edge and source == Domain.point
+
+pub func evaluate(program: const GroupProgram*, mesh: const Mesh*, target: Domain, report: GroupReport*) -> BitsBuilder!:
+    var run = Evaluation(program, mesh, none, report)
+    return try run.terms(program.top_first, program.top_count, target)
+
+struct Evaluation:
+    let program: const GroupProgram*
+    let mesh: const Mesh*
+    var topology: Topology?
+    let report: GroupReport*
+
+    mutating func connectivity() -> Topology!:
+        if let known = self.topology: return known
+        let built = try Topology.of(self.mesh)
+        self.topology = built
+        return built
+
+    func size(domain: Domain) -> usize!:
+        return (usize)(try self.mesh.domain_count((i64)(u8)domain))
+
+    ## Terms first..<first + count combined into bits of `target`.
+    mutating func terms(first: u32, count: u32, target: Domain) -> BitsBuilder!:
+        var result = try BitsBuilder.zeros(try self.size(target))
+        errdefer result.close()
+        for index in first..<first + count:
+            let term = &self.program.terms.items[(usize)index]
+            var atom = try self.atom(term, target)
+            defer atom.close()
+            match term.combine:
+                .add: result.unite(atom.view())
+                .add_complement: result.unite_complement(atom.view())
+                .remove: result.subtract(atom.view())
+                _: result.intersect(atom.view())
+        return result
+
+    mutating func atom(term: const Term*, target: Domain) -> BitsBuilder!:
+        let size = try self.size(target)
+        match term.kind:
+            .all: return try BitsBuilder.ones(size)
+            .range: return try self.range(term, target)
+            .name: return try self.name(self.program.text(term), target)
+            .names: return try self.terms(term.first, term.count, target)
+            .attribute: return try self.attribute(term, target)
+            .point_edges, .face_edge:
+                var edges = try self.edge_atom(term)
+                defer edges.close()
+                return try self.convert(edges.view(), Domain.edge, target, strict_conversion(Domain.edge, target))
+            _: return try self.call(term, target)
+
+    ## Numbers name elements of the target; on edges they name faces, whose
+    ## edges are taken (Houdini's edge groups).
+    mutating func range(term: const Term*, target: Domain) -> BitsBuilder!:
+        let domain = Domain.face if target == Domain.edge else target
+        let size = try self.size(domain)
+        var bits = try BitsBuilder.zeros(size)
+        errdefer bits.close()
+        let numbers = self.program.numbers.view()[(usize)term.first..<(usize)(term.first + term.count)]
+        let first = numbers[0]
+        var last = numbers[1]
+        if last < 0.0: last = (f64)size - 1.0
+        let keep = (usize)numbers[2]
+        let step = (usize)numbers[3]
+        if last < first:
+            self.report.misses += 1
+            return try self.convert_owned(bits, domain, target)
+        let end = (usize)last + 1
+        if end > size: self.report.misses += (end - (usize)math.max(first, (f64)size) + step - 1) // step
+        if (usize)first < size: bits.set_stride((usize)first, end if end < size else size, keep, step)
+        return try self.convert_owned(bits, domain, target)
+
+    ## `bits` of `source` as bits of `destination` (the builder is taken).
+    mutating func convert_owned(bits: BitsBuilder, source: Domain, destination: Domain) -> BitsBuilder!:
+        var owned = bits
+        if source == destination: return owned
+        defer owned.close()
+        return try self.convert(owned.view(), source, destination, false)
+
+    mutating func convert(bits: Bits, source: Domain, destination: Domain, all: bool) -> BitsBuilder!:
+        if source == destination: return try BitsBuilder.copy_of(bits)
+        let topology = try self.connectivity()
+        return try converted(&topology, bits, source, destination, all)
+
+    ## Groups whose names match `pattern` on the target domain; when none
+    ## does, the first domain where some do, converted.
+    mutating func name(pattern: str, target: Domain) -> BitsBuilder!:
+        let order: Domain[5] = [target, Domain.point, Domain.face, Domain.edge, Domain.corner]
+        for at in 0..<order.length:
+            let domain = order[at]
+            if at > 0 and domain == target: continue
+            var bits = try BitsBuilder.zeros(try self.size(domain))
+            var found = false
+            for index in 0..<(usize)self.mesh.attribute_count():
+                let entry = try attribute_entry(self.mesh, (i64)index)
+                if not entry.is_group() or entry.domain != domain or not glob(pattern, entry.name()): continue
+                bits.unite(Bits.of_bytes(entry.data.view(), entry.elements))
+                found = true
+            if not found:
+                bits.close()
+                continue
+            if domain != target: self.report.converted = true
+            defer bits.close()
+            return try self.convert(bits.view(), domain, target, strict_conversion(domain, target))
+        self.report.unknown_names += 1
+        return try BitsBuilder.zeros(try self.size(target))
+
+    ## `@name[component] op values`: an attribute on the target domain, else
+    ## on its own domain and converted (any element of a face, and so on).
+    mutating func attribute(term: const Term*, target: Domain) -> BitsBuilder!:
+        let name = self.program.text(term)
+        var source = Source(kind = 0, domain = target)
+        if name == "ptnum": source = Source(kind = 1, domain = Domain.point)
+        elif name == "primnum": source = Source(kind = 1, domain = Domain.face)
+        elif name == "vtxnum": source = Source(kind = 1, domain = Domain.corner)
+        elif name == "elemnum" or name == "intrinsic:indexorder": source = Source(kind = 1, domain = target)
+        elif name == "P": source = Source(kind = 2, domain = Domain.point)
+        else:
+            let found = self.find_attribute(name, target)
+            if found >= 0:
+                let entry = try attribute_entry(self.mesh, found)
+                source = Source(kind = 3, domain = entry.domain, entry = entry)
+            elif name == "N":
+                source = Source(kind = 4, domain = Domain.face)
+            else:
+                error(errors.invalid, "group syntax: no such attribute")
+        # A detail value applies to every element of the target.
+        let domain = target if source.domain == Domain.detail else source.domain
+        var bits = try self.tested(term, &source, domain)
+        if domain == target: return bits
+        defer bits.close()
+        self.report.converted = self.report.converted or (source.kind != 1)
+        return try self.convert(bits.view(), domain, target, false)
+
+    ## An attribute of `name` on the target domain, else point, face, corner,
+    ## edge, detail; -1 when there is none.
+    func find_attribute(name: str, target: Domain) -> i64:
+        let order: Domain[6] = [target, Domain.point, Domain.face, Domain.corner, Domain.edge, Domain.detail]
+        for domain in order:
+            let found = self.mesh.find_attribute(name, (i64)(u8)domain)
+            if found >= 0: return found
+        return -1
+
+    ## Elements of `domain` whose value passes the term's test, in parallel.
+    mutating func tested(term: const Term*, source: const Source*, domain: Domain) -> BitsBuilder!:
+        let size = try self.size(domain)
+        var bits = try BitsBuilder.zeros(size)
+        errdefer bits.close()
+        if let entry = source.entry:
+            if entry.kind == DataType.text:
+                try self.test_text(term, entry, domain, &bits)
+                return bits
+        let component = (usize)(term.component if term.component >= 0 else 0)
+        if let entry = source.entry:
+            if component >= entry.width: error(errors.invalid, "group syntax: the attribute has fewer components")
+        elif source.kind == 2 or source.kind == 4:
+            if component >= 3: error(errors.invalid, "group syntax: the attribute has fewer components")
+        var work = TestWork(self.program.numbers.view()[(usize)term.first..<(usize)term.first + (usize)term.count * 2], term.compare, source.kind, component,
+                            point_span(self.mesh), mesh_origin(self.mesh), face_normal_span(self.mesh), source.entry, is_detail(source), bits.words(), size)
+        parallel.parallel_for(work.words.length, 256, test_words, (void*)&work)
+        return bits
+
+    ## Text attributes: `=` and `==` match any glob, `!=` none; no operator
+    ## means a nonempty text.
+    mutating func test_text(term: const Term*, entry: const Attribute*, domain: Domain, bits: BitsBuilder*) -> !:
+        let table = entry.table.view()
+        let hits = try alloc bool[table_count(table)] in memory.heap
+        defer free(hits) in memory.heap
+        for index in 0..<hits.length:
+            let text = table_text(table, index)
+            var hit = text.length > 0
+            if term.compare != Compare.exists:
+                hit = false
+                for span in term.spans_first..<term.spans_first + term.spans_count:
+                    hit = hit or glob(self.program.span(span), text)
+                if term.compare == Compare.not_equal: hit = not hit
+                elif term.compare != Compare.equal: error(errors.invalid, "group syntax: text attributes compare with = or !=")
+            hits[index] = hit
+        let values = attribute_ops.typed[i32](entry.data.view())
+        let count = bits.count
+        for element in 0..<count:
+            let value = values[0 if entry.storage == Storage.single else element]
+            if value >= 0 and (usize)value < hits.length and hits[(usize)value]: bits.set(element)
+
+    ## `p a`, `p a-b-c…` and `f e m` on the edge domain.
+    mutating func edge_atom(term: const Term*) -> BitsBuilder!:
+        let topology = try self.connectivity()
+        var bits = try BitsBuilder.zeros(topology.edges())
+        errdefer bits.close()
+        let numbers = self.program.numbers.view()[(usize)term.first..<(usize)(term.first + term.count)]
+        if term.kind == AtomKind.face_edge:
+            let face = numbers[0]
+            let side = numbers[1]
+            if face >= (f64)topology.faces():
+                self.report.misses += 1
+                return bits
+            let start = (usize)topology.offsets[(usize)face]
+            let size = (usize)topology.offsets[(usize)face + 1] - start
+            if side >= (f64)size:
+                self.report.misses += 1
+                return bits
+            bits.set((usize)topology.corner_edges[start + (usize)side])
+            return bits
+        if numbers.length == 1:
+            let point = numbers[0]
+            if point >= (f64)topology.points:
+                self.report.misses += 1
+                return bits
+            for at in (usize)topology.point_edge_offsets[(usize)point]..<(usize)topology.point_edge_offsets[(usize)point + 1]:
+                bits.set((usize)topology.point_edges[at])
+            return bits
+        for at in 0..<numbers.length - 1:
+            let edge = try self.mesh.find_edge((i64)numbers[at], (i64)numbers[at + 1])
+            if edge < 0: self.report.misses += 1
+            else: bits.set((usize)edge)
+        return bits
+
+    mutating func call(term: const Term*, target: Domain) -> BitsBuilder!:
+        let steps = (usize)math.max(0.0, term.argument)
+        match term.function:
+            .loop, .ring:
+                var seeds = try self.terms(term.first, term.count, Domain.edge)
+                defer seeds.close()
+                let topology = try self.connectivity()
+                var walked = (try looped(&topology, seeds.view())) if term.function == Function.loop else (try ringed(&topology, seeds.view()))
+                defer walked.close()
+                return try self.convert(walked.view(), Domain.edge, target, strict_conversion(Domain.edge, target))
+            .convert:
+                let domain = self.guess(term.first, term.count, target)
+                var inner = try self.terms(term.first, term.count, domain)
+                defer inner.close()
+                return try self.convert(inner.view(), domain, target, term.argument == 0.0)
+            _:
+                var inner = try self.terms(term.first, term.count, target)
+                defer inner.close()
+                let topology = try self.connectivity()
+                match term.function:
+                    .grow: return try grown(&topology, inner.view(), target, steps)
+                    .shrink: return try shrunk(&topology, inner.view(), target, steps)
+                    .border: return try bordered(&topology, inner.view(), target)
+                    _: return try connected(&topology, inner.view(), target)
+
+    ## The domain the first named group or attribute of some terms lives on.
+    func guess(first: u32, count: u32, fallback: Domain) -> Domain:
+        for index in first..<first + count:
+            let term = &self.program.terms.items[(usize)index]
+            if term.kind == AtomKind.name:
+                for at in 0..<(usize)self.mesh.attribute_count():
+                    let entry = attribute_entry(self.mesh, (i64)at) catch failure: return fallback
+                    if entry.is_group() and glob(self.program.text(term), entry.name()): return entry.domain
+            elif term.kind == AtomKind.attribute:
+                let found = self.find_attribute(self.program.text(term), fallback)
+                if found >= 0:
+                    let entry = attribute_entry(self.mesh, found) catch failure: return fallback
+                    return entry.domain
+            elif term.kind == AtomKind.point_edges or term.kind == AtomKind.face_edge:
+                return Domain.edge
+        return fallback
+
+func is_detail(source: const Source*) -> bool:
+    let entry = source.entry else return false
+    return entry.domain == Domain.detail
+
+## Where a test reads its values: 0 unused, 1 element numbers, 2 positions,
+## 3 an attribute, 4 face normals.
+struct Source:
+    let kind: u8
+    let domain: Domain
+    let entry: const Attribute*? = none
+
+struct TestWork:
+    let values: const f64[]
+    let compare: Compare
+    let kind: u8
+    let component: usize
+    let positions: const Float3[]
+    let origin: Vector3
+    let normals: const Float3[]
+    let entry: const Attribute*?
+    ## One value (a detail attribute) for every element.
+    let single: bool
+    let words: u64[]
+    let count: usize
+
+func test_words(context: void*?, first: usize, end: usize):
+    let work = (TestWork*)(context else return)
+    for word in first..<end:
+        var bits: u64 = 0
+        let stop = word * 64 + 64 if work.count > word * 64 + 64 else work.count
+        for element in word * 64..<stop:
+            if passes(work, value_of(work, 0 if work.single else element)):
+                bits = bits | ((u64)1 << (u64)(element & 63))
+        work.words[word] = bits
+
+func value_of(work: const TestWork*, element: usize) -> f64:
+    match work.kind:
+        1: return (f64)element
+        2:
+            let p = work.positions[element]
+            let c = work.component
+            return (f64)p.x + work.origin.x if c == 0 else ((f64)p.y + work.origin.y if c == 1 else (f64)p.z + work.origin.z)
+        4:
+            let n = work.normals[element]
+            return (f64)n.x if work.component == 0 else ((f64)n.y if work.component == 1 else (f64)n.z)
+        _:
+            let entry = work.entry else return 0.0
+            return entry.number(element, work.component)
+
+func passes(work: const TestWork*, value: f64) -> bool:
+    let pairs = work.values.length // 2
+    match work.compare:
+        .exists: return value != 0.0
+        .equal, .not_equal:
+            var hit = false
+            for at in 0..<pairs:
+                hit = hit or (value >= work.values[at * 2] and value <= work.values[at * 2 + 1])
+            return hit if work.compare == Compare.equal else not hit
+        .less: return value < work.values[0]
+        .greater: return value > work.values[0]
+        .less_equal: return value <= work.values[0]
+        .greater_equal: return value >= work.values[0]
+        _: return ((i64)value & (i64)work.values[0]) != 0

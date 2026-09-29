@@ -1,0 +1,89 @@
+## Evaluated groups, cached by what they read: the expression, the target
+## domain and the change ids of the topology, the positions and every
+## attribute. Equal ids are equal bytes, so a cached result is valid exactly
+## while all of those are; a Move leaves `top` and `0-99` valid, and anything
+## sharing the columns (snapshots, worker results) shares the entries. A few
+## recent results are kept, process-wide.
+
+let cache_size: usize = 16
+
+struct CachedGroup:
+    var key: u64 = 0
+    var bits: Column[u64]
+    var report: GroupReport
+    var used: u64 = 0
+
+var cache_lock: sync.Mutex
+## `cache_size` entries, allocated on first use; under the lock.
+var cached: CachedGroup*? = none
+var cache_clock: u64 = 0
+
+func entries() -> CachedGroup[]!:
+    if let known = cached: return CachedGroup[](known, cache_size)
+    let made = try alloc CachedGroup[cache_size] in memory.heap
+    for at in 0..<cache_size: made[at] = CachedGroup(0, Column[u64](), GroupReport(), 0)
+    cached = made.data
+    return made
+
+## An evaluated group: a share of its bits (released by the caller) and what
+## evaluation reported.
+pub struct GroupResult:
+    pub var bits: Column[u64]
+    pub var report: GroupReport
+
+## The bits of `text` on `target`, evaluated or cached.
+pub func group_bits(mesh: const Mesh*, text: str, target: Domain) -> GroupResult!:
+    let key = cache_key(mesh, text, target)
+    cache_lock.lock()
+    let slots = entries() catch failure:
+        cache_lock.unlock()
+        error(failure.code, failure.message)
+    for at in 0..<cache_size:
+        if slots[at].key == key and slots[at].key != 0:
+            cache_clock += 1
+            slots[at].used = cache_clock
+            let found = GroupResult(slots[at].bits.share(), slots[at].report)
+            cache_lock.unlock()
+            return found
+    cache_lock.unlock()
+    var program = try GroupProgram.parse(text)
+    defer program.close()
+    var report = GroupReport()
+    var bits = try evaluate(&program, mesh, target, &report)
+    let column = bits.finish()
+    cache_lock.lock()
+    defer cache_lock.unlock()
+    # Uncached when the table cannot be made; the result stands.
+    let table = entries() catch failure: return GroupResult(column, report)
+    var slot: usize = 0
+    for at in 1..<cache_size:
+        if table[at].used < table[slot].used: slot = at
+    table[slot].bits.release()
+    cache_clock += 1
+    table[slot] = CachedGroup(key, column.share(), report, cache_clock)
+    return GroupResult(column, report)
+
+## Drop every cached group (tests with allocation trackers).
+pub func clear_group_cache():
+    cache_lock.lock()
+    defer cache_lock.unlock()
+    let known = cached else return
+    let slots = CachedGroup[](known, cache_size)
+    for at in 0..<cache_size: slots[at].bits.release()
+    free(slots) in memory.heap
+    cached = none
+
+func cache_key(mesh: const Mesh*, text: str, target: Domain) -> u64:
+    var key = mix(hash(text), (u64)(u8)target + 1)
+    key = mix(key, mesh.corners_id())
+    key = mix(key, mesh.offsets_id())
+    key = mix(key, mesh.points_id())
+    key = mix(key, mesh.normals_id())
+    for index in 0..<(usize)mesh.attribute_count():
+        let id = mesh.attribute_id((i64)index) catch failure: recover 0
+        key = mix(key, id)
+    return key if key != 0 else 1
+
+func mix(state: u64, value: u64) -> u64:
+    let scrambled = state ^ (value *% 0x9E3779B97F4A7C15)
+    return ((scrambled << 27) | (scrambled >> 37)) *% 5 +% 0x52DCE729

@@ -22,6 +22,14 @@ pub struct TopologyCache:
     var point_faces: Column[i32]
     var hash_ready: @u32
     var hash: u64
+    ## Each edge's corners (one or two on a manifold), and each point's edges,
+    ## as offsets into one array: selection conversion, loops and rings.
+    var edge_corners_ready: @u32
+    var edge_corner_offsets: Column[i32]
+    var edge_corner_list: Column[i32]
+    var point_edges_ready: @u32
+    var point_edge_offsets: Column[i32]
+    var point_edge_list: Column[i32]
 
     ## The face of every corner.
     pub mutating func faces(offsets: const i32[], corners: usize) -> const i32[]!:
@@ -58,6 +66,26 @@ pub struct TopologyCache:
                 try self.build_incidence(offsets, corners, points)
                 self.incidence_ready.store(1, .release)
         return (self.point_face_offsets.view(), self.point_faces.view())
+
+    ## For every edge, the corners whose outgoing edge it is. Needs `edges`.
+    pub mutating func edge_corners(corner_edges: const i32[], edges: usize) -> (const i32[], const i32[])!:
+        if self.edge_corners_ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.edge_corners_ready.load(.acquire) == 0:
+                try bucketed(corner_edges, edges, &self.edge_corner_offsets, &self.edge_corner_list, 1)
+                self.edge_corners_ready.store(1, .release)
+        return (self.edge_corner_offsets.view(), self.edge_corner_list.view())
+
+    ## For every point, the edges ending at it. Needs `edges`.
+    pub mutating func point_edges(edge_points: const i32[], points: usize) -> (const i32[], const i32[])!:
+        if self.point_edges_ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.point_edges_ready.load(.acquire) == 0:
+                try bucketed(edge_points, points, &self.point_edge_offsets, &self.point_edge_list, 2)
+                self.point_edges_ready.store(1, .release)
+        return (self.point_edge_offsets.view(), self.point_edge_list.view())
 
     pub mutating func connectivity_hash(offsets: const i32[], corners: const i32[], points: usize) -> u64:
         if self.hash_ready.load(.acquire) == 0:
@@ -139,6 +167,32 @@ pub struct TopologyCache:
         self.corner_edges.release()
         self.point_face_offsets.release()
         self.point_faces.release()
+        self.edge_corner_offsets.release()
+        self.edge_corner_list.release()
+        self.point_edge_offsets.release()
+        self.point_edge_list.release()
+
+## A counting sort: element i of `keys` goes to bucket keys[i], and the
+## bucket lists `i / per` (so with per = 2, edge endpoints list their edge).
+func bucketed(keys: const i32[], buckets: usize, offsets: Column[i32]*, list: Column[i32]*, per: usize) -> !:
+    var starts = try Column[i32].allocate(buckets + 1)
+    errdefer starts.release()
+    let first = starts.span()
+    for at in 0..<first.length: first[at] = 0
+    for key in keys: first[(usize)key + 1] += 1
+    for at in 0..<buckets: first[at + 1] += first[at]
+    var items = try Column[i32].allocate(keys.length)
+    errdefer items.release()
+    let cursor = try alloc i32[buckets] in memory.heap
+    defer free(cursor) in memory.heap
+    memory.copy(cursor, first[..<buckets], buckets)
+    let output = items.span()
+    for at in 0..<keys.length:
+        let key = (usize)keys[at]
+        output[(usize)cursor[key]] = (i32)(at // per)
+        cursor[key] += 1
+    *offsets = starts
+    *list = items
 
 struct FaceWork:
     let offsets: const i32[]

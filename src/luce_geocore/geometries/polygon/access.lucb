@@ -250,6 +250,8 @@ extend Mesh:
         return self.positions.id()
     pub func corners_id() -> u64:
         return self.corners.id()
+    pub func offsets_id() -> u64:
+        return self.offsets.id()
     pub func triangles_id() -> u64:
         return self.triangles.id()
     pub func normals_id() -> u64:
@@ -325,3 +327,17 @@ pub func points_changed(mesh: const Mesh*) -> (usize, usize):
 pub func smooth_changed(mesh: const Mesh*) -> (usize, usize)!:
     discard(try mesh.smooth_normals())
     return mesh.shading.changed()
+
+## Faces around each point (one per corner there), as offsets into a list.
+pub func point_face_span(mesh: const Mesh*) -> (const i32[], const i32[])!:
+    return try mesh.incidence()
+
+## Each edge's corners (those whose outgoing edge it is).
+pub func edge_corner_span(mesh: const Mesh*) -> (const i32[], const i32[])!:
+    let edges = try mesh.edge_arrays()
+    return try mesh.topology.edge_corners(edges.1, edges.0.length // 2)
+
+## Each point's edges.
+pub func point_edge_span(mesh: const Mesh*) -> (const i32[], const i32[])!:
+    let edges = try mesh.edge_arrays()
+    return try mesh.topology.point_edges(edges.0, mesh.positions.count())

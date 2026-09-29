@@ -1,0 +1,284 @@
+## Selection kernels over a mesh's connectivity: converting bits between the
+## point, corner, face and edge domains, and growing, shrinking, bordering,
+## flood filling, edge loops and edge rings. They read the topology caches
+## (edges, point-face, point-edge and edge-corner lists), which every mesh
+## with the same connectivity shares, and write fresh bits.
+
+## Borrowed connectivity of one mesh; valid while the mesh is.
+pub struct Topology:
+    pub let points: usize
+    pub let offsets: const i32[]
+    pub let corners: const i32[]
+    pub let corner_faces: const i32[]
+    pub let corner_edges: const i32[]
+    pub let edge_points: const i32[]
+    pub let edge_corner_offsets: const i32[]
+    pub let edge_corners: const i32[]
+    pub let point_edge_offsets: const i32[]
+    pub let point_edges: const i32[]
+
+    pub static func of(mesh: const Mesh*) -> Topology!:
+        let edge_corners = try edge_corner_span(mesh)
+        let point_edges = try point_edge_span(mesh)
+        return Topology((usize)mesh.point_count(), offset_span(mesh), corner_span(mesh), try corner_face_span(mesh), try corner_edge_span(mesh), try edge_span(mesh),
+                        edge_corners.0, edge_corners.1, point_edges.0, point_edges.1)
+
+    pub func faces() -> usize:
+        return self.offsets.length - 1
+
+    pub func edges() -> usize:
+        return self.edge_points.length // 2
+
+    pub func size(domain: Domain) -> usize:
+        match domain:
+            .point: return self.points
+            .corner: return self.corners.length
+            .face: return self.faces()
+            .edge: return self.edges()
+            _: return 1
+
+    ## The corner after `corner` in its face.
+    pub func next(corner: usize) -> usize:
+        let face = (usize)self.corner_faces[corner]
+        return corner + 1 if corner + 1 < (usize)self.offsets[face + 1] else (usize)self.offsets[face]
+
+    pub func previous(corner: usize) -> usize:
+        let face = (usize)self.corner_faces[corner]
+        return corner - 1 if corner > (usize)self.offsets[face] else (usize)self.offsets[face + 1] - 1
+
+    ## The corner of the same edge in the neighbouring face, or -1.
+    pub func twin(corner: usize) -> i64:
+        let edge = (usize)self.corner_edges[corner]
+        for at in (usize)self.edge_corner_offsets[edge]..<(usize)self.edge_corner_offsets[edge + 1]:
+            let other = (usize)self.edge_corners[at]
+            if other != corner: return (i64)other
+        return -1
+
+    ## Edges at a point.
+    pub func valence(point: usize) -> usize:
+        return (usize)(self.point_edge_offsets[point + 1] - self.point_edge_offsets[point])
+
+## Bits of `source` elements converted to `destination` elements. With `all`, an element
+## is selected when every related element is (a face whose points all are);
+## otherwise when any is (a point of any selected face). Faces relate to
+## their corners, points and edges; edges to their two points, their corners
+## and their faces; corners to their point, face and edge.
+pub func converted(topology: const Topology*, bits: Bits, source: Domain, destination: Domain, all: bool) -> BitsBuilder!:
+    let size = topology.size(destination)
+    var out = try BitsBuilder.zeros(size)
+    errdefer out.close()
+    if source == destination:
+        memory.copy(out.words(), bits.words, bits.words.length)
+        return out
+    if source == Domain.detail:
+        if bits.get(0): out.set_range(0, size)
+        return out
+    if destination == Domain.detail:
+        if (all and bits.population() == bits.count) or (not all and bits.any()): out.set(0)
+        return out
+    let hits = try alloc u32[size] in memory.heap
+    defer free(hits) in memory.heap
+    let totals = try alloc u32[size] in memory.heap
+    defer free(totals) in memory.heap
+    memory.set(u8[]((u8*)hits.data, size * 4), 0)
+    memory.set(u8[]((u8*)totals.data, size * 4), 0)
+    # Every relation is a list of (from, to) pairs over corners or edges.
+    if (source == Domain.point and destination == Domain.edge) or (source == Domain.edge and destination == Domain.point):
+        for edge in 0..<topology.edges():
+            for side in 0..<(usize)2:
+                let point = (usize)topology.edge_points[edge * 2 + side]
+                relate(bits, source == Domain.point, point, edge, hits, totals)
+    else:
+        for corner in 0..<topology.corners.length:
+            let a = element_of(topology, corner, source)
+            let b = element_of(topology, corner, destination)
+            let target = b
+            totals[target] += 1
+            if bits.get(a): hits[target] += 1
+    for element in 0..<size:
+        if totals[element] > 0 and (hits[element] == totals[element] if all else hits[element] > 0): out.set(element)
+    return out
+
+## Count one (point, edge) relation in the direction of the conversion.
+func relate(bits: Bits, point_first: bool, point: usize, edge: usize, hits: u32[], totals: u32[]):
+    let source = point if point_first else edge
+    let target = edge if point_first else point
+    totals[target] += 1
+    if bits.get(source): hits[target] += 1
+
+## The element of `domain` a corner belongs to.
+func element_of(topology: const Topology*, corner: usize, domain: Domain) -> usize:
+    match domain:
+        .point: return (usize)topology.corners[corner]
+        .face: return (usize)topology.corner_faces[corner]
+        .edge: return (usize)topology.corner_edges[corner]
+        _: return corner
+
+## Neighbours across the domain's connector: faces through edges, points and
+## edges through points, corners through points.
+func connector(domain: Domain) -> Domain:
+    return Domain.edge if domain == Domain.face else Domain.point
+
+## `bits` and every element next to one of them, `steps` times.
+pub func grown(topology: const Topology*, bits: Bits, domain: Domain, steps: usize) -> BitsBuilder!:
+    var current = try BitsBuilder.copy_of(bits)
+    errdefer current.close()
+    let link = connector(domain)
+    for _ in 0..<steps:
+        var linked = try converted(topology, current.view(), domain, link, false)
+        defer linked.close()
+        var next = try converted(topology, linked.view(), link, domain, false)
+        current.close()
+        current = next
+    return current
+
+## `bits` without the elements next to an unselected one, `steps` times.
+pub func shrunk(topology: const Topology*, bits: Bits, domain: Domain, steps: usize) -> BitsBuilder!:
+    var current = try BitsBuilder.copy_of(bits)
+    errdefer current.close()
+    for _ in 0..<steps:
+        var outside = try BitsBuilder.copy_of(current.view())
+        defer outside.close()
+        outside.invert()
+        var reach = try grown(topology, outside.view(), domain, 1)
+        defer reach.close()
+        current.subtract(reach.view())
+    return current
+
+## The selected elements next to an unselected one.
+pub func bordered(topology: const Topology*, bits: Bits, domain: Domain) -> BitsBuilder!:
+    var outside = try BitsBuilder.copy_of(bits)
+    defer outside.close()
+    outside.invert()
+    var reach = try grown(topology, outside.view(), domain, 1)
+    errdefer reach.close()
+    reach.intersect(bits)
+    return reach
+
+## Everything connected to `bits`: a breadth-first flood over faces sharing
+## edges, or points and edges sharing points (corners through their points).
+pub func connected(topology: const Topology*, bits: Bits, domain: Domain) -> BitsBuilder!:
+    if domain == Domain.corner or domain == Domain.detail:
+        var points = try converted(topology, bits, domain, Domain.point, false)
+        defer points.close()
+        var filled = try connected(topology, points.view(), Domain.point)
+        defer filled.close()
+        return try converted(topology, filled.view(), Domain.point, domain, false)
+    var out = try BitsBuilder.copy_of(bits)
+    errdefer out.close()
+    let queue = try alloc u32[topology.size(domain)] in memory.heap
+    defer free(queue) in memory.heap
+    var head: usize = 0
+    var tail: usize = 0
+    for word in 0..<bits.words.length:
+        var pending = bits.words[word]
+        while pending != 0:
+            queue[tail] = (u32)(word * 64 + (usize)trailing_zeros(pending))
+            tail += 1
+            pending = pending & (pending - 1)
+    while head < tail:
+        let element = (usize)queue[head]
+        head += 1
+        if domain == Domain.face:
+            for corner in (usize)topology.offsets[element]..<(usize)topology.offsets[element + 1]:
+                let edge = (usize)topology.corner_edges[corner]
+                for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                    let face = (usize)topology.corner_faces[(usize)topology.edge_corners[at]]
+                    if not out.view().get(face):
+                        out.set(face)
+                        queue[tail] = (u32)face
+                        tail += 1
+        else:
+            # Points reach points through their edges; edges reach edges
+            # through their points.
+            let ends: usize[2] = [element, 0] if domain == Domain.point else [(usize)topology.edge_points[element * 2], (usize)topology.edge_points[element * 2 + 1]]
+            let count: usize = 1 if domain == Domain.point else 2
+            for side in 0..<count:
+                let point = ends[side]
+                for at in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+                    let edge = (usize)topology.point_edges[at]
+                    var next = edge
+                    if domain == Domain.point:
+                        let a = (usize)topology.edge_points[edge * 2]
+                        next = (usize)topology.edge_points[edge * 2 + 1] if a == point else a
+                    if not out.view().get(next):
+                        out.set(next)
+                        queue[tail] = (u32)next
+                        tail += 1
+    return out
+
+## Edge loops through the selected edges: across each four-edge point to the
+## edge that shares no face, until a pole, a boundary or the loop closes.
+pub func looped(topology: const Topology*, edges: Bits) -> BitsBuilder!:
+    var out = try BitsBuilder.copy_of(edges)
+    errdefer out.close()
+    for word in 0..<edges.words.length:
+        var pending = edges.words[word]
+        while pending != 0:
+            let edge = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            let first = (usize)topology.edge_corner_offsets[edge]
+            if first == (usize)topology.edge_corner_offsets[edge + 1]: continue
+            let corner = (usize)topology.edge_corners[first]
+            walk_loop(topology, corner, &out, edge)
+            # The other direction: through the edge's first point.
+            walk_back(topology, corner, &out, edge)
+    return out
+
+## From half-edge `corner`, keep crossing its end point.
+func walk_loop(topology: const Topology*, start: usize, out: BitsBuilder*, seed: usize):
+    var corner = start
+    for _ in 0..<topology.edges():
+        let point = (usize)topology.corners[topology.next(corner)]
+        if topology.valence(point) != 4: return
+        let across = topology.twin(topology.next(corner))
+        if across < 0: return
+        corner = topology.next((usize)across)
+        let edge = (usize)topology.corner_edges[corner]
+        if edge == seed or out.view().get(edge): return
+        out.set(edge)
+
+## The same walk leaving through the edge's start point.
+func walk_back(topology: const Topology*, start: usize, out: BitsBuilder*, seed: usize):
+    let reverse = topology.twin(start)
+    if reverse >= 0:
+        walk_loop(topology, (usize)reverse, out, seed)
+        return
+    # A boundary edge: step back through its first point instead.
+    var corner = start
+    for _ in 0..<topology.edges():
+        let point = (usize)topology.corners[corner]
+        if topology.valence(point) != 4: return
+        let across = topology.twin(topology.previous(corner))
+        if across < 0: return
+        corner = topology.previous((usize)across)
+        let edge = (usize)topology.corner_edges[corner]
+        if edge == seed or out.view().get(edge): return
+        out.set(edge)
+
+## Edge rings through the selected edges: across each quad to its opposite
+## edge, until a face that is not a quad or a boundary.
+pub func ringed(topology: const Topology*, edges: Bits) -> BitsBuilder!:
+    var out = try BitsBuilder.copy_of(edges)
+    errdefer out.close()
+    for word in 0..<edges.words.length:
+        var pending = edges.words[word]
+        while pending != 0:
+            let edge = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                walk_ring(topology, (usize)topology.edge_corners[at], &out, edge)
+    return out
+
+func walk_ring(topology: const Topology*, start: usize, out: BitsBuilder*, seed: usize):
+    var corner = start
+    for _ in 0..<topology.edges():
+        let face = (usize)topology.corner_faces[corner]
+        if topology.offsets[face + 1] - topology.offsets[face] != 4: return
+        let opposite = topology.next(topology.next(corner))
+        let edge = (usize)topology.corner_edges[opposite]
+        if edge == seed or out.view().get(edge): return
+        out.set(edge)
+        let across = topology.twin(opposite)
+        if across < 0: return
+        corner = (usize)across

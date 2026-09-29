@@ -16,6 +16,7 @@ import attribute_checks
 import precision_checks
 import shading_checks
 import set_checks
+import group_language_checks
 
 ## Counts live blocks and fails the allocation after `remaining` more.
 ## Kernels allocate on pool workers too, so it takes a lock.
@@ -100,6 +101,9 @@ pub func main(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 400, set_checks.exercise)
     try set_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, group_language_checks.exercise)
+    try group_language_checks.exercise()
     settle(&tracker)
     print("ok polygon meshes, operators, queries and allocation failures")
     return 0

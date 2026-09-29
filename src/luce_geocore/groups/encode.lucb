@@ -1,0 +1,122 @@
+## Bits back to a group expression (Houdini's generateSelectionString): what a
+## tool writes into the node it creates. The parser reads the text back to
+## exactly the same bits. Every element is `*`; a named group's members are
+## its name; points, faces and corners are runs (`0-5 12 40-99`) with evenly
+## spaced singles folded (`1-9:2`); edges are point pairs, chained where they
+## continue (`p3-4-5 p9-10`), which survive a renumbering of the edges.
+
+## The expression for `bits` of `domain`, appended to `out`.
+pub func encode(mesh: const Mesh*, bits: Bits, domain: Domain, out: Growing[u8]*) -> !:
+    let population = bits.population()
+    if population == 0: return
+    if population == bits.count:
+        try append_text(out, "*")
+        return
+    if try named_group(mesh, bits, domain, out): return
+    if domain == Domain.edge:
+        try encode_edges(mesh, bits, out)
+        return
+    try encode_numbers(bits, out)
+
+## The name of a group with exactly these members, if one exists.
+func named_group(mesh: const Mesh*, bits: Bits, domain: Domain, out: Growing[u8]*) -> bool!:
+    for index in 0..<(usize)mesh.attribute_count():
+        let entry = try attribute_entry(mesh, (i64)index)
+        if not entry.is_group() or entry.domain != domain or entry.elements != bits.count: continue
+        let group = Bits.of_bytes(entry.data.view(), entry.elements)
+        var same = true
+        for word in 0..<bits.words.length:
+            if group.words[word] != bits.words[word]:
+                same = false
+                break
+        if not same: continue
+        # A name must parse as a name, not a number or a function.
+        let name = entry.name()
+        if name.length == 0 or (name.bytes[0] >= 48 and name.bytes[0] <= 57): continue
+        try append_text(out, name)
+        return true
+    return false
+
+func encode_numbers(bits: Bits, out: Growing[u8]*) -> !:
+    let count = bits.population()
+    let ids = try alloc i64[count] in memory.heap
+    defer free(ids) in memory.heap
+    bits.indices(ids)
+    var at: usize = 0
+    while at < count:
+        if out.count > 0: try append_text(out, " ")
+        var end = at + 1
+        while end < count and ids[end] == ids[end - 1] + 1: end += 1
+        if end - at >= 2:
+            try append_range(out, ids[at], ids[end - 1], 1)
+            at = end
+            continue
+        # A single: fold evenly spaced singles into `a-b:step`.
+        var stride_end = at + 1
+        if at + 1 < count:
+            let step = ids[at + 1] - ids[at]
+            while stride_end < count and ids[stride_end] - ids[stride_end - 1] == step and (stride_end + 1 >= count or ids[stride_end + 1] != ids[stride_end] + 1): stride_end += 1
+            if stride_end - at >= 3 and step > 1:
+                try append_range(out, ids[at], ids[stride_end - 1], step)
+                at = stride_end
+                continue
+        try append_number(out, (usize)ids[at])
+        at += 1
+
+func append_range(out: Growing[u8]*, first: i64, last: i64, step: i64) -> !:
+    try append_number(out, (usize)first)
+    try append_text(out, "-")
+    try append_number(out, (usize)last)
+    if step > 1:
+        try append_text(out, ":")
+        try append_number(out, (usize)step)
+
+## Chains of selected edges as `pA-B-C`: from each unvisited edge, extend
+## while exactly one other selected, unvisited edge continues the chain.
+func encode_edges(mesh: const Mesh*, bits: Bits, out: Growing[u8]*) -> !:
+    let edges = try edge_span(mesh)
+    let around = try point_edge_span(mesh)
+    var visited = try BitsBuilder.zeros(bits.count)
+    defer visited.close()
+    var chain = Growing[i32]()
+    defer chain.close()
+    for word in 0..<bits.words.length:
+        var pending = bits.words[word]
+        while pending != 0:
+            let edge = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            if visited.view().get(edge): continue
+            visited.set(edge)
+            # Extend back from the first point (collected reversed), then
+            # forward from the last.
+            chain.clear()
+            try chain.push(edges[edge * 2])
+            while true:
+                let next = continuation(edges, around, bits, &visited, chain.items[chain.count - 1])
+                if next < 0: break
+                visited.set((usize)next)
+                let a = edges[(usize)next * 2]
+                try chain.push(edges[(usize)next * 2 + 1] if a == chain.items[chain.count - 1] else a)
+            for at in 0..<chain.count // 2:
+                let swap = chain.items[at]
+                chain.items[at] = chain.items[chain.count - 1 - at]
+                chain.items[chain.count - 1 - at] = swap
+            try chain.push(edges[edge * 2 + 1])
+            while true:
+                let next = continuation(edges, around, bits, &visited, chain.items[chain.count - 1])
+                if next < 0: break
+                visited.set((usize)next)
+                let a = edges[(usize)next * 2]
+                try chain.push(edges[(usize)next * 2 + 1] if a == chain.items[chain.count - 1] else a)
+            if out.count > 0: try append_text(out, " ")
+            try append_text(out, "p")
+            for at in 0..<chain.count:
+                if at > 0: try append_text(out, "-")
+                try append_number(out, (usize)chain.items[at])
+
+## The one selected, unvisited edge at `point`, or -1.
+func continuation(edges: const i32[], around: (const i32[], const i32[]), bits: Bits, visited: const BitsBuilder*, point: i32) -> i64:
+    for at in (usize)around.0[(usize)point]..<(usize)around.0[(usize)point + 1]:
+        let edge = (usize)around.1[at]
+        if bits.get(edge) and not visited.view().get(edge): return (i64)edge
+    return -1
