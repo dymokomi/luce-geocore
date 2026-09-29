@@ -38,6 +38,10 @@ pub let edge_bits_from_pairs = polygon.edge_bits_from_pairs
 pub let mesh_share = polygon.mesh_share
 pub let mesh_dispose = polygon.mesh_dispose
 pub let mesh_adopt = polygon.mesh_adopt
+## A mesh over `source`'s topology with new positions of which `moved`
+## changed (normals around them refreshed; caches update in part).
+pub let moved_storage = polygon.moved_storage
+pub let precise_span = polygon.precise_span
 pub let mesh_unique_bytes = polygon.mesh_unique_bytes
 pub let with_attribute_entry = polygon.with_attribute_entry
 pub let kept_faces = polygon.kept_faces
