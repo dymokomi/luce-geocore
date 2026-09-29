@@ -1,0 +1,88 @@
+## Shared typed attributes: snapshots and edits share columns (equal ids),
+## adding one attribute writes that column only, single storage, the edge
+## domain through topology changes, merges that widen types, and the kernels.
+import math
+import geocore
+from geocore import PolygonMesh, Vector3, AttributeKernels, MeshPrimitives
+
+func near(a: f64, b: f64):
+    assert(math.abs(a - b) < 0.000000001)
+
+pub func exercise() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 2)
+    defer grid.release()
+    let mesh = grid.value()
+    var weights: f64[9]
+    for at in 0..<(usize)9: weights[at] = (f64)at * 0.5
+    let weighted = try mesh.with_attribute("weight", 0, 1, weights)
+    defer weighted.release()
+    # Topology and positions are shared by the snapshot, not copied.
+    assert(weighted.value().points_id() == mesh.points_id() and weighted.value().triangles_id() == mesh.triangles_id())
+    var ids: f64[16]
+    for at in 0..<(usize)16: ids[at] = (f64)(at % 3)
+    let tagged = try weighted.value().with_attribute("id", 1, 1, ids[..<16], true)
+    defer tagged.release()
+    let w = tagged.value().find_attribute("weight", 0)
+    assert(w >= 0 and (try tagged.value().attribute_id(w)) == (try weighted.value().attribute_id(weighted.value().find_attribute("weight", 0))))
+    let id = tagged.value().find_attribute("id", 1)
+    assert((try tagged.value().attribute_integer(id)) and (try tagged.value().attribute_type(id)) == 2)
+    near(try tagged.value().attribute_value(w, 8), 4.0)
+    # A Move shares every attribute column and the topology.
+    let moved = try tagged.value().moved_points([4], Vector3(0.0, 1.0, 0.0))
+    defer moved.release()
+    assert(moved.value().points_id() != mesh.points_id() and moved.value().corners_id() == mesh.corners_id())
+    assert((try moved.value().attribute_id(moved.value().find_attribute("id", 1))) == (try tagged.value().attribute_id(id)))
+    # Single storage answers every element.
+    let lit = try moved.value().with_single_attribute("Cd", 2, [0.25, 0.5, 1.0])
+    defer lit.release()
+    let cd = lit.value().find_attribute("Cd", 2)
+    assert((try lit.value().attribute_storage(cd)) == 1)
+    near(try lit.value().attribute_value(cd, 3, 1), 0.5)
+    # Edge attributes follow their corners through a topology change.
+    var edges: f64[12]
+    for at in 0..<(usize)12: edges[at] = (f64)at
+    let creased = try mesh.with_attribute("crease", 4, 1, edges)
+    defer creased.release()
+    let extruded = try creased.value().extruded_faces([0], 0.5)
+    defer extruded.release()
+    let crease = extruded.value().find_attribute("crease", 4)
+    assert(crease >= 0 and (try extruded.value().domain_count(4)) == extruded.value().edge_count())
+    for edge in 0..<creased.value().edge_count():
+        let a = try creased.value().edge_point(edge, 0)
+        let b = try creased.value().edge_point(edge, 1)
+        for other in 0..<extruded.value().edge_count():
+            if (try extruded.value().edge_point(other, 0)) == a and (try extruded.value().edge_point(other, 1)) == b:
+                near(try extruded.value().attribute_value(crease, other), (f64)edge)
+    # Merging an integer i32 with an out-of-range i64 widens to i64.
+    let big = try mesh.with_attribute("id", 1, 1, [3000000000.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], true)
+    defer big.release()
+    let merged = try tagged.value().merged(big)
+    defer merged.release()
+    let joined = merged.value().find_attribute("id", 1)
+    assert((try merged.value().attribute_type(joined)) == 3)
+    near(try merged.value().attribute_value(joined, 16), 3000000000.0)
+    near(try merged.value().attribute_value(joined, 1), 1.0)
+    near(try merged.value().attribute_value(merged.value().find_attribute("weight", 0), 10), 0.0)
+    # Kernels.
+    let uv = try AttributeKernels.uv_project(grid, 2.0)
+    defer uv.release()
+    let uvi = uv.value().find_attribute("uv", 1)
+    let corner_point = try uv.value().corner_point(5)
+    near(try uv.value().attribute_value(uvi, 5, 1), (try uv.value().point(corner_point)).z * 2.0)
+    let normals = try AttributeKernels.normals(grid, 0)
+    defer normals.release()
+    near(try normals.value().attribute_value(normals.value().find_attribute("N", 0), 4, 1), 1.0)
+    let areas = try AttributeKernels.face_areas(grid)
+    defer areas.release()
+    near(try areas.value().attribute_value(areas.value().find_attribute("area", 2), 2), 1.0)
+    let filled = try AttributeKernels.filled(grid, "w", 0, [2.5], true, false, 0.0)
+    defer filled.release()
+    near(try filled.value().attribute_value(filled.value().find_attribute("w", 0), 7), 2.0)
+    let random = try AttributeKernels.filled(grid, "r", 2, [1.0, 2.0], false, true, 3.0)
+    defer random.release()
+    let expected = math.sin(1.0 * 12.9898 + 3.0 * 78.233) * 43758.5453
+    near(try random.value().attribute_value(random.value().find_attribute("r", 2), 0, 1), 2.0 * (expected - math.floor(expected)))
+    let group = try AttributeKernels.membership(grid, "g", 2, [1, 3])
+    defer group.release()
+    let g = group.value().find_attribute("g", 2)
+    assert((try group.value().attribute_value(g, 3)) == 1.0 and (try group.value().attribute_value(g, 2)) == 0.0)

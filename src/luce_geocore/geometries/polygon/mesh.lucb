@@ -1,0 +1,242 @@
+## Immutable indexed polygon topology, shared by procedural geometry consumers.
+## Operators return new meshes; input snapshots never change. No editor state.
+## Every array is a shared column: a snapshot, a worker-to-UI transfer or an
+## edit that leaves an array alone shares it instead of copying it.
+import interop
+import math
+import memory
+import luce_geocore.errors as errors
+from luce_geocore.core.geometry import Geometry, Vertex, Bounds
+from luce_geocore.core.polygon_topology import PolygonTopology
+from luce_geocore.core.shared import Column
+from luce_geocore.core.attributes import Attribute, AttributeStore, Domain, DataType, Storage
+import luce_geocore.core.attribute_ops as attribute_ops
+from luce_geocore.math.vector import Vector3
+from luce_geocore.math.matrix import Matrix4
+from luce_geocore.geometries.query_cache import QueryCache
+from luce_geocore.geometries.triangle_index import TriangleIndex
+from luce_geocore.geometries.polygon_triangulation import triangulate, area_normal
+import luce_geocore.geometries.display_triangulation as display_triangles
+from luce_geocore.geometries.topology_hash import topology_hash
+import luce_geocore.geometries.position_edit as positions
+
+pub struct PolygonMesh: Geometry, PolygonTopology:
+    var points: Column[Vector3]
+    var sizes: Column[i64]
+    var corners: Column[i64]
+    ## Face f's corners are offsets[f]..<offsets[f + 1].
+    var offsets: Column[usize]
+    var corner_faces: Column[usize]
+    var normals: Column[Vector3]
+    ## Display triangles grouped by face, 3*(size-2) corner indices each.
+    var triangles: Column[i64]
+    ## Two point ids per edge, in first-use order.
+    var edge_points: Column[i64]
+    var corner_edges: Column[usize]
+    var extent: Bounds
+    # Connectivity fingerprint, computed once; position-only copies keep it.
+    let topology_key: u64
+    var attributes: AttributeStore
+    # The spatial index over these points and triangles. Meshes sharing both
+    # columns share it; its owner count is atomic.
+    var queries: QueryCache*
+
+    ## Optional display indices are grouped by polygon, 3*(size-2) entries each.
+    ## A wholly -1 face requests ordinary triangulation. Explicit triangles are
+    ## validated and affect rendering/picking, never the polygon edge topology.
+    pub func init(points: const Vector3[], sizes: const i64[], corners: const i64[], display: const i64[]? = none) -> !:
+        if points.length > 8388608 or sizes.length > 8388608 or corners.length > 33554432:
+            error(errors.limit, "polygon mesh exceeds 8M points/faces or 32M corners")
+        var used: usize = 0
+        var triangle_count: usize = 0
+        for size in sizes:
+            if size < 3 or size > 256:
+                error(errors.invalid, "a polygon needs 3..256 corners")
+            used += (usize)size
+            triangle_count += (usize)(size - 2)
+        if used != corners.length or triangle_count > 33554432:
+            error(errors.invalid, "polygon sizes must describe every corner")
+        if let supplied = display:
+            if supplied.length != triangle_count*3: error(errors.invalid,"display indices must cover every polygon")
+        let extent = try positions.bounds_of(points)
+        for corner in corners:
+            if corner < 0 or (usize)corner >= points.length:
+                error(errors.invalid, "polygon references a missing point")
+        var point_column = try Column[Vector3].copy_of(points)
+        errdefer point_column.release()
+        var size_column = try Column[i64].copy_of(sizes)
+        errdefer size_column.release()
+        var corner_column = try Column[i64].copy_of(corners)
+        errdefer corner_column.release()
+        var offset_column = try Column[usize].allocate(sizes.length + 1)
+        errdefer offset_column.release()
+        var face_column = try Column[usize].allocate(corners.length)
+        errdefer face_column.release()
+        var normal_column = try Column[Vector3].allocate(sizes.length)
+        errdefer normal_column.release()
+        var triangle_column = try Column[i64].allocate(triangle_count * 3)
+        errdefer triangle_column.release()
+        var corner_edge_column = try Column[usize].allocate(corners.length)
+        errdefer corner_edge_column.release()
+        let edge_a = try alloc i64[corners.length] in memory.heap
+        defer free(edge_a) in memory.heap
+        let edge_b = try alloc i64[corners.length] in memory.heap
+        defer free(edge_b) in memory.heap
+        # Open-addressed edge table: linear construction, deterministic edge IDs.
+        let table = try alloc i64[corners.length * 2 + 1] in memory.heap
+        defer free(table) in memory.heap
+        for index in 0..<table.length:
+            table[index] = -1
+        let offsets = offset_column.span()
+        let corner_faces = face_column.span()
+        let normals = normal_column.span()
+        let triangles = triangle_column.span()
+        let corner_edges = corner_edge_column.span()
+        var start: usize = 0
+        var triangle: usize = 0
+        var edges: usize = 0
+        for face in 0..<sizes.length:
+            let count = (usize)sizes[face]
+            offsets[face] = start
+            var normal = Vector3()
+            var extent2: f64 = 0.0
+            let origin = points[(usize)corners[start]]
+            for at in 0..<count:
+                let a = corners[start + at]
+                let b = corners[start + (at + 1) % count]
+                if a == b:
+                    error(errors.invalid, "polygon has a collapsed edge")
+                let delta = points[(usize)a].subtract(origin)
+                extent2 = math.max(extent2,delta.dot(delta))
+                normal = normal.add(delta.cross(points[(usize)b].subtract(origin)))
+                corner_faces[start + at] = face
+                let low = a if a < b else b
+                let high = b if a < b else a
+                var slot = ((usize)low * 65537 + (usize)high * 31) % table.length
+                while table[slot] >= 0 and (edge_a[(usize)table[slot]] != low or edge_b[(usize)table[slot]] != high):
+                    slot = (slot + 1) % table.length
+                if table[slot] < 0:
+                    table[slot] = (i64)edges
+                    edge_a[edges] = low
+                    edge_b[edges] = high
+                    edges += 1
+                corner_edges[start + at] = (usize)table[slot]
+            normals[face] = try area_normal(normal,extent2)
+            let output = triangles[triangle..<triangle + (count - 2) * 3]
+            var provided = false
+            if let supplied = display:
+                let part = supplied[triangle..<triangle + (count - 2) * 3]
+                if part[0] >= 0:
+                    try display_triangles.validate(points,corners,start,count,part)
+                    memory.copy(output,part,part.length)
+                    provided = true
+                else:
+                    for index in part:
+                        if index != -1: error(errors.invalid,"partial display triangulation is not valid")
+            if not provided: try triangulate(points, corners, start, count, normals[face], output)
+            triangle += (count - 2) * 3
+            start += count
+        offsets[sizes.length] = start
+        var edge_column = try Column[i64].allocate(edges * 2)
+        errdefer edge_column.release()
+        let edge_points = edge_column.span()
+        for edge in 0..<edges:
+            edge_points[edge * 2] = edge_a[edge]
+            edge_points[edge * 2 + 1] = edge_b[edge]
+        let queries = try new QueryCache() in memory.heap
+        self.points = point_column
+        self.sizes = size_column
+        self.corners = corner_column
+        self.offsets = offset_column
+        self.corner_faces = face_column
+        self.normals = normal_column
+        self.triangles = triangle_column
+        self.edge_points = edge_column
+        self.corner_edges = corner_edge_column
+        self.extent = extent
+        self.topology_key = topology_hash(points.length, sizes, corners)
+        self.attributes = AttributeStore()
+        self.queries = queries
+
+    ## This mesh with every column shared. Its `attributes` and `queries` still
+    ## name this mesh's: the caller replaces or shares them.
+    func shared_columns() -> PolygonMesh:
+        var copy = self
+        copy.points = self.points.share()
+        copy.sizes = self.sizes.share()
+        copy.corners = self.corners.share()
+        copy.offsets = self.offsets.share()
+        copy.corner_faces = self.corner_faces.share()
+        copy.normals = self.normals.share()
+        copy.triangles = self.triangles.share()
+        copy.edge_points = self.edge_points.share()
+        copy.corner_edges = self.corner_edges.share()
+        return copy
+
+    ## A heap snapshot sharing every column and every attribute: O(columns).
+    func snapshot_storage() -> PolygonMesh*!:
+        var attributes = try self.attributes.shared()
+        errdefer attributes.close()
+        let storage = try alloc PolygonMesh[1] in memory.heap
+        storage[0] = self.shared_columns()
+        storage[0].attributes = attributes
+        discard(self.queries.owners.add(1))
+        return storage.data
+
+    func snapshot() -> interop.Reference[PolygonMesh]!:
+        return try adopt_storage(try self.snapshot_storage())
+
+    ## Native owner for a worker mailbox: it shares the immutable columns and
+    ## the query index through atomic counts. No ARC owners, callbacks or
+    ## borrowed spans cross threads; the receiver adopts it on its thread.
+    func detached_copy() -> PolygonMesh*!:
+        return try self.snapshot_storage()
+
+    pub mutating func close():
+        self.attributes.close()
+        self.points.release()
+        self.sizes.release()
+        self.corners.release()
+        self.offsets.release()
+        self.corner_faces.release()
+        self.normals.release()
+        self.triangles.release()
+        self.edge_points.release()
+        self.corner_edges.release()
+        # The index borrows columns every owner of it shares, so it goes with
+        # the last of them.
+        if self.queries.owners.sub(1, .acq_rel) > 1: return
+        self.queries.close()
+        free(self.queries) in memory.heap
+
+pub let polygon_mesh_type: interop.Type[PolygonMesh] = interop.Type[PolygonMesh]("PolygonMesh", PolygonMesh.close, closeable = true)
+
+## Base-only transfer API; receiver exclusively owns the returned heap storage.
+pub func detached_mesh(source: interop.Reference[PolygonMesh]) -> PolygonMesh*!:
+    return try source.value().detached_copy()
+
+func dispose_detached(mesh: PolygonMesh*):
+    mesh.close()
+    free(mesh) in memory.heap
+
+func make_mesh(points: const Vector3[], sizes: const i64[], corners: const i64[], display: const i64[]? = none) -> interop.Reference[PolygonMesh]!:
+    return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(points, sizes, corners, display) in memory.heap, polygon_mesh_type, memory.heap)
+
+## Adoption disposes the storage itself when it fails.
+func adopt_storage(storage: PolygonMesh*) -> interop.Reference[PolygonMesh]!:
+    return try interop.Reference[PolygonMesh].adopt(storage, polygon_mesh_type, memory.heap)
+
+func checked(index: i64, length: usize) -> !:
+    if index < 0 or (usize)index >= length:
+        error(errors.invalid, "mesh element index is out of range")
+
+func validate_map(parents: const i64[], count: usize, old_count: usize) -> !:
+    if parents.length == 0:
+        if count != 0 and count != old_count:
+            error(errors.invalid, "changed topology requires explicit attribute parent maps")
+        return
+    if parents.length != count:
+        error(errors.invalid, "attribute parent map has the wrong length")
+    for parent in parents:
+        if parent < -1 or (parent >= 0 and (usize)parent >= old_count):
+            error(errors.invalid, "attribute parent index out of range")

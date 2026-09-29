@@ -1,0 +1,123 @@
+## Region extrusion, and joining two meshes' attributes for `merged`.
+
+extend PolygonMesh:
+    ## Region extrusion: duplicate selected points once, replace caps in place,
+    ## and create walls only at the region boundary (never between selected faces).
+    ## Face IDs of caps are stable so repeated extrusions keep their selection.
+    pub func extruded_faces(selection: const i64[], distance: f64) -> interop.Reference[PolygonMesh]!:
+        if selection.length == 0 or not math.is_finite(distance) or math.abs(distance) < 0.000001:
+            error(errors.invalid, "extrusion needs selected faces and a finite nonzero distance")
+        let old_points = self.points.view()
+        let old_sizes = self.sizes.view()
+        let old_corners = self.corners.view()
+        let offsets = self.offsets.view()
+        let normals = self.normals.view()
+        let corner_edges = self.corner_edges.view()
+        let selected = try alloc bool[old_sizes.length] in memory.heap
+        defer free(selected) in memory.heap
+        let counts = try alloc i64[self.edge_points.count() // 2] in memory.heap
+        defer free(counts) in memory.heap
+        let mapping = try alloc i64[old_points.length] in memory.heap
+        defer free(mapping) in memory.heap
+        let directions = try alloc Vector3[old_points.length] in memory.heap
+        defer free(directions) in memory.heap
+        for face in 0..<selected.length:
+            selected[face] = false
+        for edge in 0..<counts.length:
+            counts[edge] = 0
+        for index in 0..<mapping.length:
+            mapping[index] = -1
+            directions[index] = Vector3()
+        for face in selection:
+            try checked(face, old_sizes.length)
+            selected[(usize)face] = true
+        for face in 0..<old_sizes.length:
+            if not selected[face]:
+                continue
+            for at in offsets[face]..<offsets[face + 1]:
+                counts[corner_edges[at]] += 1
+                let point = (usize)old_corners[at]
+                mapping[point] = 0
+                directions[point] = directions[point].add(normals[face])
+        var walls: usize = 0
+        for count in counts:
+            if count == 1:
+                walls += 1
+            elif count > 2:
+                error(errors.invalid, "cannot extrude a nonmanifold region")
+        if walls == 0:
+            error(errors.invalid, "extrude a face region with a boundary, not an entire closed surface")
+        var points_count = old_points.length
+        for index in 0..<mapping.length:
+            if mapping[index] >= 0:
+                mapping[index] = (i64)points_count
+                points_count += 1
+        if points_count > 8388608 or old_corners.length + walls * 4 > 33554432:
+            error(errors.limit, "extrusion exceeds geometry limits")
+        let points = try alloc Vector3[points_count] in memory.heap
+        defer free(points) in memory.heap
+        let sizes = try alloc i64[old_sizes.length + walls] in memory.heap
+        defer free(sizes) in memory.heap
+        let corners = try alloc i64[old_corners.length + walls * 4] in memory.heap
+        defer free(corners) in memory.heap
+        let point_parents = try alloc i64[points_count] in memory.heap
+        defer free(point_parents) in memory.heap
+        let face_parents = try alloc i64[sizes.length] in memory.heap
+        defer free(face_parents) in memory.heap
+        let corner_parents = try alloc i64[corners.length] in memory.heap
+        defer free(corner_parents) in memory.heap
+        for index in 0..<old_points.length:
+            points[index] = old_points[index]
+            point_parents[index] = (i64)index
+            if mapping[index] >= 0:
+                point_parents[(usize)mapping[index]] = (i64)index
+                let direction = try directions[index].normalized()
+                points[(usize)mapping[index]] = old_points[index].add(direction.multiply_scalar(distance))
+        var next_face = old_sizes.length
+        var next_corner = old_corners.length
+        for face in 0..<old_sizes.length:
+            sizes[face] = old_sizes[face]
+            face_parents[face] = (i64)face
+            let start = offsets[face]
+            let count = (usize)old_sizes[face]
+            for at in 0..<count:
+                let a = old_corners[start + at]
+                corners[start + at] = mapping[(usize)a] if selected[face] else a
+                corner_parents[start + at] = (i64)(start + at)
+                if selected[face] and counts[corner_edges[start + at]] == 1:
+                    let b = old_corners[start + (at + 1) % count]
+                    sizes[next_face] = 4
+                    face_parents[next_face] = (i64)face
+                    next_face += 1
+                    corners[next_corner] = a
+                    corners[next_corner + 1] = b
+                    corners[next_corner + 2] = mapping[(usize)b]
+                    corners[next_corner + 3] = mapping[(usize)a]
+                    corner_parents[next_corner] = (i64)(start + at)
+                    corner_parents[next_corner + 1] = (i64)(start + (at + 1) % count)
+                    corner_parents[next_corner + 2] = corner_parents[next_corner + 1]
+                    corner_parents[next_corner + 3] = corner_parents[next_corner]
+                    next_corner += 4
+        # Original faces keep their corner slots, so their triangles (CAD display
+        # triangles included) stay valid; only the new quad walls triangulate.
+        let old_triangles = self.triangles.view()
+        let display = try alloc i64[old_triangles.length + walls * 6] in memory.heap
+        defer free(display) in memory.heap
+        memory.copy(display, old_triangles, old_triangles.length)
+        for at in old_triangles.length..<display.length:
+            display[at] = -1
+        return try self.remapped(points, sizes, corners, point_parents, face_parents, corner_parents, false, display)
+
+## `output`'s attributes: each (name, domain) of either input, `a`'s elements
+## first. A side without the attribute contributes zeros.
+func merge_attributes(a: const PolygonMesh*, b: const PolygonMesh*, output: PolygonMesh*) -> !:
+    for index in 0..<a.attributes.count():
+        let entry = a.attributes.entry(index)
+        let found = b.attributes.find(entry.name(), (i64)(u8)entry.domain)
+        let other: const Attribute*? = b.attributes.entry((usize)found) if found >= 0 else none
+        try output.attributes.put(try attribute_ops.joined(entry, a.domain_size(entry.domain), other, b.domain_size(entry.domain)))
+    for index in 0..<b.attributes.count():
+        let entry = b.attributes.entry(index)
+        if a.attributes.find(entry.name(), (i64)(u8)entry.domain) >= 0:
+            continue
+        try output.attributes.put(try attribute_ops.joined(none, a.domain_size(entry.domain), entry, b.domain_size(entry.domain)))

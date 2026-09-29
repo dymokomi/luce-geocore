@@ -1,0 +1,191 @@
+## Operators that publish new meshes: remapping through parent maps, position
+## edits, placement, merging and region extrusion.
+
+extend PolygonMesh:
+    ## All operators publish new meshes. Parent maps are output-to-input indices;
+    ## -1 means a genuinely new element (zero-valued attributes). Empty maps mean
+    ## unchanged indexing, valid only when domain cardinality is unchanged. Edge
+    ## attributes follow their corners.
+    pub func remapped(points: const Vector3[], sizes: const i64[], corners: const i64[],
+                      point_parents: const i64[], face_parents: const i64[], corner_parents: const i64[], preserve_normals: bool = false, display: const i64[]? = none) -> interop.Reference[PolygonMesh]!:
+        try validate_map(point_parents, points.length, self.points.count())
+        try validate_map(face_parents, sizes.length, self.sizes.count())
+        try validate_map(corner_parents, corners.length, self.corners.count())
+        let result = try make_mesh(points, sizes, corners, display)
+        errdefer result.release()
+        let output = result.value()
+        var unchanged_geometry = points.length == self.points.count() and sizes.length == self.sizes.count() and corners.length == self.corners.count()
+        if unchanged_geometry and not preserve_normals:
+            let old_points = self.points.view()
+            let old_sizes = self.sizes.view()
+            let old_corners = self.corners.view()
+            for at in 0..<points.length:
+                unchanged_geometry = unchanged_geometry and points[at].x == old_points[at].x and points[at].y == old_points[at].y and points[at].z == old_points[at].z
+            for at in 0..<sizes.length:
+                unchanged_geometry = unchanged_geometry and sizes[at] == old_sizes[at]
+            for at in 0..<corners.length:
+                unchanged_geometry = unchanged_geometry and corners[at] == old_corners[at]
+        var edge_parents: i64[]
+        defer:
+            if edge_parents.length > 0: free(edge_parents) in memory.heap
+        for index in 0..<self.attributes.count():
+            let entry = self.attributes.entry(index)
+            # Derived shading normals become stale after arbitrary modeling edits.
+            # Rigid/affine transforms explicitly retain and inverse-transpose them.
+            if entry.name() == "N" and not unchanged_geometry and not preserve_normals:
+                continue
+            if entry.domain == Domain.edge and edge_parents.length == 0 and corner_parents.length > 0:
+                edge_parents = try self.edge_parents_of(output, corner_parents)
+            let parents = point_parents if entry.domain == Domain.point else (corner_parents if entry.domain == Domain.corner else (edge_parents if entry.domain == Domain.edge else face_parents))
+            try output.attributes.put(try attribute_ops.remapped(entry, parents, output.domain_size(entry.domain)))
+        return result
+
+    ## Each of `output`'s edges takes the old edge of its first corner's parent.
+    func edge_parents_of(output: const PolygonMesh*, corner_parents: const i64[]) -> i64[]!:
+        let parents = try alloc i64[output.edge_points.count() // 2] in memory.heap
+        for at in 0..<parents.length: parents[at] = -1
+        let new_edges = output.corner_edges.view()
+        let old_edges = self.corner_edges.view()
+        for corner in 0..<corner_parents.length:
+            let edge = new_edges[corner]
+            if parents[edge] < 0 and corner_parents[corner] >= 0:
+                parents[edge] = (i64)old_edges[(usize)corner_parents[corner]]
+        return parents
+
+    ## Position-only edits keep this mesh's topology (edges, corner maps) and
+    ## its triangle indices, recomputing moved faces' normals and the bounds.
+    ## The spatial index is rebuilt lazily on the first query. Stale shading
+    ## normals ("N") are dropped once any point moves, as for other edits.
+    pub func with_positions(points: const Vector3[]) -> interop.Reference[PolygonMesh]!:
+        return try self.repositioned(points, false)
+
+    func repositioned(points: const Vector3[], rigid: bool) -> interop.Reference[PolygonMesh]!:
+        var edit = try positions.reposition(self.points.view(), points, self.sizes.view(), self.corners.view(), self.offsets.view(), self.normals.view(), self.triangles.view(), rigid)
+        if not edit.moved:
+            edit.close()
+            return try self.snapshot()
+        return try adopt_storage(try self.repositioned_storage(&edit, rigid))
+
+    ## Takes the edit's columns on success and on failure.
+    func repositioned_storage(edit: positions.Repositioned*, keep_normals: bool) -> PolygonMesh*!:
+        errdefer edit.close()
+        var attributes = try self.attributes.shared()
+        errdefer attributes.close()
+        if not keep_normals:
+            for domain in 0..<(i64)5:
+                let found = attributes.find("N", domain)
+                if found >= 0: attributes.remove((usize)found)
+        let queries = try new QueryCache() in memory.heap
+        errdefer free(queries) in memory.heap
+        let storage = try alloc PolygonMesh[1] in memory.heap
+        storage[0] = self.shared_columns()
+        storage[0].attributes = attributes
+        storage[0].queries = queries
+        storage[0].points.release()
+        storage[0].points = edit.points
+        storage[0].normals.release()
+        storage[0].normals = edit.normals
+        if not edit.triangles.is_empty():
+            storage[0].triangles.release()
+            storage[0].triangles = edit.triangles
+        storage[0].extent = edit.extent
+        return storage.data
+
+    pub func transformed(translation: Vector3, rotation: Vector3, scale: Vector3) -> interop.Reference[PolygonMesh]!:
+        if not translation.is_finite() or not rotation.is_finite() or not scale.is_finite() or math.abs(scale.x) < 0.000001 or math.abs(scale.y) < 0.000001 or math.abs(scale.z) < 0.000001:
+            error(errors.invalid, "mesh transform must be finite and nonsingular")
+        let matrix = Matrix4.compose(translation, rotation, scale)
+        return try self.placed(matrix)
+
+    ## Affine placement preserves attributes and inverse-transposes normals.
+    pub func placed(matrix: Matrix4) -> interop.Reference[PolygonMesh]!:
+        if not matrix.is_finite() or math.abs(matrix.determinant()) < 0.000000000001:
+            error(errors.invalid, "mesh placement must be finite and nonsingular")
+        let source = self.points.view()
+        let points = try alloc Vector3[source.length] in memory.heap
+        defer free(points) in memory.heap
+        for index in 0..<points.length:
+            points[index] = matrix.transform_point(source[index])
+        # Without a reflection, placement is a position-only edit: topology and
+        # triangles are shared, and no triangle can fold.
+        if matrix.determinant() > 0.0:
+            let moved = try self.repositioned(points, true)
+            errdefer moved.release()
+            try positions.transform_normals(&moved.value().attributes, matrix)
+            return moved
+        # Reversing corners preserves outward normals under a reflection.
+        let old_corners = self.corners.view()
+        let old_sizes = self.sizes.view()
+        let offsets = self.offsets.view()
+        let corners = try alloc i64[old_corners.length] in memory.heap
+        defer free(corners) in memory.heap
+        let parents = try alloc i64[old_corners.length] in memory.heap
+        defer free(parents) in memory.heap
+        for face in 0..<old_sizes.length:
+            let start = offsets[face]
+            let count = (usize)old_sizes[face]
+            for at in 0..<count:
+                corners[start + at] = old_corners[start + count - 1 - at]
+                parents[start + at] = (i64)(start + count - 1 - at)
+        var unchanged: i64[]
+        let old_triangles = self.triangles.view()
+        let display = try alloc i64[old_triangles.length] in memory.heap
+        defer free(display) in memory.heap
+        for triangle in 0..<display.length//3:
+            for at in 0..<(usize)3:
+                let old = (usize)old_triangles[triangle*3+(2-at)]
+                display[triangle*3+at] = parents[old]
+        let result = try self.remapped(points, old_sizes, corners, unchanged, unchanged, parents, true, display)
+        errdefer result.release()
+        try positions.transform_normals(&result.value().attributes, matrix)
+        return result
+
+    pub func moved_points(selection: const i64[], delta: Vector3) -> interop.Reference[PolygonMesh]!:
+        if not delta.is_finite():
+            error(errors.invalid, "point displacement must be finite")
+        let source = self.points.view()
+        let marked = try alloc bool[source.length] in memory.heap
+        defer free(marked) in memory.heap
+        for index in 0..<marked.length:
+            marked[index] = false
+        for index in selection:
+            try checked(index, source.length)
+            marked[(usize)index] = true
+        let points = try alloc Vector3[source.length] in memory.heap
+        defer free(points) in memory.heap
+        for index in 0..<points.length:
+            points[index] = source[index].add(delta) if marked[index] else source[index]
+        return try self.with_positions(points)
+
+    pub func merged(other: interop.Reference[PolygonMesh]) -> interop.Reference[PolygonMesh]!:
+        let rhs = try other.get()
+        let left_points = self.points.view()
+        let right_points = rhs.points.view()
+        let left_corners = self.corners.view()
+        let right_corners = rhs.corners.view()
+        if left_points.length + right_points.length > 8388608 or left_corners.length + right_corners.length > 33554432:
+            error(errors.limit, "merged mesh exceeds geometry limits")
+        let points = try alloc Vector3[left_points.length + right_points.length] in memory.heap
+        defer free(points) in memory.heap
+        memory.copy(points, left_points, left_points.length)
+        memory.copy(points[left_points.length..], right_points, right_points.length)
+        let sizes = try alloc i64[self.sizes.count() + rhs.sizes.count()] in memory.heap
+        defer free(sizes) in memory.heap
+        memory.copy(sizes, self.sizes.view(), self.sizes.count())
+        memory.copy(sizes[self.sizes.count()..], rhs.sizes.view(), rhs.sizes.count())
+        let corners = try alloc i64[left_corners.length + right_corners.length] in memory.heap
+        defer free(corners) in memory.heap
+        memory.copy(corners, left_corners, left_corners.length)
+        for index in 0..<right_corners.length:
+            corners[left_corners.length + index] = right_corners[index] + (i64)left_points.length
+        let left_triangles = self.triangles.view()
+        let right_triangles = rhs.triangles.view()
+        let display = try alloc i64[left_triangles.length + right_triangles.length] in memory.heap
+        defer free(display) in memory.heap
+        memory.copy(display, left_triangles, left_triangles.length)
+        for at in 0..<right_triangles.length:
+            display[left_triangles.length + at] = right_triangles[at] + (i64)left_corners.length
+        let result = try make_mesh(points, sizes, corners, display)
+        errdefer result.release()
+        try merge_attributes(&self, rhs, result.value())
+        return result

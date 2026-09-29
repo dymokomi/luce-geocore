@@ -14,6 +14,7 @@ import luce_geocore.geometries.overlays as overlays
 import luce_geocore.geometries.primitives as primitives
 import luce_geocore.geometries.topology_tools as topology_tools
 import luce_geocore.geometries.dissolve_workspace as dissolve_workspace
+import luce_geocore.geometries.attribute_kernels as attribute_kernels
 import luce_geocore.errors as errors
 
 pub type Vector3 = vector.Vector3
@@ -34,6 +35,7 @@ pub let mesh_overlay_points = overlays.mesh_overlay_points
 pub type MeshPrimitives = primitives.MeshPrimitives
 pub type TopologyTools = topology_tools.TopologyTools
 pub type DissolveWorkspace = dissolve_workspace.DissolveWorkspace
+pub type AttributeKernels = attribute_kernels.AttributeKernels
 pub let invalid: ErrorCode = errors.invalid
 pub let busy: ErrorCode = errors.busy
 pub let limit: ErrorCode = errors.limit

@@ -8,20 +8,39 @@ of inputs.
 
 ## Attributes
 
+Every array of a mesh, its attributes included, is a shared column
+(`core/shared.lucb`): one heap block with an atomic user count and a change id.
+Snapshots, worker-to-UI transfers (`detached_mesh`) and edits share every column
+they leave alone, so adding an attribute, moving points or handing a result to
+another thread costs only what changes. A column is immutable once a mesh holds
+it; writers copy on write (`writable()`), which also gives the copy a fresh id.
+Equal ids mean equal contents on any thread: caches key on them
+(`points_id`, `corners_id`, `triangles_id`, `normals_id`, `edges_id`,
+`attribute_id`).
+
 `with_attribute(name, domain, width, values, integer=false)` returns a new mesh.
-Domains: points 0, corners 1, faces 2, detail 3. Width is 1–4; flattened values
-must match `domain_count(domain) * width`. Integral data is represented exactly
-within the supported f64 integer range. Names are per-domain; P is reserved.
+Domains: points 0, corners 1, faces 2, detail 3, edges 4. Width is 1–4; flattened
+values must match `domain_count(domain) * width`. Values are stored typed
+(`core/attributes.lucb`): integers as i32 (i64 when out of range), other numbers
+as f64, so every value reads back exactly; booleans (packed bits), i8 and f32
+columns exist for Base producers. `with_single_attribute(name, domain, values)`
+stores one tuple for the whole domain in O(1). Names are per-domain; P is
+reserved; there is no limit on the number of attributes. Edge attributes are
+indexed by edge id and follow their corners through topology changes.
 
 Inspect with `attribute_count`, `find_attribute`, `attribute_name`,
-`attribute_domain`, `attribute_width`, `attribute_integer`, `attribute_value`.
-Use `without_attribute`, `renamed_attribute`, `promoted_attribute` for edits.
-Promotion averages floating contributors and picks the first integral contributor;
-source attributes are retained. Detail broadcasts to other domains.
+`attribute_domain`, `attribute_width`, `attribute_integer`, `attribute_type`,
+`attribute_storage`, `attribute_value`. Use `without_attribute`,
+`renamed_attribute`, `promoted_attribute` for edits. Promotion averages floating
+contributors and picks the first integral contributor; source attributes are
+retained. Detail broadcasts to other domains. `AttributeKernels` computes whole
+attributes in Base: `uv_project`, `normals`, `face_areas`, `filled` (constant or
+hashed-random values) and `membership` (a 0/1 group).
 
 `remapped` accepts point, face and corner parent maps. A parent of -1 produces
 zero attributes. `with_positions` preserves attribute identity. Merge unions
-compatible schemas, zero-fills missing data, and preserves left detail values.
+compatible schemas (the wider scalar type wins), zero-fills missing data, and
+preserves left detail values.
 Transforms preserve generic stored values; they do not implicitly reinterpret
 numeric tuples as normals or directions.
 

@@ -10,6 +10,7 @@ import distance_checks
 import partition_checks
 import query_checks
 import dissolve_checks
+import attribute_checks
 
 ## Counts live blocks and fails the allocation after `remaining` more.
 struct Tracker: memory.Allocator:
@@ -74,6 +75,9 @@ pub func main(arguments: str[]) -> i32!:
     try display_checks.exercise()
     inject(&tracker, 128, position_checks.exercise)
     try position_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 160, attribute_checks.exercise)
+    try attribute_checks.exercise()
     settle(&tracker)
     print("ok polygon meshes, operators, queries and allocation failures")
     return 0

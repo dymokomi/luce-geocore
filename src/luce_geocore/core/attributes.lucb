@@ -1,0 +1,230 @@
+## Typed attributes over shared columns. An attribute is a name, a domain, a
+## scalar type and a tuple width, and one column of bytes: `width` values per
+## element (array storage) or one tuple for the whole domain (single storage,
+## O(1) to add). Snapshots share every column; changing one attribute writes
+## that column alone.
+import math
+import memory
+import luce_geocore.errors as errors
+from luce_geocore.core.shared import Column
+from luce_geocore.core.growing import Growing
+
+## Element domains. The numbers are the ones callers pass as integers.
+pub enum Domain as u8:
+    point = 0
+    corner = 1
+    face = 2
+    detail = 3
+    edge = 4
+
+pub let domain_count: usize = 5
+
+## Scalar component types. Booleans are packed bits, 64 per u64 word.
+pub enum DataType as u8:
+    boolean = 0
+    int8 = 1
+    int32 = 2
+    int64 = 3
+    float32 = 4
+    float64 = 5
+
+pub enum Storage as u8:
+    array = 0
+    single = 1
+
+pub func scalar_bytes(kind: DataType) -> usize:
+    match kind:
+        .int8: return 1
+        .int32, .float32: return 4
+        .int64, .float64: return 8
+        _: return 0
+
+pub func is_integer(kind: DataType) -> bool:
+    return kind == DataType.boolean or kind == DataType.int8 or kind == DataType.int32 or kind == DataType.int64
+
+## Names are 1..64 bytes; "P" belongs to the positions.
+pub func check_name(name: str) -> !:
+    if name.length == 0 or name.length > 64 or name == "P":
+        error(errors.invalid, "attribute needs a nonreserved name of 1..64 bytes")
+
+pub struct Attribute:
+    var label: u8[64]
+    var label_length: usize
+    pub var domain: Domain
+    pub var kind: DataType
+    pub var width: usize
+    pub var storage: Storage
+    ## Elements covered: the domain's size (1 for single storage).
+    pub var elements: usize
+    pub var data: Column[u8]
+
+    ## An attribute whose column the caller fills: `elements` tuples, or one
+    ## tuple for single storage. Booleans need width 1.
+    pub static func create(name: str, domain: Domain, kind: DataType, width: usize, elements: usize, storage: Storage = Storage.array) -> Attribute!:
+        try check_name(name)
+        if width < 1 or width > 4 or (kind == DataType.boolean and width != 1):
+            error(errors.invalid, "attribute tuples have 1..4 components; booleans have one")
+        let stored = 1 if storage == Storage.single else elements
+        let bytes = (stored + 63) // 64 * 8 if kind == DataType.boolean else stored * width * scalar_bytes(kind)
+        var label: u8[64]
+        memory.copy(label[..<name.length], name.bytes, name.length)
+        return Attribute(label, name.length, domain, kind, width, storage, elements, try Column[u8].allocate(bytes))
+
+    ## From f64 tuples: integers become int32 (int64 when out of range), and
+    ## other numbers float64, so every value reads back exactly.
+    pub static func from_numbers(name: str, domain: Domain, width: usize, values: const f64[], integer: bool, storage: Storage = Storage.array) -> Attribute!:
+        if width < 1 or width > 4 or values.length % width != 0:
+            error(errors.invalid, "attribute needs a tuple size of 1..4 dividing its values")
+        if values.length // width > 33554432:
+            error(errors.limit, "attribute exceeds 33554432 tuples")
+        var wide = false
+        if integer:
+            for value in values:
+                if not (math.abs(value) <= 9007199254740991.0) or math.floor(value) != value:
+                    error(errors.invalid, "attribute values must be finite and integer values exactly representable")
+                wide = wide or value < -2147483648.0 or value > 2147483647.0
+        else:
+            for value in values:
+                if not math.is_finite(value):
+                    error(errors.invalid, "attribute values must be finite and integer values exactly representable")
+        let kind = (DataType.int64 if wide else DataType.int32) if integer else DataType.float64
+        let tuples = values.length // width
+        var attribute = try Attribute.create(name, domain, kind, width, tuples if storage == Storage.array else 0, storage)
+        let stored = attribute.data.span()
+        let count = width if storage == Storage.single else values.length
+        match kind:
+            .int32:
+                let output = i32[]((i32*)stored.data, count)
+                for at in 0..<count: output[at] = (i32)values[at]
+            .int64:
+                let output = i64[]((i64*)stored.data, count)
+                for at in 0..<count: output[at] = (i64)values[at]
+            _: memory.copy(f64[]((f64*)stored.data, count), values[..<count], count)
+        return attribute
+
+    pub func name() -> str:
+        return (str)self.label[..<self.label_length]
+
+    pub func integer() -> bool:
+        return is_integer(self.kind)
+
+    ## Component `component` of element `element`, as f64. Single storage
+    ## answers its one tuple for every element.
+    pub func number(element: usize, component: usize) -> f64:
+        let index = (0 if self.storage == Storage.single else element) * self.width + component
+        let bytes = self.data.view()
+        match self.kind:
+            .boolean: return 1.0 if (bytes[index // 8] >> (u8)(index % 8)) & 1 != 0 else 0.0
+            .int8: return (f64)(i8)bytes[index]
+            .int32: return (f64)memory.read[i32]((void*)&bytes[index * 4])
+            .int64: return (f64)memory.read[i64]((void*)&bytes[index * 8])
+            .float32: return (f64)memory.read[f32]((void*)&bytes[index * 4])
+            _: return memory.read[f64]((void*)&bytes[index * 8])
+
+    ## Bytes of one tuple; 0 for bits.
+    pub func tuple_bytes() -> usize:
+        return self.width * scalar_bytes(self.kind)
+
+    ## Another owner of the same attribute: shares its column.
+    pub func share() -> Attribute:
+        var copy = self
+        copy.data = self.data.share()
+        return copy
+
+    ## The same attribute under another name.
+    pub func renamed(name: str) -> Attribute!:
+        try check_name(name)
+        var copy = self.share()
+        memory.copy(copy.label[..<name.length], name.bytes, name.length)
+        copy.label_length = name.length
+        return copy
+
+    pub mutating func release():
+        self.data.release()
+
+## The attributes of one mesh. (name, domain) pairs are unique; Cd, uv and N
+## are found once per change, not per element.
+pub struct AttributeStore:
+    var entries: Growing[Attribute]
+    ## Index of Cd, uv and N per domain, or -1.
+    pub var colors: i64[5]
+    pub var uvs: i64[5]
+    pub var normals: i64[5]
+
+    pub func init():
+        self.entries = Growing[Attribute]()
+        self.colors = [-1, -1, -1, -1, -1]
+        self.uvs = [-1, -1, -1, -1, -1]
+        self.normals = [-1, -1, -1, -1, -1]
+
+    pub func count() -> usize:
+        return self.entries.count
+
+    pub func entry(index: usize) -> const Attribute*:
+        return &self.entries.items[index]
+
+    pub func find(name: str, domain: i64) -> i64:
+        for index in 0..<self.entries.count:
+            let entry = &self.entries.items[index]
+            if (i64)(u8)entry.domain == domain and entry.name() == name:
+                return (i64)index
+        return -1
+
+    ## Add `attribute` (taking its share), replacing one of the same name and
+    ## domain. On failure the store is unchanged and the share released.
+    pub mutating func put(attribute: Attribute) -> !:
+        var owned = attribute
+        let found = self.find(owned.name(), (i64)(u8)owned.domain)
+        if found >= 0:
+            self.entries.items[(usize)found].release()
+            self.entries.items[(usize)found] = owned
+        else:
+            self.entries.push(owned) catch failure:
+                owned.release()
+                error(failure.code, failure.message)
+        self.reindex()
+
+    ## The column of attribute `index`, written copy-on-write: other owners of
+    ## it keep their contents.
+    pub mutating func writable(index: usize) -> u8[]!:
+        return try self.entries.items[index].data.writable()
+
+    pub mutating func remove(index: usize):
+        self.entries.items[index].release()
+        for at in index + 1..<self.entries.count:
+            self.entries.items[at - 1] = self.entries.items[at]
+        self.entries.count -= 1
+        self.reindex()
+
+    ## A store sharing every column: O(attributes), no element copies.
+    pub func shared() -> AttributeStore!:
+        var copy = AttributeStore()
+        try copy.entries.reserve(self.entries.count)
+        for entry in self.entries.view():
+            copy.entries.items[copy.entries.count] = entry.share()
+            copy.entries.count += 1
+        copy.colors = self.colors
+        copy.uvs = self.uvs
+        copy.normals = self.normals
+        return copy
+
+    mutating func reindex():
+        self.colors = [-1, -1, -1, -1, -1]
+        self.uvs = [-1, -1, -1, -1, -1]
+        self.normals = [-1, -1, -1, -1, -1]
+        for index in 0..<self.entries.count:
+            let entry = &self.entries.items[index]
+            let domain = (usize)(u8)entry.domain
+            if entry.name() == "Cd": self.colors[domain] = (i64)index
+            elif entry.name() == "uv": self.uvs[domain] = (i64)index
+            elif entry.name() == "N": self.normals[domain] = (i64)index
+
+    ## Bytes of every column, counting shared ones as if owned.
+    pub func bytes() -> usize:
+        var total: usize = 0
+        for entry in self.entries.view(): total += entry.data.bytes()
+        return total
+
+    pub mutating func close():
+        for index in 0..<self.entries.count: self.entries.items[index].release()
+        self.entries.close()

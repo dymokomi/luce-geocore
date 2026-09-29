@@ -6,10 +6,6 @@ import memory
 from luce_geocore.math.vector import Vector3
 from luce_geocore.geometries.triangle_index import TriangleIndex
 
-## An atomic owner count for storage shared by meshes on several threads.
-pub struct SharedCount:
-    pub var count: @usize
-
 pub struct QueryCache:
     pub var owners: @usize = 1
     var lock: sync.Mutex

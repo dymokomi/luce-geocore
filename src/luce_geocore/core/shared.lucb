@@ -1,0 +1,131 @@
+## Shared, immutable-after-publish arrays. A Block is one heap allocation: a
+## header with an atomic user count and a change id, then the elements. A
+## Column[T] is a typed handle to one. Meshes, snapshots and worker results
+## share columns by count instead of copying them, and every derived cache
+## (GPU buffers included) is keyed by the ids of the columns it read: equal
+## ids mean equal bytes, on any thread, so invalidation needs no tags.
+import memory
+
+## The last id handed out; ids start at 1 and are never reused.
+var last_block_id: @u64
+
+## A process-unique id for new or rewritten contents.
+pub func fresh_id() -> u64:
+    return last_block_id.add(1, .relaxed) + 1
+
+## Elements start this far into the allocation: a cache line, which also
+## satisfies every element type's alignment.
+let header_bytes: usize = 64
+
+pub struct Block:
+    ## Owners on every thread; the release that drops it to zero frees it.
+    pub var users: @usize
+    ## The change id of the contents.
+    pub var id: u64
+    ## Elements, and the bytes they take.
+    pub var count: usize
+    pub var bytes: usize
+    ## The block this one was derived from by editing some elements, or 0.
+    ## Incremental caches (a GPU sub-range upload, a BVH refit) key on it.
+    pub var parent: u64 = 0
+
+assert(sizeof(Block) <= 64, "the block header must fit before the elements")
+
+## A typed handle. Copying the handle does not share: `share()` does, and
+## each share is released once. The zero value is an empty column.
+pub struct Column[T]:
+    var block: Block*?
+
+    ## `count` uninitialised elements, owned by the caller alone.
+    pub static func allocate(count: usize) -> Column[T]!:
+        let bytes = count * sizeof(T)
+        let storage = try alloc(header_bytes + bytes, 64) in memory.heap
+        let block = (Block*)storage.data
+        block.users.store(1, .relaxed)
+        block.id = fresh_id()
+        block.count = count
+        block.bytes = bytes
+        block.parent = 0
+        return Column[T](block)
+
+    ## A new column holding a copy of `values`.
+    pub static func copy_of(values: const T[]) -> Column[T]!:
+        var column = try Column[T].allocate(values.length)
+        if values.length > 0: memory.copy(column.span(), values, values.length)
+        return column
+
+    ## `count` copies of `value`.
+    pub static func filled(count: usize, value: T) -> Column[T]!:
+        var column = try Column[T].allocate(count)
+        let items = column.span()
+        for at in 0..<count: items[at] = value
+        return column
+
+    pub func count() -> usize:
+        let block = self.block else return 0
+        return block.count
+
+    ## The contents' change id; 0 for an empty handle.
+    pub func id() -> u64:
+        let block = self.block else return 0
+        return block.id
+
+    pub func parent() -> u64:
+        let block = self.block else return 0
+        return block.parent
+
+    pub func is_empty() -> bool:
+        return self.block == none
+
+    ## Read access; valid while this handle holds its share.
+    pub func view() -> const T[]:
+        if let block = self.block:
+            return T[]((T*)((u8*)block + header_bytes), block.count)
+        var empty: T[]
+        return empty
+
+    ## Another owner of the same contents: O(1), no copy.
+    pub func share() -> Column[T]:
+        if let block = self.block: discard(block.users.add(1, .relaxed))
+        return Column[T](self.block)
+
+    ## Write access to contents only this handle owns (just allocated, or
+    ## made writable). Writing a shared block would change other owners'
+    ## data under them, so that traps.
+    pub mutating func span() -> T[]:
+        if let block = self.block:
+            if block.users.load(.acquire) != 1: trap("writing a shared column")
+            return T[]((T*)((u8*)block + header_bytes), block.count)
+        var empty: T[]
+        return empty
+
+    ## Copy on write: a private copy when others share the contents, then a
+    ## fresh id either way, since the caller is about to change them. The
+    ## new id's parent is the old one, for incremental caches.
+    pub mutating func writable() -> T[]!:
+        let block = self.block else return self.span()
+        if block.users.load(.acquire) != 1:
+            var copy = try Column[T].copy_of(self.view())
+            copy.set_parent(block.id)
+            self.release()
+            self.block = copy.block
+            return self.span()
+        block.parent = block.id
+        block.id = fresh_id()
+        return self.span()
+
+    ## Record that these contents were derived from the block `id`.
+    pub mutating func set_parent(id: u64):
+        if let block = self.block: block.parent = id
+
+    ## Give up this share; the last one frees the block.
+    pub mutating func release():
+        let block = self.block else return
+        self.block = none
+        if block.users.sub(1, .acq_rel) != 1: return
+        free(u8[]((u8*)block, header_bytes + block.bytes)) in memory.heap
+
+    ## Bytes this column holds, for memory budgets.
+    pub func bytes() -> usize:
+        let block = self.block else return 0
+        return header_bytes + block.bytes

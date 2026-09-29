@@ -1,0 +1,139 @@
+## Attribute access and attribute-only edits. Every edit shares the topology
+## columns, the query index and every other attribute's column: adding one
+## costs that column alone.
+
+extend PolygonMesh:
+    pub func attribute_count() -> i64:
+        return (i64)self.attributes.count()
+    pub func find_attribute(name: str, domain: i64) -> i64:
+        return self.attributes.find(name, domain)
+    pub func attribute_name(index: i64) -> str!:
+        try checked(index, self.attributes.count())
+        return self.attributes.entry((usize)index).name()
+    pub func attribute_domain(index: i64) -> i64!:
+        try checked(index, self.attributes.count())
+        return (i64)(u8)self.attributes.entry((usize)index).domain
+    pub func attribute_width(index: i64) -> i64!:
+        try checked(index, self.attributes.count())
+        return (i64)self.attributes.entry((usize)index).width
+    pub func attribute_integer(index: i64) -> bool!:
+        try checked(index, self.attributes.count())
+        return self.attributes.entry((usize)index).integer()
+    ## The scalar type (core.attributes.DataType) and storage (0 array, 1 single).
+    pub func attribute_type(index: i64) -> i64!:
+        try checked(index, self.attributes.count())
+        return (i64)(u8)self.attributes.entry((usize)index).kind
+    pub func attribute_storage(index: i64) -> i64!:
+        try checked(index, self.attributes.count())
+        return (i64)(u8)self.attributes.entry((usize)index).storage
+    ## The change id of attribute `index`'s column.
+    pub func attribute_id(index: i64) -> u64!:
+        try checked(index, self.attributes.count())
+        return self.attributes.entry((usize)index).data.id()
+    pub func attribute_value(index: i64, element: i64, component: i64 = 0) -> f64!:
+        try checked(index, self.attributes.count())
+        let entry = self.attributes.entry((usize)index)
+        try checked(component, entry.width)
+        try checked(element, self.domain_size(entry.domain))
+        return entry.number((usize)element, (usize)component)
+
+    pub func with_attribute(name: str, domain: i64, width: i64, values: const f64[], integer: bool = false) -> interop.Reference[PolygonMesh]!:
+        let count = try self.domain_count(domain)
+        if width < 1 or width > 4 or values.length != (usize)(count * width):
+            error(errors.invalid, "attribute length must match its geometry domain")
+        return try self.with_entry(try Attribute.from_numbers(name, Domain((u8)domain), (usize)width, values, integer))
+
+    ## One value for the whole domain: O(1) whatever the domain's size.
+    pub func with_single_attribute(name: str, domain: i64, values: const f64[], integer: bool = false) -> interop.Reference[PolygonMesh]!:
+        let count = try self.domain_count(domain)
+        if values.length < 1 or values.length > 4:
+            error(errors.invalid, "a single attribute value has 1..4 components")
+        var attribute = try Attribute.from_numbers(name, Domain((u8)domain), values.length, values, integer, Storage.single)
+        attribute.elements = (usize)count
+        return try self.with_entry(attribute)
+
+    ## A snapshot with `attribute` added or replacing its (name, domain).
+    ## Takes the attribute's share.
+    func with_entry(attribute: Attribute) -> interop.Reference[PolygonMesh]!:
+        var owned = attribute
+        let result = self.snapshot() catch failure:
+            owned.release()
+            error(failure.code, failure.message)
+        errdefer result.release()
+        try result.value().attributes.put(owned)
+        return result
+
+    pub func without_attribute(name: str, domain: i64) -> interop.Reference[PolygonMesh]!:
+        let result = try self.snapshot()
+        let found = result.value().attributes.find(name, domain)
+        if found >= 0: result.value().attributes.remove((usize)found)
+        return result
+
+    pub func renamed_attribute(name: str, replacement: str, domain: i64) -> interop.Reference[PolygonMesh]!:
+        let index = self.attributes.find(name, domain)
+        if index < 0:
+            error(errors.invalid, "attribute to rename does not exist")
+        let renamed = try self.attributes.entry((usize)index).renamed(replacement)
+        let result = try self.with_entry(renamed)
+        if replacement != name:
+            let old = result.value().attributes.find(name, domain)
+            result.value().attributes.remove((usize)old)
+        return result
+
+    ## Numeric domain conversion: continuous values average incident source
+    ## elements, integers keep the first contributor. Isolated targets get zero.
+    pub func promoted_attribute(name: str, domain: i64, target: i64) -> interop.Reference[PolygonMesh]!:
+        let index = self.attributes.find(name, domain)
+        if index < 0:
+            error(errors.invalid, "attribute to promote does not exist")
+        if domain == 4 or target == 4:
+            error(errors.invalid, "edge attributes are not promoted yet")
+        let entry = self.attributes.entry((usize)index)
+        let count = (usize)(try self.domain_count(target))
+        let source_count = (usize)(try self.domain_count(domain))
+        let width = entry.width
+        let values = try alloc f64[count * width] in memory.heap
+        defer free(values) in memory.heap
+        let weights = try alloc usize[count] in memory.heap
+        defer free(weights) in memory.heap
+        for at in 0..<values.length:
+            values[at] = 0.0
+        for at in 0..<count:
+            weights[at] = 0
+        let corners = self.corners.view()
+        let corner_faces = self.corner_faces.view()
+        let contributions = count if domain == target or domain == 3 else (source_count if target == 3 else corners.length)
+        for at in 0..<contributions:
+            let source = at if domain == target or target == 3 else (0 if domain == 3 else ((usize)corners[at] if domain == 0 else (corner_faces[at] if domain == 2 else at)))
+            let destination = at if domain == target or domain == 3 else (0 if target == 3 else ((usize)corners[at] if target == 0 else (corner_faces[at] if target == 2 else at)))
+            for component in 0..<width:
+                if not entry.integer() or weights[destination] == 0:
+                    values[destination * width + component] += entry.number(source, component)
+            weights[destination] += 1
+        if not entry.integer():
+            for at in 0..<count:
+                if weights[at] > 0:
+                    for component in 0..<width:
+                        values[at * width + component] /= (f64)weights[at]
+        return try self.with_attribute(name, target, (i64)width, values, entry.integer())
+
+    ## Construct topology and its imported corner data once, without rebuilding
+    ## triangulation, edge tables and BVH for each attribute. Empty spans omit it.
+    pub static func from_corner_data(points: const Vector3[], sizes: const i64[], corners: const i64[], uv: const f64[], normals: const f64[]) -> interop.Reference[PolygonMesh]!:
+        if (uv.length != 0 and uv.length != corners.length * 2) or (normals.length != 0 and normals.length != corners.length * 3):
+            error(errors.invalid, "imported corner attribute size mismatch")
+        let result = try make_mesh(points, sizes, corners)
+        errdefer result.release()
+        if uv.length > 0: try result.value().attributes.put(try Attribute.from_numbers("uv", Domain.corner, 2, uv, false))
+        if normals.length > 0: try result.value().attributes.put(try Attribute.from_numbers("N", Domain.corner, 3, normals, false))
+        return result
+
+    ## Bytes of the columns this mesh holds, shared ones included.
+    pub func column_bytes() -> i64:
+        let columns = self.points.bytes() + self.sizes.bytes() + self.corners.bytes() + self.offsets.bytes() + self.corner_faces.bytes() + self.normals.bytes() + self.triangles.bytes() + self.edge_points.bytes() + self.corner_edges.bytes()
+        return (i64)(columns + self.attributes.bytes())
+
+## A snapshot of `mesh` with `attribute` added (taking its share), for Base
+## kernels; Attribute cannot cross into Luce, so this is not a method.
+pub func with_attribute_entry(mesh: const PolygonMesh*, attribute: Attribute) -> interop.Reference[PolygonMesh]!:
+    return try mesh.with_entry(attribute)

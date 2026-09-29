@@ -1,0 +1,94 @@
+## Whole-column attribute operations for topology changes: remapping through
+## parent maps and joining two meshes' attributes. Each writes one new column
+## per attribute with typed loops, never per-element f64 conversions.
+import memory
+import luce_geocore.errors as errors
+from luce_geocore.core.attributes import Attribute, DataType, Domain, Storage, is_integer, scalar_bytes
+
+## `source` over a new domain of `elements`, element i taking its value from
+## element `parents[i]` (-1: zero). An empty map keeps the indexing. Single
+## and detail attributes do not depend on elements and are shared.
+pub func remapped(source: const Attribute*, parents: const i64[], elements: usize) -> Attribute!:
+    if source.storage == Storage.single or source.domain == Domain.detail:
+        var shared = source.share()
+        shared.elements = elements
+        return shared
+    if parents.length == 0 and elements == source.elements:
+        return source.share()
+    var result = try Attribute.create(source.name(), source.domain, source.kind, source.width, elements)
+    errdefer result.release()
+    let input = source.data.view()
+    let output = result.data.span()
+    match source.kind:
+        .boolean:
+            memory.set(output, 0)
+            for at in 0..<elements:
+                let parent = parents[at] if parents.length > 0 else (i64)at
+                if parent >= 0 and (input[(usize)parent // 8] >> (u8)((usize)parent % 8)) & 1 != 0:
+                    output[at // 8] = output[at // 8] | ((u8)1 << (u8)(at % 8))
+        .int8: gather[i8](typed[i8](input), typed_mut[i8](output), source.width, parents, 0)
+        .int32: gather[i32](typed[i32](input), typed_mut[i32](output), source.width, parents, 0)
+        .float32: gather[f32](typed[f32](input), typed_mut[f32](output), source.width, parents, 0.0)
+        .int64: gather[i64](typed[i64](input), typed_mut[i64](output), source.width, parents, 0)
+        _: gather[f64](typed[f64](input), typed_mut[f64](output), source.width, parents, 0.0)
+    return result
+
+## The attribute of a merge: `left`'s elements, then `right`'s, either side
+## zero where it lacks the attribute. Both sides must agree on integer-ness
+## and width; the wider scalar type wins. Detail attributes keep the left
+## value when there is one.
+pub func joined(left: const Attribute*?, left_count: usize, right: const Attribute*?, right_count: usize) -> Attribute!:
+    let model = left else (right else trap("joined needs an attribute"))
+    var kind = model.kind
+    if let a = left:
+        if let b = right:
+            if a.width != b.width or is_integer(a.kind) != is_integer(b.kind):
+                error(errors.invalid, "Merge inputs have conflicting attribute schemas")
+            if scalar_bytes(b.kind) > scalar_bytes(a.kind): kind = b.kind
+    if model.domain == Domain.detail:
+        return model.share()
+    let total = left_count + right_count
+    var result = try Attribute.create(model.name(), model.domain, kind, model.width, total)
+    errdefer result.release()
+    let output = result.data.span()
+    memory.set(output, 0)
+    for side in 0..<(usize)2:
+        let source = left if side == 0 else right
+        let attribute = source else continue
+        let first = 0 if side == 0 else left_count
+        let count = left_count if side == 0 else right_count
+        if attribute.kind == kind and attribute.storage == Storage.array and kind != DataType.boolean:
+            let size = attribute.tuple_bytes()
+            memory.copy(output[first * size..<(first + count) * size], attribute.data.view(), count * size)
+            continue
+        for element in 0..<count:
+            for component in 0..<model.width:
+                write_number(output, kind, (first + element) * model.width + component, attribute.number(element, component))
+    return result
+
+func write_number(bytes: u8[], kind: DataType, index: usize, value: f64):
+    match kind:
+        .boolean:
+            if value != 0.0: bytes[index // 8] = bytes[index // 8] | ((u8)1 << (u8)(index % 8))
+        .int8: bytes[index] = (u8)(i8)value
+        .int32: memory.write[i32]((void*)&bytes[index * 4], (i32)value)
+        .int64: memory.write[i64]((void*)&bytes[index * 8], (i64)value)
+        .float32: memory.write[f32]((void*)&bytes[index * 4], (f32)value)
+        _: memory.write[f64]((void*)&bytes[index * 8], value)
+
+## Column bytes as scalars; columns are 64-byte aligned.
+pub func typed[T](bytes: const u8[]) -> const T[]:
+    return T[]((T*)bytes.data, bytes.length // sizeof(T))
+
+pub func typed_mut[T](bytes: u8[]) -> T[]:
+    return T[]((T*)bytes.data, bytes.length // sizeof(T))
+
+func gather[T](input: const T[], output: T[], width: usize, parents: const i64[], zero: T):
+    let elements = output.length // width
+    for at in 0..<elements:
+        let parent = parents[at] if parents.length > 0 else (i64)at
+        if parent < 0:
+            for component in 0..<width: output[at * width + component] = zero
+        else:
+            let origin = (usize)parent * width
+            for component in 0..<width: output[at * width + component] = input[origin + component]
