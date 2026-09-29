@@ -1,16 +1,21 @@
 ## Fill and Dissolve over edge groups. Fill caps every closed loop of the
-## group's boundary edges with one face; Dissolve joins the faces across the
-## group's interior edges into one face per connected region. A region or
+## group's boundary edges with one face (or a fan of triangles around its
+## center); Dissolve joins the faces across the group's interior edges into
+## one face per connected region. A point group dissolves every edge at its
+## points and then the points themselves where two edges are left (Blender's
+## Dissolve Vertices); points no face uses any more go. A region or
 ## loop they cannot make a simple face of (a hole, a pinch, more than 256
 ## corners) is left as it was and counted in the warning; when nothing
 ## applies, the input passes through with a warning rather than an error, so
 ## a node dropped in with its defaults never fails.
 
+let fill_parms: ParmSpec[1] = [ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Single face|Fan", "One face per loop, or triangles around a new point at its center.")]
+
 pub func fill_verb() -> Verb:
-    return Verb("Fill", "Modeling", "Cap each closed loop of the group's boundary edges", Domain.edge, true, placeholder_parms[..<0], true, cook_fill)
+    return Verb("Fill", "Modeling", "Cap each closed loop of the group's boundary edges", Domain.edge, true, fill_parms, true, cook_fill)
 
 pub func dissolve_verb() -> Verb:
-    return Verb("Dissolve", "Modeling", "Join the faces across the group's interior edges, one face per region", Domain.edge, true, placeholder_parms[..<0], true, cook_dissolve)
+    return Verb("Dissolve", "Modeling", "Join the faces across the group's interior edges (or around its points), one face per region", Domain.edge, true, placeholder_parms[..<0], true, cook_dissolve, false, Domain.point)
 
 func cook_fill(input: const VerbInput*, output: VerbOutput*) -> !:
     let mesh = input.mesh
@@ -67,21 +72,44 @@ func cook_fill(input: const VerbInput*, output: VerbOutput*) -> !:
     output.built = true
     let faces = topology.faces()
     try builder.copy_faces(mesh, 0, faces)
-    output.selection = try BitsBuilder.zeros(faces + loop_ends.count)
-    output.selection_domain = Domain.face
+    let fan = input.parms.at(0) == 1.0
     var begin: usize = 0
     for end in loop_ends.view():
-        output.selection.set(builder.face_count())
-        try builder.face(-1)
         # The cap winds against the boundary: its corners in reverse, each
         # taking the adjacent face's corner at that point.
+        var cap: i32[256]
+        var parents: i32[256]
+        var size: usize = 0
         var at = (usize)end
         while at > begin:
             at -= 1
-            let corner = loops.items[at]
-            try builder.corner(topology.corners[topology.next((usize)corner)], (i32)topology.next((usize)corner))
-        try builder.end_face()
+            let corner = topology.next((usize)loops.items[at])
+            cap[size] = topology.corners[corner]
+            parents[size] = (i32)corner
+            size += 1
         begin = (usize)end
+        if not fan:
+            try builder.face(-1)
+            for index in 0..<size: try builder.corner(cap[index], parents[index])
+            try builder.end_face()
+            continue
+        # A fan: a point at the loop's center, its values the loop's mean.
+        var center = Vector3()
+        var weights: f32[256]
+        for index in 0..<size:
+            center = center.add(builder.position(cap[index]))
+            weights[index] = 1.0 / (f32)size
+        let middle = try builder.mixed_point(center.multiply_scalar(1.0 / (f64)size), cap[..<size], weights[..<size])
+        for index in 0..<size:
+            let next = (index + 1) % size
+            try builder.face(-1)
+            try builder.mixed_corner(middle, parents[..<size], weights[..<size])
+            try builder.corner(cap[index], parents[index])
+            try builder.corner(cap[next], parents[next])
+            try builder.end_face()
+    output.selection = try BitsBuilder.zeros(builder.face_count())
+    output.selection.set_range(faces, builder.face_count())
+    output.selection_domain = Domain.face
     if skipped > 0: output.warning = "Some boundary runs in the group are not closed simple loops and were left open"
 
 func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
@@ -94,8 +122,17 @@ func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
     for face in 0..<faces: parent[face] = (i32)face
     var dissolved = try BitsBuilder.zeros(topology.edges())
     defer dissolved.close()
+    # A point group: every edge at its points.
+    let by_points = input.domain == Domain.point
+    var chosen = try BitsBuilder.zeros(topology.edges())
+    defer chosen.close()
     for edge in 0..<topology.edges():
-        if not input.group.get(edge): continue
+        if not by_points:
+            if input.group.get(edge): chosen.set(edge)
+        elif input.group.get((usize)topology.edge_points[edge * 2]) or input.group.get((usize)topology.edge_points[edge * 2 + 1]):
+            chosen.set(edge)
+    for edge in 0..<topology.edges():
+        if not chosen.view().get(edge): continue
         let first = (usize)topology.edge_corner_offsets[edge]
         if (usize)topology.edge_corner_offsets[edge + 1] - first != 2: continue
         let a = find(parent, topology.corner_faces[(usize)topology.edge_corners[first]])
@@ -149,7 +186,21 @@ func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
         try loop_starts.push((u32)begin)
     try loop_starts.push((u32)loops.count)
     let merged = loop_starts.count - 1
-    if merged == 0:
+    # Group points left between two edges go from the faces around them.
+    let removable = try alloc u8[topology.points] in memory.heap
+    defer free(removable) in memory.heap
+    memory.set(removable, 0)
+    var removals: usize = 0
+    if by_points:
+        for point in 0..<topology.points:
+            if not input.group.get(point): continue
+            var kept: usize = 0
+            for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+                if not dissolved.view().get((usize)topology.point_edges[slot]): kept += 1
+            if kept == 2:
+                removable[point] = 1
+                removals += 1
+    if merged == 0 and removals == 0:
         output.warning = "Nothing to dissolve: the group joins no region of faces into a simple face; the input passes through"
         return
     var builder = &output.builder
@@ -163,22 +214,45 @@ func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
     output.selection = try BitsBuilder.zeros(face_total)
     output.selection_domain = Domain.face
     var run: usize = 0
+    var ring: i32[256]
     for face in 0..<faces:
         let region = (usize)parent[face]
-        if members[region] < 2 or loop_of[region] < 0: continue
+        let joined = members[region] >= 2 and loop_of[region] >= 0
+        if not joined and not touches(&topology, removable, face): continue
         try builder.copy_faces(mesh, run, face)
         run = face + 1
-        if region != face: continue
-        # The region's face, at its lowest face's place, from its loop.
-        let index = (usize)loop_of[region]
-        output.selection.set(builder.face_count())
+        if joined and region != face: continue
+        # The region's face at its lowest face's place, from its loop (or
+        # an unjoined face's own corners), without removable points.
+        var size: usize = 0
+        if joined:
+            let index = (usize)loop_of[region]
+            for at in (usize)loop_starts.items[index]..<(usize)loop_starts.items[index + 1]:
+                ring[size] = loops.items[at]
+                size += 1
+        else:
+            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                ring[size] = (i32)corner
+                size += 1
+        var staying: usize = 0
+        for at in 0..<size:
+            if removable[(usize)topology.corners[(usize)ring[at]]] == 0: staying += 1
+        if joined: output.selection.set(builder.face_count())
         try builder.face((i32)face)
-        for at in (usize)loop_starts.items[index]..<(usize)loop_starts.items[index + 1]:
-            let corner = loops.items[at]
+        for at in 0..<size:
+            let corner = ring[at]
+            if staying >= 3 and removable[(usize)topology.corners[(usize)corner]] != 0: continue
             try builder.corner(topology.corners[(usize)corner], corner)
         try builder.end_face()
     try builder.copy_faces(mesh, run, faces)
+    try builder.drop_unused_points()
     if skipped > 0: output.warning = "Regions with holes, pinches or more than 256 corners were left as they were"
+
+## Whether face `face` has a corner at a removable point.
+func touches(topology: const Topology*, removable: const u8[], face: usize) -> bool:
+    for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+        if removable[(usize)topology.corners[corner]] != 0: return true
+    return false
 
 ## The one boundary corner of `region` leaving `point` (its edge not
 ## dissolved), or -1 for none or a pinch (several).

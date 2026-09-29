@@ -19,6 +19,7 @@ pub func exercise() -> !:
     try extrude_checks(grid, cube)
     try loop_cut_checks(grid, cube)
     try bridge_checks(grid, cube)
+    try merge_fill_dissolve_checks(grid, cube)
 
 func fixture() -> interop.Reference[Mesh]!:
     let grid = try MeshPrimitives.grid(2.0, 4)
@@ -269,6 +270,52 @@ func bridge_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh])
     defer alone.release()
     assert(alone.value().warning().length > 0)
     print("PASS Bridge: runs with divisions, zipped runs, a tunnel through a cube, pass-through")
+
+func merge_fill_dissolve_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) -> !:
+    # Merge at the center: a face's four points become one; the faces
+    # around lose a corner, the face itself goes.
+    let center = try made(grid, "Merge Points", "6 7 11 12", 1, [0.0, 0.001], 1)
+    defer center.release()
+    counts(center, 22, 15)
+    let at_first = try made(grid, "Merge Points", "6 7", 1, [1.0, 0.001], 1)
+    defer at_first.release()
+    counts(at_first, 24, 16)
+    near((try at_first.value().point(6)).x, -0.5)
+    let at_last = try made(grid, "Merge Points", "6 7", 1, [2.0, 0.001], 1)
+    defer at_last.release()
+    near((try at_last.value().point(6)).x, 0.0)
+    # Islands: two separate pairs merge separately, each at its center.
+    let islands = try made(grid, "Merge Points", "0 1 23 24", 1, [3.0, 0.001], 2)
+    defer islands.release()
+    counts(islands, 23, 16)
+    near((try islands.value().point(0)).x, -0.75)
+    # By distance: split faces fuse back.
+    let split = try made(grid, "Split", "0", 3, [0.0], 1)
+    defer split.release()
+    let fused = try made(split, "Merge Points", "*", 1, [4.0, 0.001], 4)
+    defer fused.release()
+    counts(fused, 25, 16)
+    # Fill as a fan: a center point and a triangle per boundary edge.
+    let holed = try made(grid, "Delete", "5", 3, [0.0], 0)
+    defer holed.release()
+    let fan = try made(holed, "Fill", "p6-11-12-7-6", 2, [1.0], 4)
+    defer fan.release()
+    counts(fan, 26, 19)
+    try planar_uv(fan)
+    near((try fan.value().point(25)).x, -0.25)
+    # Dissolve points: an inner point's faces join into one and the point
+    # goes; a border point between two edges leaves its faces.
+    let inner = try made(grid, "Dissolve", "12", 1, [0.0], 1)
+    defer inner.release()
+    counts(inner, 24, 13)
+    let border = try made(grid, "Dissolve", "2", 1, [0.0], 1)
+    defer border.release()
+    counts(border, 24, 15)
+    # Cube corner: its three faces join into one face without it.
+    let corner = try made(cube, "Dissolve", "0", 1, [0.0], 1)
+    defer corner.release()
+    counts(corner, 7, 4)
+    print("PASS Merge (center, first, last, islands, distance), Fill fan, Dissolve points")
 
 func dump(mesh: interop.Reference[Mesh]) -> !:
     print(f"{mesh.value().point_count()} points {mesh.value().face_count()} faces")

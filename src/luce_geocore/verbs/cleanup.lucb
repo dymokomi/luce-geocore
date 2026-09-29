@@ -1,12 +1,21 @@
-## Fuse (merge the group's points closer than a distance) and Clean (drop
-## unused points). Faces keep their corner order; a face whose corners
-## collapse below three disappears. Fuse selects the points that absorbed
+## Fuse (merge the group's points closer than a distance), Merge (the
+## group's points into one at their center, the first or the last, each
+## connected island into one, or by distance) and Clean (drop unused
+## points). Faces keep their corner order; a face whose corners collapse
+## below three disappears. Fuse and Merge select the points that absorbed
 ## others.
 
 let fuse_parms: ParmSpec[1] = [ParmSpec("Distance", ParmKind.number, 0.001, 0.000001, 100000.0, 1, "", "Points of the group closer than this merge into the first of them.")]
 
 pub func fuse_verb() -> Verb:
     return Verb("Fuse", "Modeling", "Merge nearby points of the group", Domain.point, true, fuse_parms, true, cook_fuse)
+
+let merge_parms: ParmSpec[2] = [
+    ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 4.0, 1, "At center|At first|At last|Collapse islands|By distance", "Where the group's points merge: all at their center, the first or the last point; each connected island at its center; or those within the distance."),
+    ParmSpec("Distance", ParmKind.number, 0.001, 0.000001, 100000.0, 1, "", "By distance: points of the group closer than this merge.")]
+
+pub func merge_verb() -> Verb:
+    return Verb("Merge Points", "Modeling", "Merge the group's points: at their center, first, last, per island or by distance", Domain.point, true, merge_parms, true, cook_merge)
 
 pub func clean_verb() -> Verb:
     return Verb("Clean", "Modeling", "Remove points no face uses", Domain.point, true, placeholder_parms[..<0], true, cook_clean)
@@ -16,11 +25,20 @@ pub func clean_verb() -> Verb:
 func cook_fuse(input: const VerbInput*, output: VerbOutput*) -> !:
     let distance = input.parms.at(0)
     if not (distance >= 0.000001 and distance <= 100000.0): error(errors.invalid, "Fuse distance must be in 1e-6..1e5")
-    let mesh = input.mesh
-    let points = (usize)mesh.point_count()
-    let positions = point_span(mesh)
+    let points = (usize)input.mesh.point_count()
     let target = try alloc i32[points] in memory.heap
     defer free(target) in memory.heap
+    try fuse_targets(input, distance, target)
+    var nothing: Vector3[]
+    try rebuild(input, output, target, nothing)
+    output.selection_domain = Domain.point
+
+## Each group point's target: the lowest numbered earlier point within
+## `distance` (a spatial hash of cells that wide), else itself.
+func fuse_targets(input: const VerbInput*, distance: f64, target: i32[]) -> !:
+    let mesh = input.mesh
+    let points = target.length
+    let positions = point_span(mesh)
     let buckets: usize = 65536
     let heads = try alloc i32[buckets] in memory.heap
     defer free(heads) in memory.heap
@@ -50,8 +68,79 @@ func cook_fuse(input: const VerbInput*, output: VerbOutput*) -> !:
             let bucket = cell(x, y, z, buckets)
             next[point] = heads[bucket]
             heads[bucket] = (i32)point
-    try rebuild(input, output, target)
+
+func cook_merge(input: const VerbInput*, output: VerbOutput*) -> !:
+    let mode = input.parms.at(0)
+    let mesh = input.mesh
+    let points = (usize)mesh.point_count()
+    let target = try alloc i32[points] in memory.heap
+    defer free(target) in memory.heap
+    for at in 0..<points: target[at] = (i32)at
+    if mode == 4.0:
+        let distance = input.parms.at(1)
+        if not (distance >= 0.000001 and distance <= 100000.0): error(errors.invalid, "Merge distance must be in 1e-6..1e5")
+        try fuse_targets(input, distance, target)
+        var nothing: Vector3[]
+        try rebuild(input, output, target, nothing)
+        output.selection_domain = Domain.point
+        return
+    if input.group.population() < 2:
+        output.warning = "Merge needs two or more points in the group; the input passes through"
+        return
+    let places = try alloc Vector3[points] in memory.heap
+    defer free(places) in memory.heap
+    for at in 0..<points: places[at] = builder_position(mesh, at)
+    if mode == 3.0:
+        try islands(input, target)
+    else:
+        var first: i32 = -1
+        var last: i32 = -1
+        for point in 0..<points:
+            if not input.group.get(point): continue
+            if first < 0: first = (i32)point
+            last = (i32)point
+        let keep = last if mode == 2.0 else first
+        for point in 0..<points:
+            if input.group.get(point): target[point] = keep
+    # At a center: each kept point moves to the mean of those merging into it.
+    if mode == 0.0 or mode == 3.0:
+        let sums = try alloc Vector3[points] in memory.heap
+        defer free(sums) in memory.heap
+        let counts = try alloc u32[points] in memory.heap
+        defer free(counts) in memory.heap
+        for at in 0..<points:
+            sums[at] = Vector3()
+            counts[at] = 0
+        for point in 0..<points:
+            if not input.group.get(point): continue
+            let into = (usize)target[point]
+            sums[into] = sums[into].add(places[point])
+            counts[into] += 1
+        for point in 0..<points:
+            if counts[point] > 0: places[point] = sums[point].multiply_scalar(1.0 / (f64)counts[point])
+    try rebuild(input, output, target, places)
     output.selection_domain = Domain.point
+
+## Each connected island of the group (points joined by edges with both
+## ends in it) merges into its lowest numbered point.
+func islands(input: const VerbInput*, target: i32[]) -> !:
+    let mesh = input.mesh
+    let edges = try edge_span(mesh)
+    for edge in 0..<edges.length // 2:
+        let a = (usize)edges[edge * 2]
+        let b = (usize)edges[edge * 2 + 1]
+        if not input.group.get(a) or not input.group.get(b): continue
+        let root_a = root(target, (i32)a)
+        let root_b = root(target, (i32)b)
+        if root_a != root_b: target[(usize)(root_a if root_a > root_b else root_b)] = root_a if root_a < root_b else root_b
+    for point in 0..<target.length: target[point] = root(target, (i32)point)
+
+func root(parent: i32[], point: i32) -> i32:
+    var at = point
+    while parent[(usize)at] != at:
+        parent[(usize)at] = parent[(usize)parent[(usize)at]]
+        at = parent[(usize)at]
+    return at
 
 func cell(x: i64, y: i64, z: i64, buckets: usize) -> usize:
     let value = (x *% 73856093) ^ (y *% 19349663) ^ (z *% 83492791)
@@ -62,13 +151,14 @@ func cook_clean(input: const VerbInput*, output: VerbOutput*) -> !:
     let target = try alloc i32[points] in memory.heap
     defer free(target) in memory.heap
     for at in 0..<points: target[at] = (i32)at
-    try rebuild(input, output, target)
+    var nothing: Vector3[]
+    try rebuild(input, output, target, nothing)
     output.selection_domain = Domain.point
 
 ## Faces over points mapped through `target` (each point to the one it
-## merges into), keeping only points some face uses. Merged-into points are
-## selected.
-func rebuild(input: const VerbInput*, output: VerbOutput*, target: const i32[]) -> !:
+## merges into, placed at `places` when given), keeping only points some
+## face uses. Merged-into points are selected.
+func rebuild(input: const VerbInput*, output: VerbOutput*, target: const i32[], places: const Vector3[]) -> !:
     let mesh = input.mesh
     let offsets = offset_span(mesh)
     let corners = corner_span(mesh)
@@ -81,7 +171,7 @@ func rebuild(input: const VerbInput*, output: VerbOutput*, target: const i32[]) 
     try builder.begin(mesh)
     output.built = true
     for point in 0..<points:
-        if used[point] == 0: used[point] = try builder.point(builder_position(mesh, point), (i32)point)
+        if used[point] == 0: used[point] = try builder.point(places[point] if places.length > 0 else builder_position(mesh, point), (i32)point)
     output.selection = try BitsBuilder.zeros(builder.point_count())
     for point in 0..<points:
         if target[point] != (i32)point and used[(usize)target[point]] >= 0: output.selection.set((usize)used[(usize)target[point]])

@@ -245,7 +245,18 @@ func finish(source: const Mesh*, output: VerbOutput*) -> Mesh*!:
     if let made = output.mesh:
         output.mesh = none
         return made
-    if output.built: return try output.builder.finish(source)
+    if output.built:
+        # Faces the kernel made degenerate (a bridge between coplanar loops,
+        # say): nothing sensible to show, so the input passes through.
+        let built: Mesh*? = output.builder.finish(source) catch failure:
+            if failure.code != errors.invalid: error(failure.code, failure.message)
+            output.warning = "The operation would make degenerate faces; the input passes through"
+            recover none
+        if let made = built: return made
+        output.selection.close()
+        output.selection = try BitsBuilder.zeros(0)
+        output.builder.selected_edges.clear()
+        return try mesh_share(source)
     if not output.positions.is_empty():
         # Points moved onto each other collapse faces: nothing sensible to
         # make, so the input passes through with a warning.
