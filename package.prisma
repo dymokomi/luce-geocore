@@ -27,6 +27,10 @@ def package "luce-geocore" {
         str module = "luce_geocore.core.growing"
     }
 
+    def export "geocore_shared" {
+        str module = "luce_geocore.core.shared"
+    }
+
     def dependency "luce-std" {
         str owner = "dymokomi"
         str version = "^0.1.0"

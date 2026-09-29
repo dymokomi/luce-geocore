@@ -82,6 +82,11 @@ pub struct Column[T]:
     pub func is_empty() -> bool:
         return self.block == none
 
+    ## Whether this handle is the only owner (writing needs no copy).
+    pub func unique() -> bool:
+        let block = self.block else return true
+        return block.users.load(.acquire) == 1
+
     ## Read access; valid while this handle holds its share.
     pub func view() -> const T[]:
         if let block = self.block:
