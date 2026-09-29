@@ -21,6 +21,7 @@ import luce_geocore.set_verbs as set_verbs
 import luce_geocore.io as io
 import luce_geocore.fields as fields
 import luce_geocore.errors as errors
+import luce_geocore.core.attributes as attributes
 
 pub type Vector3 = vector.Vector3
 pub type Matrix4 = matrix.Matrix4
@@ -43,6 +44,10 @@ pub type AttributeKernels = attribute_kernels.AttributeKernels
 pub type GeometrySet = geometry_set.GeometrySet
 pub let geometry_set_type = geometry_set.geometry_set_type
 pub type Selection = groups.Selection
+## Selection domains (Domain.point, .corner, .face, .edge) and what a verb's
+## group names (GroupType); Luce passes them to the i64 parameters with int().
+pub type Domain = attributes.Domain
+pub type GroupType = groups.GroupType
 pub type Groups = groups.Groups
 pub type Verbs = verbs.Verbs
 pub type VerbResult = verbs.VerbResult

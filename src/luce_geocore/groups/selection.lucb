@@ -216,6 +216,15 @@ pub func adopt_selection(column: Column[u64], elements: usize, domain: Domain, t
 pub func selection_bits(selection: const Selection*) -> Bits:
     return selection.view()
 
+## What a verb's group names (a node's Group Type): its domain, or a guess
+## from the expression. Corners are Houdini's vertices.
+pub enum GroupType as u8:
+    guess = 0
+    points = 1
+    edges = 2
+    faces = 3
+    corners = 4
+
 pub func domain_of(value: i64) -> Domain!:
     if value < 0 or value > 4 or value == 3: error(errors.invalid, "a selection is of points (0), corners (1), faces (2) or edges (4)")
     return Domain((u8)value)
