@@ -1,0 +1,115 @@
+## Indexed modeling primitives, sharing points across seams.
+import interop
+import math
+import luce_geocore.errors as errors
+from luce_geocore.math.vector import Vector3
+from luce_geocore.geometries.polygon import PolygonMesh
+from luce_geocore.geometries.builder import MeshBuilder
+
+pub struct MeshPrimitives:
+    let reserved: u8 = 0
+
+    pub static func grid(size: f64 = 2.0, divisions: i64 = 4) -> interop.Reference[PolygonMesh]!:
+        try parameters(size, divisions)
+        var out = try MeshBuilder()
+        defer out.close()
+        for z in 0..<divisions + 1:
+            for x in 0..<divisions + 1:
+                discard(try out.point(Vector3(((f64)x / (f64)divisions - 0.5) * size, 0.0, ((f64)z / (f64)divisions - 0.5) * size)))
+        for z in 0..<divisions:
+            for x in 0..<divisions:
+                let a = z * (divisions + 1) + x
+                try out.face(4)
+                try out.corner(a)
+                try out.corner(a + divisions + 1)
+                try out.corner(a + divisions + 2)
+                try out.corner(a + 1)
+        return try out.finish()
+
+    pub static func sphere(radius: f64 = 1.0, segments: i64 = 16) -> interop.Reference[PolygonMesh]!:
+        try parameters(radius, segments)
+        if segments < 4:
+            error(errors.invalid, "Sphere needs at least four segments")
+        let rows = segments // 2
+        var out = try MeshBuilder()
+        defer out.close()
+        discard(try out.point(Vector3(0.0, radius * 2.0, 0.0)))
+        for row in 1..<rows:
+            let theta = (f64)row * 3.141592653589793 / (f64)rows
+            for segment in 0..<segments:
+                let phi = (f64)segment * 6.283185307179586 / (f64)segments
+                discard(try out.point(Vector3(math.sin(theta) * math.cos(phi) * radius, (math.cos(theta) + 1.0) * radius, math.sin(theta) * math.sin(phi) * radius)))
+        let bottom = try out.point(Vector3())
+        for segment in 0..<segments:
+            let next = (segment + 1) % segments
+            try out.face(3)
+            try out.corner(0)
+            try out.corner(1 + next)
+            try out.corner(1 + segment)
+            for row in 0..<rows - 2:
+                let a = 1 + row * segments
+                try out.face(4)
+                try out.corner(a + segment)
+                try out.corner(a + next)
+                try out.corner(a + segments + next)
+                try out.corner(a + segments + segment)
+            try out.face(3)
+            try out.corner(bottom)
+            try out.corner(1 + (rows - 2) * segments + segment)
+            try out.corner(1 + (rows - 2) * segments + next)
+        return try out.finish()
+
+    pub static func cylinder(radius: f64 = 1.0, height: f64 = 2.0, segments: i64 = 16, cone: bool = false) -> interop.Reference[PolygonMesh]!:
+        try parameters(radius, segments)
+        if segments < 3 or not (height > 0.0 and height <= 100000.0):
+            error(errors.invalid, "Cylinder needs positive height and at least three sides")
+        var out = try MeshBuilder()
+        defer out.close()
+        for row in 0..<(i64)(1 if cone else 2):
+            for segment in 0..<segments:
+                let angle = (f64)segment * 6.283185307179586 / (f64)segments
+                discard(try out.point(Vector3(math.cos(angle) * radius, (f64)row * height, math.sin(angle) * radius)))
+        if cone:
+            discard(try out.point(Vector3(0.0, height, 0.0)))
+        try out.face(segments)
+        for segment in 0..<segments:
+            try out.corner(segment)
+        if not cone:
+            try out.face(segments)
+            for segment in 0..<segments:
+                try out.corner(segments * 2 - segment - 1)
+        for segment in 0..<segments:
+            let next = (segment + 1) % segments
+            try out.face(3 if cone else 4)
+            try out.corner(segment)
+            try out.corner(segments if cone else segments + segment)
+            if not cone:
+                try out.corner(segments + next)
+            try out.corner(next)
+        return try out.finish()
+
+    pub static func torus(radius: f64 = 1.0, tube: f64 = 0.3, segments: i64 = 16) -> interop.Reference[PolygonMesh]!:
+        try parameters(radius, segments)
+        if segments < 4 or not (tube > 0.0 and tube < radius):
+            error(errors.invalid, "Torus tube must be smaller than its radius")
+        let rows = segments
+        var out = try MeshBuilder()
+        defer out.close()
+        for i in 0..<segments:
+            let phi = (f64)i * 6.283185307179586 / (f64)segments
+            for j in 0..<rows:
+                let theta = (f64)j * 6.283185307179586 / (f64)rows
+                let r = radius + math.cos(theta) * tube
+                discard(try out.point(Vector3(r * math.cos(phi), math.sin(theta) * tube + tube, r * math.sin(phi))))
+        for i in 0..<segments:
+            for j in 0..<rows:
+                try out.face(4)
+                try out.corner(i * rows + j)
+                try out.corner(i * rows + (j + 1) % rows)
+                try out.corner(((i + 1) % segments) * rows + (j + 1) % rows)
+                try out.corner(((i + 1) % segments) * rows + j)
+        return try out.finish()
+
+func parameters(size: f64, divisions: i64) -> !:
+    if not (size > 0.0 and size <= 100000.0) or divisions < 1 or divisions > 64:
+        error(errors.invalid, "primitive size must be positive and divisions in 1..64")

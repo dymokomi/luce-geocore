@@ -1,0 +1,51 @@
+## Shared immutable topology must outlive any attribute snapshot owner.
+import geocore
+import math
+import interop
+import memory
+from geocore import PolygonMesh, Vector3
+
+pub func exercise() -> !:
+    let source = try PolygonMesh.cube()
+    defer source.release()
+    let tagged = try source.value().with_attribute("weight", 0, 1, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0])
+    defer tagged.release()
+    let stripped = try tagged.value().without_attribute("weight", 0)
+    defer stripped.release()
+    # The connectivity hash ignores positions and attributes, not topology.
+    let moved = try source.value().moved_points([0, 1], Vector3(0.0, 0.25, 0.0))
+    defer moved.release()
+    let extruded = try source.value().extruded_faces([2], 0.5)
+    defer extruded.release()
+    assert(source.value().topology_hash() != 0)
+    assert(tagged.value().topology_hash() == source.value().topology_hash())
+    assert(moved.value().topology_hash() == source.value().topology_hash())
+    assert(extruded.value().topology_hash() != source.value().topology_hash())
+    assert(source.value().find_attribute("weight", 0) == -1)
+    source.close()
+    assert(math.abs((try tagged.value().surface_distance(Vector3(0.0, 3.0, 0.0))) - 1.0) < 0.00000001)
+    assert((try tagged.value().closest_face(Vector3(0.0, 3.0, 0.0))) == 2)
+    assert((try tagged.value().surface_distance(Vector3(1.0, 1.0, 0.0))) == 0.0)
+    tagged.close()
+    assert(stripped.value().face_count() == 6 and stripped.value().attribute_count() == 0)
+    assert((try stripped.value().ray_face(Vector3(0.0, 3.0, 0.0), Vector3(0.0, -1.0, 0.0))) == 2)
+    let empty = try PolygonMesh.empty()
+    defer empty.release()
+    assert((try empty.value().surface_distance(Vector3())) == -1.0)
+    assert((try empty.value().closest_face(Vector3())) == -1)
+    # Exercise BVH growth past its initial capacity, including failed growth.
+    let points = try alloc Vector3[192] in memory.heap
+    defer free(points) in memory.heap
+    var sizes: i64[64]
+    var corners: i64[192]
+    for at in 0..<(usize)64:
+        let x = (f64)(at % 8) * 2.0
+        let y = (f64)(at // 8) * 2.0
+        points[at * 3] = Vector3(x, y, 0.0)
+        points[at * 3 + 1] = Vector3(x + 1.0, y, 0.0)
+        points[at * 3 + 2] = Vector3(x, y + 1.0, 0.0)
+        sizes[at] = 3
+        for corner in 0..<(usize)3: corners[at * 3 + corner] = (i64)(at * 3 + corner)
+    var mesh = try PolygonMesh(points, sizes, corners)
+    defer mesh.close()
+    assert(math.abs((try mesh.surface_distance(Vector3(0.2, 0.2, 3.0))) - 3.0) < 0.00000001)

@@ -1,0 +1,197 @@
+## Immutable triangle BVH. Borrows topology for exactly its owning mesh lifetime.
+import memory
+import math
+from luce_geocore.math.vector import Vector3
+from luce_geocore.core.geometry import Bounds
+from luce_geocore.geometries.distance import bounds_distance, triangle_distance
+
+struct Branch:
+    var minimum: Vector3
+    var maximum: Vector3
+    var first: usize
+    var end: usize
+    var left: usize
+    var right: usize
+
+pub struct RayHit:
+    pub let face: i64 = -1
+    pub let distance: f64 = -1.0
+
+pub struct TriangleIndex:
+    let points: const Vector3[]
+    let corners: const i64[]
+    let triangles: const i64[]
+    let faces: const usize[]
+    let order: usize[]
+    var nodes: Branch[]
+    var used: usize
+
+    pub func init(points: const Vector3[], corners: const i64[], triangles: const i64[], faces: const usize[]) -> !:
+        let count = triangles.length // 3
+        let order = try alloc usize[count] in memory.heap
+        errdefer free(order) in memory.heap
+        let nodes = try alloc Branch[count // 4 + 1] in memory.heap
+        self.points = points
+        self.corners = corners
+        self.triangles = triangles
+        self.faces = faces
+        self.order = order
+        self.nodes = nodes
+        self.used = 0
+        errdefer free(self.nodes) in memory.heap
+        # Gather once while input is sequential. Recursive nodes must not chase
+        # corner/vertex indices three times per triangle at every tree level.
+        let bounds = try alloc Bounds[count] in memory.heap
+        defer free(bounds) in memory.heap
+        for index in 0..<count:
+            order[index] = index
+            let a = self.point(index, 0)
+            let b = self.point(index, 1)
+            let c = self.point(index, 2)
+            bounds[index] = Bounds(Vector3(math.min(a.x, math.min(b.x, c.x)), math.min(a.y, math.min(b.y, c.y)), math.min(a.z, math.min(b.z, c.z))),
+                                   Vector3(math.max(a.x, math.max(b.x, c.x)), math.max(a.y, math.max(b.y, c.y)), math.max(a.z, math.max(b.z, c.z))))
+        if count > 0:
+            discard(try self.build(0, count, 0, bounds))
+
+    func point(triangle: usize, corner: usize) -> Vector3:
+        return self.points[(usize)self.corners[(usize)self.triangles[triangle * 3 + corner]]]
+
+    mutating func build(first: usize, end: usize, depth: usize, bounds: const Bounds[]) -> usize!:
+        if self.used == self.nodes.length:
+            let grown = try alloc Branch[self.nodes.length * 2] in memory.heap
+            memory.copy(grown, self.nodes, self.used)
+            free(self.nodes) in memory.heap
+            self.nodes = grown
+        let id = self.used
+        self.used += 1
+        var minimum = bounds[self.order[first]].minimum
+        var maximum = bounds[self.order[first]].maximum
+        for at in first..<end:
+            let box = bounds[self.order[at]]
+            minimum = Vector3(math.min(minimum.x, box.minimum.x), math.min(minimum.y, box.minimum.y), math.min(minimum.z, box.minimum.z))
+            maximum = Vector3(math.max(maximum.x, box.maximum.x), math.max(maximum.y, box.maximum.y), math.max(maximum.z, box.maximum.z))
+        self.nodes[id] = Branch(minimum, maximum, first, end, 0, 0)
+        if end - first <= 8 or depth >= 32:
+            return id
+        let extent = maximum.subtract(minimum)
+        let axis: usize = 0 if extent.x >= extent.y and extent.x >= extent.z else (1 if extent.y >= extent.z else 2)
+        let split = (component(minimum, axis) + component(maximum, axis)) * 0.5
+        var middle = first
+        for at in first..<end:
+            let box = bounds[self.order[at]]
+            if (component(box.minimum, axis) + component(box.maximum, axis)) * 0.5 < split:
+                let swap = self.order[middle]
+                self.order[middle] = self.order[at]
+                self.order[at] = swap
+                middle += 1
+        if middle == first or middle == end:
+            middle = first + (end - first) // 2
+        let left = try self.build(first, middle, depth + 1, bounds)
+        let right = try self.build(middle, end, depth + 1, bounds)
+        self.nodes[id].left = left
+        self.nodes[id].right = right
+        return id
+
+    pub func ray(origin: Vector3, direction: Vector3) -> RayHit:
+        if self.used == 0 or not origin.is_finite() or not direction.is_finite():
+            return RayHit()
+        var nearest = 1.0e30
+        var face: i64 = -1
+        var stack: usize[64]
+        var count: usize = 1
+        stack[0] = 0
+        while count > 0:
+            count -= 1
+            let node = &self.nodes[stack[count]]
+            if not hits_bounds(origin, direction, node.minimum, node.maximum, nearest):
+                continue
+            if node.left != 0:
+                stack[count] = node.right
+                stack[count + 1] = node.left
+                count += 2
+                continue
+            for at in node.first..<node.end:
+                let triangle = self.order[at]
+                let distance = hit_triangle(origin, direction, self.point(triangle, 0), self.point(triangle, 1), self.point(triangle, 2))
+                let candidate = (i64)self.faces[(usize)self.triangles[triangle * 3]]
+                if distance >= 0.0 and (distance < nearest or (distance == nearest and candidate < face)):
+                    nearest = distance
+                    face = candidate
+        return RayHit(face, nearest if face >= 0 else -1.0)
+
+    pub mutating func close():
+        free(self.order) in memory.heap
+        free(self.nodes) in memory.heap
+
+    ## Exact nearest distance to the triangulated mesh, using AABB pruning.
+    pub func distance(point: Vector3) -> f64:
+        return self.nearest(point).distance
+
+    pub func nearest(point: Vector3) -> RayHit:
+        if self.used == 0: return RayHit()
+        var best: f64 = 1.0e300
+        var face: i64 = -1
+        var stack: usize[64]
+        var count: usize = 1
+        stack[0] = 0
+        while count > 0:
+            count -= 1
+            let node = self.nodes[stack[count]]
+            if bounds_distance(point, node.minimum, node.maximum) >= best: continue
+            if node.left != 0:
+                let a = self.nodes[node.left]
+                let b = self.nodes[node.right]
+                let closer = bounds_distance(point, a.minimum, a.maximum) < bounds_distance(point, b.minimum, b.maximum)
+                stack[count] = node.right if closer else node.left
+                stack[count + 1] = node.left if closer else node.right
+                count += 2
+            else:
+                for at in node.first..<node.end:
+                    let id = self.order[at]
+                    let distance = triangle_distance(point, self.point(id, 0), self.point(id, 1), self.point(id, 2))
+                    if distance < best:
+                        best = distance
+                        face = (i64)self.faces[(usize)self.triangles[id * 3]]
+        return RayHit(face, math.sqrt(best))
+
+func component(v: Vector3, axis: usize) -> f64:
+    return v.x if axis == 0 else (v.y if axis == 1 else v.z)
+
+func hits_bounds(origin: Vector3, direction: Vector3, minimum: Vector3, maximum: Vector3, nearest: f64) -> bool:
+    var near = 0.0
+    var far = nearest
+    for axis in 0..<(usize)3:
+        let o = component(origin, axis)
+        let d = component(direction, axis)
+        let lo = component(minimum, axis) - 0.000001
+        let hi = component(maximum, axis) + 0.000001
+        if math.abs(d) < 1.0e-15:
+            if o < lo or o > hi:
+                return false
+        else:
+            let a = (lo - o) / d
+            let b = (hi - o) / d
+            near = math.max(near, math.min(a, b))
+            far = math.min(far, math.max(a, b))
+            if far < near:
+                return false
+    return true
+
+func hit_triangle(origin: Vector3, direction: Vector3, a: Vector3, b: Vector3, c: Vector3) -> f64:
+    let ab = b.subtract(a)
+    let ac = c.subtract(a)
+    let p = direction.cross(ac)
+    let determinant = ab.dot(p)
+    if math.abs(determinant) < 0.000000001:
+        return -1.0
+    let inverse = 1.0 / determinant
+    let offset = origin.subtract(a)
+    let u = offset.dot(p) * inverse
+    if u < -0.000001 or u > 1.000001:
+        return -1.0
+    let q = offset.cross(ab)
+    let v = direction.dot(q) * inverse
+    if v < -0.000001 or u + v > 1.000001:
+        return -1.0
+    let distance = ac.dot(q) * inverse
+    return distance if distance >= 0.0 else -1.0

@@ -1,0 +1,113 @@
+## Exceptional bounded polygon triangulation when greedy ears strand a trim
+## chain. Visible diagonals and positive, conditioned triangles form a complete
+## partition; no point is welded, discarded, moved or added. Ordinary polygons
+## still use the linear-storage ear path in polygon_triangulation.
+import memory
+import math
+from luce_geocore.math.vector import Vector3
+
+## Return a complete normal-plane partition, or leave the output untouched.
+## Called only after ear clipping fails; at most 256 corners bound cubic work.
+pub func partition(points: const Vector3[], corners: const i64[], start: usize, count: usize, normal: Vector3, epsilon: f64, output: i64[]) -> bool!:
+    if count < 4 or count > 256: return false
+    let uv = try alloc Vector3[count] in memory.heap
+    defer free(uv) in memory.heap
+    let axis = Vector3(1.0,0.0,0.0) if math.abs(normal.x) < 0.9 else Vector3(0.0,1.0,0.0)
+    let x = try axis.subtract(normal.multiply_scalar(axis.dot(normal))).normalized()
+    let y = normal.cross(x)
+    let origin = points[(usize)corners[start]]
+    for at in 0..<count:
+        let delta = points[(usize)corners[start+at]].subtract(origin)
+        uv[at] = Vector3(delta.dot(x),delta.dot(y),0.0)
+    # The solver must not rescue an actually crossed/touching projected loop.
+    for i in 0..<count:
+        let next = (i+1)%count
+        if same(uv[i],uv[next]): return false
+        for j in i+1..<count:
+            let end = (j+1)%count
+            if next == j or end == i: continue
+            if intersects(uv[i],uv[next],uv[j],uv[end]): return false
+    let visible = try alloc bool[count*count] in memory.heap
+    defer free(visible) in memory.heap
+    let costs = try alloc f64[count*count] in memory.heap
+    defer free(costs) in memory.heap
+    let splits = try alloc i64[count*count] in memory.heap
+    defer free(splits) in memory.heap
+    for i in 0..<count:
+        for j in i..<count:
+            visible[i*count+j] = j == i+1 or (i == 0 and j == count-1) or (j > i+1 and diagonal(uv,i,j))
+            costs[i*count+j] = 0.0 if j <= i+1 else 1e300
+            splits[i*count+j] = -1
+    for gap in 2..<count:
+        for i in 0..<count-gap:
+            let j = i+gap
+            if not visible[i*count+j]: continue
+            for k in i+1..<j:
+                if costs[i*count+k] >= 1e300 or costs[k*count+j] >= 1e300: continue
+                # Keep exactly the existing area admission in the caller's
+                # normal plane, even if projection introduced roundoff.
+                let a = points[(usize)corners[start+k]].subtract(points[(usize)corners[start+i]])
+                let b = points[(usize)corners[start+j]].subtract(points[(usize)corners[start+i]])
+                let area = a.cross(b).dot(normal)
+                if area <= epsilon or orient(uv[i],uv[k],uv[j]) <= 0.0: continue
+                let c = b.subtract(a)
+                let candidate = costs[i*count+k]+costs[k*count+j]+(a.dot(a)+b.dot(b)+c.dot(c))/area
+                if candidate < costs[i*count+j]:
+                    costs[i*count+j] = candidate
+                    splits[i*count+j] = (i64)k
+    if splits[count-1] < 0: return false
+    var first: usize[256]
+    var last: usize[256]
+    first[0] = 0
+    last[0] = count-1
+    var pending: usize = 1
+    var written: usize = 0
+    while pending > 0:
+        pending -= 1
+        let i = first[pending]
+        let j = last[pending]
+        let k = (usize)splits[i*count+j]
+        output[written] = (i64)(start+i)
+        output[written+1] = (i64)(start+k)
+        output[written+2] = (i64)(start+j)
+        written += 3
+        if k > i+1:
+            first[pending] = i
+            last[pending] = k
+            pending += 1
+        if j > k+1:
+            first[pending] = k
+            last[pending] = j
+            pending += 1
+    return true
+
+func same(a: Vector3, b: Vector3) -> bool:
+    return a.x == b.x and a.y == b.y
+
+func orient(a: Vector3, b: Vector3, c: Vector3) -> f64:
+    return (b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x)
+
+func on_segment(a: Vector3, b: Vector3, p: Vector3) -> bool:
+    return orient(a,b,p) == 0.0 and p.x >= math.min(a.x,b.x) and p.x <= math.max(a.x,b.x) and p.y >= math.min(a.y,b.y) and p.y <= math.max(a.y,b.y)
+
+func intersects(a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> bool:
+    let ac = orient(a,b,c)
+    let ad = orient(a,b,d)
+    let ca = orient(c,d,a)
+    let cb = orient(c,d,b)
+    return (((ac > 0.0 and ad < 0.0) or (ac < 0.0 and ad > 0.0)) and ((ca > 0.0 and cb < 0.0) or (ca < 0.0 and cb > 0.0))) or on_segment(a,b,c) or on_segment(a,b,d) or on_segment(c,d,a) or on_segment(c,d,b)
+
+func diagonal(uv: const Vector3[], i: usize, j: usize) -> bool:
+    let a = uv[i]
+    let b = uv[j]
+    for at in 0..<uv.length:
+        let next = (at+1)%uv.length
+        if at == i or at == j or next == i or next == j: continue
+        if intersects(a,b,uv[at],uv[next]): return false
+    let middle = a.add(b).multiply_scalar(0.5)
+    var inside = false
+    for at in 0..<uv.length:
+        let c = uv[at]
+        let d = uv[(at+1)%uv.length]
+        if (c.y > middle.y) != (d.y > middle.y) and middle.x < c.x+(d.x-c.x)*(middle.y-c.y)/(d.y-c.y): inside = not inside
+    return inside

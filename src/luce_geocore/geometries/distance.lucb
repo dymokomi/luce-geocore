@@ -1,0 +1,53 @@
+## Squared Euclidean distances, including degenerate reference triangles.
+import math
+from luce_geocore.math.vector import Vector3
+
+pub func bounds_distance(p: Vector3, lo: Vector3, hi: Vector3) -> f64:
+    let x = math.max(math.max(lo.x - p.x, p.x - hi.x), 0.0)
+    let y = math.max(math.max(lo.y - p.y, p.y - hi.y), 0.0)
+    let z = math.max(math.max(lo.z - p.z, p.z - hi.z), 0.0)
+    return x * x + y * y + z * z
+
+func segment(p: Vector3, a: Vector3, b: Vector3) -> f64:
+    let ab = b.subtract(a)
+    let length = ab.dot(ab)
+    let t = math.clamp(p.subtract(a).dot(ab) / length, 0.0, 1.0) if length > 0.0 else 0.0
+    let d = p.subtract(a.add(ab.multiply_scalar(t)))
+    return d.dot(d)
+
+## Squared distance using signed areas instead of a cancellation-prone Gram
+## solve. Degenerate triangles reduce to their point/segment boundary.
+pub func triangle_distance(p: Vector3, a: Vector3, b: Vector3, c: Vector3) -> f64:
+    let ab = b.subtract(a)
+    let ac = c.subtract(a)
+    let bc = c.subtract(b)
+    let boundary = math.min(segment(p,a,b),math.min(segment(p,b,c),segment(p,c,a)))
+    # The Gram determinant |ab|²|ac|²-(ab.ac)² subtracts nearly equal
+    # numbers on thin ears. Its barycentrics can return a distant interior
+    # point even when p lies on an edge. Use oriented areas instead, anchored
+    # opposite the longest side (the two shortest incident vectors).
+    var origin = a
+    var first = ab
+    var second = ac
+    if ab.dot(ab) >= ac.dot(ac) and ab.dot(ab) >= bc.dot(bc):
+        origin = c
+        first = ac.multiply_scalar(-1.0)
+        second = bc.multiply_scalar(-1.0)
+    elif ac.dot(ac) >= bc.dot(bc):
+        origin = b
+        first = bc
+        second = ab.multiply_scalar(-1.0)
+    let relative = p.subtract(origin)
+    let normal = first.cross(second)
+    let area2 = normal.dot(normal)
+    if area2 > 0.0:
+        let s = relative.cross(second).dot(normal)
+        let t = first.cross(relative).dot(normal)
+        # Test all three signed subareas without subtracting s+t from area2.
+        let remaining = first.subtract(relative).cross(second.subtract(relative)).dot(normal)
+        if s >= 0.0 and t >= 0.0 and remaining >= 0.0:
+            let height = relative.dot(normal)
+            # The boundary is always a valid candidate, including when the
+            # projection is numerically ambiguous beside a very short side.
+            return math.min(boundary,height*height/area2)
+    return boundary

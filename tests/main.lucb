@@ -1,0 +1,79 @@
+## luce-geocore's Base gate: every mesh check, with allocation failure
+## injected at each stage and no allocation left live afterwards.
+import memory
+import ownership
+import polygon_checks
+import scale_checks
+import display_checks
+import position_checks
+import distance_checks
+import partition_checks
+import query_checks
+import dissolve_checks
+
+## Counts live blocks and fails the allocation after `remaining` more.
+struct Tracker: memory.Allocator:
+    var upstream: memory.Allocator
+    var live: usize
+    var remaining: usize?
+
+    pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
+        if size == 0: return self.upstream.allocate(size, alignment)
+        if let remaining = self.remaining:
+            if remaining == 0:
+                return none
+            self.remaining = remaining - 1
+        let block = self.upstream.allocate(size, alignment) else return none
+        self.live += 1
+        return block
+
+    pub mutating func resize(block: u8[], size: usize) -> bool:
+        return self.upstream.resize(block, size)
+
+    pub mutating func release(block: u8[]):
+        if block.length == 0: return
+        assert(self.live > 0)
+        self.live -= 1
+        self.upstream.release(block)
+
+func restore(previous: memory.Allocator):
+    memory.heap = previous
+
+func settle(tracker: Tracker*):
+    tracker.remaining = none
+    ownership.collect()
+    discard(ownership.finish_run(0))
+    assert(tracker.live == 0)
+
+## Fail each of the first `stages` allocations of `check` in turn; every
+## failure must be memory.exhausted and leave nothing allocated.
+func inject(tracker: Tracker*, stages: usize, check: func() -> unit!):
+    for stage in 0..<stages:
+        tracker.remaining = stage
+        check() catch failure:
+            assert(failure.code == memory.exhausted)
+        settle(tracker)
+
+pub func main(arguments: str[]) -> i32!:
+    try query_checks.exercise()
+    let previous = memory.heap
+    var tracker = Tracker(previous, 0, none)
+    memory.heap = &tracker
+    defer restore(previous)
+    inject(&tracker, 96, polygon_checks.exercise)
+    try polygon_checks.exercise()
+    inject(&tracker, 192, dissolve_checks.allocations)
+    try dissolve_checks.exercise()
+    try partition_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 96, partition_checks.single)
+    try scale_checks.exercise()
+    distance_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 256, display_checks.exercise)
+    try display_checks.exercise()
+    inject(&tracker, 128, position_checks.exercise)
+    try position_checks.exercise()
+    settle(&tracker)
+    print("ok polygon meshes, operators, queries and allocation failures")
+    return 0

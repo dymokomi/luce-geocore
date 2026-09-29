@@ -1,0 +1,79 @@
+## A greedy ear may strand a nearly straight sampled boundary. Retain all
+## seven canonical corners while finding a conditioned complete partition.
+import math
+import geocore
+from geocore import Vector3, Matrix4, PolygonMesh
+
+pub func single() -> !:
+    try chain(1.0,0,false,0,1e-11)
+
+pub func exercise() -> !:
+    for scale in [1e-6,1.0,1e4]:
+        for pose in 0..<3:
+            for reverse in [false,true]:
+                for start in 0..<7:
+                    for noise in [-1e-11,0.0,1e-11]:
+                        try chain(scale,pose,reverse,start,noise)
+    # A bow tie must remain invalid; a complete partition is not permission
+    # to ignore crossed constraints or to discard any supplied corner.
+    var rejected = false
+    var bad = PolygonMesh([Vector3(),Vector3(2.0,2.0,0.0),Vector3(0.0,2.0,0.0),Vector3(2.0,0.0,0.0)],[4],[0,1,2,3]) catch failure:
+        if failure.code != geocore.invalid: error(failure.code,failure.message)
+        rejected = true
+        recover try PolygonMesh([Vector3(),Vector3(1.0,0.0,0.0),Vector3(0.0,1.0,0.0)],[3],[0,1,2])
+    defer bad.close()
+    assert(rejected)
+
+func chain(scale: f64, pose: i64, reverse: bool, start: i64, noise: f64) -> !:
+    let original = [Vector3(0.0,1.0,0.0),Vector3(4.0,1.0,0.0),Vector3(4.0,0.0,0.0),
+        Vector3(),Vector3(0.0,0.021,0.0),Vector3(0.0,0.022,0.0),Vector3(noise,0.86,0.0)]
+    let rotation = Vector3() if pose == 0 else (Vector3(0.4,0.8,-0.2) if pose == 1 else Vector3(-0.7,-0.3,1.2))
+    let matrix = Matrix4.compose(Vector3(3.0,-2.0,7.0).multiply_scalar(scale),rotation,Vector3(scale,scale,scale))
+    var points = [Vector3(),Vector3(),Vector3(),Vector3(),Vector3(),Vector3(),Vector3()]
+    var corners: i64[7]
+    for at in 0..<(usize)7:
+        points[at] = matrix.transform_point(original[at])
+        corners[at] = (start+(6-(i64)at if reverse else (i64)at))%7
+    var mesh = try PolygonMesh(points,[7],corners)
+    defer mesh.close()
+    assert(mesh.point_count() == 7 and mesh.face_count() == 1 and mesh.index_count() == 15)
+    let normal = try matrix.transform_normal(Vector3(0.0,0.0,1.0 if reverse else -1.0))
+    var incidence: i64[49]
+    var direction: i64[49]
+    for at in 0..<(usize)49:
+        incidence[at] = 0
+        direction[at] = 0
+    var area: f64 = 0.0
+    for triangle in 0..<5:
+        var ids: i64[3]
+        for at in 0..<3:
+            let index = mesh.index(triangle*3+at)
+            defer index.release()
+            ids[(usize)at] = try index.get()
+            assert(ids[(usize)at] >= 0 and ids[(usize)at] < 7)
+        let a = points[(usize)corners[(usize)ids[0]]]
+        let b = points[(usize)corners[(usize)ids[1]]]
+        let c = points[(usize)corners[(usize)ids[2]]]
+        let cross = b.subtract(a).cross(c.subtract(a)).dot(normal)
+        assert(cross > scale*scale*1e-13)
+        area += cross*0.5
+        for at in 0..<(usize)3:
+            let ea = ids[at]
+            let eb = ids[(at+1)%3]
+            let slot = (usize)((ea if ea < eb else eb)*7+(eb if ea < eb else ea))
+            incidence[slot] += 1
+            direction[slot] += 1 if ea < eb else -1
+    assert(math.abs(area/(scale*scale)-4.0) < 1e-9)
+    var diagonals: i64 = 0
+    for i in 0..<(usize)7:
+        assert((try mesh.point((i64)i)) == points[i])
+        assert((try mesh.face_point(0,(i64)i)) == corners[i])
+        for j in i+1..<(usize)7:
+            let boundary = j == i+1 or (i == 0 and j == 6)
+            if boundary:
+                assert(incidence[i*7+j] == 1)
+                assert(direction[i*7+j] == (-1 if i == 0 and j == 6 else 1))
+            elif incidence[i*7+j] > 0:
+                assert(incidence[i*7+j] == 2 and direction[i*7+j] == 0)
+                diagonals += 1
+    assert(diagonals == 4)

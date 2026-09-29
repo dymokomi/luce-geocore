@@ -1,0 +1,130 @@
+## Position-only edits: new points over unchanged polygon topology. The edge
+## table and the triangle indices are reused, so a Move never re-triangulates
+## faces it did not fold. CAD cut-cell n-gons carry support-chart triangles
+## that ear clipping in an average plane cannot reproduce.
+import math
+import memory
+import luce_geocore.errors as errors
+from luce_geocore.core.geometry import Bounds
+from luce_geocore.math.vector import Vector3
+from luce_geocore.math.matrix import Matrix4
+from luce_geocore.geometries.attributes import AttributeSet
+from luce_geocore.geometries.polygon_triangulation import triangulate, area_normal
+
+## Owned results for the new mesh. `triangles` is empty when the caller's
+## triangle indices remain valid and can be shared.
+pub struct Repositioned:
+    pub var points: Vector3[]
+    pub var normals: Vector3[]
+    pub var triangles: i64[]
+    pub var extent: Bounds
+    pub var moved: bool
+
+    pub mutating func close():
+        free(self.points) in memory.heap
+        free(self.normals) in memory.heap
+        if self.triangles.length > 0: free(self.triangles) in memory.heap
+
+## Same validation as construction: finite points bounded to 1e6.
+pub func bounds_of(points: const Vector3[]) -> Bounds!:
+    var minimum = Vector3()
+    var maximum = Vector3()
+    for index in 0..<points.length:
+        let point = points[index]
+        if not point.is_finite() or math.abs(point.x) > 1000000.0 or math.abs(point.y) > 1000000.0 or math.abs(point.z) > 1000000.0:
+            error(errors.invalid, "mesh points must be finite and bounded to 1e6")
+        if index == 0:
+            minimum = point
+            maximum = point
+        else:
+            minimum = Vector3(math.min(minimum.x, point.x), math.min(minimum.y, point.y), math.min(minimum.z, point.z))
+            maximum = Vector3(math.max(maximum.x, point.x), math.max(maximum.y, point.y), math.max(maximum.z, point.z))
+    return Bounds(minimum, maximum)
+
+## Recompute normals only for faces with a moved corner. `rigid` promises an
+## orientation-preserving affine map, under which no triangle can fold.
+pub func reposition(old: const Vector3[], points: const Vector3[], sizes: const i64[], corners: const i64[], offsets: const usize[],
+                    normals: const Vector3[], triangles: const i64[], rigid: bool) -> Repositioned!:
+    if points.length != old.length: error(errors.invalid, "a position edit keeps the point count")
+    let extent = try bounds_of(points)
+    let moved = try alloc bool[points.length] in memory.heap
+    defer free(moved) in memory.heap
+    var any = false
+    for index in 0..<points.length:
+        let a = old[index]
+        let b = points[index]
+        moved[index] = a.x != b.x or a.y != b.y or a.z != b.z
+        any = any or moved[index]
+    let copied = try alloc Vector3[points.length] in memory.heap
+    errdefer free(copied) in memory.heap
+    memory.copy(copied, points, points.length)
+    let fresh = try alloc Vector3[normals.length] in memory.heap
+    errdefer free(fresh) in memory.heap
+    memory.copy(fresh, normals, normals.length)
+    var retriangulated: i64[]
+    errdefer release(retriangulated)
+    for face in 0..<sizes.length:
+        let start = offsets[face]
+        let count = (usize)sizes[face]
+        var touched = false
+        for at in start..<start + count:
+            touched = touched or moved[(usize)corners[at]]
+        if not touched: continue
+        let origin = points[(usize)corners[start]]
+        var area = Vector3()
+        var extent2: f64 = 0.0
+        for at in 0..<count:
+            let delta = points[(usize)corners[start + at]].subtract(origin)
+            extent2 = math.max(extent2, delta.dot(delta))
+            area = area.add(delta.cross(points[(usize)corners[start + (at + 1) % count]].subtract(origin)))
+        fresh[face] = try area_normal(area, extent2)
+        let first = (start - face * 2) * 3
+        let span = triangles[first..<first + (count - 2) * 3]
+        if rigid or not folded(old, points, corners, span): continue
+        # Keep the old triangles when the moved polygon cannot be ear clipped:
+        # a display artifact is better than refusing the whole edit.
+        var scratch: i64[762]
+        triangulate(points, corners, start, count, fresh[face], scratch[..<span.length]) catch failure:
+            continue
+        if retriangulated.length == 0:
+            retriangulated = try alloc i64[triangles.length] in memory.heap
+            memory.copy(retriangulated, triangles, triangles.length)
+        memory.copy(retriangulated[first..<first + span.length], scratch[..<span.length], span.length)
+    return Repositioned(copied, fresh, retriangulated, extent, any)
+
+func release(span: i64[]):
+    if span.length > 0: free(span) in memory.heap
+
+## A kept triangle folds when it degenerates or turns against its old facing.
+func folded(old: const Vector3[], points: const Vector3[], corners: const i64[], triangles: const i64[]) -> bool:
+    for at in 0..<triangles.length // 3:
+        let a = (usize)corners[(usize)triangles[at * 3]]
+        let b = (usize)corners[(usize)triangles[at * 3 + 1]]
+        let c = (usize)corners[(usize)triangles[at * 3 + 2]]
+        let before = old[b].subtract(old[a]).cross(old[c].subtract(old[a]))
+        let ab = points[b].subtract(points[a])
+        let ac = points[c].subtract(points[a])
+        let after = ab.cross(ac)
+        if after.length() <= math.max(1e-30, math.max(ab.dot(ab), ac.dot(ac)) * 1e-14) or after.dot(before) <= 0.0:
+            return true
+    return false
+
+## Copy every attribute into a fresh snapshot, optionally without "N".
+pub func copy_attributes(source: const AttributeSet*, output: AttributeSet*, normals: bool) -> !:
+    for entry in source.entries[..<source.count]:
+        if normals or entry.name.value != "N":
+            try output.put(entry.name.value, entry.domain, entry.width, entry.values, entry.integer)
+
+## Shading normals follow an affine placement by the inverse transpose.
+pub func transform_normals(attributes: AttributeSet*, matrix: Matrix4) -> !:
+    for entry in attributes.entries[..<attributes.count]:
+        if entry.name.value != "N" or entry.width != 3:
+            continue
+        for at in 0..<entry.values.length // 3:
+            let n = Vector3(entry.values[at * 3], entry.values[at * 3 + 1], entry.values[at * 3 + 2])
+            if n.length() <= 0.000000001:
+                continue
+            let transformed = try matrix.transform_normal(n)
+            entry.values[at * 3] = transformed.x
+            entry.values[at * 3 + 1] = transformed.y
+            entry.values[at * 3 + 2] = transformed.z

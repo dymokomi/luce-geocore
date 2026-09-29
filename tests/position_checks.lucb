@@ -1,0 +1,97 @@
+## Position-only edits keep topology and display triangles (a Move on
+## tessellated CAD must not re-triangulate its cut-cell n-gons).
+import interop
+import math
+import memory
+import geocore
+from geocore import Vector3, Matrix4, PolygonMesh, MeshOps
+
+func index(mesh: const PolygonMesh*, at: i64) -> i64!:
+    let value = mesh.index(at)
+    defer value.release()
+    return try value.get()
+
+func same_triangles(mesh: const PolygonMesh*, expected: const i64[]) -> !:
+    assert(mesh.index_count() == (i64)expected.length)
+    for at in 0..<expected.length: assert((try index(mesh, (i64)at)) == expected[at])
+
+## A 300-degree band: one 16-gon whose average-plane projection overlaps
+## itself, so ear clipping fails, with explicit strip triangles like CAD's.
+func band(points: Vector3[], corners: i64[], display: i64[]):
+    for at in 0..<(usize)8:
+        let angle = (f64)at * (300.0 / 7.0) * math.pi / 180.0
+        points[at] = Vector3(math.cos(angle), math.sin(angle), 0.0)
+        points[at + 8] = Vector3(math.cos(angle), math.sin(angle), 1.0)
+    for at in 0..<(usize)8:
+        corners[at] = (i64)at
+        corners[at + 8] = (i64)(15 - at)
+    for strip in 0..<(usize)7:
+        let i = (i64)strip
+        let values: i64[6] = [i, i + 1, 14 - i, i, 14 - i, 15 - i]
+        for at in 0..<(usize)6: display[strip * 6 + at] = values[at]
+
+func triangulable(points: const Vector3[], corners: const i64[]) -> bool:
+    var mesh = PolygonMesh(points, [16], corners) catch failure:
+        return false
+    mesh.close()
+    return true
+
+func tagged_move(points: const Vector3[], corners: const i64[], display: const i64[]) -> interop.Reference[PolygonMesh]!:
+    let mesh = try interop.Reference[PolygonMesh].adopt(try new PolygonMesh(points, [16], corners, display) in memory.heap, geocore.polygon_mesh_type, memory.heap)
+    defer mesh.release()
+    let tagged = try mesh.value().with_attribute("tag", 0, 1, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0])
+    defer tagged.release()
+    let unchanged = try tagged.value().moved_points([0, 3, 9], Vector3())
+    defer unchanged.release()
+    try same_triangles(unchanged.value(), display)
+    return try tagged.value().moved_points([3, 11], Vector3(0.0, 0.0, 0.05))
+
+pub func exercise() -> !:
+    let points = try alloc Vector3[16] in memory.heap
+    defer free(points) in memory.heap
+    let corners = try alloc i64[16] in memory.heap
+    defer free(corners) in memory.heap
+    let display = try alloc i64[42] in memory.heap
+    defer free(display) in memory.heap
+    band(points, corners, display)
+    assert(not triangulable(points, corners))
+    # The edited mesh outlives the meshes whose topology it shares.
+    let moved = try tagged_move(points, corners, display)
+    defer moved.release()
+    try same_triangles(moved.value(), display)
+    let edited = moved.value()
+    assert(edited.edge_count() == 16 and edited.face_count() == 1 and edited.point_count() == 16)
+    assert((try edited.point(3)).z == 0.05 and (try edited.point(11)).z == 1.05 and (try edited.point(4)).z == 0.0)
+    assert((try edited.attribute_value(edited.find_attribute("tag", 0), 5)) == 6.0)
+    assert(edited.bounds().maximum.z == 1.05)
+    let again = try moved.value().moved_points([3], Vector3(0.0, 0.0, -0.05))
+    defer again.release()
+    try same_triangles(again.value(), display)
+    assert(again.value().topology_hash() == moved.value().topology_hash())
+    assert(math.abs(try again.value().surface_distance(Vector3(math.cos(3.0 * 300.0 / 7.0 * math.pi / 180.0), math.sin(3.0 * 300.0 / 7.0 * math.pi / 180.0), 0.0))) < 1e-9)
+    let placed = try moved.value().placed(Matrix4.compose(Vector3(1.0, 2.0, 3.0), Vector3(0.1, 0.2, 0.3), Vector3(2.0, 2.0, 2.0)))
+    defer placed.release()
+    try same_triangles(placed.value(), display)
+    let smoothed = try MeshOps.points(moved, [2], 1, 0.01)
+    defer smoothed.release()
+    try same_triangles(smoothed.value(), display)
+    try folding()
+
+## Ordinary meshes still re-triangulate a face whose kept triangles fold.
+func folding() -> !:
+    let square = [Vector3(), Vector3(1.0, 0.0, 0.0), Vector3(1.0, 1.0, 0.0), Vector3(0.0, 1.0, 0.0)]
+    let mesh = try interop.Reference[PolygonMesh].adopt(try new PolygonMesh(square, [4], [0, 1, 2, 3]) in memory.heap, geocore.polygon_mesh_type, memory.heap)
+    defer mesh.release()
+    for corner in 0..<(i64)4:
+        # Pull each corner past the opposite diagonal: one kept triangle folds.
+        let opposite = (corner + 2) % 4
+        let pull = (try mesh.value().point(opposite)).subtract(try mesh.value().point(corner)).multiply_scalar(0.8)
+        let dented = try mesh.value().moved_points([corner], pull)
+        defer dented.release()
+        let edited = dented.value()
+        let normal = try edited.face_normal(0)
+        for triangle in 0..<edited.index_count() // 3:
+            let a = try edited.point(try edited.corner_point(try index(edited, triangle * 3)))
+            let b = try edited.point(try edited.corner_point(try index(edited, triangle * 3 + 1)))
+            let c = try edited.point(try edited.corner_point(try index(edited, triangle * 3 + 2)))
+            assert(b.subtract(a).cross(c.subtract(a)).dot(normal) > 0.0)

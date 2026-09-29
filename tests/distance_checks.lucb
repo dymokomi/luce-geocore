@@ -1,0 +1,47 @@
+## Point/triangle queries must stay accurate on thin cut-cell display ears.
+## Test the primitive independently of CAD projection or tessellation policy.
+import math
+from geocore import Vector3, squared_triangle_distance
+
+pub func exercise():
+    # A near-edge point from the observed cancellation, not a meshing fixture.
+    let a = Vector3(45.119560052442942,13.650000000000002,5.9696790753848292)
+    let b = Vector3(44.771582627023221,13.850000000000003,5.788225911838528)
+    let c = Vector3(44.77158262816269,13.849999970197686,5.7882259416201256)
+    let p = Vector3(44.77158262759297,13.849999985098842,5.788225926729325)
+    for corners in [[a,b,c],[b,c,a],[c,a,b],[a,c,b],[b,a,c],[c,b,a]]:
+        assert(squared_triangle_distance(p,corners[0],corners[1],corners[2]) < 1e-24)
+    # Long thin interior: 100-digit arithmetic on these binary64 inputs gives
+    # squared distance 4.6433534657e-28, not the old result 1.2835e-4.
+    let d = Vector3(48.891555490312399,-13.661651972635122,4.1003398028213436)
+    let e = Vector3(48.891407063692405,8.8200000000000145,4.1000000596046409)
+    let f = Vector3(48.891407063692398,9.6600000000000144,4.10000005960464)
+    let needle = Vector3(48.891456539232379,1.6061160091216167,4.1001133073435465)
+    for corners in [[d,e,f],[e,f,d],[f,d,e],[d,f,e],[e,d,f],[f,e,d]]:
+        assert(squared_triangle_distance(needle,corners[0],corners[1],corners[2]) < 1e-24)
+    for scale in [1e-6,1.0,1e6]:
+        for offset in [0.0,64.0]:
+            for width in [1.0,1e-4,1e-8,1e-10]:
+                for axis in [0,1,2]:
+                    let origin = Vector3(offset,offset,offset).multiply_scalar(scale)
+                    let x = Vector3(1.0,0.0,0.0) if axis == 0 else (Vector3(0.0,1.0,0.0) if axis == 1 else Vector3(0.0,0.0,1.0))
+                    let y = Vector3(0.0,1.0,0.0) if axis == 0 else (Vector3(0.0,0.0,1.0) if axis == 1 else Vector3(1.0,0.0,0.0))
+                    let n = x.cross(y)
+                    let points = [origin,origin.add(x.multiply_scalar(scale)),origin.add(x.add(y.multiply_scalar(width)).multiply_scalar(scale))]
+                    for order in [[0,1,2],[1,2,0],[2,0,1],[0,2,1],[1,0,2],[2,1,0]]:
+                        let pa = points[(usize)order[0]]
+                        let pb = points[(usize)order[1]]
+                        let pc = points[(usize)order[2]]
+                        # Known interior, boundary and exterior projections;
+                        # a skinny triangle is not a line just because its
+                        # Gram determinant rounds to zero.
+                        for uv in [Vector3(0.5,width*0.25,0.0),Vector3(1.0,width*0.5,0.0),Vector3(0.0,0.0,0.0),Vector3(1.25,width*0.5,0.0),Vector3(0.5,-width,0.0)]:
+                            let outside = 0.25 if uv.x > 1.0 else (width if uv.y < 0.0 else 0.0)
+                            for height in [0.0,0.125]:
+                                let q = origin.add(x.multiply_scalar(uv.x*scale)).add(y.multiply_scalar(uv.y*scale)).add(n.multiply_scalar(height*scale))
+                                let actual = math.sqrt(squared_triangle_distance(q,pa,pb,pc))/scale
+                                let expected = math.sqrt(outside*outside+height*height)
+                                assert(math.abs(actual-expected) < 2e-12)
+    # Repeated and collinear vertices retain ordinary point/segment behavior.
+    assert(squared_triangle_distance(Vector3(1.0,2.0,3.0),Vector3(),Vector3(),Vector3()) == 14.0)
+    assert(squared_triangle_distance(Vector3(0.5,2.0,0.0),Vector3(),Vector3(1.0,0.0,0.0),Vector3(2.0,0.0,0.0)) == 4.0)

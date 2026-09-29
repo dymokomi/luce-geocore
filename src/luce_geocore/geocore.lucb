@@ -1,0 +1,39 @@
+## The luce-geocore export: shared geometry with no GPU or UI dependency.
+## Vectors and matrices, polygon meshes and their builders, modeling kernels,
+## primitives and CPU spatial queries.
+import luce_geocore.math.vector as vector
+import luce_geocore.math.matrix as matrix
+import luce_geocore.core.geometry as geometry
+import luce_geocore.core.polygon_topology as polygon_topology
+import luce_geocore.geometries.polygon as polygon
+import luce_geocore.geometries.builder as builder
+import luce_geocore.geometries.operators as operators
+import luce_geocore.geometries.normals as normals
+import luce_geocore.geometries.distance as distance
+import luce_geocore.geometries.overlays as overlays
+import luce_geocore.geometries.primitives as primitives
+import luce_geocore.geometries.topology_tools as topology_tools
+import luce_geocore.geometries.dissolve_workspace as dissolve_workspace
+import luce_geocore.errors as errors
+
+pub type Vector3 = vector.Vector3
+pub type Matrix4 = matrix.Matrix4
+pub type Geometry = geometry.Geometry
+pub type Vertex = geometry.Vertex
+pub type Bounds = geometry.Bounds
+pub type PolygonTopology = polygon_topology.PolygonTopology
+pub type PolygonMesh = polygon.PolygonMesh
+pub let polygon_mesh_type = polygon.polygon_mesh_type
+pub let detached_mesh = polygon.detached_mesh
+pub type MeshBuilder = builder.MeshBuilder
+pub type MeshOps = operators.MeshOps
+pub type MeshNormals = normals.MeshNormals
+## Squared Euclidean distance to a triangle, including degenerate triangles.
+pub let squared_triangle_distance = distance.triangle_distance
+pub let mesh_overlay_points = overlays.mesh_overlay_points
+pub type MeshPrimitives = primitives.MeshPrimitives
+pub type TopologyTools = topology_tools.TopologyTools
+pub type DissolveWorkspace = dissolve_workspace.DissolveWorkspace
+pub let invalid: ErrorCode = errors.invalid
+pub let busy: ErrorCode = errors.busy
+pub let limit: ErrorCode = errors.limit

@@ -1,0 +1,14 @@
+import interop
+import memory
+
+pub let invalid: ErrorCode = ErrorCode.package(300)
+pub let busy: ErrorCode = ErrorCode.package(301)
+pub let limit: ErrorCode = ErrorCode.package(302)
+
+pub func success[T](value: T) -> interop.Outcome[T]:
+    return interop.Outcome[T].success(interop.Owned[T](value))
+
+pub func failure[T](code: ErrorCode, message: str) -> interop.Outcome[T]:
+    let copied = interop.copy_text(message) catch exhausted:
+        return interop.Outcome[T].failure(memory.exhausted, interop.Owned[str]("out of memory copying a 3D error"))
+    return interop.Outcome[T].failure(code, copied)

@@ -1,0 +1,175 @@
+## Lazy BVH lifetime, retry after exhaustion, and simultaneous first readers.
+import interop
+import memory
+import ownership
+import sync
+import thread
+from geocore import PolygonMesh, Vector3, polygon_mesh_type, detached_mesh
+
+struct Gate: memory.Allocator:
+    let upstream: memory.Allocator
+    var lock: sync.Mutex
+    var remaining: usize? = none
+    var live: usize = 0
+
+    pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
+        self.lock.lock()
+        defer self.lock.unlock()
+        if size == 0: return self.upstream.allocate(size, alignment)
+        if let remaining = self.remaining:
+            if remaining == 0: return none
+            self.remaining = remaining - 1
+        let block = self.upstream.allocate(size, alignment) else return none
+        self.live += 1
+        return block
+
+    pub mutating func resize(block: u8[], size: usize) -> bool:
+        self.lock.lock()
+        defer self.lock.unlock()
+        return self.upstream.resize(block, size)
+
+    pub mutating func release(block: u8[]):
+        self.lock.lock()
+        defer self.lock.unlock()
+        if block.length == 0: return
+        assert(self.live > 0)
+        self.live -= 1
+        self.upstream.release(block)
+
+func restore(previous: memory.Allocator):
+    memory.heap = previous
+
+func grid() -> interop.Reference[PolygonMesh]!:
+    let points = try alloc Vector3[192] in memory.heap
+    defer free(points) in memory.heap
+    var sizes: i64[64]
+    var corners: i64[192]
+    for at in 0..<(usize)64:
+        let x = (f64)(at % 8) * 2.0
+        let y = (f64)(at // 8) * 2.0
+        points[at * 3] = Vector3(x,y,0.0)
+        points[at * 3 + 1] = Vector3(x+1.0,y,0.0)
+        points[at * 3 + 2] = Vector3(x,y+1.0,0.0)
+        sizes[at] = 3
+        for corner in 0..<(usize)3: corners[at*3+corner] = (i64)(at*3+corner)
+    return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(points,sizes,corners) in memory.heap,polygon_mesh_type,memory.heap)
+
+func queries(mesh: const PolygonMesh*) -> !:
+    try mesh.prepare_queries()
+    let p = Vector3(0.2,0.2,3.0)
+    let d = Vector3(0.0,0.0,-1.0)
+    assert((try mesh.surface_distance(p)) == 3.0)
+    assert((try mesh.closest_face(p)) == 0)
+    assert((try mesh.ray_face(p,d)) == 0)
+    assert((try mesh.ray_distance(p,d)) == 3.0)
+    assert((try mesh.ray_face(p,d.multiply_scalar(-1.0))) == -1)
+
+func retry(gate: Gate*, stage: usize) -> bool!:
+    let source = try grid()
+    defer source.release()
+    let snapshot = try source.value().without_attribute("absent",0)
+    defer snapshot.release()
+    let baseline = gate.live
+    gate.remaining = stage
+    defer clear_limit(gate)
+    var failed = false
+    source.value().prepare_queries() catch failure:
+        assert(failure.code == memory.exhausted)
+        assert(gate.live == baseline)
+        failed = true
+    gate.remaining = none
+    try source.value().prepare_queries()
+    # Both attribute snapshots must share the completed cache, even after the
+    # original owner closes. No allocation is permitted on a warmed query.
+    gate.remaining = 0
+    try queries(snapshot.value())
+    source.close()
+    try queries(snapshot.value())
+    return failed
+
+func clear_limit(gate: Gate*):
+    gate.remaining = none
+
+struct Readers:
+    let mesh: const PolygonMesh*
+    var waiting: @u32
+    var start: @u32
+    var failures: @u32
+
+func read(raw: void*?):
+    let readers = (Readers*)(raw else trap("missing query readers"))
+    discard(readers.waiting.add(1,.release))
+    while readers.start.load(.acquire) == 0: thread.yield()
+    for iteration in 0..<100:
+        queries(readers.mesh) catch failure:
+            discard(readers.failures.add(1,.relaxed))
+
+func join(readers: Readers*, handles: const thread.Handle[]):
+    readers.start.store(1,.release)
+    for handle in handles: handle.join() catch failure: trap(failure.message)
+
+func concurrent() -> !:
+    let source = try grid()
+    defer source.release()
+    # A detached product is native storage, not a cross-thread ARC handle.
+    let copy = try detached_mesh(source)
+    defer:
+        copy.close()
+        free(copy) in memory.heap
+    source.close()
+    var readers = Readers(mesh=copy)
+    var handles: thread.Handle[8]
+    var started: usize = 0
+    defer join(&readers,handles[..<started])
+    for at in 0..<handles.length:
+        handles[at] = try thread.spawn(read,(void*)&readers,name="mesh query")
+        started += 1
+    while readers.waiting.load(.acquire) != 8: thread.yield()
+    join(&readers,handles)
+    started = 0
+    assert(readers.failures.load(.acquire) == 0)
+    try queries(copy)
+
+func display_surface() -> !:
+    let points = [Vector3(),Vector3(1.0,0.0,0.0),Vector3(1.0,1.0,1.0),Vector3(0.0,1.0,0.0)]
+    let origin = Vector3(0.5,0.5,2.0)
+    let direction = Vector3(0.0,0.0,-1.0)
+    for raised in [false,true]:
+        let display: i64[6] = [0,1,2,0,2,3] if raised else [0,1,3,1,2,3]
+        var raw = try PolygonMesh(points,[4],[0,1,2,3],display)
+        defer raw.close()
+        let snapshot = try raw.without_attribute("absent",0)
+        defer snapshot.release()
+        let copy = try detached_mesh(snapshot)
+        defer:
+            copy.close()
+            free(copy) in memory.heap
+        let expected = 1.5 if raised else 2.0
+        assert((try raw.ray_distance(origin,direction)) == expected)
+        assert((try snapshot.value().ray_distance(origin,direction)) == expected)
+        try copy.prepare_queries()
+        assert((try copy.ray_distance(origin,direction)) == expected)
+        let on_surface = Vector3(0.5,0.5,0.5 if raised else 0.0)
+        assert((try copy.surface_distance(on_surface)) == 0.0)
+
+pub func exercise() -> !:
+    let previous = memory.heap
+    var gate = Gate(upstream=previous)
+    memory.heap = &gate
+    defer restore(previous)
+    var failures: usize = 0
+    for stage in 0..<(usize)10:
+        if try retry(&gate,stage): failures += 1
+        ownership.collect()
+        discard(ownership.finish_run(0))
+        assert(gate.live == 0)
+    assert(failures >= 4 and failures < 10)
+    for iteration in 0..<8:
+        try concurrent()
+        ownership.collect()
+        discard(ownership.finish_run(0))
+        assert(gate.live == 0)
+    try display_surface()
+    ownership.collect()
+    discard(ownership.finish_run(0))
+    assert(gate.live == 0)

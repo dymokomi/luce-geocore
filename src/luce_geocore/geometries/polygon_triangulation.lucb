@@ -1,0 +1,81 @@
+import luce_geocore.errors as errors
+import math
+from luce_geocore.math.vector import Vector3
+from luce_geocore.geometries.polygon_partition import partition
+
+## Polygon area has squared-distance units. Normalize relative to its own
+## extent, not Vector3's world-space direction cutoff, exactly as ear tests do.
+pub func area_normal(area: Vector3, extent2: f64) -> Vector3!:
+    let length = area.length()
+    if not math.is_finite(length) or not math.is_finite(extent2) or length <= math.max(1e-30,extent2*1e-14):
+        error(errors.invalid,"polygon has degenerate area")
+    return area.multiply_scalar(1.0/length)
+
+## Ear clipping in the face's normal plane supports concave polygons created
+## by point editing. A self-intersecting/collapsed polygon is rejected atomically.
+pub func triangulate(points: const Vector3[], corners: const i64[], start: usize, count: usize, normal: Vector3, output: i64[]) -> !:
+    let origin = points[(usize)corners[start]]
+    var extent2: f64 = 0.0
+    for index in 0..<count:
+        let delta = points[(usize)corners[start+index]].subtract(origin)
+        extent2 = math.max(extent2,delta.dot(delta))
+    # Orientation has area units. A fixed world-space threshold rejects valid
+    # small trim cells (and the same polygon merely expressed in smaller units).
+    let epsilon = math.max(1e-30,extent2*1e-14)
+    var remaining: usize[256]
+    for index in 0..<count:
+        remaining[index] = start + index
+    var length = count
+    var written: usize = 0
+    while length > 3:
+        var clipped = false
+        for index in 0..<length:
+            let ai = remaining[(index + length - 1) % length]
+            let bi = remaining[index]
+            let ci = remaining[(index + 1) % length]
+            let a = points[(usize)corners[ai]]
+            let b = points[(usize)corners[bi]]
+            let c = points[(usize)corners[ci]]
+            if b.subtract(a).cross(c.subtract(a)).dot(normal) <= epsilon:
+                continue
+            var blocked = false
+            for other in 0..<length:
+                let corner = remaining[other]
+                if corner == ai or corner == bi or corner == ci:
+                    continue
+                let point = points[(usize)corners[corner]]
+                if b.subtract(a).cross(point.subtract(a)).dot(normal) >= -epsilon and c.subtract(b).cross(point.subtract(b)).dot(normal) >= -epsilon and a.subtract(c).cross(point.subtract(c)).dot(normal) >= -epsilon:
+                    blocked = true
+                    break
+            if blocked:
+                continue
+            # A legal ear can leave three collinear boundary vertices. Those
+            # vertices are real seam corners, not a collapsed input polygon;
+            # choose the other diagonal instead of rejecting the whole face.
+            if length == 4:
+                let di = remaining[(index + 2) % length]
+                let d = points[(usize)corners[di]]
+                if c.subtract(a).cross(d.subtract(a)).dot(normal) <= epsilon:
+                    continue
+            output[written] = (i64)ai
+            output[written + 1] = (i64)bi
+            output[written + 2] = (i64)ci
+            written += 3
+            for at in index..<length - 1:
+                remaining[at] = remaining[at + 1]
+            length -= 1
+            clipped = true
+            break
+        if not clipped:
+            # Greedy ears can strand a rounded, nearly straight trim chain.
+            # Solve the original polygon transactionally, not the stranded tail.
+            if try partition(points,corners,start,count,normal,epsilon,output): return
+            error(errors.invalid, "cannot triangulate a collapsed or self-intersecting polygon")
+    let a = points[(usize)corners[remaining[0]]]
+    let b = points[(usize)corners[remaining[1]]]
+    let c = points[(usize)corners[remaining[2]]]
+    if b.subtract(a).cross(c.subtract(a)).dot(normal) <= epsilon:
+        error(errors.invalid, "polygon has a degenerate triangle")
+    output[written] = (i64)remaining[0]
+    output[written + 1] = (i64)remaining[1]
+    output[written + 2] = (i64)remaining[2]

@@ -1,0 +1,49 @@
+## Heap arrays that keep their capacity across rebuilds of retained overlays.
+import memory
+
+## A heap array that grows by doubling and keeps its capacity across rebuilds.
+pub struct Growing[T]:
+    pub var items: T[]
+    pub var count: usize = 0
+
+    pub func view() -> const T[]:
+        return self.items[..<self.count]
+
+    pub mutating func clear():
+        self.count = 0
+
+    pub mutating func reserve(capacity: usize) -> !:
+        if capacity <= self.items.length: return
+        var size: usize = 64 if self.items.length == 0 else self.items.length
+        while size < capacity: size *= 2
+        let grown = try alloc T[size] in memory.heap
+        if self.count > 0: memory.copy(grown, self.items, self.count)
+        if self.items.length > 0: free(self.items) in memory.heap
+        self.items = grown
+
+    pub mutating func push(value: T) -> !:
+        try self.reserve(self.count + 1)
+        self.items[self.count] = value
+        self.count += 1
+
+    pub mutating func fill(count: usize, value: T) -> !:
+        try self.reserve(count)
+        for at in 0..<count: self.items[at] = value
+        self.count = count
+
+    pub mutating func assign(values: const T[]) -> !:
+        try self.reserve(values.length)
+        if values.length > 0: memory.copy(self.items, values, values.length)
+        self.count = values.length
+
+    pub mutating func close():
+        if self.items.length > 0: free(self.items) in memory.heap
+        var empty: T[]
+        self.items = empty
+        self.count = 0
+
+pub func same_ids(stored: const Growing[i64]*, values: const i64[]) -> bool:
+    if values.length != stored.count: return false
+    for at in 0..<values.length:
+        if stored.items[at] != values[at]: return false
+    return true
