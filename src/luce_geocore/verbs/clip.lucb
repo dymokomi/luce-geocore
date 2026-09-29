@@ -1,15 +1,18 @@
-## Clip: cut the group's faces with an axis-aligned plane and keep the side
-## above it, below it, or both (a knife cut), after Houdini's Clip. An edge
+## Clip: cut the group's faces with a plane (axis-aligned, or any plane
+## given by a point and a normal: a knife stroke) and keep the side above
+## it, below it, or both (a knife cut), after Houdini's Clip. An edge
 ## the plane crosses gets one new point, shared by every face on it (faces
 ## outside the group take it into their boundary, so the surface stays
 ## closed); a face the plane crosses splits into its parts on each side.
 ## The cut edges are the output selection.
 
-let clip_parms: ParmSpec[4] = [
-    ParmSpec("Axis", ParmKind.menu, 1.0, 0.0, 2.0, 1, "X|Y|Z", "The axis the cutting plane faces."),
-    ParmSpec("Offset", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "Where the plane crosses its axis.", 5.0),
+let clip_parms: ParmSpec[6] = [
+    ParmSpec("Axis", ParmKind.menu, 1.0, 0.0, 3.0, 1, "X|Y|Z|Custom", "The axis the cutting plane faces, or the plane below (Custom)."),
+    ParmSpec("Offset", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "Where the plane crosses its axis (Custom: how far it moves along its normal).", 5.0),
     ParmSpec("Through centroid", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Put the plane through the group's centroid (Offset then moves it from there)."),
-    ParmSpec("Keep", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Above|Below|Both", "The side of the plane kept; Both cuts and keeps everything.")]
+    ParmSpec("Keep", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Above|Below|Both", "The side of the plane kept; Both cuts and keeps everything."),
+    ParmSpec("Plane point", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "Custom: a point on the plane."),
+    ParmSpec("Plane normal", ParmKind.vector, 0.0, -1.0, 1.0, 3, "", "Custom: the plane's normal; above is the side it points to.")]
 
 pub func clip_verb() -> Verb:
     return Verb("Clip", "Modeling", "Cut the group's faces with a plane; keep one side, or both", Domain.face, true, clip_parms, true, cook_clip)
@@ -29,19 +32,27 @@ struct Cut:
         self.cut.close()
 
 func cook_clip(input: const VerbInput*, output: VerbOutput*) -> !:
-    let axis = (usize)math.max(0.0, math.min(2.0, input.parms.at(0)))
+    let axis = (usize)math.max(0.0, math.min(3.0, input.parms.at(0)))
     let offset = input.parms.at(1)
     if not math.is_finite(offset): error(errors.invalid, "Clip offset must be finite")
     let keep = (usize)math.max(0.0, math.min(2.0, input.parms.at(3)))
     let mesh = input.mesh
     let topology = try Topology.of(mesh)
+    # The plane: a unit normal and its distance from the origin.
+    var normal = Vector3(1.0 if axis == 0 else 0.0, 1.0 if axis == 1 else 0.0, 1.0 if axis == 2 else 0.0)
     var level = offset
-    if input.parms.at(2) != 0.0: level += try centroid_axis(mesh, &topology, input.group, axis)
+    if axis == 3:
+        let point = Vector3(input.parms.at(4), input.parms.at(5), input.parms.at(6))
+        let given = Vector3(input.parms.at(7), input.parms.at(8), input.parms.at(9))
+        if not point.is_finite() or not given.is_finite() or given.length() == 0.0: error(errors.invalid, "Clip needs a finite plane point and a nonzero normal")
+        normal = given.multiply_scalar(1.0 / given.length())
+        level += point.dot(normal)
+    if input.parms.at(2) != 0.0: level += try centroid_along(mesh, &topology, input.group, normal)
     var cut = Cut()
     defer cut.close()
     try cut.distance.fill(topology.points, 0.0)
     for point in 0..<topology.points:
-        cut.distance.items[point] = axis_value(try mesh.point((i64)point), axis) - level
+        cut.distance.items[point] = (try mesh.point((i64)point)).dot(normal) - level
     var builder = &output.builder
     try builder.begin(mesh)
     try builder.copy_points(mesh)
@@ -98,12 +109,17 @@ func axis_value(value: Vector3, axis: usize) -> f64:
 
 ## The mean of the group's faces' points along `axis`.
 func centroid_axis(mesh: const Mesh*, topology: const Topology*, group: Bits, axis: usize) -> f64!:
+    let direction = Vector3(1.0 if axis == 0 else 0.0, 1.0 if axis == 1 else 0.0, 1.0 if axis == 2 else 0.0)
+    return try centroid_along(mesh, topology, group, direction)
+
+## The mean of the group's faces' points along `direction`.
+func centroid_along(mesh: const Mesh*, topology: const Topology*, group: Bits, direction: Vector3) -> f64!:
     var sum = 0.0
     var count = 0.0
     for face in 0..<topology.faces():
         if not group.get(face): continue
         for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
-            sum += axis_value(try mesh.point((i64)topology.corners[corner]), axis)
+            sum += (try mesh.point((i64)topology.corners[corner])).dot(direction)
             count += 1.0
     return sum / count if count > 0.0 else 0.0
 

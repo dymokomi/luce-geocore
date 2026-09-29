@@ -20,7 +20,7 @@ pub func exercise() -> !:
     try slide_checks(grid)
     try mirror_checks(cube)
     try spin_checks(grid)
-    print("PASS G6 verbs: Clip (sides, knife, centroid, on-plane faces), Connect (points, edge middles), Edge Slide, PolyMirror (welded, alone), Spin (full and partial turns)")
+    print("PASS G6 verbs: Clip (sides, knife, custom plane, centroid, on-plane faces), Connect (points, edge middles), Edge Slide, PolyMirror (welded, alone), Spin (full and partial turns)")
 
 ## Run a verb, check its output selection's size, return its mesh.
 func made(mesh: interop.Reference[Mesh], name: str, group: str, group_type: i64, numbers: const f64[], selected: i64) -> interop.Reference[Mesh]!:
@@ -77,6 +77,12 @@ func clip_checks(cube: interop.Reference[Mesh], grid: interop.Reference[Mesh]) -
     let resting = try made(cube, "Clip", "*", 3, floor[..<4], 6)
     defer resting.release()
     try counts(resting, 8, 6)
+    # A tilted plane given by a point and a normal (a knife stroke).
+    let stroke: f64[10] = [3.0, 0.0, 0.0, 2.0, 0.0, 1.2, 0.0, 0.2, 1.0, 0.0]
+    let tilted = try made(cube, "Clip", "*", 3, stroke[..<10], 4)
+    defer tilted.release()
+    try counts(tilted, 12, 10)
+    try surface(tilted, true)
     # Only the group's faces are cut; a neighbour takes the cut point.
     let column: f64[4] = [0.0, 0.1, 0.0, 2.0]
     let top = try made(grid, "Clip", "12-15", 3, column[..<4], 1)
