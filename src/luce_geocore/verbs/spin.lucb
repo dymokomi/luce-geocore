@@ -1,0 +1,99 @@
+## Spin: sweep the group's edges around an axis into a surface of
+## revolution, after Blender's Spin and Houdini's Revolve. Each chain of
+## the group's edges is the profile; `Steps` copies of it turn through
+## `Angle` about the axis through `Center`, and quads join each copy to the
+## next (a full turn closes on the profile itself). Profile points on the
+## axis stay single, so quads there become triangles. The new faces are the
+## output selection.
+
+let spin_parms: ParmSpec[4] = [
+    ParmSpec("Axis", ParmKind.menu, 1.0, 0.0, 2.0, 1, "X|Y|Z", "The axis the profile turns about."),
+    ParmSpec("Center", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "A point on the axis."),
+    ParmSpec("Angle", ParmKind.number, 360.0, -360.0, 360.0, 1, "", "How far the profile turns, in degrees; 360 closes it."),
+    ParmSpec("Steps", ParmKind.integer, 12.0, 1.0, 512.0, 1, "", "Copies of the profile along the turn.")]
+
+pub func spin_verb() -> Verb:
+    return Verb("Spin", "Modeling", "Sweep the group's edges around an axis into a surface of revolution", Domain.edge, true, spin_parms, true, cook_spin)
+
+func cook_spin(input: const VerbInput*, output: VerbOutput*) -> !:
+    let axis = (usize)math.max(0.0, math.min(2.0, input.parms.at(0)))
+    let center = Vector3(input.parms.at(1), input.parms.at(2), input.parms.at(3))
+    let angle = input.parms.at(4)
+    let steps = (usize)math.max(1.0, math.min(512.0, input.parms.at(5)))
+    if not center.is_finite() or not math.is_finite(angle) or angle == 0.0: error(errors.invalid, "Spin needs a finite center and a nonzero angle")
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var chains = EdgeChains()
+    defer chains.close()
+    try edge_chains(&topology, input.group, &chains)
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    try builder.copy_faces(mesh, 0, topology.faces())
+    if chains.count() == 0:
+        output.warning = "The group has no edges to spin; the input passes through"
+        return
+    let full = math.abs(angle) >= 360.0
+    let copies = steps if full else steps + 1
+    let box = mesh.bounds()
+    let tolerance = box.maximum.subtract(box.minimum).length() * 0.000001
+    let first_face = builder.face_count()
+    var rings = Growing[i32]()
+    defer rings.close()
+    for index in 0..<chains.count():
+        let chain = chains.chain(index)
+        let closed = chains.closed.items[index] != 0
+        # Point ids per copy: copy 0 is the profile itself.
+        rings.clear()
+        try rings.fill(chain.length * copies, -1)
+        for at in 0..<chain.length:
+            let point = chain[at]
+            let position = builder.position(point)
+            let on_axis = radial(position.subtract(center), axis).length() <= tolerance
+            rings.items[at] = point
+            for copy in 1..<copies:
+                if on_axis:
+                    rings.items[copy * chain.length + at] = point
+                    continue
+                let turned = turn(position, center, axis, angle * (f64)copy / (f64)steps)
+                rings.items[copy * chain.length + at] = try builder.point(turned, point)
+        let segments = chain.length if closed else chain.length - 1
+        for copy in 0..<steps:
+            let next = (copy + 1) % copies
+            for at in 0..<segments:
+                let b = (at + 1) % chain.length
+                var ids: i32[4] = [rings.items[copy * chain.length + at], rings.items[copy * chain.length + b],
+                                   rings.items[next * chain.length + b], rings.items[next * chain.length + at]]
+                try quad(builder, ids, (i32)chain[at])
+    output.selection = try BitsBuilder.zeros(builder.face_count())
+    output.selection.set_range(first_face, builder.face_count())
+    output.selection_domain = Domain.face
+
+## A face through `ids` without repeated points (a triangle at the axis),
+## skipped when fewer than three remain; its parent the profile's point.
+func quad(builder: TopologyBuilder*, ids: i32[4], parent: i32) -> !:
+    var kept: i32[4]
+    var count: usize = 0
+    for at in 0..<(usize)4:
+        let id = ids[at]
+        if count > 0 and kept[count - 1] == id: continue
+        if at == 3 and count > 0 and kept[0] == id: continue
+        kept[count] = id
+        count += 1
+    if count < 3: return
+    try builder.face(-1)
+    for at in 0..<count: try builder.corner(kept[at], -1)
+    try builder.end_face()
+
+## The part of `offset` across `axis` (its distance from the axis).
+func radial(offset: Vector3, axis: usize) -> Vector3:
+    if axis == 0: return Vector3(0.0, offset.y, offset.z)
+    if axis == 1: return Vector3(offset.x, 0.0, offset.z)
+    return Vector3(offset.x, offset.y, 0.0)
+
+## `position` turned by `degrees` about `axis` through `center`.
+func turn(position: Vector3, center: Vector3, axis: usize, degrees: f64) -> Vector3:
+    let r = degrees * 0.017453292519943295
+    let rotation = Vector3(r if axis == 0 else 0.0, r if axis == 1 else 0.0, r if axis == 2 else 0.0)
+    return Matrix4.compose(Vector3(), rotation, Vector3(1.0, 1.0, 1.0)).transform_point(position.subtract(center)).add(center)

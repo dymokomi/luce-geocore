@@ -1,0 +1,76 @@
+## Chains of a group's edges, for verbs that need them in order (Edge
+## Slide's tangents, Spin's profile direction): runs and loops through
+## points where two of the group's edges meet. A run ends where one edge
+## ends or three or more meet; what is left after the runs are loops.
+
+struct EdgeChains:
+    ## Chain points in order: chain c holds points starts[c]..<starts[c + 1]
+    ## (a loop does not repeat its first point).
+    var points: Growing[i32]
+    var starts: Growing[u32]
+    var closed: Growing[u8]
+
+    func init():
+        self.points = Growing[i32]()
+        self.starts = Growing[u32]()
+        self.closed = Growing[u8]()
+
+    func count() -> usize:
+        return self.closed.count
+
+    func chain(index: usize) -> const i32[]:
+        return self.points.items[(usize)self.starts.items[index]..<(usize)self.starts.items[index + 1]]
+
+    mutating func close():
+        self.points.close()
+        self.starts.close()
+        self.closed.close()
+
+func edge_chains(topology: const Topology*, group: Bits, chains: EdgeChains*) -> !:
+    let points = topology.points
+    let degree = try alloc u32[points] in memory.heap
+    defer free(degree) in memory.heap
+    for at in 0..<points: degree[at] = 0
+    for edge in 0..<topology.edges():
+        if not group.get(edge): continue
+        degree[(usize)topology.edge_points[edge * 2]] += 1
+        degree[(usize)topology.edge_points[edge * 2 + 1]] += 1
+    var used = try BitsBuilder.zeros(topology.edges())
+    defer used.close()
+    try chains.starts.push(0)
+    # Runs from their ends first, then loops from any point left.
+    for pass in 0..<(usize)2:
+        for point in 0..<points:
+            if degree[point] == 0: continue
+            if pass == 0 and degree[point] == 2: continue
+            while true:
+                let edge = next_edge(topology, group, used.view(), point) else break
+                try walk(topology, group, &used, degree, point, edge, chains, pass == 1)
+
+## An unused group edge at `point`.
+func next_edge(topology: const Topology*, group: Bits, used: Bits, point: usize) -> usize?:
+    for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        if group.get(edge) and not used.get(edge): return edge
+    return none
+
+## One chain from `start` along `edge`: on through points where two group
+## edges meet, until an end, a branch, or (a loop) back at `start`.
+func walk(topology: const Topology*, group: Bits, used: BitsBuilder*, degree: const u32[], start: usize, edge: usize, chains: EdgeChains*, loop: bool) -> !:
+    try chains.points.push((i32)start)
+    var point = start
+    var current = edge
+    var closed = false
+    while true:
+        used.set(current)
+        let a = (usize)topology.edge_points[current * 2]
+        point = (usize)topology.edge_points[current * 2 + 1] if a == point else a
+        if point == start:
+            closed = loop
+            break
+        try chains.points.push((i32)point)
+        if degree[point] != 2: break
+        let next = next_edge(topology, group, used.view(), point) else break
+        current = next
+    try chains.starts.push((u32)chains.points.count)
+    try chains.closed.push(1 if closed else 0)

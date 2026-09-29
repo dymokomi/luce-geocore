@@ -1,0 +1,160 @@
+## Clip: cut the group's faces with an axis-aligned plane and keep the side
+## above it, below it, or both (a knife cut), after Houdini's Clip. An edge
+## the plane crosses gets one new point, shared by every face on it (faces
+## outside the group take it into their boundary, so the surface stays
+## closed); a face the plane crosses splits into its parts on each side.
+## The cut edges are the output selection.
+
+let clip_parms: ParmSpec[4] = [
+    ParmSpec("Axis", ParmKind.menu, 1.0, 0.0, 2.0, 1, "X|Y|Z", "The axis the cutting plane faces."),
+    ParmSpec("Offset", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "Where the plane crosses its axis.", 5.0),
+    ParmSpec("Through centroid", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Put the plane through the group's centroid (Offset then moves it from there)."),
+    ParmSpec("Keep", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Above|Below|Both", "The side of the plane kept; Both cuts and keeps everything.")]
+
+pub func clip_verb() -> Verb:
+    return Verb("Clip", "Modeling", "Cut the group's faces with a plane; keep one side, or both", Domain.face, true, clip_parms, true, cook_clip)
+
+## The plane's signed distance at each point and the cut points on edges.
+struct Cut:
+    var distance: Growing[f64]
+    ## Per edge: the builder id of its cut point, or -1.
+    var cut: Growing[i32]
+
+    func init():
+        self.distance = Growing[f64]()
+        self.cut = Growing[i32]()
+
+    mutating func close():
+        self.distance.close()
+        self.cut.close()
+
+func cook_clip(input: const VerbInput*, output: VerbOutput*) -> !:
+    let axis = (usize)math.max(0.0, math.min(2.0, input.parms.at(0)))
+    let offset = input.parms.at(1)
+    if not math.is_finite(offset): error(errors.invalid, "Clip offset must be finite")
+    let keep = (usize)math.max(0.0, math.min(2.0, input.parms.at(3)))
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var level = offset
+    if input.parms.at(2) != 0.0: level += try centroid_axis(mesh, &topology, input.group, axis)
+    var cut = Cut()
+    defer cut.close()
+    try cut.distance.fill(topology.points, 0.0)
+    for point in 0..<topology.points:
+        cut.distance.items[point] = axis_value(try mesh.point((i64)point), axis) - level
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    # One cut point per crossed edge of a group face.
+    try cut.cut.fill(topology.edges(), -1)
+    var crossed: usize = 0
+    for face in 0..<topology.faces():
+        if not input.group.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let edge = (usize)topology.corner_edges[corner]
+            if cut.cut.items[edge] >= 0: continue
+            let a = topology.edge_points[edge * 2]
+            let b = topology.edge_points[edge * 2 + 1]
+            let da = cut.distance.items[(usize)a]
+            let db = cut.distance.items[(usize)b]
+            if not ((da < 0.0 and db > 0.0) or (da > 0.0 and db < 0.0)): continue
+            let t = da / (da - db)
+            let parents: i32[2] = [a, b]
+            let weights: f32[2] = [(f32)(1.0 - t), (f32)t]
+            let pa = builder.position(a)
+            cut.cut.items[edge] = try builder.mixed_point(pa.add(builder.position(b).subtract(pa).multiply_scalar(t)), parents[..<2], weights[..<2])
+            crossed += 1
+    var kept = Growing[u32]()
+    defer kept.close()
+    var run: usize = 0
+    for face in 0..<topology.faces():
+        var touched = input.group.get(face)
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if cut.cut.items[(usize)topology.corner_edges[corner]] >= 0: touched = true
+        if not touched: continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        if not input.group.get(face):
+            try boundary_with_cuts(&topology, &cut, builder, face)
+            continue
+        let made = builder.face_count()
+        if keep != 1: try clipped_part(&topology, &cut, builder, face, true, keep == 2)
+        if keep != 0: try clipped_part(&topology, &cut, builder, face, false, false)
+        for part in made..<builder.face_count(): try kept.push((u32)part)
+    try builder.copy_faces(mesh, run, topology.faces())
+    if keep != 2: try builder.drop_unused_points()
+    if keep != 2 or builder.selected_edges.count == 0:
+        # One side kept (or nothing cut): the output selection is the
+        # group's remaining faces.
+        output.selection = try BitsBuilder.zeros(builder.face_count())
+        for part in kept.view(): output.selection.set((usize)part)
+        output.selection_domain = Domain.face
+    if crossed == 0 and keep == 2:
+        output.warning = "The plane crosses none of the group's faces; the input passes through"
+
+func axis_value(value: Vector3, axis: usize) -> f64:
+    return value.x if axis == 0 else (value.y if axis == 1 else value.z)
+
+## The mean of the group's faces' points along `axis`.
+func centroid_axis(mesh: const Mesh*, topology: const Topology*, group: Bits, axis: usize) -> f64!:
+    var sum = 0.0
+    var count = 0.0
+    for face in 0..<topology.faces():
+        if not group.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            sum += axis_value(try mesh.point((i64)topology.corners[corner]), axis)
+            count += 1.0
+    return sum / count if count > 0.0 else 0.0
+
+## An untouched face with the cut points of its edges in its boundary.
+func boundary_with_cuts(topology: const Topology*, cut: const Cut*, builder: TopologyBuilder*, face: usize) -> !:
+    try builder.face((i32)face)
+    for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+        try builder.corner(topology.corners[corner], (i32)corner)
+        try cut_corner(topology, cut, builder, corner)
+    try builder.end_face()
+
+## The cut point on corner `corner`'s edge, as a corner blended between it
+## and the next (nothing when the edge is not cut).
+func cut_corner(topology: const Topology*, cut: const Cut*, builder: TopologyBuilder*, corner: usize) -> !:
+    let point = cut.cut.items[(usize)topology.corner_edges[corner]]
+    if point < 0: return
+    let next = topology.next(corner)
+    let dp = cut.distance.items[(usize)topology.corners[corner]]
+    let dq = cut.distance.items[(usize)topology.corners[next]]
+    let t = (f32)(dp / (dp - dq))
+    let parents: i32[2] = [(i32)corner, (i32)next]
+    let weights: f32[2] = [1.0 - t, t]
+    try builder.mixed_corner(point, parents[..<2], weights[..<2])
+
+## The part of group face `face` above the plane (or below): its corners on
+## that side or on the plane, and the cut points between. With `select`,
+## the cut across it is selected.
+func clipped_part(topology: const Topology*, cut: const Cut*, builder: TopologyBuilder*, face: usize, above: bool, select: bool) -> !:
+    let first = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    var count: usize = 0
+    var cuts: i32[2] = [-1, -1]
+    var found: usize = 0
+    var strictly_above: usize = 0
+    var strictly_below: usize = 0
+    for corner in first..<end:
+        let d = cut.distance.items[(usize)topology.corners[corner]]
+        if d > 0.0: strictly_above += 1
+        if d < 0.0: strictly_below += 1
+        if (above and d >= 0.0) or (not above and d <= 0.0): count += 1
+        if cut.cut.items[(usize)topology.corner_edges[corner]] >= 0: count += 1
+    # A face lying on the plane counts as above, once.
+    if count < 3 or (above and strictly_above == 0 and strictly_below > 0) or (not above and strictly_below == 0): return
+    try builder.face((i32)face)
+    for corner in first..<end:
+        let d = cut.distance.items[(usize)topology.corners[corner]]
+        if (above and d >= 0.0) or (not above and d <= 0.0): try builder.corner(topology.corners[corner], (i32)corner)
+        let point = cut.cut.items[(usize)topology.corner_edges[corner]]
+        if point >= 0:
+            try cut_corner(topology, cut, builder, corner)
+            if found < 2: cuts[found] = point
+            found += 1
+    try builder.end_face()
+    if select and found == 2: try builder.select_edge(cuts[0], cuts[1])

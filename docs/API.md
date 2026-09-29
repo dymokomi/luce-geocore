@@ -246,6 +246,20 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
 - **Fill**: one face per boundary loop, or a fan around a center point.
 - **Dissolve** (edges, points, faces strictly): one face per joined region;
   points left between two edges go.
+- **Clip** (faces): cut by an axis-aligned plane (optionally through the
+  group's centroid) and keep the side above, below, or both (a knife cut);
+  one cut point per crossed edge, which neighbours outside the group take
+  into their boundaries; a face on the plane counts as above, once.
+- **Connect** (edges or points): two of the group's points across a face
+  split it along their diagonal; the group's edges get a point each and a
+  face with two of them splits between them.
+- **Edge Slide** (edges): each point of the group's chains moves along the
+  edge beside it that leans most to one side of the chain.
+- **PolyMirror** (faces): the group reflected across an axis-aligned plane,
+  wound outward, welded to the original on the plane, with or without the
+  original.
+- **Spin** (edges): the group's chains swept round an axis in steps into a
+  surface of revolution (a full turn closes; points on the axis stay single).
 
 New corners inside a face blend that face's corners (the builder's mixed
 corners), so UVs follow insets, slides and cuts; every other attribute and

@@ -1,0 +1,160 @@
+## The G6 modeling verbs: Clip (and knife cuts), Connect, Edge Slide,
+## PolyMirror and Spin. Element counts, output selections, and surfaces
+## staying closed (or edges used at most twice on open ones). The grid is 4
+## by 4 over -1..1 in XZ (point z*5+x, face z*4+x); the cube spans -1..1
+## in X and Z and 0..2 in Y.
+import interop
+import math
+import memory
+from geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from geocore_kernel import clear_group_cache
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let cube = try Mesh.cube()
+    defer cube.release()
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    try clip_checks(cube, grid)
+    try connect_checks(grid)
+    try slide_checks(grid)
+    try mirror_checks(cube)
+    try spin_checks(grid)
+    print("PASS G6 verbs: Clip (sides, knife, centroid, on-plane faces), Connect (points, edge middles), Edge Slide, PolyMirror (welded, alone), Spin (full and partial turns)")
+
+## Run a verb, check its output selection's size, return its mesh.
+func made(mesh: interop.Reference[Mesh], name: str, group: str, group_type: i64, numbers: const f64[], selected: i64) -> interop.Reference[Mesh]!:
+    let result = try Verbs.run(name, mesh, group, group_type, numbers)
+    defer result.release()
+    let selection = try result.value().selection()
+    defer selection.release()
+    if selection.value().count() != selected:
+        print(f"{name} {group}: selected {selection.value().count()}, expected {selected}")
+        assert(false)
+    return try result.value().mesh()
+
+## Every edge used by at most two faces (exactly two with `closed`), in
+## opposite directions when two.
+func surface(mesh: interop.Reference[Mesh], closed: bool) -> !:
+    let geometry = mesh.value()
+    let edges = (usize)(try geometry.edge_count())
+    let uses = try alloc i32[edges * 2] in memory.heap
+    defer free(uses) in memory.heap
+    for at in 0..<uses.length: uses[at] = 0
+    for face in 0..<geometry.face_count():
+        let size = try geometry.face_size(face)
+        for at in 0..<size:
+            let edge = (usize)(try geometry.face_edge(face, at))
+            let forward = (try geometry.face_point(face, at)) == (try geometry.edge_point((i64)edge, 0))
+            uses[edge * 2] += 1
+            uses[edge * 2 + 1] += 1 if forward else -1
+    for edge in 0..<edges:
+        let count = uses[edge * 2]
+        assert(count >= 1 and count <= 2)
+        if closed: assert(count == 2)
+        if count == 2: assert(uses[edge * 2 + 1] == 0)
+
+func counts(mesh: interop.Reference[Mesh], points: i64, faces: i64) -> !:
+    if mesh.value().point_count() != points or mesh.value().face_count() != faces:
+        print(f"expected {points} points and {faces} faces, made {mesh.value().point_count()} and {mesh.value().face_count()}")
+        assert(false)
+
+func clip_checks(cube: interop.Reference[Mesh], grid: interop.Reference[Mesh]) -> !:
+    # Axis Y at 1: both halves (a knife cut round the cube), or one side.
+    let knife: f64[4] = [1.0, 1.0, 0.0, 2.0]
+    let both = try made(cube, "Clip", "*", 3, knife[..<4], 4)
+    defer both.release()
+    try counts(both, 12, 10)
+    try surface(both, true)
+    let upper: f64[4] = [1.0, 1.0, 0.0, 0.0]
+    let above = try made(cube, "Clip", "*", 3, upper[..<4], 5)
+    defer above.release()
+    try counts(above, 8, 5)
+    try surface(above, false)
+    near(above.value().bounds().minimum.y, 1.0)
+    # A face on the plane (the bottom, at 0) is kept once, as above.
+    let floor: f64[4] = [1.0, 0.0, 0.0, 2.0]
+    let resting = try made(cube, "Clip", "*", 3, floor[..<4], 6)
+    defer resting.release()
+    try counts(resting, 8, 6)
+    # Only the group's faces are cut; a neighbour takes the cut point.
+    let column: f64[4] = [0.0, 0.1, 0.0, 2.0]
+    let top = try made(grid, "Clip", "12-15", 3, column[..<4], 1)
+    defer top.release()
+    try counts(top, 27, 17)
+    try surface(top, false)
+    let centered: f64[4] = [2.0, 0.0, 1.0, 2.0]
+    # Through the group's centroid (z = -0.25): faces 5 and 6 split; their
+    # outer neighbours take the cut points.
+    let middle = try made(grid, "Clip", "5 6", 3, centered[..<4], 2)
+    defer middle.release()
+    try counts(middle, 28, 18)
+    try surface(middle, false)
+
+func connect_checks(grid: interop.Reference[Mesh]) -> !:
+    let half: f64[1] = [0.5]
+    # Two points across face 5.
+    let corners = try made(grid, "Connect", "6 12", 1, half[..<1], 1)
+    defer corners.release()
+    try counts(corners, 25, 17)
+    try surface(corners, false)
+    # Two opposite edges of face 5: their middles, joined; faces 1 and 9
+    # take the new points into their boundaries.
+    let middles = try made(grid, "Connect", "p6-7 p11-12", 2, half[..<1], 1)
+    defer middles.release()
+    try counts(middles, 27, 17)
+    try surface(middles, false)
+
+func slide_checks(grid: interop.Reference[Mesh]) -> !:
+    let amount: f64[1] = [0.5]
+    let slid = try made(grid, "Edge Slide", "p10-11-12-13-14", 2, amount[..<1], 4)
+    defer slid.release()
+    try counts(slid, 25, 16)
+    let middle = try slid.value().point(12)
+    near(math.abs(middle.z), 0.25)
+    near(middle.x, 0.0)
+    let back: f64[1] = [-0.5]
+    let other = try made(grid, "Edge Slide", "p10-11-12-13-14", 2, back[..<1], 4)
+    defer other.release()
+    near((try other.value().point(12)).z, -middle.z)
+
+func mirror_checks(cube: interop.Reference[Mesh]) -> !:
+    # Half a cube mirrored across its cut, welded: the whole cube again.
+    let upper: f64[4] = [1.0, 1.0, 0.0, 0.0]
+    let half = try made(cube, "Clip", "*", 3, upper[..<4], 5)
+    defer half.release()
+    let mirror: f64[5] = [1.0, 1.0, 0.0, 1.0, 1.0]
+    let whole = try made(half, "PolyMirror", "*", 3, mirror[..<5], 5)
+    defer whole.release()
+    try counts(whole, 12, 10)
+    try surface(whole, true)
+    near(whole.value().bounds().minimum.y, 0.0)
+    # Without the original: only the reflection.
+    let alone: f64[5] = [1.0, 1.0, 0.0, 0.0, 1.0]
+    let reflection = try made(half, "PolyMirror", "*", 3, alone[..<5], 5)
+    defer reflection.release()
+    try counts(reflection, 8, 5)
+    near(reflection.value().bounds().maximum.y, 1.0)
+
+func spin_checks(grid: interop.Reference[Mesh]) -> !:
+    # A three-point run of the grid's front edge, turned all the way round
+    # the Y axis in 12 steps: a band of 24 quads, closed round the axis.
+    let turn: f64[6] = [1.0, 0.0, 0.0, 0.0, 360.0, 12.0]
+    let band = try made(grid, "Spin", "p0-1-2", 2, turn[..<6], 24)
+    defer band.release()
+    try counts(band, 25 + 33, 16 + 24)
+    # Every new point is a profile point turned: at one of its radii.
+    for point in 25..<58:
+        let p = try band.value().point(point)
+        let radius = math.sqrt(p.x * p.x + p.z * p.z)
+        near(p.y, 0.0)
+        assert(math.abs(radius - math.sqrt(2.0)) < 0.00001 or math.abs(radius - math.sqrt(1.25)) < 0.00001 or math.abs(radius - 1.0) < 0.00001)
+    # A quarter turn in 3 steps: 4 copies of the profile, 6 quads.
+    let quarter: f64[6] = [1.0, 0.0, 0.0, 0.0, 90.0, 3.0]
+    let arc = try made(grid, "Spin", "p0-1-2", 2, quarter[..<6], 6)
+    defer arc.release()
+    try counts(arc, 25 + 9, 16 + 6)
+
+func near(a: f64, b: f64):
+    if math.abs(a - b) >= 0.00001: print(f"near: {a} vs {b}")
+    assert(math.abs(a - b) < 0.00001)

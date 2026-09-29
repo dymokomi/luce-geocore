@@ -1,0 +1,73 @@
+## Edge Slide: slide the group's edges along the faces beside them, after
+## Blender's Edge Slide. Each point of the group's chains moves along its
+## rail, the edge at it outside the group leaning most to one side of the
+## chain (the side `Amount`'s sign picks: the chain's tangent crossed with
+## the surface normal), by that fraction of the rail's length. The topology
+## stays; the group's edges are the output selection.
+
+let edge_slide_parms: ParmSpec[1] = [
+    ParmSpec("Amount", ParmKind.number, 0.5, -1.0, 1.0, 1, "", "How far along the rails, as a fraction of each rail; the sign picks the side.")]
+
+pub func edge_slide_verb() -> Verb:
+    return Verb("Edge Slide", "Deform", "Slide the group's edges along the faces beside them", Domain.edge, true, edge_slide_parms, false, cook_edge_slide)
+
+func cook_edge_slide(input: const VerbInput*, output: VerbOutput*) -> !:
+    let amount = input.parms.at(0)
+    if not math.is_finite(amount) or amount < -1.0 or amount > 1.0: error(errors.invalid, "Edge Slide amount must lie in -1..1")
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    output.positions = mesh_positions(mesh)
+    let positions = try output.positions.writable()
+    output.selection = try BitsBuilder.copy_of(input.group)
+    output.selection_domain = Domain.edge
+    if amount == 0.0: return
+    var chains = EdgeChains()
+    defer chains.close()
+    try edge_chains(&topology, input.group, &chains)
+    # Reads see the input's positions; writes go to the output's.
+    let original = point_span(mesh)
+    let normals = face_normal_span(mesh)
+    for index in 0..<chains.count():
+        let chain = chains.chain(index)
+        let closed = chains.closed.items[index] != 0
+        for at in 0..<chain.length:
+            let point = (usize)chain[at]
+            # The chain's direction here, from its neighbours.
+            let before = chain[at - 1] if at > 0 else (chain[chain.length - 1] if closed else chain[at])
+            let after = chain[at + 1] if at + 1 < chain.length else (chain[0] if closed else chain[at])
+            let tangent = original[(usize)after].vector().subtract(original[(usize)before].vector())
+            let side = point_normal(&topology, normals, point).cross(tangent)
+            let rail = rail_end(&topology, input.group, original, point, side, amount > 0.0) else continue
+            let here = original[point].vector()
+            let target = original[(usize)rail].vector()
+            positions[point] = Float3.of(here.add(target.subtract(here).multiply_scalar(math.abs(amount))))
+            try output.moved.push((u32)point)
+
+## The mean normal of the faces around `point`.
+func point_normal(topology: const Topology*, normals: const Float3[], point: usize) -> Vector3:
+    var sum = Vector3()
+    for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+            sum = sum.add(normals[(usize)topology.corner_faces[(usize)topology.edge_corners[at]]].vector())
+    return sum
+
+## The far end of the rail at `point`: of its edges outside the group, the
+## one leaning most along `side` (against it when not `positive`).
+func rail_end(topology: const Topology*, group: Bits, positions: const Float3[], point: usize, side: Vector3, positive: bool) -> i32?:
+    var best: i32? = none
+    var lean = 0.0
+    let here = positions[point].vector()
+    for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        if group.get(edge): continue
+        let a = topology.edge_points[edge * 2]
+        let other = topology.edge_points[edge * 2 + 1] if (usize)a == point else a
+        let direction = positions[(usize)other].vector().subtract(here)
+        let length = direction.length()
+        if length == 0.0: continue
+        let along = direction.dot(side) / length * (1.0 if positive else -1.0)
+        if along > lean:
+            lean = along
+            best = other
+    return best

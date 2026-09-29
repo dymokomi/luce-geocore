@@ -1,0 +1,82 @@
+## PolyMirror: the group's faces reflected across an axis-aligned plane,
+## after Houdini's Mirror and Blender's Mirror. The mirrored faces wind the
+## other way (so they face outward too); with Weld, their points on the
+## plane are the originals, so the halves join into one surface. With Keep
+## original off, the reflection replaces the group. The mirrored faces are
+## the output selection.
+
+let mirror_parms: ParmSpec[5] = [
+    ParmSpec("Axis", ParmKind.menu, 0.0, 0.0, 2.0, 1, "X|Y|Z", "The axis the mirror plane faces."),
+    ParmSpec("Offset", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "Where the plane crosses its axis.", 5.0),
+    ParmSpec("Through centroid", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Put the plane through the group's centroid (Offset then moves it from there)."),
+    ParmSpec("Keep original", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep the group beside its reflection."),
+    ParmSpec("Weld", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Join the reflection to the original at points on the plane.")]
+
+pub func mirror_verb() -> Verb:
+    return Verb("PolyMirror", "Modeling", "Reflect the group's faces across a plane, joined along it", Domain.face, true, mirror_parms, true, cook_mirror)
+
+func cook_mirror(input: const VerbInput*, output: VerbOutput*) -> !:
+    let axis = (usize)math.max(0.0, math.min(2.0, input.parms.at(0)))
+    let offset = input.parms.at(1)
+    if not math.is_finite(offset): error(errors.invalid, "PolyMirror offset must be finite")
+    let keep = input.parms.at(3) != 0.0
+    let weld = input.parms.at(4) != 0.0
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var level = offset
+    if input.parms.at(2) != 0.0: level += try centroid_axis(mesh, &topology, input.group, axis)
+    let box = mesh.bounds()
+    let tolerance = box.maximum.subtract(box.minimum).length() * 0.0001
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    # The reflection of each of the group's points (the point itself when
+    # welded on the plane).
+    var reflected = Growing[i32]()
+    defer reflected.close()
+    try reflected.fill(topology.points, -1)
+    var faces: usize = 0
+    for face in 0..<topology.faces():
+        if not input.group.get(face): continue
+        faces += 1
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let point = (usize)topology.corners[corner]
+            if reflected.items[point] >= 0: continue
+            let position = builder.position((i32)point)
+            let distance = axis_value(position, axis) - level
+            if weld and math.abs(distance) <= tolerance:
+                reflected.items[point] = (i32)point
+                continue
+            reflected.items[point] = try builder.point(reflected_across(position, axis, level), (i32)point)
+    if faces == 0:
+        output.warning = "The group has no faces to mirror; the input passes through"
+        try builder.copy_faces(mesh, 0, topology.faces())
+        return
+    # The input's faces (all, or those outside the group), then the mirror.
+    if keep:
+        try builder.copy_faces(mesh, 0, topology.faces())
+    else:
+        for face in 0..<topology.faces():
+            if not input.group.get(face): try builder.copy_faces(mesh, face, face + 1)
+    let first = builder.face_count()
+    for face in 0..<topology.faces():
+        if not input.group.get(face): continue
+        let start = (usize)topology.offsets[face]
+        let end = (usize)topology.offsets[face + 1]
+        try builder.face((i32)face, false, true)
+        var corner = end
+        while corner > start:
+            corner -= 1
+            try builder.corner(reflected.items[(usize)topology.corners[corner]], (i32)corner)
+        try builder.end_face()
+    if not keep: try builder.drop_unused_points()
+    output.selection = try BitsBuilder.zeros(builder.face_count())
+    output.selection.set_range(first, builder.face_count())
+    output.selection_domain = Domain.face
+
+## `position` reflected across the plane where `axis` is `level`.
+func reflected_across(position: Vector3, axis: usize, level: f64) -> Vector3:
+    if axis == 0: return Vector3(2.0 * level - position.x, position.y, position.z)
+    if axis == 1: return Vector3(position.x, 2.0 * level - position.y, position.z)
+    return Vector3(position.x, position.y, 2.0 * level - position.z)

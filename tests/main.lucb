@@ -28,6 +28,7 @@ import sdf_edit_checks
 import sketch_checks
 import detail_checks
 import instance_checks
+import g6_checks
 
 ## Counts live blocks and fails the allocation after `remaining` more.
 ## Kernels allocate on pool workers too, so it takes a lock.
@@ -124,6 +125,9 @@ pub func main(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 400, modeling_checks.exercise)
     try modeling_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, g6_checks.exercise)
+    try g6_checks.exercise()
     settle(&tracker)
     inject(&tracker, 300, subdivision_checks.exercise)
     try subdivision_checks.exercise()

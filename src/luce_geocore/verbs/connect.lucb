@@ -1,0 +1,133 @@
+## Connect: new edges across faces, after Blender's Connect and Houdini's
+## PolySplit. With a point group, a face with two of the group's points not
+## next to each other splits along the line between them. With an edge
+## group, each of the group's edges gets a point at its middle (shared by
+## every face on it); a face with two of them splits between them, and any
+## other face takes them into its boundary so the surface stays closed. The
+## new edges are the output selection.
+
+let connect_parms: ParmSpec[1] = [
+    ParmSpec("Position", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "Where along each of the group's edges the new point sits.")]
+
+pub func connect_verb() -> Verb:
+    return Verb("Connect", "Modeling", "Connect the group's points or edge middles across their faces", Domain.edge, true, connect_parms, true, cook_connect, false, Domain.point)
+
+func cook_connect(input: const VerbInput*, output: VerbOutput*) -> !:
+    let fraction = input.parms.at(0)
+    if not math.is_finite(fraction) or fraction <= 0.0 or fraction >= 1.0: error(errors.invalid, "Connect position must lie strictly between 0 and 1")
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    let points = input.domain == Domain.point
+    # Edge mode: a point on each of the group's edges, from its first end.
+    var middle = Growing[i32]()
+    defer middle.close()
+    try middle.fill(topology.edges(), -1)
+    if not points:
+        for edge in 0..<topology.edges():
+            if not input.group.get(edge): continue
+            let a = topology.edge_points[edge * 2]
+            let b = topology.edge_points[edge * 2 + 1]
+            let parents: i32[2] = [a, b]
+            let weights: f32[2] = [(f32)(1.0 - fraction), (f32)fraction]
+            let pa = builder.position(a)
+            middle.items[edge] = try builder.mixed_point(pa.add(builder.position(b).subtract(pa).multiply_scalar(fraction)), parents[..<2], weights[..<2])
+    var run: usize = 0
+    var splits: usize = 0
+    for face in 0..<topology.faces():
+        let first = (usize)topology.offsets[face]
+        let end = (usize)topology.offsets[face + 1]
+        # Where the face splits: two corners (point mode) or two cut edges'
+        # corners (edge mode); -1 when it does not.
+        var a: i64 = -1
+        var b: i64 = -1
+        var touched = false
+        if points:
+            for corner in first..<end:
+                if not input.group.get((usize)topology.corners[corner]): continue
+                if a < 0: a = (i64)corner
+                elif b < 0 and not adjacent(first, end, (usize)a, corner): b = (i64)corner
+        else:
+            var cuts: usize = 0
+            for corner in first..<end:
+                if middle.items[(usize)topology.corner_edges[corner]] < 0: continue
+                touched = true
+                cuts += 1
+                if a < 0: a = (i64)corner
+                elif b < 0: b = (i64)corner
+            if cuts != 2:
+                a = -1
+                b = -1
+        if b < 0 and not touched: continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        if b < 0:
+            # Cut edges but no split: the new points join its boundary.
+            try builder.face((i32)face)
+            for corner in first..<end:
+                try builder.corner(topology.corners[corner], (i32)corner)
+                try middle_corner(&topology, &middle, builder, corner, fraction)
+            try builder.end_face()
+            continue
+        splits += 1
+        if points:
+            try split_at_corners(&topology, builder, face, (usize)a, (usize)b)
+        else:
+            try split_at_middles(&topology, &middle, builder, face, (usize)a, (usize)b, fraction)
+    try builder.copy_faces(mesh, run, topology.faces())
+    if splits == 0:
+        output.warning = "No face has two of the group's points (not neighbours) or cut edges to connect; the input passes through"
+
+## Whether corners `a` and `b` of the face spanning `first..<end` are
+## neighbours.
+func adjacent(first: usize, end: usize, a: usize, b: usize) -> bool:
+    let size = end - first
+    let d = (b - a) if b > a else (a - b)
+    return d == 1 or d == size - 1
+
+## Corner `corner` of its face's edge point, blended along the edge.
+func middle_corner(topology: const Topology*, middle: const Growing[i32]*, builder: TopologyBuilder*, corner: usize, fraction: f64) -> !:
+    let edge = (usize)topology.corner_edges[corner]
+    let point = middle.items[edge]
+    if point < 0: return
+    # The point sits `fraction` from the edge's first end.
+    let from_first = topology.edge_points[edge * 2] == topology.corners[corner]
+    let t = (f32)(fraction if from_first else 1.0 - fraction)
+    let next = topology.next(corner)
+    let parents: i32[2] = [(i32)corner, (i32)next]
+    let weights: f32[2] = [1.0 - t, t]
+    try builder.mixed_corner(point, parents[..<2], weights[..<2])
+
+## The face split along corners `a` < `b`: a..b, then b..end and first..a.
+func split_at_corners(topology: const Topology*, builder: TopologyBuilder*, face: usize, a: usize, b: usize) -> !:
+    let first = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    try builder.face((i32)face)
+    for corner in a..<b + 1: try builder.corner(topology.corners[corner], (i32)corner)
+    try builder.end_face()
+    try builder.face((i32)face)
+    for corner in b..<end: try builder.corner(topology.corners[corner], (i32)corner)
+    for corner in first..<a + 1: try builder.corner(topology.corners[corner], (i32)corner)
+    try builder.end_face()
+    try builder.select_edge(topology.corners[a], topology.corners[b])
+
+## The face split between the points on the edges of corners `a` < `b`:
+## middle(a), a+1..b, middle(b); then middle(b), b+1.., ..a, middle(a).
+func split_at_middles(topology: const Topology*, middle: const Growing[i32]*, builder: TopologyBuilder*, face: usize, a: usize, b: usize, fraction: f64) -> !:
+    let first = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    try builder.face((i32)face)
+    try middle_corner(topology, middle, builder, a, fraction)
+    for corner in a + 1..<b + 1: try builder.corner(topology.corners[corner], (i32)corner)
+    try middle_corner(topology, middle, builder, b, fraction)
+    try builder.end_face()
+    try builder.face((i32)face)
+    try middle_corner(topology, middle, builder, b, fraction)
+    for corner in b + 1..<end: try builder.corner(topology.corners[corner], (i32)corner)
+    for corner in first..<a + 1: try builder.corner(topology.corners[corner], (i32)corner)
+    try middle_corner(topology, middle, builder, a, fraction)
+    try builder.end_face()
+    try builder.select_edge(middle.items[(usize)topology.corner_edges[a]], middle.items[(usize)topology.corner_edges[b]])
