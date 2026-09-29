@@ -1,88 +1,359 @@
-## PolyExtrude of a face region: the group's points are duplicated once and
-## moved along their averaged face normals, the caps keep their face ids
-## (and triangles), and walls join the old and new points along the region's
-## boundary only, never between selected faces. The caps are the output
-## selection (Houdini's front group).
+## PolyExtrude and Inset, after Houdini's PolyExtrude and Blender's Inset.
+## A face group extrudes as regions (connected faces move together, walls
+## along the region's boundary only) or as individual faces; its front
+## points move `distance` along their faces' averaged normals and `inset`
+## inward across the region's boundary, and the walls get `divisions` rows.
+## An edge group extrudes its edges into quads: outward in the face plane
+## for boundary edges, along the faces' normals otherwise.
+##
+## Around a boundary point, each run of region faces between two boundary
+## edges (a sector) gets its own front point, so regions touching at a point
+## stay apart; a whole closed surface has no boundary and just moves out. The
+## fronts keep their face ids and are the output selection (an edge group
+## selects its front edges). Front corners moved inward blend their face's
+## corners, so UVs follow the inset.
 
-let extrude_parms: ParmSpec[1] = [ParmSpec("Distance", ParmKind.number, 0.2, -100000.0, 100000.0, 1, "", "Extrusion distance along the averaged face normals.", 2.0)]
+let extrude_parms: ParmSpec[5] = [
+    ParmSpec("Distance", ParmKind.number, 0.2, -100000.0, 100000.0, 1, "", "How far the fronts move along their faces' normals.", 2.0),
+    ParmSpec("Inset", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "How far the fronts' boundaries move inward across the faces.", 1.0),
+    ParmSpec("Divisions", ParmKind.integer, 1.0, 1.0, 64.0, 1, "", "Rows of faces along each wall."),
+    ParmSpec("Individual faces", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Extrude each face on its own instead of each connected region."),
+    ParmSpec("Clamp inset", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep each inset within half of the boundary edges beside it.")]
 
 pub func extrude_verb() -> Verb:
-    return Verb("PolyExtrude", "Modeling", "Extrude a face region along its normals", Domain.face, true, extrude_parms, true, cook_extrude)
+    return Verb("PolyExtrude", "Modeling", "Extrude faces (as regions or one by one) or edges", Domain.face, true, extrude_parms, true, cook_extrude, false, Domain.edge)
+
+let inset_parms: ParmSpec[4] = [
+    ParmSpec("Thickness", ParmKind.number, 0.1, 0.0, 100000.0, 1, "", "How far the inner faces' boundaries move inward.", 1.0),
+    ParmSpec("Depth", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "How far the inner faces move along their normals.", 1.0),
+    ParmSpec("Individual faces", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Inset each face on its own instead of each connected region."),
+    ParmSpec("Clamp", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep each inset within half of the boundary edges beside it.")]
+
+pub func inset_verb() -> Verb:
+    return Verb("Inset", "Modeling", "Inset faces by a distance, as regions or one by one", Domain.face, true, inset_parms, true, cook_inset)
+
+## One extrusion's settings.
+struct Extrusion:
+    let distance: f64
+    let inset: f64
+    let divisions: usize
+    let individual: bool
+    let clamp: bool
 
 func cook_extrude(input: const VerbInput*, output: VerbOutput*) -> !:
     let distance = input.parms.at(0)
-    if not input.group.any() or not math.is_finite(distance) or math.abs(distance) < 0.000001:
-        error(errors.invalid, "extrusion needs selected faces and a finite nonzero distance")
+    let inset = input.parms.at(1)
+    if not math.is_finite(distance) or not math.is_finite(inset): error(errors.invalid, "Extrude distance and inset must be finite")
+    let divisions = (usize)math.max(1.0, math.min(64.0, input.parms.at(2)))
+    let settings = Extrusion(distance, inset, divisions, input.parms.at(3) != 0.0, input.parms.at(4) != 0.0)
+    if input.domain == Domain.edge: return try extrude_edges(input, output, settings)
+    try extrude_faces(input, output, settings)
+
+func cook_inset(input: const VerbInput*, output: VerbOutput*) -> !:
+    let thickness = input.parms.at(0)
+    let depth = input.parms.at(1)
+    if not math.is_finite(thickness) or not math.is_finite(depth) or thickness < 0.0: error(errors.invalid, "Inset thickness must be finite and not negative")
+    try extrude_faces(input, output, Extrusion(depth, thickness, 1, input.parms.at(2) != 0.0, input.parms.at(3) != 0.0))
+
+## Face work: which region corner belongs to which front point (a sector, or
+## an inner point of a region), and each front point's place.
+struct Fronts:
+    ## Per corner of a group face: its front point (an index into `places`).
+    var of_corner: Growing[i32]
+    ## Per front point: the input point, where it goes, and the inset part
+    ## of the move (for the corner blend).
+    var points: Growing[i32]
+    var places: Growing[Vector3]
+    var insets: Growing[Vector3]
+
+    func init():
+        self.of_corner = Growing[i32]()
+        self.points = Growing[i32]()
+        self.places = Growing[Vector3]()
+        self.insets = Growing[Vector3]()
+
+    mutating func close():
+        self.of_corner.close()
+        self.points.close()
+        self.places.close()
+        self.insets.close()
+
+## Whether corner `corner`'s edge bounds a region: the other side is not a
+## group face (or there is no single other side), or faces go one by one.
+func bounds_region(topology: const Topology*, group: Bits, corner: usize, individual: bool) -> bool:
+    if individual: return true
+    let edge = (usize)topology.corner_edges[corner]
+    let first = (usize)topology.edge_corner_offsets[edge]
+    if (usize)topology.edge_corner_offsets[edge + 1] - first != 2: return true
+    let across = topology.twin(corner)
+    return across < 0 or not group.get((usize)topology.corner_faces[(usize)across]) or topology.corner_faces[(usize)across] == topology.corner_faces[corner]
+
+func point_of(mesh: const Mesh*, point: i32) -> Vector3:
+    let exact = precise_span(mesh)
+    if exact.length > 0: return exact[(usize)point]
+    return point_span(mesh)[(usize)point].vector().add(mesh_origin(mesh))
+
+## The unit vector from `a` to `b` turned a quarter inward in a face with
+## normal `normal` (to the left of a counterclockwise edge).
+func inward(normal: Vector3, a: Vector3, b: Vector3) -> Vector3:
+    let across = normal.cross(b.subtract(a))
+    let length = across.length()
+    return across.multiply_scalar(1.0 / length) if length > 0.0 else Vector3()
+
+func extrude_faces(input: const VerbInput*, output: VerbOutput*, settings: Extrusion) -> !:
     let mesh = input.mesh
-    let offsets = offset_span(mesh)
-    let corners = corner_span(mesh)
+    if not input.group.any():
+        output.warning = "No faces in the group to extrude; the input passes through"
+        return
+    let topology = try Topology.of(mesh)
     let normals = face_normal_span(mesh)
-    let corner_edges = try corner_edge_span(mesh)
-    let edge_count = (try edge_span(mesh)).length // 2
-    let faces = offsets.length - 1
-    let points = (usize)mesh.point_count()
-    # How often each edge borders a selected face, and each point's
-    # direction: the sum of its selected faces' normals.
-    let uses = try alloc u8[edge_count] in memory.heap
-    defer free(uses) in memory.heap
-    memory.set(uses, 0)
-    let directions = try alloc Vector3[points] in memory.heap
-    defer free(directions) in memory.heap
-    let mapping = try alloc i32[points] in memory.heap
-    defer free(mapping) in memory.heap
-    for at in 0..<points:
-        directions[at] = Vector3()
-        mapping[at] = -1
-    var walls: usize = 0
+    var fronts = Fronts()
+    defer fronts.close()
+    try fronts.of_corner.fill(topology.corners.length, -1)
+    # Sectors: from each boundary edge arriving at a point, around it through
+    # group faces to the boundary edge leaving it.
+    let faces = topology.faces()
     for face in 0..<faces:
         if not input.group.get(face): continue
-        for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
-            let edge = (usize)corner_edges[corner]
-            if uses[edge] == 2: error(errors.invalid, "cannot extrude a nonmanifold region")
-            uses[edge] += 1
-            let point = (usize)corners[corner]
-            mapping[point] = 0
-            directions[point] = directions[point].add(normals[face].vector())
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if not bounds_region(&topology, input.group, corner, settings.individual): continue
+            try sector(mesh, &topology, input.group, normals, settings, corner, &fronts)
+    # Inner points of regions: one front point each, along their faces'
+    # summed normals.
+    let inner = try alloc i32[topology.points] in memory.heap
+    defer free(inner) in memory.heap
+    for at in 0..<topology.points: inner[at] = -1
+    let sums = try alloc Vector3[topology.points] in memory.heap
+    defer free(sums) in memory.heap
     for face in 0..<faces:
         if not input.group.get(face): continue
-        for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
-            if uses[(usize)corner_edges[corner]] == 1: walls += 1
-    if walls == 0: error(errors.invalid, "extrude a face region with a boundary, not an entire closed surface")
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if fronts.of_corner.items[corner] >= 0: continue
+            let point = (usize)topology.corners[corner]
+            if inner[point] < 0:
+                inner[point] = (i32)fronts.points.count
+                sums[point] = Vector3()
+                try fronts.points.push((i32)point)
+                try fronts.places.push(Vector3())
+                try fronts.insets.push(Vector3())
+            sums[point] = sums[point].add(normals[face].vector())
+            fronts.of_corner.items[corner] = inner[point]
+    for front in 0..<fronts.points.count:
+        let point = fronts.points.items[front]
+        if inner[(usize)point] != (i32)front: continue
+        let length = sums[(usize)point].length()
+        let direction = sums[(usize)point].multiply_scalar(1.0 / length) if length > 0.0 else Vector3()
+        fronts.places.items[front] = point_of(mesh, point).add(direction.multiply_scalar(settings.distance))
+    try build_faces(input, output, &topology, &fronts, settings)
+
+## The sector starting at boundary corner `arriving`'s far end: its corners
+## get one front point, moved along their faces' normals and inward from
+## the arriving and leaving boundary edges.
+func sector(mesh: const Mesh*, topology: const Topology*, group: Bits, normals: const Float3[], settings: Extrusion, arriving: usize, fronts: Fronts*) -> !:
+    let front = (i32)fronts.points.count
+    let point = topology.corners[topology.next(arriving)]
+    var normal = Vector3()
+    var corner = topology.next(arriving)
+    var leaving = corner
+    for _ in 0..<topology.corners.length:
+        fronts.of_corner.items[corner] = front
+        normal = normal.add(normals[(usize)topology.corner_faces[corner]].vector())
+        if bounds_region(topology, group, corner, settings.individual):
+            leaving = corner
+            break
+        corner = topology.next((usize)topology.twin(corner))
+    let length = normal.length()
+    let direction = normal.multiply_scalar(1.0 / length) if length > 0.0 else Vector3()
+    # The miter: inset along both boundary edges' inward directions.
+    let here = point_of(mesh, point)
+    let before = point_of(mesh, topology.corners[arriving])
+    let after = point_of(mesh, topology.corners[topology.next(leaving)])
+    let d_in = inward(normals[(usize)topology.corner_faces[arriving]].vector(), before, here)
+    let d_out = inward(normals[(usize)topology.corner_faces[leaving]].vector(), here, after)
+    var shift = d_in.add(d_out).multiply_scalar(settings.inset / math.max(1.0 + d_in.dot(d_out), 0.05))
+    if settings.clamp:
+        let limit = 0.5 * math.min(here.subtract(before).length(), after.subtract(here).length())
+        if shift.length() > limit: shift = shift.multiply_scalar(limit / shift.length())
+    try fronts.points.push(point)
+    try fronts.places.push(here.add(shift).add(direction.multiply_scalar(settings.distance)))
+    try fronts.insets.push(shift)
+
+## Points (input, fronts, wall rows), the faces with fronts in place (their
+## ids kept), then the walls; interior points left unused go.
+func build_faces(input: const VerbInput*, output: VerbOutput*, topology: const Topology*, fronts: const Fronts*, settings: Extrusion) -> !:
+    let mesh = input.mesh
     var builder = &output.builder
     try builder.begin(mesh)
     try builder.copy_points(mesh)
     output.built = true
-    for point in 0..<points:
-        if mapping[point] < 0: continue
-        let direction = try directions[point].normalized()
-        mapping[point] = try builder.point(builder.position((i32)point).add(direction.multiply_scalar(distance)), (i32)point)
+    let first_front = builder.point_count()
+    for front in 0..<fronts.points.count:
+        discard(try builder.point(fronts.places.items[front], fronts.points.items[front]))
+    # Wall rows between each boundary point and its front: rows 1..<divisions.
+    let rows = settings.divisions
+    let first_row = builder.point_count()
+    for row in 1..<rows:
+        let t = (f64)row / (f64)rows
+        for front in 0..<fronts.points.count:
+            let point = fronts.points.items[front]
+            let start = point_of(mesh, point)
+            discard(try builder.point(start.add(fronts.places.items[front].subtract(start).multiply_scalar(t)), point))
+    let faces = topology.faces()
+    var walls: usize = 0
+    for face in 0..<faces:
+        if not input.group.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if bounds_region(topology, input.group, corner, settings.individual): walls += rows
     output.selection = try BitsBuilder.zeros(faces + walls)
     output.selection_domain = Domain.face
-    # Every face in order; the caps use the moved points.
     var run: usize = 0
     for face in 0..<faces:
         if not input.group.get(face): continue
         try builder.copy_faces(mesh, run, face)
         run = face + 1
         output.selection.set(face)
-        try builder.face((i32)face, true)
-        for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
-            try builder.corner(mapping[(usize)corners[corner]], (i32)corner)
+        let moved_in = settings.inset != 0.0
+        try builder.face((i32)face, not moved_in)
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let front = fronts.of_corner.items[corner]
+            try front_corner(topology, builder, (i32)(first_front + (usize)front), corner, fronts.insets.items[(usize)front], mesh)
         try builder.end_face()
     try builder.copy_faces(mesh, run, faces)
-    # Walls along the boundary, in face and corner order.
+    # Walls: along each boundary edge a→b, rows from the input points to the
+    # fronts, facing the way the face beside them did.
     for face in 0..<faces:
         if not input.group.get(face): continue
-        let start = (usize)offsets[face]
-        let end = (usize)offsets[face + 1]
-        for corner in start..<end:
-            if uses[(usize)corner_edges[corner]] != 1: continue
-            let next = corner + 1 if corner + 1 < end else start
-            let a = corners[corner]
-            let b = corners[next]
-            try builder.face((i32)face)
-            try builder.corner(a, (i32)corner)
-            try builder.corner(b, (i32)next)
-            try builder.corner(mapping[(usize)b], (i32)next)
-            try builder.corner(mapping[(usize)a], (i32)corner)
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if not bounds_region(topology, input.group, corner, settings.individual): continue
+            let next = topology.next(corner)
+            let front_a = (usize)fronts.of_corner.items[corner]
+            let front_b = (usize)fronts.of_corner.items[next]
+            let a = WallSide(corner, front_a, fronts.insets.items[front_a])
+            let b = WallSide(next, front_b, fronts.insets.items[front_b])
+            for row in 0..<rows:
+                try builder.face((i32)face)
+                try wall_corner(topology, fronts, builder, mesh, a, row, rows, first_front, first_row)
+                try wall_corner(topology, fronts, builder, mesh, b, row, rows, first_front, first_row)
+                try wall_corner(topology, fronts, builder, mesh, b, row + 1, rows, first_front, first_row)
+                try wall_corner(topology, fronts, builder, mesh, a, row + 1, rows, first_front, first_row)
+                try builder.end_face()
+    try builder.drop_unused_points()
+
+## One end of a wall: the face corner it starts from, its front point and
+## that front's inset.
+struct WallSide:
+    let corner: usize
+    let front: usize
+    let shift: Vector3
+
+## A wall corner on row `row` (0 the input point, `rows` the front): its
+## values blend like the front's, by the share of the inset it has made.
+func wall_corner(topology: const Topology*, fronts: const Fronts*, builder: TopologyBuilder*, mesh: const Mesh*, side: WallSide, row: usize, rows: usize, first_front: usize, first_row: usize) -> !:
+    if row == 0: return try builder.corner(topology.corners[side.corner], (i32)side.corner)
+    let t = (f64)row / (f64)rows
+    let point = (i32)(first_front + side.front) if row == rows else (i32)(first_row + (row - 1) * fronts.points.count + side.front)
+    try front_corner(topology, builder, point, side.corner, side.shift.multiply_scalar(t), mesh)
+
+## A front corner: the face's own corner, blended with its neighbours by how
+## far the inset moved the point along the face's two edges (exact for
+## values linear across a flat face, like projected UVs).
+func front_corner(topology: const Topology*, builder: TopologyBuilder*, point: i32, corner: usize, shift: Vector3, mesh: const Mesh*) -> !:
+    if shift.length() == 0.0: return try builder.corner(point, (i32)corner)
+    let before = topology.previous(corner)
+    let after = topology.next(corner)
+    let here = point_of(mesh, topology.corners[corner])
+    let e1 = point_of(mesh, topology.corners[before]).subtract(here)
+    let e2 = point_of(mesh, topology.corners[after]).subtract(here)
+    let a11 = e1.dot(e1)
+    let a12 = e1.dot(e2)
+    let a22 = e2.dot(e2)
+    let determinant = a11 * a22 - a12 * a12
+    if math.abs(determinant) < 0.000000000001 * math.max(a11 * a22, 0.000000000001): return try builder.corner(point, (i32)corner)
+    let r1 = e1.dot(shift)
+    let r2 = e2.dot(shift)
+    let alpha = (r1 * a22 - r2 * a12) / determinant
+    let beta = (r2 * a11 - r1 * a12) / determinant
+    let parents: i32[3] = [(i32)corner, (i32)before, (i32)after]
+    let weights: f32[3] = [(f32)(1.0 - alpha - beta), (f32)alpha, (f32)beta]
+    try builder.mixed_corner(point, parents[..<3], weights[..<3])
+
+## Edge extrusion: each group edge becomes `divisions` quads from the edge
+## to its copy moved `distance` along its direction (outward in the face's
+## plane for a boundary edge, the faces' normals otherwise), with the moved
+## copies shared where group edges meet. The front edges are selected.
+func extrude_edges(input: const VerbInput*, output: VerbOutput*, settings: Extrusion) -> !:
+    let mesh = input.mesh
+    if not input.group.any() or settings.distance == 0.0:
+        output.warning = "No edges in the group to extrude (or a zero distance); the input passes through"
+        return
+    let topology = try Topology.of(mesh)
+    let normals = face_normal_span(mesh)
+    let sums = try alloc Vector3[topology.points] in memory.heap
+    defer free(sums) in memory.heap
+    let front = try alloc i32[topology.points] in memory.heap
+    defer free(front) in memory.heap
+    for at in 0..<topology.points:
+        sums[at] = Vector3()
+        front[at] = -1
+    for edge in 0..<topology.edges():
+        if not input.group.get(edge): continue
+        let direction = edge_direction(mesh, &topology, normals, edge)
+        for side in 0..<(usize)2:
+            let point = (usize)topology.edge_points[edge * 2 + side]
+            sums[point] = sums[point].add(direction)
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    try builder.copy_faces(mesh, 0, topology.faces())
+    let rows = settings.divisions
+    # Rows 1..rows of each group point: consecutive new points.
+    for point in 0..<topology.points:
+        let length = sums[point].length()
+        if length == 0.0 and not touches_group(&topology, input.group, point): continue
+        let direction = sums[point].multiply_scalar(1.0 / length) if length > 0.0 else Vector3()
+        front[point] = (i32)builder.point_count()
+        let start = point_of(mesh, (i32)point)
+        for row in 1..<rows + 1:
+            discard(try builder.point(start.add(direction.multiply_scalar(settings.distance * (f64)row / (f64)rows)), (i32)point))
+    for edge in 0..<topology.edges():
+        if not input.group.get(edge): continue
+        # Face the way the edge's first face does: it runs a→b there, so the
+        # quads run b→a along the edge.
+        let corner = (usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge]]
+        let next = topology.next(corner)
+        let a = topology.corners[corner]
+        let b = topology.corners[next]
+        for row in 0..<rows:
+            try builder.face(topology.corner_faces[corner])
+            try builder.corner(edge_row(front, b, row), (i32)next)
+            try builder.corner(edge_row(front, a, row), (i32)corner)
+            try builder.corner(edge_row(front, a, row + 1), (i32)corner)
+            try builder.corner(edge_row(front, b, row + 1), (i32)next)
             try builder.end_face()
+        try builder.select_edge(edge_row(front, a, rows), edge_row(front, b, rows))
+
+func edge_row(front: const i32[], point: i32, row: usize) -> i32:
+    if row == 0: return point
+    return front[(usize)point] + (i32)row - 1
+
+func touches_group(topology: const Topology*, group: Bits, point: usize) -> bool:
+    for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+        if group.get((usize)topology.point_edges[slot]): return true
+    return false
+
+## An edge's extrusion direction: outward in its face's plane on a boundary,
+## else its faces' summed normals.
+func edge_direction(mesh: const Mesh*, topology: const Topology*, normals: const Float3[], edge: usize) -> Vector3:
+    let first = (usize)topology.edge_corner_offsets[edge]
+    let count = (usize)topology.edge_corner_offsets[edge + 1] - first
+    let corner = (usize)topology.edge_corners[first]
+    if count == 1:
+        let a = point_of(mesh, topology.corners[corner])
+        let b = point_of(mesh, topology.corners[topology.next(corner)])
+        return inward(normals[(usize)topology.corner_faces[corner]].vector(), a, b).multiply_scalar(-1.0)
+    var sum = Vector3()
+    for at in first..<first + count:
+        sum = sum.add(normals[(usize)topology.corner_faces[(usize)topology.edge_corners[at]]].vector())
+    let length = sum.length()
+    return sum.multiply_scalar(1.0 / length) if length > 0.0 else Vector3()

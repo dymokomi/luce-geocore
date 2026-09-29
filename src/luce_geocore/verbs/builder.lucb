@@ -19,6 +19,8 @@ pub struct TopologyBuilder:
     var point_mix: Mix
     var corner_mix: Mix
     var origin: Vector3
+    ## Point pairs whose edges are the output selection (see select_edge).
+    var selected_edges: Growing[i32]
 
     pub func init():
         self.positions = Growing[Vector3]()
@@ -31,6 +33,7 @@ pub struct TopologyBuilder:
         self.point_mix = Mix()
         self.corner_mix = Mix()
         self.origin = Vector3()
+        self.selected_edges = Growing[i32]()
 
     ## Start from `source`'s frame (its origin).
     pub mutating func begin(source: const Mesh*) -> !:
@@ -140,6 +143,12 @@ pub struct TopologyBuilder:
             try self.corner(points[(usize)point] if points.length > 0 else point, (i32)corner)
         try self.end_face()
 
+    ## Select the edge between points `a` and `b` of the result (the output
+    ## selection is then these edges).
+    pub mutating func select_edge(a: i32, b: i32) -> !:
+        try self.selected_edges.push(a)
+        try self.selected_edges.push(b)
+
     ## Remove the points no corner uses, renumbering the rest in order (a
     ## verb that replaces some input points copies them all first).
     pub mutating func drop_unused_points() -> !:
@@ -158,6 +167,7 @@ pub struct TopologyBuilder:
         self.positions.count = kept
         self.point_parents.count = kept
         for at in 0..<self.corners.count: self.corners.items[at] = map[(usize)self.corners.items[at]]
+        for at in 0..<self.selected_edges.count: self.selected_edges.items[at] = map[(usize)self.selected_edges.items[at]]
 
     ## The mesh: positions, faces, triangles (kept or clipped), normals, and
     ## every attribute of `source` through the parents.
@@ -198,6 +208,7 @@ pub struct TopologyBuilder:
         self.face_parents.close()
         self.corner_parents.close()
         self.copied.close()
+        self.selected_edges.close()
         self.point_mix.close()
         self.corner_mix.close()
 

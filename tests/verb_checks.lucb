@@ -125,7 +125,7 @@ func face_verbs(mesh: interop.Reference[Mesh]) -> !:
     let together = try fused.value().mesh()
     defer together.release()
     assert(together.value().point_count() == 25 and together.value().face_count() == 16)
-    let inset = try run(mesh, "Inset", "5", [0.25])
+    let inset = try run(mesh, "Inset", "5", [0.1])
     defer inset.release()
     let inner = try inset.value().mesh()
     defer inner.release()

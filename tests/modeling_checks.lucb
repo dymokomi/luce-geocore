@@ -16,6 +16,7 @@ pub func exercise() -> !:
     let cube = try Mesh.cube()
     defer cube.release()
     try bevel_checks(grid, cube)
+    try extrude_checks(grid, cube)
 
 func fixture() -> interop.Reference[Mesh]!:
     let grid = try MeshPrimitives.grid(2.0, 4)
@@ -142,6 +143,64 @@ func bevel_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) 
     defer same.release()
     counts(same, 25, 16)
     print("PASS PolyBevel: cube edge, segments, every edge, a line across a grid, an inner edge, boundary pass-through")
+
+func extrude_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) -> !:
+    # A region of four faces: one front point per region point, the inner
+    # point moved (its input copy goes), walls on the region's boundary.
+    let region = try made(grid, "PolyExtrude", "5 6 9 10", 3, [0.5, 0.0, 1.0, 0.0, 1.0], 4)
+    defer region.release()
+    counts(region, 33, 24)
+    near((try region.value().face_center(5)).y, 0.5)
+    near(try region.value().attribute_value(region.value().find_attribute("id", 2), 9), 90.0)
+    assert(region.value().group_size("top", 2) == 4)
+    # One by one: every face its own front and walls.
+    let apart = try made(grid, "PolyExtrude", "5 6", 3, [0.5, 0.0, 1.0, 1.0, 1.0], 2)
+    defer apart.release()
+    counts(apart, 33, 24)
+    # Divisions: rows of wall faces.
+    let rows = try made(grid, "PolyExtrude", "5", 3, [1.0, 0.0, 2.0, 0.0, 1.0], 1)
+    defer rows.release()
+    counts(rows, 33, 24)
+    near((try rows.value().point(29)).y, 0.5)
+    # A whole closed cube has no boundary: it moves out, no walls.
+    let shell = try made(cube, "PolyExtrude", "", 0, [0.5, 0.0, 1.0, 0.0, 1.0], 6)
+    defer shell.release()
+    counts(shell, 8, 6)
+    try closed(shell)
+    near(shell.value().bounds().maximum.x, 1.0 + 0.5 / math.sqrt(3.0))
+    # Inset by a distance: the region's rim moves in 0.1 across its faces,
+    # and the inner corners' uv follow their points.
+    let inset = try made(grid, "Inset", "5 6", 3, [0.1, 0.0, 0.0, 1.0], 2)
+    defer inset.release()
+    counts(inset, 31, 22)
+    try planar_uv(inset)
+    let inner = try inset.value().face_center(5)
+    near(inner.x, -0.25 + 0.05)
+    near(inner.z, -0.25)
+    let each = try made(grid, "Inset", "5 6", 3, [0.1, 0.2, 1.0, 1.0], 2)
+    defer each.release()
+    counts(each, 33, 24)
+    near((try each.value().face_center(6)).y, 0.2)
+    # Clamped: a thickness past half the face stops at half its edges.
+    let clamped = try made(grid, "Inset", "5", 3, [2.0, 0.0, 0.0, 1.0], 1)
+    defer clamped.release()
+    counts(clamped, 29, 20)
+    # Edges extrude into quads, outward for a boundary edge; the front edges
+    # are selected and the input's open side grows.
+    let flap = try made(grid, "PolyExtrude", "p0-1-2", 2, [0.5, 0.0, 1.0, 0.0, 1.0], 2)
+    defer flap.release()
+    counts(flap, 28, 18)
+    let result = try Verbs.run("PolyExtrude", grid, "p0-1-2", 2, [0.5, 0.0, 1.0, 0.0, 1.0])
+    defer result.release()
+    let fronts = try result.value().selection()
+    defer fronts.release()
+    assert(fronts.value().domain() == 4)
+    near((try flap.value().point(26)).z, -1.5)
+    # Nothing to extrude passes through with a warning.
+    let none_left = try Verbs.run("PolyExtrude", grid, "p0-1", 2, [0.0, 0.0, 1.0, 0.0, 1.0])
+    defer none_left.release()
+    assert(none_left.value().warning().length > 0)
+    print("PASS PolyExtrude and Inset: regions, individual faces, divisions, closed shells, distance insets, clamping, edges")
 
 func dump(mesh: interop.Reference[Mesh]) -> !:
     print(f"{mesh.value().point_count()} points {mesh.value().face_count()} faces")
