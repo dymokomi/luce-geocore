@@ -8,7 +8,7 @@ import math
 import interop
 import memory
 import geocore
-from geocore import Mesh, Vector3, Verbs
+from geocore import Mesh, Vector3, Verbs, Subdivision
 import geocore_parallel
 
 ## One case: what it runs, on which mesh (0 grid, 1 tube cut in two, 2 grid
@@ -88,7 +88,36 @@ pub func main(arguments: str[]) -> i32!:
         print(f"{case.name}\t{spent}\t{mesh.value().face_count()}\t{result.value().warning()}")
         mesh.release()
         result.release()
+    try subdivision_rows(grid)
     return 0
+
+## The display subdivision of the grid: the first display builds the plan
+## (level topology, carried attributes, sharpness) and evaluates; after a
+## Move only positions are evaluated; an unchanged mesh is a lookup.
+func subdivision_rows(grid: interop.Reference[Mesh]) -> !:
+    let levels: f64[2] = [1.0, 2.0]
+    for at in 0..<(usize)2:
+        let marking = try Verbs.run("Subdivision", grid, "", 0, [1.0, levels[at], 3.0, 1.0])
+        defer marking.release()
+        let marked = try marking.value().mesh()
+        defer marked.release()
+        var start = time.now()
+        let first = try Subdivision.display(marked)
+        defer first.release()
+        print(f"Subdivision display level {levels[at]}: plan and first evaluation\t{(f64)time.since(start) / 1000000.0}\t{first.value().face_count()}\t")
+        start = time.now()
+        let again = try Subdivision.display(marked)
+        again.release()
+        print(f"Subdivision display level {levels[at]}: unchanged mesh\t{(f64)time.since(start) / 1000000.0}\t{first.value().face_count()}\t")
+        let up: f64[15] = [0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+        let moving = try Verbs.run("Transform Components", marked, "350000-350999", 3, up)
+        defer moving.release()
+        let moved = try moving.value().mesh()
+        defer moved.release()
+        start = time.now()
+        let shown = try Subdivision.display(moved)
+        print(f"Subdivision display level {levels[at]}: after a Move (positions only)\t{(f64)time.since(start) / 1000000.0}\t{shown.value().face_count()}\t")
+        shown.release()
 
 ## The n×n quad grid in the XZ plane, one unit per quad.
 func quad_grid(n: usize) -> interop.Reference[Mesh]!:

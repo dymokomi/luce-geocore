@@ -1,0 +1,213 @@
+## The display mesh of a subdivided cage, cached in the cage's topology
+## cache (so every mesh with its connectivity shares it): plans by their key
+## (connectivity, settings, sharpness and the carried attributes' columns),
+## display meshes by plan and positions. An unchanged mesh costs a lookup.
+## The newest display keeps every level's positions, so a Move re-evaluates
+## only what the moved points reach: at each level the faces around them,
+## the edges and points those touch, and at the limit the final points
+## around those (display_update.lucb).
+
+## A display mesh made for one plan and one positions column.
+struct Shown:
+    let plan: u64
+    let positions: u64
+    let mesh: Mesh*
+
+## The newest display's state: the cage's points and each level's (f64,
+## levels 0..level, level l's points from `starts[l]`).
+struct LevelState:
+    var plan: u64 = 0
+    var points: Growing[Vector3]
+    var starts: Growing[usize]
+
+struct DisplayCache:
+    var lock: sync.Mutex
+    var plans: Growing[Plan*]
+    var shown: Growing[Shown]
+    var state: LevelState
+
+func dispose_cache(context: void*):
+    let cache = (DisplayCache*)context
+    for plan in cache.plans.view():
+        plan.close()
+        free(plan) in memory.heap
+    cache.plans.close()
+    for entry in cache.shown.view(): mesh_dispose(entry.mesh)
+    cache.shown.close()
+    cache.state.points.close()
+    cache.state.starts.close()
+    free(cache) in memory.heap
+
+## The key of the plan `mesh` needs: connectivity, settings, and the columns
+## of every attribute the levels carry or read (normals and hidden
+## attributes excepted: a Move refreshes normals, the display makes its own,
+## and hidden ones such as a verb's `.selection` are not carried).
+func plan_key(mesh: const Mesh*, settings: Settings) -> u64:
+    var key = (u64)mesh.topology_hash() *% 0x9E3779B97F4A7C15
+    key = (key ^ (u64)(u8)settings.scheme) *% 0x100000001B3
+    key = (key ^ (u64)settings.level) *% 0x100000001B3
+    key = (key ^ (1 if settings.corners else 0)) *% 0x100000001B3
+    for index in 0..<mesh.attribute_count():
+        let entry = attribute_entry(mesh, index) catch failure: continue
+        if entry.role == Role.normal or entry.name().bytes[0] == 46: continue
+        key = (key ^ entry.data.id()) *% 0x100000001B3
+    return key
+
+## The display mesh of `mesh` (another owner's share), or none when it is
+## not subdivided.
+pub func subdivided_display(mesh: const Mesh*) -> Mesh*?!:
+    let settings = settings_of(mesh)
+    if settings.scheme == Scheme.off or settings.level == 0: return none
+    let key = plan_key(mesh, settings)
+    let positions = mesh.points_id()
+    let context = try topology_extension(mesh, dispose_cache, make_cache)
+    let cache = (DisplayCache*)context
+    cache.lock.lock()
+    defer cache.lock.unlock()
+    for entry in cache.shown.view():
+        if entry.plan == key and entry.positions == positions: return try mesh_share(entry.mesh)
+    var plan: Plan*? = none
+    for known in cache.plans.view():
+        if known.key == key: plan = known
+    let chosen = plan else try keep_plan(cache, try build_plan(mesh, settings, key))
+    # The newest display of this plan updates where the cage moved;
+    # otherwise every level is evaluated.
+    var made: Mesh*? = none
+    if cache.state.plan == key and cache.shown.count > 0 and cache.shown.items[cache.shown.count - 1].plan == key:
+        made = try updated(mesh, chosen, &cache.state, cache.shown.items[cache.shown.count - 1].mesh)
+    let display = made else try evaluate(mesh, chosen, &cache.state)
+    # The caller's share first: once the cache holds `display`, nothing fails.
+    let result = mesh_share(display) catch failure:
+        mesh_dispose(display)
+        error(failure.code, failure.message)
+    if cache.shown.count == 2:
+        mesh_dispose(cache.shown.items[0].mesh)
+        cache.shown.items[0] = cache.shown.items[1]
+        cache.shown.count = 1
+    cache.shown.push(Shown(key, positions, display)) catch failure:
+        mesh_dispose(display)
+        mesh_dispose(result)
+        error(failure.code, failure.message)
+    return result
+
+func make_cache() -> void*!:
+    return (void*)(try new DisplayCache(sync.Mutex(), Growing[Plan*](), Growing[Shown](), LevelState(0, Growing[Vector3](), Growing[usize]())) in memory.heap)
+
+## Keep `plan` (the last two plans are kept).
+func keep_plan(cache: DisplayCache*, plan: Plan*) -> Plan*!:
+    if cache.plans.count == 2:
+        cache.plans.items[0].close()
+        free(cache.plans.items[0]) in memory.heap
+        cache.plans.items[0] = cache.plans.items[1]
+        cache.plans.count = 1
+    cache.plans.push(plan) catch failure:
+        plan.close()
+        free(plan) in memory.heap
+        error(failure.code, failure.message)
+    return plan
+
+## The cage's points in f64 (world space).
+func cage_points(mesh: const Mesh*, out: Vector3[]):
+    let origin = mesh_origin(mesh)
+    let exact = precise_span(mesh)
+    let points = point_span(mesh)
+    for at in 0..<points.length: out[at] = exact[at] if exact.length > 0 else points[at].vector().add(origin)
+
+## Every level's points of `mesh` under `plan`, into `state`: level l's are
+## state.points from state.starts[l].
+func evaluate_levels(mesh: const Mesh*, plan: const Plan*, state: LevelState*) -> !:
+    state.plan = 0
+    state.points.clear()
+    state.starts.clear()
+    var total = (usize)mesh.point_count()
+    try state.starts.push(0)
+    for level in 0..<plan.level:
+        try state.starts.push(total)
+        total += (usize)plan.meshes.items[level].point_count()
+    try state.starts.push(total)
+    try state.points.fill(total, Vector3())
+    cage_points(mesh, state.points.items[..<(usize)mesh.point_count()])
+    var every: u32[1]
+    var source: const Mesh* = mesh
+    for level in 0..<plan.level:
+        let topology = try Topology.of(source)
+        let source_points = state.points.items[state.starts.items[level]..<state.starts.items[level + 1]]
+        let to = state.points.items[state.starts.items[level + 1]..<state.starts.items[level + 2]]
+        refine_positions(plan.scheme, &topology, source_points, plan.edge_sharpness.items[level].view(), plan.point_sharpness.items[level].view(), to, every[..<0], every[..<0], every[..<0])
+        source = plan.meshes.items[level]
+    state.plan = plan.key
+
+## The display mesh for `mesh`'s positions: every level refined, the last
+## level's points taken to the limit surface, placed on the plan's template
+## with the limit normals as point `N`.
+func evaluate(mesh: const Mesh*, plan: const Plan*, state: LevelState*) -> Mesh*!:
+    try evaluate_levels(mesh, plan, state)
+    let template = plan.template()
+    let topology = try Topology.of(template)
+    let first = state.starts.items[plan.level]
+    let count = state.starts.items[plan.level + 1] - first
+    var limit = Growing[Vector3]()
+    defer limit.close()
+    try limit.fill(count, Vector3())
+    var normals = Growing[Vector3]()
+    defer normals.close()
+    try normals.fill(count, Vector3())
+    var every: u32[1]
+    limit_surface(plan.scheme, &topology, state.points.items[first..<first + count], plan.edge_sharpness.items[plan.level].view(), plan.point_sharpness.items[plan.level].view(), limit.items[..<count], normals.items[..<count], every[..<0])
+    var moved = Growing[u32]()
+    defer moved.close()
+    try moved.fill(count, 0)
+    for at in 0..<count: moved.items[at] = (u32)at
+    return try placed_display(template, limit.view(), normals.view(), moved.view(), none)
+
+## `base` (the template, or the previous display) with points `moved` at
+## `limit` and normals `normals` (both indexed like `moved`), every other
+## point and normal as `base` has them (`previous` gives the old normals).
+func placed_display(base: const Mesh*, limit: const Vector3[], normals: const Vector3[], moved: const u32[], previous: const Mesh*?) -> Mesh*!:
+    let origin = mesh_origin(base)
+    var placed = try Column[Float3].copy_of(point_span(base))
+    defer placed.release()
+    let out = placed.span()
+    for at in 0..<moved.length: out[(usize)moved[at]] = Float3.of(limit[at].subtract(origin))
+    let made = try displayed(base, placed, moved)
+    errdefer mesh_dispose(made)
+    let count = point_span(base).length
+    var attribute = try Attribute.create("N", Domain.point, DataType.float32, 3, count)
+    let values = typed_mut[f32](attribute.data.span())
+    if let old = previous:
+        let index = old.find_attribute("N", (i64)(u8)Domain.point)
+        if index >= 0:
+            let entry = attribute_entry(old, index) catch failure:
+                attribute.release()
+                error(failure.code, failure.message)
+            let source = typed[f32](entry.data.view())
+            if source.length == values.length: memory.copy(values, source, values.length)
+    for at in 0..<moved.length:
+        let point = (usize)moved[at]
+        let n = normals[at]
+        values[point * 3] = (f32)n.x
+        values[point * 3 + 1] = (f32)n.y
+        values[point * 3 + 2] = (f32)n.z
+    try put_attribute(made, attribute)
+    return made
+
+## The Luce view: a mesh's display subdivision.
+pub struct Subdivision:
+    let reserved: u8 = 0
+
+    ## The mesh the viewport draws for `mesh`: its subdivided limit surface,
+    ## or `mesh` itself when it is not subdivided.
+    pub static func display(mesh: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
+        let storage = try subdivided_display(try mesh.get()) else return mesh.clone()
+        return try mesh_adopt(storage)
+
+    ## The display levels `mesh` asks for, after the budget clamp (0: none).
+    pub static func level(mesh: interop.Reference[Mesh]) -> i64!:
+        let settings = settings_of(try mesh.get())
+        return 0 if settings.scheme == Scheme.off else (i64)settings.level
+
+    ## The cage face a display face came from (-1 when it has no cage).
+    pub static func cage_face(display: interop.Reference[Mesh], face: i64) -> i64!:
+        let index = (try display.get()).find_attribute(".cage_face", (i64)(u8)Domain.face)
+        if index < 0: return -1
+        return (i64)(try (try display.get()).attribute_value(index, face))

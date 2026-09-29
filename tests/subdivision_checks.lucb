@@ -1,0 +1,170 @@
+## Subdivision as a display attribute: the Subdivision verb only writes
+## detail attributes; the display mesh is the refined cage taken to its limit
+## surface. A limit point does not move with the level (every level-1 point
+## keeps its id at level 2), creases pin the surface to the cage, and the
+## display is cached per connectivity and positions.
+import interop
+import math
+from geocore import Mesh, MeshPrimitives, Verbs, Subdivision, Vector3
+from geocore_kernel import clear_group_cache
+from verb_run import verb_mesh
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let cube = try Mesh.cube()
+    defer cube.release()
+    try limit_checks(cube)
+    try crease_checks(cube)
+    try loop_checks(cube)
+    try cache_checks(cube)
+
+func near(a: f64, b: f64, tolerance: f64 = 0.000001):
+    if math.abs(a - b) > tolerance: print(f"near: {a} vs {b}")
+    assert(math.abs(a - b) <= tolerance)
+
+func subdivided(cage: interop.Reference[Mesh], scheme: f64, level: f64) -> interop.Reference[Mesh]!:
+    let marked = try verb_mesh("Subdivision", cage, "", 0, [scheme, level, 3.0, 1.0])
+    defer marked.release()
+    return try Subdivision.display(marked)
+
+func closed(mesh: interop.Reference[Mesh]) -> !:
+    let edges = try mesh.value().edge_count()
+    assert((try mesh.value().domain_count(1)) == edges * 2 and mesh.value().point_count() - edges + mesh.value().face_count() == 2)
+
+func limit_checks(cube: interop.Reference[Mesh]) -> !:
+    # The verb writes only detail attributes: the cage is unchanged.
+    let marked = try verb_mesh("Subdivision", cube, "", 0, [1.0, 2.0, 3.0, 1.0])
+    defer marked.release()
+    assert(marked.value().face_count() == 6 and marked.value().point_count() == 8 and marked.value().topology_hash() == cube.value().topology_hash())
+    assert((try Subdivision.level(marked)) == 2 and (try Subdivision.level(cube)) == 0)
+    let one = try subdivided(cube, 1.0, 1.0)
+    defer one.release()
+    let two = try subdivided(cube, 1.0, 2.0)
+    defer two.release()
+    assert(one.value().face_count() == 24 and one.value().point_count() == 26)
+    # The display is not subdivided again.
+    assert((try Subdivision.level(one)) == 0)
+    assert(two.value().face_count() == 96 and two.value().point_count() == 98)
+    try closed(one)
+    try closed(two)
+    # Limit points stay put across levels.
+    for point in 0..<one.value().point_count():
+        let a = try one.value().point(point)
+        let b = try two.value().point(point)
+        near(a.x, b.x, 0.00001)
+        near(a.y, b.y, 0.00001)
+        near(a.z, b.z, 0.00001)
+    # A cube corner (valence 3) converges inside the cage along its diagonal,
+    # its normal pointing out along it.
+    let box = cube.value().bounds()
+    let center = box.minimum.add(box.maximum).multiply_scalar(0.5)
+    let corner = try one.value().point(0)
+    let cage_corner = try cube.value().point(0)
+    let out = cage_corner.subtract(center)
+    let pulled = corner.subtract(center)
+    assert(pulled.length() < out.length() and pulled.length() > out.length() * 0.3)
+    let normals = one.value().find_attribute("N", 0)
+    assert(normals >= 0)
+    let n = Vector3(try one.value().attribute_value(normals, 0, 0), try one.value().attribute_value(normals, 0, 1), try one.value().attribute_value(normals, 0, 2))
+    near(n.length(), 1.0, 0.0001)
+    assert(n.dot(out.multiply_scalar(1.0 / out.length())) > 0.999)
+    # Display faces know their cage face.
+    for face in 0..<one.value().face_count():
+        let cage = try Subdivision.cage_face(one, face)
+        assert(cage >= 0 and cage < 6)
+
+func crease_checks(cube: interop.Reference[Mesh]) -> !:
+    # Infinitely sharp edges everywhere: the display is the cage's shape.
+    let sharp = try verb_mesh("Crease", cube, "", 0, [10.0, 0.0])
+    defer sharp.release()
+    let pinned = try subdivided(sharp, 1.0, 2.0)
+    defer pinned.release()
+    let a = pinned.value().bounds()
+    let b = cube.value().bounds()
+    near(a.maximum.x, b.maximum.x)
+    near(a.minimum.y, b.minimum.y)
+    # A sharpness of 1 keeps the first level sharp, then smooths: between.
+    let soft = try verb_mesh("Crease", cube, "", 0, [1.0, 0.0])
+    defer soft.release()
+    let rounded = try subdivided(soft, 1.0, 2.0)
+    defer rounded.release()
+    let smooth = try subdivided(cube, 1.0, 2.0)
+    defer smooth.release()
+    # Measured at a cube corner (a limit point with the same id at every level).
+    let center = b.minimum.add(b.maximum).multiply_scalar(0.5)
+    let sharp_reach = (try pinned.value().point(0)).subtract(center).length()
+    let soft_reach = (try rounded.value().point(0)).subtract(center).length()
+    let smooth_reach = (try smooth.value().point(0)).subtract(center).length()
+    assert(soft_reach < sharp_reach - 0.0001 and soft_reach > smooth_reach + 0.0001)
+    # Bilinear keeps the cage's surface.
+    let flat = try subdivided(cube, 3.0, 2.0)
+    defer flat.release()
+    near(flat.value().bounds().maximum.x, b.maximum.x)
+    try closed(flat)
+
+func loop_checks(cube: interop.Reference[Mesh]) -> !:
+    let triangles = try verb_mesh("Triangulate", cube, "", 0, [0.0])
+    defer triangles.release()
+    let one = try subdivided(triangles, 2.0, 1.0)
+    defer one.release()
+    let two = try subdivided(triangles, 2.0, 2.0)
+    defer two.release()
+    assert(one.value().face_count() == 48 and two.value().face_count() == 192)
+    try closed(two)
+    for point in 0..<one.value().point_count():
+        let a = try one.value().point(point)
+        let b = try two.value().point(point)
+        near(a.x, b.x, 0.00001)
+        near(a.y, b.y, 0.00001)
+    # Loop on quads falls back to Catmull-Clark.
+    let quads = try subdivided(cube, 2.0, 1.0)
+    defer quads.release()
+    assert(quads.value().face_count() == 24)
+
+func cache_checks(cube: interop.Reference[Mesh]) -> !:
+    let marked = try verb_mesh("Subdivision", cube, "", 0, [1.0, 2.0, 3.0, 1.0])
+    defer marked.release()
+    let first = try Subdivision.display(marked)
+    defer first.release()
+    let again = try Subdivision.display(marked)
+    defer again.release()
+    assert(again.value().points_id() == first.value().points_id())
+    # A Move keeps the plan and re-evaluates positions only.
+    let up: f64[15] = [0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+    let moved = try verb_mesh("Transform Components", marked, "0", 1, up)
+    defer moved.release()
+    let shown = try Subdivision.display(moved)
+    defer shown.release()
+    assert(shown.value().points_id() != first.value().points_id() and shown.value().topology_hash() == first.value().topology_hash())
+    assert((try shown.value().point(0)).y > (try first.value().point(0)).y)
+    # The update after a Move equals a full evaluation (Clean rebuilds the
+    # same mesh with its own caches): two levels on a bent, creased grid.
+    let grid = try MeshPrimitives.grid(2.0, 8)
+    defer grid.release()
+    let bent = try verb_mesh("Mountain", grid, "", 0, [0.3, 1.0])
+    defer bent.release()
+    let creased = try verb_mesh("Crease", bent, "p30-31-32-33", 2, [1.5, 0.0])
+    defer creased.release()
+    let deep = try verb_mesh("Subdivision", creased, "", 0, [1.0, 2.0, 3.0, 1.0])
+    defer deep.release()
+    let before = try Subdivision.display(deep)
+    defer before.release()
+    let lifted = try verb_mesh("Transform Components", deep, "40 41", 1, up)
+    defer lifted.release()
+    let updated = try Subdivision.display(lifted)
+    defer updated.release()
+    let rebuilt = try verb_mesh("Clean", lifted, "", 0, [0.0])
+    defer rebuilt.release()
+    let fresh = try Subdivision.display(rebuilt)
+    defer fresh.release()
+    assert(updated.value().point_count() == fresh.value().point_count() and updated.value().points_id() != before.value().points_id())
+    let n_updated = updated.value().find_attribute("N", 0)
+    let n_fresh = fresh.value().find_attribute("N", 0)
+    for point in 0..<fresh.value().point_count():
+        let a = try updated.value().point(point)
+        let b = try fresh.value().point(point)
+        near(a.x, b.x, 0.00001)
+        near(a.y, b.y, 0.00001)
+        near(a.z, b.z, 0.00001)
+        for axis in 0..<3: near(try updated.value().attribute_value(n_updated, point, axis), try fresh.value().attribute_value(n_fresh, point, axis), 0.0001)
+    print("PASS subdivision display: Catmull-Clark, Loop and bilinear limits, level-invariant limit points, creases, cage faces, cached plans, Move updates equal to full evaluations")

@@ -1,0 +1,116 @@
+## Updating the newest display after a Move: the cage points that moved,
+## and at each level only what they reach (the faces around the moved
+## points, the edges and points of those faces), are evaluated again; at the
+## final level the limit is taken again at the points around the moved ones.
+## The display mesh is the previous one with only those points moved, so its
+## caches and GPU buffers update in part. When more than a quarter of the
+## cage moved, a full evaluation is cheaper.
+
+## Elements reached from `points` at one level: the faces around them, the
+## edges of those faces and at the points, and the points of those faces.
+struct Reach:
+    var faces: Growing[u32]
+    var edges: Growing[u32]
+    var points: Growing[u32]
+
+    func init():
+        self.faces = Growing[u32]()
+        self.edges = Growing[u32]()
+        self.points = Growing[u32]()
+
+    mutating func close():
+        self.faces.close()
+        self.edges.close()
+        self.points.close()
+
+func reach(topology: const Topology*, moved: const u32[], out: Reach*) -> !:
+    var faces = try BitsBuilder.zeros(topology.faces())
+    defer faces.close()
+    var edges = try BitsBuilder.zeros(topology.edges())
+    defer edges.close()
+    var points = try BitsBuilder.zeros(topology.points)
+    defer points.close()
+    for point in moved:
+        points.set((usize)point)
+        for slot in (usize)topology.point_edge_offsets[(usize)point]..<(usize)topology.point_edge_offsets[(usize)point + 1]:
+            let edge = (usize)topology.point_edges[slot]
+            edges.set(edge)
+            for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                faces.set((usize)topology.corner_faces[(usize)topology.edge_corners[at]])
+    let face_bits = faces.view()
+    for face in 0..<topology.faces():
+        if not face_bits.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            edges.set((usize)topology.corner_edges[corner])
+            points.set((usize)topology.corners[corner])
+    try listed(face_bits, &out.faces)
+    try listed(edges.view(), &out.edges)
+    try listed(points.view(), &out.points)
+
+func listed(bits: Bits, out: Growing[u32]*) -> !:
+    out.clear()
+    try out.reserve(bits.population())
+    for index in 0..<bits.count:
+        if bits.get(index):
+            out.items[out.count] = (u32)index
+            out.count += 1
+
+## The previous display `previous` updated to `mesh`'s positions, or none
+## when a full evaluation is due.
+func updated(mesh: const Mesh*, plan: const Plan*, state: LevelState*, previous: const Mesh*) -> Mesh*?!:
+    let cage = (usize)mesh.point_count()
+    if state.starts.count != plan.level + 2 or state.starts.items[1] != cage: return none
+    var current = Growing[Vector3]()
+    defer current.close()
+    try current.fill(cage, Vector3())
+    cage_points(mesh, current.items[..<cage])
+    var moved = Growing[u32]()
+    defer moved.close()
+    for point in 0..<cage:
+        let a = current.items[point]
+        let b = state.points.items[point]
+        if a.x != b.x or a.y != b.y or a.z != b.z: try moved.push((u32)point)
+    if moved.count * 4 > cage: return none
+    if moved.count == 0: return try mesh_share(previous)
+    # In flight: a failure below leaves the state to a full evaluation.
+    state.plan = 0
+    for point in moved.view(): state.points.items[(usize)point] = current.items[(usize)point]
+    var around = Reach()
+    defer around.close()
+    var affected = Growing[u32]()
+    defer affected.close()
+    try affected.assign(moved.view())
+    var source: const Mesh* = mesh
+    for level in 0..<plan.level:
+        let topology = try Topology.of(source)
+        try reach(&topology, affected.view(), &around)
+        let source_points = state.points.items[state.starts.items[level]..<state.starts.items[level + 1]]
+        let to = state.points.items[state.starts.items[level + 1]..<state.starts.items[level + 2]]
+        var face_list = around.faces.view()
+        if plan.scheme == Scheme.loop: face_list = face_list[..<0]
+        refine_positions(plan.scheme, &topology, source_points, plan.edge_sharpness.items[level].view(), plan.point_sharpness.items[level].view(), to, face_list, around.edges.view(), around.points.view())
+        # The next level's affected points: these points' vertex points, the
+        # edges' edge points and the faces' face points.
+        affected.clear()
+        for point in around.points.view(): try affected.push(point)
+        for edge in around.edges.view(): try affected.push((u32)(topology.points + (usize)edge))
+        if plan.scheme != Scheme.loop:
+            for face in around.faces.view(): try affected.push((u32)(topology.points + topology.edges() + (usize)face))
+        source = plan.meshes.items[level]
+    # The limit around the affected final points.
+    let template = plan.template()
+    let topology = try Topology.of(template)
+    try reach(&topology, affected.view(), &around)
+    let count = around.points.count
+    var limit = Growing[Vector3]()
+    defer limit.close()
+    try limit.fill(count, Vector3())
+    var normals = Growing[Vector3]()
+    defer normals.close()
+    try normals.fill(count, Vector3())
+    let first = state.starts.items[plan.level]
+    let final = state.points.items[first..<state.starts.items[plan.level + 1]]
+    limit_surface(plan.scheme, &topology, final, plan.edge_sharpness.items[plan.level].view(), plan.point_sharpness.items[plan.level].view(), limit.items[..<count], normals.items[..<count], around.points.view())
+    let made = try placed_display(previous, limit.view(), normals.view(), around.points.view(), previous)
+    state.plan = plan.key
+    return made

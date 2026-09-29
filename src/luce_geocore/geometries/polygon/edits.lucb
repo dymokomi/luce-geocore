@@ -187,6 +187,48 @@ extend Mesh:
         discard(self.topology.users.add(1, .relaxed))
         return storage.data
 
+    ## A display mesh: `fresh` positions (relative to this mesh's origin, the
+    ## caller keeping its reference) whose points `moved` changed, with this
+    ## mesh's triangles and every other column shared. Face normals of the
+    ## faces around `moved` are recomputed; a face that collapses keeps a zero
+    ## normal instead of failing (a subdivided limit surface may pinch).
+    func displayed_storage(fresh: Column[Float3], moved: const u32[]) -> Mesh*!:
+        var owned = fresh.share()
+        errdefer owned.release()
+        let incidence = try self.incidence()
+        var normals = self.normals.share()
+        errdefer normals.release()
+        let output = try normals.writable()
+        let faces = self.offsets.count() - 1
+        var touched = try BitsBuilder.zeros(faces)
+        defer touched.close()
+        for point in moved:
+            for at in (usize)incidence.0[(usize)point]..<(usize)incidence.0[(usize)point + 1]: touched.set((usize)incidence.1[at])
+        var work = DisplayNormals(owned.view(), self.offsets.view(), self.corners.view(), touched.view(), output)
+        parallel.parallel_for(faces, 4096, display_normals, (void*)&work)
+        var attributes = try self.attributes.shared()
+        errdefer attributes.close()
+        let queries = try QueryCache.after(self.queries)
+        errdefer release_query(queries)
+        let shading = try ShadingCache.after(self.shading, moved)
+        errdefer release_shading(shading)
+        let extent = try position_edit.bounds_of(owned.view(), self.origin)
+        let storage = try alloc Mesh[1] in memory.heap
+        storage[0] = self.shared_columns()
+        owned.set_parent(self.positions.id())
+        if moved.length > 0 and moved.length < owned.count():
+            owned.set_changed((usize)min_of(moved), (usize)max_of(moved) + 1)
+        storage[0].positions.release()
+        storage[0].positions = owned
+        storage[0].normals.release()
+        storage[0].normals = normals
+        storage[0].extent = extent
+        storage[0].attributes = attributes
+        storage[0].queries = queries
+        storage[0].shading = shading
+        discard(self.topology.users.add(1, .relaxed))
+        return storage.data
+
     pub func transformed(translation: Vector3, rotation: Vector3, scale: Vector3) -> interop.Reference[Mesh]!:
         if not translation.is_finite() or not rotation.is_finite() or not scale.is_finite() or math.abs(scale.x) < 0.000001 or math.abs(scale.y) < 0.000001 or math.abs(scale.z) < 0.000001:
             error(errors.invalid, "mesh transform must be finite and nonsingular")
@@ -322,3 +364,24 @@ func max_of(values: const u32[]) -> u32:
     var most = values[0]
     for value in values: most = value if value > most else most
     return most
+
+struct DisplayNormals:
+    let positions: const Float3[]
+    let offsets: const i32[]
+    let corners: const i32[]
+    let touched: Bits
+    let normals: Float3[]
+
+func display_normals(context: void*?, first: usize, end: usize):
+    let work = (DisplayNormals*)(context else return)
+    for face in first..<end:
+        if not work.touched.get(face): continue
+        let start = (usize)work.offsets[face]
+        let size = (usize)work.offsets[face + 1] - start
+        var normal = Vector3()
+        for at in 0..<size:
+            let p = work.positions[(usize)work.corners[start + at]].vector()
+            let q = work.positions[(usize)work.corners[start + (at + 1) % size]].vector()
+            normal = normal.add(p.cross(q))
+        let length = normal.length()
+        work.normals[face] = Float3.of(normal.multiply_scalar(1.0 / length) if length > 0.0 else Vector3())

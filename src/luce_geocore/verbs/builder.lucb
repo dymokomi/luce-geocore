@@ -21,6 +21,10 @@ pub struct TopologyBuilder:
     var origin: Vector3
     ## Point pairs whose edges are the output selection (see select_edge).
     var selected_edges: Growing[i32]
+    ## Triangulate new faces as fans and trust them (no ear clipping, no
+    ## area check; face normals left zero): subdivision templates, whose
+    ## positions the display replaces.
+    pub var fans: bool = false
 
     pub func init():
         self.positions = Growing[Vector3]()
@@ -34,6 +38,7 @@ pub struct TopologyBuilder:
         self.corner_mix = Mix()
         self.origin = Vector3()
         self.selected_edges = Growing[i32]()
+        self.fans = false
 
     ## Start from `source`'s frame (its origin).
     pub mutating func begin(source: const Mesh*) -> !:
@@ -199,10 +204,12 @@ pub struct TopologyBuilder:
         defer corners.release()
         var triangles = try Column[i32].allocate((corner_total - faces * 2) * 3)
         defer triangles.release()
-        var work = TriangleWork(offset_span(source), triangle_span(source), self.offsets.view(), self.face_parents.view(), self.copied.view(), triangles.span())
+        var work = TriangleWork(offset_span(source), triangle_span(source), self.offsets.view(), self.face_parents.view(), self.copied.view(), triangles.span(), self.fans)
         parallel.parallel_for(faces, 4096, copy_triangles, (void*)&work)
         var normals: Column[Float3]
-        let storage = try assembled(positions.take(), self.origin, offsets.take(), corners.take(), triangles.take(), normals, exact.take())
+        defer normals.release()
+        if self.fans: normals = try Column[Float3].filled(faces, Float3.of(Vector3()))
+        let storage = try assembled(positions.take(), self.origin, offsets.take(), corners.take(), triangles.take(), normals.take(), exact.take())
         errdefer mesh_dispose(storage)
         try propagate(source, storage, self.point_parents.view(), self.face_parents.view(), self.corner_parents.view(), &self.point_mix, &self.corner_mix)
         return storage
@@ -237,6 +244,7 @@ struct TriangleWork:
     let parents: const i32[]
     let copied: const u8[]
     let triangles: i32[]
+    let fans: bool
 
 ## Copied faces take their parent's triangles, shifted to their corners;
 ## the rest are marked for ear clipping.
@@ -247,7 +255,13 @@ func copy_triangles(context: void*?, first: usize, end: usize):
         let size = (usize)work.offsets[face + 1] - start
         let target = (start - face * 2) * 3
         if work.copied[face] == 0:
-            work.triangles[target] = -1
+            if not work.fans:
+                work.triangles[target] = -1
+                continue
+            for triangle in 0..<size - 2:
+                work.triangles[target + triangle * 3] = (i32)start
+                work.triangles[target + triangle * 3 + 1] = (i32)(start + triangle + 1)
+                work.triangles[target + triangle * 3 + 2] = (i32)(start + triangle + 2)
             continue
         let parent = (usize)work.parents[face]
         let old_start = (usize)work.source_offsets[parent]

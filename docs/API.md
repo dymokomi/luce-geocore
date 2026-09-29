@@ -114,6 +114,31 @@ mesh in the same order, with the same display triangles and attribute provenance
 as sequential `dissolve_edge` calls. This is native single-owner scratch,
 not a concurrent mutable mesh or a CAD-specific merge policy.
 
+## Subdivision as a display attribute
+
+The Subdivision verb writes detail attributes only (`subd.scheme`: 1
+Catmull-Clark, 2 Loop, 3 bilinear; `subd.level`, `subd.render_level`,
+`subd.boundary`); downstream nodes keep reading the cage. The Crease verb sets
+the edge attribute `crease` (USD sharpness: 10 infinitely sharp, s sharp for s
+levels, fractions blending); `corner_sharpness` on points pins corners.
+
+`Subdivision.display(mesh)` is the mesh the viewport draws: the cage refined
+`subd.level` times (clamped to 8M faces) and taken to its limit surface, with
+limit normals as point `N` (zebra and curvature read them) and `.cage_face` on
+each face. Its plan (each level's refined connectivity with the cage's
+attributes carried, and each level's sharpness) is built once per
+connectivity, settings, sharpness and attribute columns, and kept in the
+cage's topology cache (`TopologyCache.extension_of`), so every mesh with that
+connectivity shares it. A Move re-evaluates only what the moved points reach
+at each level and the limit around it, on the previous display mesh (its
+columns change in part); an unchanged mesh is a lookup. luce-3d's renderer
+draws a subdivided cage's display surface with the cage's wires over it and
+maps a cage face selection onto the display faces; luced-3d's worker makes the
+display before publishing, so the renderer finds it cached.
+
+On the 700k-face grid (display level 1, 2.8M faces): plan and first
+evaluation 1.3 s, a Move of 1k faces 36 ms, an unchanged mesh 0.005 ms.
+
 ## Groups, text and roles
 
 A group is a boolean attribute flagged as a group, on the point, corner,

@@ -1,0 +1,52 @@
+## Verbs that set how a mesh displays, not its geometry: Subdivision (the
+## detail attributes subdivision.lucb reads: the viewport draws the limit
+## surface, downstream nodes keep the cage) and Crease (the edge attribute
+## `crease`, USD sharpness, which Subdivision and the display follow).
+
+let subdivision_parms: ParmSpec[4] = [
+    ParmSpec("Scheme", ParmKind.menu, 1.0, 0.0, 3.0, 1, "None|Catmull-Clark|Loop|Bilinear", "How the display refines the cage. Loop needs triangles (others fall back to Catmull-Clark)."),
+    ParmSpec("Display level", ParmKind.integer, 2.0, 0.0, 6.0, 1, "", "Refinement levels drawn in the viewport (clamped to 8M faces)."),
+    ParmSpec("Render level", ParmKind.integer, 3.0, 0.0, 6.0, 1, "", "Refinement levels for renders and exports."),
+    ParmSpec("Boundary", ParmKind.menu, 1.0, 0.0, 1.0, 1, "Sharp edges|Sharp edges and corners", "Open boundaries stay sharp; with corners, a boundary point on one face stays put too.")]
+
+pub func subdivision_verb() -> Verb:
+    return Verb("Subdivision", "Subdivide", "Display the mesh as a subdivision surface; downstream nodes read the cage", Domain.face, true, subdivision_parms, false, cook_subdivision)
+
+let crease_parms: ParmSpec[2] = [
+    ParmSpec("Sharpness", ParmKind.number, 10.0, 0.0, 10.0, 1, "", "USD crease sharpness: 0 smooth, 10 infinitely sharp; s stays sharp for s levels.", 5.0),
+    ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Set|Clear", "Give the group's edges this sharpness, or make them smooth.")]
+
+pub func crease_verb() -> Verb:
+    return Verb("Crease", "Subdivide", "Set the crease sharpness of the group's edges for subdivision", Domain.edge, true, crease_parms, false, cook_crease)
+
+func cook_subdivision(input: const VerbInput*, output: VerbOutput*) -> !:
+    let names: str[4] = ["subd.scheme", "subd.level", "subd.render_level", "subd.boundary"]
+    var current = try mesh_adopt(try mesh_share(input.mesh))
+    defer current.release()
+    for at in 0..<(usize)4:
+        let value: f64[1] = [math.floor(input.parms.at(at))]
+        let next = try current.value().with_single_attribute(names[at], (i64)(u8)Domain.detail, value[..<1], true)
+        current.release()
+        current = next
+    output.mesh = try mesh_share(current.value())
+
+func cook_crease(input: const VerbInput*, output: VerbOutput*) -> !:
+    let sharpness = input.parms.at(0)
+    if not math.is_finite(sharpness) or sharpness < 0.0: error(errors.invalid, "Crease sharpness must be finite and not negative")
+    let value = (f32)(0.0 if input.parms.at(1) == 1.0 else math.min(10.0, sharpness))
+    let mesh = input.mesh
+    let edges = (usize)(try mesh.edge_count())
+    var attribute = try Attribute.create("crease", Domain.edge, DataType.float32, 1, edges)
+    let values = attribute_ops.typed_mut[f32](attribute.data.span())
+    let existing = mesh.find_attribute("crease", (i64)(u8)Domain.edge)
+    for edge in 0..<edges:
+        values[edge] = value if input.group.get(edge) else (f32)(0.0 if existing < 0 else (mesh.attribute_value(existing, (i64)edge) catch failure: recover 0.0))
+    let made = mesh_share(mesh) catch failure:
+        attribute.release()
+        error(failure.code, failure.message)
+    put_attribute(made, attribute) catch failure:
+        mesh_dispose(made)
+        error(failure.code, failure.message)
+    output.mesh = made
+    output.selection = try BitsBuilder.copy_of(input.group)
+    output.selection_domain = Domain.edge

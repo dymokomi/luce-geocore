@@ -19,6 +19,7 @@ import set_checks
 import group_language_checks
 import verb_checks
 import modeling_checks
+import subdivision_checks
 import curve_checks
 import codec_checks
 
@@ -114,6 +115,9 @@ pub func main(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 400, modeling_checks.exercise)
     try modeling_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, subdivision_checks.exercise)
+    try subdivision_checks.exercise()
     settle(&tracker)
     inject(&tracker, 700, curve_checks.exercise)
     try curve_checks.run()

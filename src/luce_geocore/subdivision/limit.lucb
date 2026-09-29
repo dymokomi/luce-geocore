@@ -1,0 +1,164 @@
+## The limit surface at the final level's points, in parallel: where each
+## point converges and its limit normal, which zebra and curvature shading
+## read. A smooth interior point takes the scheme's limit position and the
+## cross product of its two limit tangents (Catmull-Clark: Halstead et al.'s
+## masks over the ring of edge and diagonal neighbours; Loop: cosine and
+## sine masks over the neighbours). A crease point converges to
+## (e1 + 4v + e2) / 6, a corner stays; their normals, and bilinear ones,
+## average the faces around them.
+
+struct LimitWork:
+    let scheme: Scheme
+    let topology: const Topology*
+    let positions: const Vector3[]
+    let edge_sharpness: const f32[]
+    let point_sharpness: const f32[]
+    let out_positions: Vector3[]
+    let out_normals: Vector3[]
+    ## Only these points (every one when empty); with a list the outputs are
+    ## compact (entry i for point points[i]).
+    let points: const u32[]
+
+pub func limit_surface(scheme: Scheme, topology: const Topology*, positions: const Vector3[], edge_sharpness: const f32[], point_sharpness: const f32[], out_positions: Vector3[], out_normals: Vector3[], points: const u32[]):
+    var work = LimitWork(scheme, topology, positions, edge_sharpness, point_sharpness, out_positions, out_normals, points)
+    parallel.parallel_for(points.length if points.length > 0 else topology.points, 2048, limit_points, (void*)&work)
+
+## The area-weighted normal of the faces around `point` (each met through
+## both of its edges there, which doubles every weight alike).
+func face_average(work: const LimitWork*, point: usize) -> Vector3:
+    let topology = work.topology
+    var sum = Vector3()
+    for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+            let face = (usize)topology.corner_faces[(usize)topology.edge_corners[at]]
+            let start = (usize)topology.offsets[face]
+            let size = (usize)topology.offsets[face + 1] - start
+            var normal = Vector3()
+            for index in 0..<size:
+                let p = work.positions[(usize)topology.corners[start + index]]
+                let q = work.positions[(usize)topology.corners[start + (index + 1) % size]]
+                normal = normal.add(p.cross(q))
+            sum = sum.add(normal)
+    return sum
+
+func direction_of(value: Vector3) -> Vector3:
+    let length = value.length()
+    return value.multiply_scalar(1.0 / length) if length > 0.0 else Vector3(0.0, 1.0, 0.0)
+
+func limit_points(context: void*?, first: usize, end: usize):
+    let work = (LimitWork*)(context else return)
+    let topology = work.topology
+    var ring: i32[128]
+    var diagonals: i32[128]
+    for at in first..<end:
+        let point = element(work.points, at)
+        let out = at if work.points.length > 0 else point
+        let here = work.positions[point]
+        work.out_positions[out] = here
+        if work.scheme == Scheme.bilinear:
+            work.out_normals[out] = direction_of(face_average(work, point))
+            continue
+        let start = (usize)topology.point_edge_offsets[point]
+        let stop = (usize)topology.point_edge_offsets[point + 1]
+        let n = stop - start
+        if n == 0: continue
+        var sharp_count: usize = 0
+        var sharp_ends = Vector3()
+        for slot in start..<stop:
+            let edge = (usize)topology.point_edges[slot]
+            let boundary = topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge] != 2
+            if boundary or work.edge_sharpness[edge] > 0.0:
+                sharp_count += 1
+                let a = (usize)topology.edge_points[edge * 2]
+                sharp_ends = sharp_ends.add(work.positions[(usize)topology.edge_points[edge * 2 + 1] if a == point else a])
+        if work.point_sharpness[point] > 0.0 or sharp_count > 2:
+            work.out_normals[out] = direction_of(face_average(work, point))
+            continue
+        if sharp_count == 2:
+            work.out_positions[out] = sharp_ends.add(here.multiply_scalar(4.0)).multiply_scalar(1.0 / 6.0)
+            work.out_normals[out] = direction_of(face_average(work, point))
+            continue
+        # Smooth: the ring in rotation order (a closed fan of quads or triangles).
+        if n > 128 or not fan(topology, point, n, ring[..<n], diagonals[..<n], work.scheme == Scheme.loop):
+            work.out_normals[out] = direction_of(face_average(work, point))
+            continue
+        let count = (f64)n
+        let turn = 6.283185307179586 / count
+        # cos and sin of turn * i by rotation (two trig calls a point).
+        let step_cos = math.cos(turn)
+        let step_sin = math.sin(turn)
+        var cosines: f64[129]
+        var sines: f64[129]
+        cosines[0] = 1.0
+        sines[0] = 0.0
+        for i in 0..<n:
+            cosines[i + 1] = cosines[i] * step_cos - sines[i] * step_sin
+            sines[i + 1] = sines[i] * step_cos + cosines[i] * step_sin
+        var tangent_u = Vector3()
+        var tangent_v = Vector3()
+        if work.scheme == Scheme.loop:
+            let beta = loop_beta(count)
+            let omega = 1.0 / (3.0 / (8.0 * beta) + count)
+            var sum = Vector3()
+            for i in 0..<n:
+                let q = work.positions[(usize)ring[i]]
+                sum = sum.add(q)
+                tangent_u = tangent_u.add(q.multiply_scalar(cosines[i]))
+                tangent_v = tangent_v.add(q.multiply_scalar(sines[i]))
+            work.out_positions[out] = here.multiply_scalar(1.0 - count * omega).add(sum.multiply_scalar(omega))
+        else:
+            var edges = Vector3()
+            var faces = Vector3()
+            let a_n = 1.0 + step_cos + math.cos(turn * 0.5) * math.sqrt(2.0 * (9.0 + step_cos))
+            for i in 0..<n:
+                let e = work.positions[(usize)ring[i]]
+                let f = work.positions[(usize)diagonals[i]]
+                edges = edges.add(e)
+                faces = faces.add(f)
+                let c0 = cosines[i]
+                let c1 = cosines[i + 1]
+                let s0 = sines[i]
+                let s1 = sines[i + 1]
+                tangent_u = tangent_u.add(e.multiply_scalar(a_n * c0)).add(f.multiply_scalar(c0 + c1))
+                tangent_v = tangent_v.add(e.multiply_scalar(a_n * s0)).add(f.multiply_scalar(s0 + s1))
+            work.out_positions[out] = here.multiply_scalar(count * count).add(edges.multiply_scalar(4.0)).add(faces).multiply_scalar(1.0 / (count * (count + 5.0)))
+        # Face 1 of the fan winds v, ring[1], ..., ring[0]: its normal orients
+        # the limit normal.
+        let facing = work.positions[(usize)ring[1]].subtract(here).cross(work.positions[(usize)ring[0]].subtract(here))
+        var normal = tangent_u.cross(tangent_v)
+        if normal.dot(facing) < 0.0: normal = normal.multiply_scalar(-1.0)
+        work.out_normals[out] = direction_of(normal) if normal.length() > 0.0 else direction_of(face_average(work, point))
+
+## The closed fan of `point`: `ring[i]` the neighbour along edge i and
+## `diagonals[i]` the point across the face between edges i and i + 1
+## (quads; triangles have none). False when the faces around it are not one
+## closed fan of quads (triangles for Loop).
+func fan(topology: const Topology*, point: usize, n: usize, ring: i32[], diagonals: i32[], triangles: bool) -> bool:
+    var start: i64 = -1
+    let edge = (usize)topology.point_edges[(usize)topology.point_edge_offsets[point]]
+    for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+        let corner = (usize)topology.edge_corners[at]
+        if (usize)topology.corners[corner] == point: start = (i64)corner
+    if start < 0: return false
+    let size: i32 = 3 if triangles else 4
+    var corner = (usize)start
+    for i in 0..<n:
+        let face = (usize)topology.corner_faces[corner]
+        if topology.offsets[face + 1] - topology.offsets[face] != size: return false
+        let next = topology.next(corner)
+        ring[i] = topology.corners[next]
+        if not triangles: diagonals[i] = topology.corners[topology.next(next)]
+        let across = topology.twin(corner)
+        if across < 0: return false
+        corner = topology.next((usize)across)
+        if (usize)topology.corners[corner] != point: return false
+        if i + 1 < n and corner == (usize)start: return false
+    if corner != (usize)start: return false
+    # The diagonal between edges i and i + 1 is in face i + 1 (next(next)
+    # of its corner); face i's is between edge i - 1 and edge i.
+    if not triangles:
+        let first = diagonals[0]
+        for i in 0..<n - 1: diagonals[i] = diagonals[i + 1]
+        diagonals[n - 1] = first
+    return true

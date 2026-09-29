@@ -332,6 +332,11 @@ pub func smooth_changed(mesh: const Mesh*) -> (usize, usize)!:
 pub func point_face_span(mesh: const Mesh*) -> (const i32[], const i32[])!:
     return try mesh.incidence()
 
+## What another module derives from `mesh`'s connectivity, shared by every
+## mesh with it (see TopologyCache.extension_of).
+pub func topology_extension(mesh: const Mesh*, dispose: func(void*) -> unit, make: func() -> void*!) -> void*!:
+    return try mesh.topology.extension_of(dispose, make)
+
 ## Each edge's corners (those whose outgoing edge it is).
 pub func edge_corner_span(mesh: const Mesh*) -> (const i32[], const i32[])!:
     let edges = try mesh.edge_arrays()

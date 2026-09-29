@@ -1,0 +1,207 @@
+## The refinement plan: what connectivity, creases and attributes determine,
+## built once and reused for every position change (a Move re-evaluates
+## positions only). For each level it keeps the refined mesh, whose
+## attributes (uv, colours, groups) were carried from the cage through their
+## parents, and each level's edge and point sharpness. Level l + 1 numbers
+## its points: level l's points (vertex points), then one per edge (edge
+## points), then (Catmull-Clark, bilinear) one per face (face points). Each
+## level-l face of n corners becomes n quads (Loop: a triangle becomes four).
+## The final level's faces carry `.cage_face`, the cage face they came from.
+
+pub struct Plan:
+    pub var key: u64
+    pub var scheme: Scheme
+    pub var level: usize
+    pub var corners: bool
+    ## Levels 1..level (index l - 1): each refined mesh (the last is the
+    ## display's template).
+    pub var meshes: Growing[Mesh*]
+    ## Levels 0..level: each level's edge and point sharpness.
+    pub var edge_sharpness: Growing[Column[f32]]
+    pub var point_sharpness: Growing[Column[f32]]
+
+    pub func template() -> const Mesh*:
+        return self.meshes.items[self.meshes.count - 1]
+
+    pub mutating func close():
+        for mesh in self.meshes.view(): mesh_dispose(mesh)
+        self.meshes.close()
+        for column in self.edge_sharpness.view():
+            var owned = column
+            owned.release()
+        self.edge_sharpness.close()
+        for column in self.point_sharpness.view():
+            var owned = column
+            owned.release()
+        self.point_sharpness.close()
+
+## The plan for `mesh` under `settings` (level at least 1).
+pub func build_plan(mesh: const Mesh*, settings: Settings, key: u64) -> Plan*!:
+    let plan = try new Plan(key, settings.scheme, settings.level, settings.corners, Growing[Mesh*](), Growing[Column[f32]](), Growing[Column[f32]]()) in memory.heap
+    errdefer:
+        plan.close()
+        free(plan) in memory.heap
+    # The cage with each face's own id, carried to every level's faces.
+    let faces = (usize)mesh.face_count()
+    let tagged = try mesh_share(mesh)
+    errdefer mesh_dispose(tagged)
+    var ids = try Attribute.create(".cage_face", Domain.face, DataType.int32, 1, faces)
+    let values = typed_mut[i32](ids.data.span())
+    for face in 0..<faces: values[face] = (i32)face
+    try put_attribute(tagged, ids)
+    # The display is not subdivided again: its levels drop the settings.
+    for name in ["subd.scheme", "subd.level", "subd.render_level", "subd.boundary"]: remove_attribute(tagged, name, Domain.detail)
+    try cage_sharpness(mesh, settings.corners, plan)
+    var source: const Mesh* = tagged
+    for level in 0..<settings.level:
+        let next = try refine_topology(source, settings.scheme)
+        plan.meshes.push(next) catch failure:
+            mesh_dispose(next)
+            error(failure.code, failure.message)
+        try child_sharpness(source, next, plan, level)
+        source = next
+    mesh_dispose(tagged)
+    return plan
+
+## Level 0 sharpness: the `crease` edge attribute and `corner_sharpness`
+## point attribute; with pinned corners, a boundary point on one face.
+func cage_sharpness(mesh: const Mesh*, pinned: bool, plan: Plan*) -> !:
+    let topology = try Topology.of(mesh)
+    var edges = try Column[f32].filled(topology.edges(), 0.0)
+    errdefer edges.release()
+    let crease = mesh.find_attribute("crease", (i64)(u8)Domain.edge)
+    if crease >= 0:
+        let values = edges.span()
+        for edge in 0..<values.length: values[edge] = (f32)math.max(0.0, try mesh.attribute_value(crease, (i64)edge))
+    var points = try Column[f32].filled(topology.points, 0.0)
+    errdefer points.release()
+    let corner = mesh.find_attribute("corner_sharpness", (i64)(u8)Domain.point)
+    let values = points.span()
+    if corner >= 0:
+        for point in 0..<values.length: values[point] = (f32)math.max(0.0, try mesh.attribute_value(corner, (i64)point))
+    if pinned:
+        # A point whose edges are two boundary edges of one face: a corner.
+        for point in 0..<topology.points:
+            let first = (usize)topology.point_edge_offsets[point]
+            let end = (usize)topology.point_edge_offsets[point + 1]
+            if end - first != 2: continue
+            var boundary = true
+            for slot in first..<end:
+                let edge = (usize)topology.point_edges[slot]
+                if topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge] != 1: boundary = false
+            if boundary: values[point] = infinite
+    try keep_level(plan, &edges, &points)
+
+## Keep one level's sharpness columns (the plan takes them).
+func keep_level(plan: Plan*, edges: Column[f32]*, points: Column[f32]*) -> !:
+    try plan.edge_sharpness.reserve(plan.edge_sharpness.count + 1)
+    try plan.point_sharpness.reserve(plan.point_sharpness.count + 1)
+    try plan.edge_sharpness.push(edges.take())
+    try plan.point_sharpness.push(points.take())
+
+## Level l + 1's sharpness: each half of a sharp edge keeps its sharpness
+## less one, as does each level-l point (its vertex point); new edges and
+## points are smooth. Infinite sharpness stays.
+func child_sharpness(parent: const Mesh*, child: const Mesh*, plan: Plan*, level: usize) -> !:
+    let before = try Topology.of(parent)
+    let after = try Topology.of(child)
+    var edges = try Column[f32].filled(after.edges(), 0.0)
+    errdefer edges.release()
+    let parent_edges = plan.edge_sharpness.items[level].view()
+    let out = edges.span()
+    for edge in 0..<before.edges():
+        let sharpness = parent_edges[edge]
+        if sharpness <= 1.0: continue
+        let left = sharpness if sharpness >= infinite else sharpness - 1.0
+        let middle = (i64)(before.points + edge)
+        for side in 0..<(usize)2:
+            let end = (i64)before.edge_points[edge * 2 + side]
+            let half = try child.find_edge(end, middle)
+            if half >= 0: out[(usize)half] = left
+    var points = try Column[f32].filled(after.points, 0.0)
+    errdefer points.release()
+    let parent_points = plan.point_sharpness.items[level].view()
+    let next = points.span()
+    for point in 0..<before.points:
+        let sharpness = parent_points[point]
+        next[point] = sharpness if sharpness >= infinite else (sharpness - 1.0 if sharpness > 1.0 else 0.0)
+    try keep_level(plan, &edges, &points)
+
+## One level of refined connectivity, positions linear (the evaluation
+## places them), attributes carried through the parents.
+func refine_topology(mesh: const Mesh*, scheme: Scheme) -> Mesh*!:
+    let topology = try Topology.of(mesh)
+    let points = topology.points
+    let edges = topology.edges()
+    let faces = topology.faces()
+    var builder = TopologyBuilder()
+    defer builder.close()
+    # Fan triangles: the display replaces the positions (and its triangles
+    # stay valid where a noisy cage's linear refinement would not be).
+    builder.fans = true
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    var parents: i32[256]
+    var weights: f32[256]
+    let half: f32[2] = [0.5, 0.5]
+    for edge in 0..<edges:
+        let a = topology.edge_points[edge * 2]
+        let b = topology.edge_points[edge * 2 + 1]
+        parents[0] = a
+        parents[1] = b
+        discard(try builder.mixed_point(builder.position(a).add(builder.position(b)).multiply_scalar(0.5), parents[..<2], half[..<2]))
+    let edge_base = (i32)points
+    if scheme == Scheme.loop:
+        # Four triangles: one at each corner, one in the middle.
+        for face in 0..<faces:
+            let start = (usize)topology.offsets[face]
+            for at in 0..<(usize)3:
+                let corner = start + at
+                let previous = start + (at + 2) % 3
+                let next = start + (at + 1) % 3
+                try builder.face((i32)face)
+                try builder.corner(topology.corners[corner], (i32)corner)
+                let forward: i32[2] = [(i32)corner, (i32)next]
+                try builder.mixed_corner(edge_base + topology.corner_edges[corner], forward[..<2], half[..<2])
+                let back: i32[2] = [(i32)previous, (i32)corner]
+                try builder.mixed_corner(edge_base + topology.corner_edges[previous], back[..<2], half[..<2])
+                try builder.end_face()
+            try builder.face((i32)face)
+            for at in 0..<(usize)3:
+                let corner = start + at
+                let next = start + (at + 1) % 3
+                let forward: i32[2] = [(i32)corner, (i32)next]
+                try builder.mixed_corner(edge_base + topology.corner_edges[corner], forward[..<2], half[..<2])
+            try builder.end_face()
+        return try builder.finish(mesh)
+    for face in 0..<faces:
+        let start = (usize)topology.offsets[face]
+        let size = (usize)topology.offsets[face + 1] - start
+        var center = Vector3()
+        for at in 0..<size:
+            parents[at] = topology.corners[start + at]
+            weights[at] = (f32)(1.0 / (f64)size)
+            center = center.add(builder.position(topology.corners[start + at]))
+        discard(try builder.mixed_point(center.multiply_scalar(1.0 / (f64)size), parents[..<size], weights[..<size]))
+    let face_base = (i32)(points + edges)
+    var mixed_parents: i32[256]
+    var mixed_weights: f32[256]
+    for face in 0..<faces:
+        let start = (usize)topology.offsets[face]
+        let size = (usize)topology.offsets[face + 1] - start
+        for at in 0..<size:
+            mixed_parents[at] = (i32)(start + at)
+            mixed_weights[at] = (f32)(1.0 / (f64)size)
+        for at in 0..<size:
+            let corner = start + at
+            let next = start + (at + 1) % size
+            let previous = start + (at + size - 1) % size
+            try builder.face((i32)face)
+            try builder.corner(topology.corners[corner], (i32)corner)
+            let forward: i32[2] = [(i32)corner, (i32)next]
+            try builder.mixed_corner(edge_base + topology.corner_edges[corner], forward[..<2], half[..<2])
+            try builder.mixed_corner(face_base + (i32)face, mixed_parents[..<size], mixed_weights[..<size])
+            let back: i32[2] = [(i32)previous, (i32)corner]
+            try builder.mixed_corner(edge_base + topology.corner_edges[previous], back[..<2], half[..<2])
+            try builder.end_face()
+    return try builder.finish(mesh)

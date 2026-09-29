@@ -1,0 +1,77 @@
+## Subdivision as a display attribute (after USD and Hydra's refineLevel). A
+## mesh asks to be shown subdivided through detail attributes, and nothing
+## else changes: downstream nodes read the cage, its points, topology and
+## selection ids. The display draws the limit surface of the refined cage
+## (plan.lucb, refine.lucb, limit.lucb), cached per connectivity and
+## positions (display.lucb):
+##
+## - `subd.scheme`: 0 none, 1 Catmull-Clark, 2 Loop (triangles), 3 bilinear;
+## - `subd.level`: display refinement levels (clamped so the refined mesh
+##   stays within 8M faces and points); `subd.render_level` for renders;
+## - `subd.boundary`: 0 sharp edges only, 1 sharp edges and corners (a
+##   boundary point on a single face stays put);
+## - edge attribute `crease` and point attribute `corner_sharpness`: USD's
+##   sharpness (0 smooth, 10 or more infinitely sharp; a sharpness of s stays
+##   sharp for s levels, the fraction blending into the smooth rule).
+import interop
+import math
+import memory
+import sync
+import luce_geocore.errors as errors
+import luce_geocore.core.parallel as parallel
+from luce_geocore.core.growing import Growing
+from luce_geocore.core.bits import Bits, BitsBuilder
+from luce_geocore.core.shared import Column
+from luce_geocore.core.float3 import Float3
+from luce_geocore.core.attributes import Attribute, Domain, DataType, Role
+from luce_geocore.core.attribute_ops import typed, typed_mut
+from luce_geocore.math.vector import Vector3
+from luce_geocore.geometries.polygon import Mesh, mesh_share, mesh_dispose, mesh_adopt, mesh_origin, point_span, precise_span, attribute_entry, moved_storage, displayed, put_attribute, remove_attribute, face_normal_span, offset_span, corner_span, topology_extension
+from luce_geocore.groups import Topology
+from luce_geocore.verbs import TopologyBuilder
+
+pub enum Scheme as u8:
+    off = 0
+    catmull_clark = 1
+    loop = 2
+    bilinear = 3
+
+## Sharpness at or above this is infinite (USD).
+let infinite: f32 = 10.0
+
+## What the display does with a mesh.
+pub struct Settings:
+    pub let scheme: Scheme
+    pub let level: usize
+    pub let corners: bool
+
+## A detail number of `mesh`, or `fallback` without the attribute.
+func detail(mesh: const Mesh*, name: str, fallback: f64) -> f64:
+    let index = mesh.find_attribute(name, (i64)(u8)Domain.detail)
+    if index < 0: return fallback
+    return mesh.attribute_value(index, 0) catch failure: recover fallback
+
+## The mesh's subdivision settings, the level clamped to the budget (Loop
+## needs triangles: other faces fall back to Catmull-Clark).
+pub func settings_of(mesh: const Mesh*) -> Settings:
+    var scheme = Scheme((u8)math.max(0.0, math.min(3.0, detail(mesh, "subd.scheme", 0.0))))
+    let wanted = (usize)math.max(0.0, math.min(6.0, detail(mesh, "subd.level", 1.0)))
+    let pinned = detail(mesh, "subd.boundary", 1.0) != 0.0
+    if scheme == Scheme.off or wanted == 0 or mesh.face_count() == 0: return Settings(Scheme.off, 0, pinned)
+    let offsets = offset_span(mesh)
+    if scheme == Scheme.loop:
+        for face in 0..<offsets.length - 1:
+            if offsets[face + 1] - offsets[face] != 3:
+                scheme = Scheme.catmull_clark
+                break
+    # Level 1 makes a face per corner (Loop: four per triangle), then four
+    # per face each level; points grow alike.
+    let corners = (f64)corner_span(mesh).length
+    var faces = corners if scheme != Scheme.loop else (f64)mesh.face_count() * 4.0
+    var points = (f64)mesh.point_count() + corners + (f64)mesh.face_count()
+    var level: usize = 0
+    while level < wanted and faces <= 8388608.0 and points <= 8388608.0:
+        level += 1
+        faces *= 4.0
+        points *= 4.0
+    return Settings(scheme, level, pinned)

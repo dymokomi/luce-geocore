@@ -94,6 +94,10 @@ pub let group_bits_of = groups.group_bits
 pub let clear_group_cache = groups.clear_group_cache
 pub let selection_bits = groups.selection_bits
 
+import luce_geocore.subdivision as subdivision
+## A subdivided mesh's display mesh (limit surface, cached), or none.
+pub let subdivided_display = subdivision.subdivided_display
+
 ## Curves (the curves family): the structure, its builder, its evaluated
 ## caches and its place in a set.
 import luce_geocore.curves as curves

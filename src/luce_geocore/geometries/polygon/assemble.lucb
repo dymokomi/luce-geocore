@@ -171,6 +171,12 @@ pub func edge_parents(source: const Mesh*, output: const Mesh*, corner_parents: 
 pub func moved_storage(source: const Mesh*, positions: Column[Float3], moved: const u32[]) -> Mesh*!:
     return try source.repositioned_storage(positions, source.origin, moved, false)
 
+## A display mesh over `source`'s topology with `positions` whose points
+## `moved` changed: triangles kept, a collapsed face's normal zero (see
+## displayed_storage).
+pub func displayed(source: const Mesh*, positions: Column[Float3], moved: const u32[]) -> Mesh*!:
+    return try source.displayed_storage(positions, moved)
+
 ## Add or replace an attribute of a mesh being built (taking its share).
 pub func put_attribute(mesh: Mesh*, attribute: Attribute) -> !:
     try mesh.attributes.put(attribute)

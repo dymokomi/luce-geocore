@@ -30,6 +30,12 @@ pub struct TopologyCache:
     var point_edges_ready: @u32
     var point_edge_offsets: Column[i32]
     var point_edge_list: Column[i32]
+    ## What another module derives from this connectivity (subdivision's
+    ## plans and display meshes), made by it on first use under its own
+    ## lock and disposed with the cache.
+    var extension_lock: sync.Mutex
+    var extension: void*? = none
+    var extension_dispose: func(void*) -> unit = ignore_extension
 
     ## The face of every corner.
     pub mutating func faces(offsets: const i32[], corners: usize) -> const i32[]!:
@@ -160,8 +166,23 @@ pub struct TopologyCache:
         self.point_face_offsets = starts
         self.point_faces = faces
 
+    ## The extension, made by `make` on first use; `dispose` frees it with
+    ## the cache. One module owns the slot.
+    pub mutating func extension_of(dispose: func(void*) -> unit, make: func() -> void*!) -> void*!:
+        self.extension_lock.lock()
+        defer self.extension_lock.unlock()
+        if let made = self.extension: return made
+        let made = try make()
+        self.extension = made
+        self.extension_dispose = dispose
+        return made
+
     ## Called by the last owner, after every reader.
     pub mutating func close():
+        if let made = self.extension:
+            let dispose = self.extension_dispose
+            dispose(made)
+            self.extension = none
         self.corner_faces.release()
         self.edge_points.release()
         self.corner_edges.release()
@@ -171,6 +192,9 @@ pub struct TopologyCache:
         self.edge_corner_list.release()
         self.point_edge_offsets.release()
         self.point_edge_list.release()
+
+func ignore_extension(context: void*):
+    discard(context)
 
 ## A counting sort: element i of `keys` goes to bucket keys[i], and the
 ## bucket lists `i / per` (so with per = 2, edge endpoints list their edge).

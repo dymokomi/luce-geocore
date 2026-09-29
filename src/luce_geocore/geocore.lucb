@@ -16,6 +16,7 @@ import luce_geocore.geometries.attribute_kernels as attribute_kernels
 import luce_geocore.geometry_set as geometry_set
 import luce_geocore.groups as groups
 import luce_geocore.verbs as verbs
+import luce_geocore.subdivision as subdivision
 import luce_geocore.set_verbs as set_verbs
 import luce_geocore.io as io
 import luce_geocore.errors as errors
@@ -44,6 +45,7 @@ pub type Selection = groups.Selection
 pub type Groups = groups.Groups
 pub type Verbs = verbs.Verbs
 pub type VerbResult = verbs.VerbResult
+pub type Subdivision = subdivision.Subdivision
 ## Verbs over whole sets (curves, fields, conversions), and the one catalog
 ## of every verb a node runs.
 pub type GeometryVerbs = set_verbs.GeometryVerbs

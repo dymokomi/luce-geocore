@@ -1,0 +1,142 @@
+## One level of positions, in parallel: face points, then edge points, then
+## vertex points, by the scheme's rules with USD sharpness. An edge on a
+## boundary or on more than two faces is infinitely sharp. A point with a
+## corner sharpness, or more than two sharp edges, stays (the corner rule);
+## with two, it follows the crease ((e1 + 6v + e2) / 8); a fractional
+## sharpness blends the smooth rule toward the sharp one.
+
+struct Level:
+    let scheme: Scheme
+    let topology: const Topology*
+    let positions: const Vector3[]
+    let edge_sharpness: const f32[]
+    let point_sharpness: const f32[]
+    let out: Vector3[]
+    ## Only these faces, edges and points (every one when empty).
+    let faces: const u32[]
+    let edges: const u32[]
+    let points: const u32[]
+
+## Level l's positions (and sharpness) to level l + 1's: every element, or
+## (with lists) only the listed ones, the rest of `out` left as it is.
+pub func refine_positions(scheme: Scheme, topology: const Topology*, positions: const Vector3[], edge_sharpness: const f32[], point_sharpness: const f32[], out: Vector3[], faces: const u32[], edges: const u32[], points: const u32[]):
+    var level = Level(scheme, topology, positions, edge_sharpness, point_sharpness, out, faces, edges, points)
+    if scheme != Scheme.loop: parallel.parallel_for(faces.length if faces.length > 0 else topology.faces(), 4096, face_points, (void*)&level)
+    parallel.parallel_for(edges.length if edges.length > 0 else topology.edges(), 4096, edge_points, (void*)&level)
+    parallel.parallel_for(points.length if points.length > 0 else topology.points, 4096, vertex_points, (void*)&level)
+
+## Element `at` of a pass: from the list, or itself.
+func element(list: const u32[], at: usize) -> usize:
+    return (usize)list[at] if list.length > 0 else at
+
+func face_points(context: void*?, first: usize, end: usize):
+    let level = (Level*)(context else return)
+    let topology = level.topology
+    let base = topology.points + topology.edges()
+    for index in first..<end:
+        let face = element(level.faces, index)
+        let start = (usize)topology.offsets[face]
+        let size = (usize)topology.offsets[face + 1] - start
+        var sum = Vector3()
+        for at in 0..<size: sum = sum.add(level.positions[(usize)topology.corners[start + at]])
+        level.out[base + face] = sum.multiply_scalar(1.0 / (f64)size)
+
+## The sharpness of an edge at this level (boundary and non-manifold: infinite).
+func sharpness_of(level: const Level*, edge: usize) -> f32:
+    let topology = level.topology
+    if topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge] != 2: return infinite
+    return level.edge_sharpness[edge]
+
+func edge_points(context: void*?, first: usize, end: usize):
+    let level = (Level*)(context else return)
+    let topology = level.topology
+    let face_base = topology.points + topology.edges()
+    for index in first..<end:
+        let edge = element(level.edges, index)
+        let a = level.positions[(usize)topology.edge_points[edge * 2]]
+        let b = level.positions[(usize)topology.edge_points[edge * 2 + 1]]
+        let middle = a.add(b).multiply_scalar(0.5)
+        let sharpness = (f64)sharpness_of(level, edge)
+        if sharpness >= 1.0 or level.scheme == Scheme.bilinear:
+            level.out[topology.points + edge] = middle
+            continue
+        let slot = (usize)topology.edge_corner_offsets[edge]
+        let c1 = (usize)topology.edge_corners[slot]
+        let c2 = (usize)topology.edge_corners[slot + 1]
+        var smooth = middle
+        if level.scheme == Scheme.loop:
+            # 3/8 of each end, 1/8 of each opposite point.
+            let c = level.positions[(usize)topology.corners[topology.next(topology.next(c1))]]
+            let d = level.positions[(usize)topology.corners[topology.next(topology.next(c2))]]
+            smooth = a.add(b).multiply_scalar(0.375).add(c.add(d).multiply_scalar(0.125))
+        else:
+            let f1 = level.out[face_base + (usize)topology.corner_faces[c1]]
+            let f2 = level.out[face_base + (usize)topology.corner_faces[c2]]
+            smooth = a.add(b).add(f1).add(f2).multiply_scalar(0.25)
+        level.out[topology.points + edge] = smooth if sharpness <= 0.0 else mix(smooth, middle, sharpness)
+
+func mix(a: Vector3, b: Vector3, t: f64) -> Vector3:
+    return a.add(b.subtract(a).multiply_scalar(t))
+
+## Loop's vertex weight for n neighbours.
+pub func loop_beta(n: f64) -> f64:
+    let c = 0.375 + 0.25 * math.cos(6.283185307179586 / n)
+    return (0.625 - c * c) / n
+
+func vertex_points(context: void*?, first: usize, end: usize):
+    let level = (Level*)(context else return)
+    let topology = level.topology
+    let face_base = topology.points + topology.edges()
+    for index in first..<end:
+        let point = element(level.points, index)
+        let here = level.positions[point]
+        if level.scheme == Scheme.bilinear:
+            level.out[point] = here
+            continue
+        let start = (usize)topology.point_edge_offsets[point]
+        let stop = (usize)topology.point_edge_offsets[point + 1]
+        let n = (f64)(stop - start)
+        var neighbours = Vector3()
+        var faces = Vector3()
+        var sharp_count: usize = 0
+        var sharp_sum = 0.0
+        var sharp_ends = Vector3()
+        for slot in start..<stop:
+            let edge = (usize)topology.point_edges[slot]
+            let a = (usize)topology.edge_points[edge * 2]
+            let other = level.positions[(usize)topology.edge_points[edge * 2 + 1] if a == point else a]
+            neighbours = neighbours.add(other)
+            let sharpness = (f64)sharpness_of(level, edge)
+            if sharpness > 0.0:
+                sharp_count += 1
+                sharp_sum += math.min(1.0, sharpness)
+                sharp_ends = sharp_ends.add(other)
+            if level.scheme != Scheme.loop:
+                for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                    faces = faces.add(level.out[face_base + (usize)topology.corner_faces[(usize)topology.edge_corners[at]]])
+        if n == 0.0:
+            level.out[point] = here
+            continue
+        # The smooth rule (interior points; sharp ones use it only to blend).
+        var smooth = here
+        if level.scheme == Scheme.loop:
+            let beta = loop_beta(n)
+            smooth = here.multiply_scalar(1.0 - n * beta).add(neighbours.multiply_scalar(beta))
+        else:
+            # Q (face points, each face met twice) + 2R (edge midpoints) + (n - 3)v.
+            let q = faces.multiply_scalar(1.0 / (2.0 * n))
+            let r = here.add(neighbours.multiply_scalar(1.0 / n)).multiply_scalar(0.5)
+            smooth = q.add(r.multiply_scalar(2.0)).add(here.multiply_scalar(n - 3.0)).multiply_scalar(1.0 / n)
+        let corner = (f64)level.point_sharpness[point]
+        var rule = smooth
+        var weight = 0.0
+        if corner > 0.0:
+            rule = here
+            weight = math.min(1.0, corner)
+        elif sharp_count > 2:
+            rule = here
+            weight = sharp_sum / (f64)sharp_count
+        elif sharp_count == 2:
+            rule = sharp_ends.add(here.multiply_scalar(6.0)).multiply_scalar(0.125)
+            weight = sharp_sum / 2.0
+        level.out[point] = rule if weight >= 1.0 else mix(smooth, rule, weight)
