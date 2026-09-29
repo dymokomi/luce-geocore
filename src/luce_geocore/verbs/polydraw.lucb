@@ -67,10 +67,18 @@ func drawn_corners(input: const VerbInput*, builder: TopologyBuilder*, snap: f64
     for at in 0..<drawn:
         let position = Vector3(input.parms.at(2 + at * 3), input.parms.at(3 + at * 3), input.parms.at(4 + at * 3))
         if not position.is_finite(): error(errors.invalid, "PolyDraw positions must be finite")
+        # One tight pass over the input points, in the builder's frame and
+        # squared (a few milliseconds on 700k points).
         var point: i32 = -1
-        var best = snap
+        var best = snap * snap
+        let target = position.subtract(builder.origin)
+        let points = builder.positions.items
         for candidate in 0..<existing:
-            let distance = builder.position((i32)candidate).subtract(position).length()
+            let p = points[candidate]
+            let dx = p.x - target.x
+            let dy = p.y - target.y
+            let dz = p.z - target.z
+            let distance = dx * dx + dy * dy + dz * dz
             if distance <= best:
                 best = distance
                 point = (i32)candidate

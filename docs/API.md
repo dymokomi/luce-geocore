@@ -310,6 +310,6 @@ and attributes included):
 | Fill, a 22-edge hole | 22.2 ms | 700,560 | Some boundary runs in the group are not closed simple loops and were left open |
 | Fill, a 22-edge hole as a fan | 22.2 ms | 700,581 | Some boundary runs in the group are not closed simple loops and were left open |
 | Split, 1k faces | 19.7 ms | 700,569 |  |
-| PolyDraw, a quad drawn onto the grid, its corners snapped | 45.3 ms | 700,570 |  |
-| PolyDraw, through 4 selected points | 21.9 ms | 700,570 |  |
+| PolyDraw, a quad drawn onto the grid, its corners snapped | 22.0 ms | 700,570 |  |
+| PolyDraw, through 4 selected points | 21.2 ms | 700,570 |  |
 | Clean, everything | 28.5 ms | 700,569 |  |
