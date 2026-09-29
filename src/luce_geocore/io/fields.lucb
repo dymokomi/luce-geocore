@@ -23,11 +23,11 @@ func encode_volume(data: const void*, writer: GeometryWriter*, path: str) -> !:
         let numbers: f64[12] = [m.x.x, m.x.y, m.x.z, m.y.x, m.y.y, m.y.z, m.z.x, m.z.y, m.z.z, m.translation.x, m.translation.y, m.translation.z]
         try writer.crate.copied_array("transform", dtype_float64, 12, u8[]((u8*)&numbers[0], 96))
         let keys = grid.keys.view()
-        try writer.column_borrowed("keys", dtype_uint64, keys.length, 1, u8[]((u8*)keys.data, keys.length * 8))
+        try writer.column_borrowed("keys", dtype_uint64, keys.length, 1, bytes_view(keys))
         let values = grid.values.view()
-        try writer.column_borrowed("values", dtype_float32, values.length // leaf_voxels, leaf_voxels, u8[]((u8*)values.data, values.length * 4))
+        try writer.column_borrowed("values", dtype_float32, values.length // leaf_voxels, leaf_voxels, bytes_view(values))
         let masks = grid.masks.view()
-        try writer.column_borrowed("masks", dtype_uint64, masks.length // mask_words, mask_words, u8[]((u8*)masks.data, masks.length * 8))
+        try writer.column_borrowed("masks", dtype_uint64, masks.length // mask_words, mask_words, bytes_view(masks))
 
 func decode_volume(reader: GeometryReader*, path: str) -> void*!:
     while let header = try reader.next_property(): discard(header)
@@ -78,7 +78,7 @@ func encode_sdf(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let ops = sdf.op_span()
     try writer.column_borrowed("ops", dtype_uint8, ops.length, 1, ops)
     let params = sdf.param_span()
-    try writer.column_borrowed("params", dtype_float32, ops.length, sdf_stride, u8[]((u8*)params.data, params.length * 4))
+    try writer.column_borrowed("params", dtype_float32, ops.length, sdf_stride, bytes_view(params))
 
 func decode_sdf(reader: GeometryReader*, path: str) -> void*!:
     var ops: Column[u8]

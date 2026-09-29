@@ -176,7 +176,9 @@ program primitive by primitive for luced-3d's Edit SDF.
   is its place among the primitives. Its placement is the transform directly
   around it (through modifiers); its boolean is the one taking it as the
   second operand.
-- `SdfRewrite` makes every edit one linear pass over the ops. A move composes
+- `SdfRewrite` makes every edit one linear pass over the ops. Moves read
+  Transform Components' numbers through `ComponentTransform` (verbs), which
+  Edit Sketch and luce-cad's model moves share. A move composes
   into the placing transform, or wraps the primitive in a new one; the world
   delta is conjugated into the frame the placement lives in. A boolean change
   rewrites one op. A delete drops the primitive with what wraps it and each
@@ -233,7 +235,9 @@ The viewport draws a volume or SDF by its surface preview:
 - a level set's zero set;
 - a fog volume's half-maximum density.
 
-The preview is built once and kept with the component. The codec writes:
+The preview is built once and kept with the component. A drag's frames may
+ask for a quick SDF preview instead (1/40 of the extent), kept apart, so the
+full one is built after the release. The codec writes:
 
 - grids with their keys, values and masks as columns;
 - SDF programs as `ops` and `params`.
@@ -315,6 +319,10 @@ The document is a tree of elements:
   /geometry/instances  instances   int64 count, prototypes; int32 prototype;
                                    float64[n*9] placement; uint8 visible
     .../p0             geometry    (a prototype set, written once)
+  /geometry/volume     volume      int64 count
+    .../g0             grid        str name; int64 class; float64 background, transform[12];
+                                   uint64 keys; float32[n,512] values; uint64[n,8] masks
+  /geometry/sdf        sdf         uint8 ops; float32[n,16] params
 ```
 
 Derived caches are never written: normals, edges, evaluated curves, BVHs.
@@ -333,7 +341,8 @@ at 256 MiB, so a column above 256 MiB is written as several properties:
 on. Files under 256 MiB open in luce-prism as ordinary documents; luced-3d's
 tests check this.
 
-Each family has a codec. Mesh, points, curves and instances are built in.
+Each family has a codec. Mesh, points, curves, instances, volumes and SDFs
+are built in.
 Another package registers its own once, before saving or loading:
 
 ```luce

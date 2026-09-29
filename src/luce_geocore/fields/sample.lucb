@@ -105,14 +105,6 @@ func gather_marks(marks: const u64[], lx: i64, ly: i64, lz: i64, bx: i64, by: i6
                 let voxel_at = word * 64 + bit
                 try out.push(leaf_key(lx + x0 + (i64)(voxel_at & 7), ly + y0 + (i64)((voxel_at >> 3) & 7), lz + z0 + (i64)(voxel_at >> 6)))
 
-func trailing_zeros(word: u64) -> u32:
-    var bits = word
-    var count: u32 = 0
-    while bits & 1 == 0:
-        bits = bits >> 1
-        count += 1
-    return count
-
 struct SdfFill:
     let sdf: const Sdf*
     let voxel: f64

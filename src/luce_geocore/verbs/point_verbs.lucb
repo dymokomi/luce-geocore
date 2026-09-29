@@ -13,6 +13,32 @@ let transform_parms: ParmSpec[7] = [
     ParmSpec("Soft radius", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "Points within this distance of the group follow it, less the farther they are (0: off).", 5.0),
     ParmSpec("Falloff", ParmKind.menu, 3.0, 0.0, 3.0, 1, "Linear|Quadratic|Cubic|Smooth", "How the soft weight falls off with distance.")]
 
+## Transform Components' numbers (translate, rotate in degrees, scale,
+## pivot mode and custom pivot, in transform_parms' order) as matrices, for
+## editors that move whole things rather than points (Edit SDF's
+## primitives, Edit Sketch's curves, luce-cad's models): the rotation and
+## scale, the translation, and the pivot (`middle`, the group's centroid;
+## the origin; or the custom point).
+pub struct ComponentTransform:
+    pub let linear: Matrix4
+    pub let translation: Vector3
+    pub let pivot: Vector3
+
+    pub static func of(numbers: const f64[], middle: Vector3) -> ComponentTransform!:
+        if numbers.length < 13: error(errors.invalid, "a transform needs its thirteen numbers")
+        let degrees = 0.017453292519943295
+        let linear = Matrix4.compose(Vector3(), Vector3(numbers[3] * degrees, numbers[4] * degrees, numbers[5] * degrees), Vector3(numbers[6], numbers[7], numbers[8]))
+        var pivot = Vector3(numbers[10], numbers[11], numbers[12])
+        if numbers[9] == 1.0: pivot = Vector3()
+        elif numbers[9] == 0.0: pivot = middle
+        return ComponentTransform(linear, Vector3(numbers[0], numbers[1], numbers[2]), pivot)
+
+    ## The whole move: rotate and scale about the pivot, then translate by
+    ## `translation` (the numbers' own, or an editor's constrained one).
+    pub func matrix(translation: Vector3) -> Matrix4:
+        let moved = translation.add(self.pivot).subtract(self.linear.transform_point(self.pivot))
+        return Matrix4(self.linear.x, self.linear.y, self.linear.z, moved)
+
 pub func transform_verb() -> Verb:
     return Verb("Transform Components", "Deform", "Move, rotate and scale components about a pivot", Domain.point, true, transform_parms, false, cook_transform)
 

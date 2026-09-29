@@ -193,22 +193,12 @@ func winds_backwards(topology: const Topology*, builder: const TopologyBuilder*,
             let edge = (usize)topology.point_edges[slot]
             for use in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
                 let face = (usize)topology.corner_faces[(usize)topology.edge_corners[use]]
-                around = around.add(face_normal_of(topology, builder, face))
+                around = around.add(ring_normal(builder, topology.corners[(usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]]))
     if around.length() < 1.0e-12: return false
     return ring_normal(builder, ring).dot(around) < 0.0
 
-## Newell's normal of an existing face (unnormalized).
-func face_normal_of(topology: const Topology*, builder: const TopologyBuilder*, face: usize) -> Vector3:
-    var normal = Vector3()
-    let start = (usize)topology.offsets[face]
-    let end = (usize)topology.offsets[face + 1]
-    for corner in start..<end:
-        let here = builder.position(topology.corners[corner])
-        let next = builder.position(topology.corners[start + (corner - start + 1) % (end - start)])
-        normal = normal.add(Vector3((here.y - next.y) * (here.z + next.z), (here.z - next.z) * (here.x + next.x), (here.x - next.x) * (here.y + next.y)))
-    return normal
-
-## Newell's normal of the ring as ordered.
+## Newell's normal of the points in order (unnormalized): the ring, or an
+## existing face's corners.
 func ring_normal(builder: const TopologyBuilder*, ring: const i32[]) -> Vector3:
     var normal = Vector3()
     for at in 0..<ring.length:

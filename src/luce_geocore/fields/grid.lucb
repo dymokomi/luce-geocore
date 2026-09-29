@@ -19,7 +19,7 @@ import luce_geocore.core.attribute_ops as attribute_ops
 from luce_geocore.core.growing import Growing
 from luce_geocore.core.shared import Column
 from luce_geocore.core.float3 import Float3
-from luce_geocore.core.bits import popcount, BitsBuilder
+from luce_geocore.core.bits import popcount, trailing_zeros, BitsBuilder
 from luce_geocore.core.idset import IdSet
 from luce_geocore.core.strings import TableBuilder
 from luce_geocore.core.paths import PathFilter
@@ -31,6 +31,8 @@ from luce_geocore.geometries.polygon import Mesh, MeshPart, concatenated, assemb
 from luce_geocore.geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, union_box, set_find, set_put, set_remove, set_storage, set_mesh, empty_storage, dispose_set, adopt_set
 from luce_geocore.geometries.builder import MeshBuilder
 from luce_geocore.groups import group_bits
+from luce_geocore.verbs import ComponentTransform
+from luce_geocore.geometries.distance import bounds_distance
 
 pub let leaf_size: i64 = 8
 pub let leaf_voxels: usize = 512
@@ -112,7 +114,7 @@ pub struct SparseGrid:
     ## Voxels whose active bit is set.
     pub func active_count() -> usize:
         var total: usize = 0
-        for word in self.masks.view(): total += (usize)popcount_word(word)
+        for word in self.masks.view(): total += (usize)popcount(word)
         return total
 
     ## The world box of the leaves.
@@ -141,9 +143,6 @@ pub struct SparseGrid:
 pub func local_index(i: i64, j: i64, k: i64) -> usize:
     return (usize)(i & 7) + (usize)(j & 7) * 8 + (usize)(k & 7) * 64
 
-func popcount_word(word: u64) -> u32:
-    return popcount(word)
-
 ## A heap grid owning these columns (taken, even on failure).
 pub func new_grid(name: str, class: GridClass, background: f32, transform: Matrix4, keys: Column[u64], values: Column[f32], masks: Column[u64]) -> SparseGrid*!:
     var owned_keys = keys
@@ -171,20 +170,11 @@ pub func release_grid(grid: SparseGrid*):
     grid.close()
     free(SparseGrid[](grid, 1)) in memory.heap
 
-## The inverse of an affine matrix; fails when it is singular.
+## The inverse of an affine matrix (Matrix4.inverse), failing as a grid
+## transform when it is singular.
 pub func affine_inverse(matrix: Matrix4) -> Matrix4!:
-    let determinant = matrix.determinant()
-    if not math.is_finite(determinant) or math.abs(determinant) < 1.0e-300: error(errors.invalid, "a grid transform must be invertible")
-    let a = matrix.y.cross(matrix.z).multiply_scalar(1.0 / determinant)
-    let b = matrix.z.cross(matrix.x).multiply_scalar(1.0 / determinant)
-    let c = matrix.x.cross(matrix.y).multiply_scalar(1.0 / determinant)
-    # Rows a, b, c of the inverse linear part, as columns of the result.
-    let x = Vector3(a.x, b.x, c.x)
-    let y = Vector3(a.y, b.y, c.y)
-    let z = Vector3(a.z, b.z, c.z)
-    let linear = Matrix4(x, y, z, Vector3())
-    let t = linear.transform_direction(matrix.translation)
-    return Matrix4(x, y, z, Vector3(-t.x, -t.y, -t.z))
+    return matrix.inverse() catch failure:
+        error(errors.invalid, "a grid transform must be invertible")
 
 # mark: Sampling
 

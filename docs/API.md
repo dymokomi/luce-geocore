@@ -275,6 +275,12 @@ degenerate faces, passes its input through with a warning. Edge output
 selections are named by point pairs (`TopologyBuilder.select_edge`) and found
 on the result.
 
+`ComponentTransform.of(numbers, centroid)` reads Transform Components'
+numbers (translate, rotate in degrees, scale, pivot mode, custom pivot) as a
+rotation-and-scale, a translation and a pivot, and `matrix(translation)`
+composes the move: for editors that move whole things rather than points
+(Edit SDF's primitives, Edit Sketch's curves, luce-cad's models).
+
 Faces a builder copies keep their triangles (CAD cut cells survive); runs of
 untouched faces copy in one pass (`copy_faces`), and only new faces are ear
 clipped. `tests/bench/run.py --base <luce-base>` times every verb on the 837×837

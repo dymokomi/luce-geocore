@@ -85,20 +85,16 @@ pub struct Sketches:
     ## points land on the plane's grid) and an end reach (a moved end of an
     ## open curve lands on an unmoved end within it); 0 is off.
     pub static func moved(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
-        if numbers.length < 13: error(errors.invalid, "a transform needs its thirteen numbers")
         let source = try geometry.get()
         let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves to move")
         var chosen = try SketchChoice.of(curves, try pick.get(), group, group_type)
         defer chosen.close()
         let plane = try sketch_plane_of(source)
-        let degrees = 0.017453292519943295
-        let linear = Matrix4.compose(Vector3(), Vector3(numbers[3] * degrees, numbers[4] * degrees, numbers[5] * degrees), Vector3(numbers[6], numbers[7], numbers[8]))
-        var pivot = Vector3(numbers[10], numbers[11], numbers[12])
-        if numbers[9] == 1.0: pivot = Vector3()
-        elif numbers[9] == 0.0: pivot = chosen.centroid
-        var shift = Vector3(numbers[0], numbers[1], numbers[2])
-        shift = shift.subtract(plane.normal.multiply_scalar(shift.dot(plane.normal)))
-        let delta = Matrix4(linear.x, linear.y, linear.z, shift.add(pivot).subtract(linear.transform_point(pivot)))
+        let transform = try ComponentTransform.of(numbers, chosen.centroid)
+        let linear = transform.linear
+        # The translation stays in the plane.
+        let shift = transform.translation.subtract(plane.normal.multiply_scalar(transform.translation.dot(plane.normal)))
+        let delta = transform.matrix(shift)
         var targets = Growing[Vector3]()
         defer targets.close()
         let grid = numbers[15] if numbers.length > 15 else 0.0

@@ -23,8 +23,9 @@
 ## distance so far. A mesh with more than `dense_triangles` triangles per
 ## band voxel (triangles far smaller than voxels) is cheaper by a BVH query
 ## per voxel instead. Leaves, then their 4×4×4 blocks, beyond the band are
-## filled from one query at their center, and a voxel beside one a voxel
-## beyond the band needs none.
+## filled from one query at their center, and a voxel next to one that is
+## more than a voxel beyond the band needs no query of its own (the field
+## is 1-Lipschitz).
 
 ## Triangles per band voxel above which the BVH answers each voxel. The
 ## 700k-quad plane at 256 voxels has about 3 (queries: 0.46 s, rasterizing
@@ -49,7 +50,7 @@ pub func mesh_level_set(mesh: const Mesh*, voxel: f64, band: f64, name: str) -> 
     # Leaves each triangle's grown box touches: count, then list.
     let counts = try alloc usize[triangles + 1] in memory.heap
     defer free(counts) in memory.heap
-    var count_work = BinWork(&shape, voxel, reach, counts, empty_u64(), empty_u64(), 0)
+    var count_work = BinWork(&shape, voxel, reach, counts, nothing[u64](), nothing[u64](), 0)
     parallel.parallel_for(triangles, 1024, bin_triangles, (void*)&count_work)
     var total: usize = 0
     for triangle in 0..<triangles:
@@ -126,7 +127,7 @@ func queried_level_set(mesh: const Mesh*, shape: const MeshShape*, voxel: f64, b
     # predecessor's lists none.
     let counts = try alloc usize[triangles + 1] in memory.heap
     defer free(counts) in memory.heap
-    var count_work = BinWork(shape, voxel, reach, counts, empty_u64(), empty_u64(), 3)
+    var count_work = BinWork(shape, voxel, reach, counts, nothing[u64](), nothing[u64](), 3)
     parallel.parallel_for(triangles, 4096, bin_triangles, (void*)&count_work)
     var total: usize = 0
     for triangle in 0..<triangles:
@@ -137,18 +138,14 @@ func queried_level_set(mesh: const Mesh*, shape: const MeshShape*, voxel: f64, b
     if total > 400000000: error(errors.limit, "the voxels are too small for this mesh")
     let listed = try alloc u64[total] in memory.heap
     defer free(listed) in memory.heap
-    var list_work = BinWork(shape, voxel, reach, counts, listed, empty_u64(), 4)
+    var list_work = BinWork(shape, voxel, reach, counts, listed, nothing[u64](), 4)
     parallel.parallel_for(triangles, 4096, bin_triangles, (void*)&list_work)
     try sort_keys(listed)
     var keys = Growing[u64]()
     defer keys.close()
     try keys.assign(listed[..<unique_keys(listed)])
-    var fill = RasterWork(mesh, shape, voxel, band, empty_u64(), empty_usize())
+    var fill = RasterWork(mesh, shape, voxel, band, nothing[u64](), nothing[usize]())
     return try grid_of_leaves(name, GridClass.level_set, (f32)reach, voxel_transform(voxel), keys.view(), fill_query_leaf, (void*)&fill)
-
-func empty_usize() -> usize[]:
-    var empty: usize[]
-    return empty
 
 func fill_query_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[]):
     let work = (RasterWork*)(context else return)
@@ -156,8 +153,9 @@ func fill_query_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mask
     let (lx, ly, lz) = key_leaf(key)
     query_leaf(work, lx, ly, lz, work.band * work.voxel, values, mask)
 
-func empty_u64() -> u64[]:
-    var empty: u64[]
+## An empty slice, for work fields a pass does not use.
+func nothing[T]() -> T[]:
+    var empty: T[]
     return empty
 
 ## A mesh's triangles in world coordinates, with the pseudo-normals of
@@ -302,6 +300,9 @@ func corner_angle(a: Vector3, b: Vector3) -> f64:
     if la <= 0.0 or lb <= 0.0: return 0.0
     return math.acos(math.clamp(a.dot(b) / (la * lb), -1.0, 1.0))
 
+## Binning triangles into the leaves their band-grown boxes touch, in
+## parallel passes over the triangles: count, prefix-sum (the caller),
+## then list into each triangle's range.
 struct BinWork:
     let shape: const MeshShape*
     let voxel: f64
@@ -320,6 +321,7 @@ func leaf_box(work: const BinWork*, triangle: usize) -> (i64, i64, i64, i64, i64
     return ((i64)math.floor((low.x - work.reach) / size), (i64)math.floor((low.y - work.reach) / size), (i64)math.floor((low.z - work.reach) / size),
             (i64)math.floor((high.x + work.reach) / size), (i64)math.floor((high.y + work.reach) / size), (i64)math.floor((high.z + work.reach) / size))
 
+## One pass of BinWork over triangles first..<end.
 func bin_triangles(context: void*?, first: usize, end: usize):
     let work = (BinWork*)(context else return)
     for triangle in first..<end:
@@ -340,13 +342,7 @@ func bin_triangles(context: void*?, first: usize, end: usize):
                     if work.pass == 1: work.triangles[at] = (u64)triangle
                     at += 1
 
-## The distance from `p` to the box low..high (0 inside).
-func point_box_distance(p: Vector3, low: Vector3, high: Vector3) -> f64:
-    let dx = math.max(math.max(low.x - p.x, p.x - high.x), 0.0)
-    let dy = math.max(math.max(low.y - p.y, p.y - high.y), 0.0)
-    let dz = math.max(math.max(low.z - p.z, p.z - high.z), 0.0)
-    return math.sqrt(dx * dx + dy * dy + dz * dz)
-
+## The world box around triangle `triangle`.
 func triangle_box(shape: const MeshShape*, triangle: usize) -> (Vector3, Vector3):
     let a = shape.vertex(triangle, 0)
     let b = shape.vertex(triangle, 1)
@@ -391,7 +387,7 @@ func fill_raster_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mas
                     let p = Vector3((f64)(lx * 8 + x) * work.voxel, (f64)(ly * 8 + y) * work.voxel, (f64)(lz * 8 + z) * work.voxel)
                     # The box's distance bounds the triangle's: most dense
                     # triangles lose here, before the exact test.
-                    if point_box_distance(p, low, high) >= best[at]: continue
+                    if math.sqrt(bounds_distance(p, low, high)) >= best[at]: continue
                     let found = closest_feature(p, a, b, c)
                     let d = found.point.subtract(p).length()
                     if d >= best[at]: continue

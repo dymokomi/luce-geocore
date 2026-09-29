@@ -103,6 +103,8 @@ pub let adopt_selection = groups.adopt_selection
 ## Per-point soft weights of a selection (the Edit viewport's falloff tint).
 import luce_geocore.verbs as verbs
 pub let selection_weights = verbs.selection_weights
+## Transform Components' numbers as matrices, for editors moving whole things.
+pub type ComponentTransform = verbs.ComponentTransform
 
 import luce_geocore.subdivision as subdivision
 ## A subdivided mesh's display mesh (limit surface, cached), or none.

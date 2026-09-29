@@ -39,6 +39,18 @@ pub struct Matrix4:
         let c = self.x.cross(self.y).multiply_scalar(value.z)
         return try a.add(b).add(c).multiply_scalar(1.0 / determinant).normalized()
 
+    ## The inverse of this affine matrix; fails when it is singular.
+    pub func inverse() -> Matrix4!:
+        let determinant = self.determinant()
+        if not math.is_finite(determinant) or math.abs(determinant) < 1.0e-300: error(errors.invalid, "the matrix is singular")
+        let a = self.y.cross(self.z).multiply_scalar(1.0 / determinant)
+        let b = self.z.cross(self.x).multiply_scalar(1.0 / determinant)
+        let c = self.x.cross(self.y).multiply_scalar(1.0 / determinant)
+        # Rows a, b, c of the inverse linear part, as columns of the result.
+        let linear = Matrix4(Vector3(a.x, b.x, c.x), Vector3(a.y, b.y, c.y), Vector3(a.z, b.z, c.z), Vector3())
+        let t = linear.transform_direction(self.translation)
+        return Matrix4(linear.x, linear.y, linear.z, Vector3(-t.x, -t.y, -t.z))
+
     pub func is_finite() -> bool:
         return self.x.is_finite() and self.y.is_finite() and self.z.is_finite() and self.translation.is_finite()
 

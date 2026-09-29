@@ -57,20 +57,14 @@ pub struct SdfEdits:
     ## Transform Components' numbers (translate, rotate in degrees, scale,
     ## pivot mode and custom pivot; the centroid pivot is the picked faces').
     pub static func transformed(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
-        if numbers.length < 13: error(errors.invalid, "a transform needs its thirteen numbers")
         let source = try geometry.get()
         let sdf = set_sdf(source) else error(errors.invalid, "Edit SDF has no primitives to move")
         var tree = try SdfTree.of(sdf)
         defer tree.close()
         var chosen = try ChosenPrimitives.of(try pick.get(), group, tree.primitive_count())
         defer chosen.close()
-        let degrees = 0.017453292519943295
-        let linear = Matrix4.compose(Vector3(), Vector3(numbers[3] * degrees, numbers[4] * degrees, numbers[5] * degrees), Vector3(numbers[6], numbers[7], numbers[8]))
-        var pivot = Vector3(numbers[10], numbers[11], numbers[12])
-        if numbers[9] == 1.0: pivot = Vector3()
-        elif numbers[9] == 0.0: pivot = chosen.centroid
-        let moved = Vector3(numbers[0], numbers[1], numbers[2]).add(pivot).subtract(linear.transform_point(pivot))
-        let delta = Matrix4(linear.x, linear.y, linear.z, moved)
+        let transform = try ComponentTransform.of(numbers, chosen.centroid)
+        let delta = transform.matrix(transform.translation)
         var rewrite = try SdfRewrite.of(sdf)
         defer rewrite.close()
         for index in 0..<tree.primitive_count():

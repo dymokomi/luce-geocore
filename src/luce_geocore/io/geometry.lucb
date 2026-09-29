@@ -6,14 +6,18 @@
 ##     /geometry/a0       attribute  the set's detail attributes (as below)
 ##     /geometry/mesh     mesh       origin, P, face_offsets, corner_points,
 ##                                   triangles, [precise]
-##       /geometry/mesh/a0  attribute  name, domain, type, width, storage,
+##       /geometry/mesh/a0  attribute  name, domain, type, width, single,
 ##                                     flags, role, elements, [table], value
 ##     /geometry/points   points     origin, P
-##     /geometry/curves   curves     origin, P, offsets, knots, knot_offsets
-##     /geometry/instances  instances  count
-##       .../i0           instance   translation, rotation, scale, visible
-##         .../i0/geometry  geometry  (a nested set)
-##
+##     /geometry/curves   curves     origin, P, offsets, [knots, knot_offsets]
+##     /geometry/instances  instances  count, prototypes, prototype,
+##                                     placement, visible
+##       .../p0           geometry   (a prototype set, written once)
+##     /geometry/volume   volume     count
+##       .../g0           grid       name, class, background, transform,
+##                                   keys, values, masks
+##     /geometry/sdf      sdf        ops, params
+
 ## Each family is a codec (encode, decode) found by its component name;
 ## the built-in families are here, and other packages register theirs
 ## (luce-cad's B-rep). Columns are written as typed arrays straight from
@@ -196,14 +200,9 @@ func append_name(out: Growing[u8]*, name: str, suffix: str) -> !:
     try append_text(out, name)
     try append_text(out, suffix)
 
-func float3_bytes(values: const Float3[]) -> const u8[]:
-    return u8[]((u8*)values.data, values.length * 12)
-
-func i32_bytes(values: const i32[]) -> const u8[]:
-    return u8[]((u8*)values.data, values.length * 4)
-
-func f32_bytes(values: const f32[]) -> const u8[]:
-    return u8[]((u8*)values.data, values.length * 4)
+## The bytes of a typed slice, for a column payload (no copy).
+func bytes_view[T](values: const T[]) -> const u8[]:
+    return u8[]((u8*)values.data, values.length * sizeof(T))
 
 ## `set` under element `path` (kind "geometry"), its components as
 ## children; the root also records the format version and `key`.
@@ -235,15 +234,15 @@ func encode_mesh(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let origin = mesh_origin(mesh)
     try writer.crate.triple("origin", origin.x, origin.y, origin.z)
     let points = point_span(mesh)
-    try writer.column_borrowed("P", dtype_float32, points.length, 3, float3_bytes(points))
+    try writer.column_borrowed("P", dtype_float32, points.length, 3, bytes_view(points))
     let offsets = offset_span(mesh)
-    try writer.column_borrowed("face_offsets", dtype_int32, offsets.length, 1, i32_bytes(offsets))
+    try writer.column_borrowed("face_offsets", dtype_int32, offsets.length, 1, bytes_view(offsets))
     let corners = corner_span(mesh)
-    try writer.column_borrowed("corner_points", dtype_int32, corners.length, 1, i32_bytes(corners))
+    try writer.column_borrowed("corner_points", dtype_int32, corners.length, 1, bytes_view(corners))
     let triangles = triangle_span(mesh)
-    try writer.column_borrowed("triangles", dtype_int32, triangles.length, 1, i32_bytes(triangles))
+    try writer.column_borrowed("triangles", dtype_int32, triangles.length, 1, bytes_view(triangles))
     let precise = precise_span(mesh)
-    if precise.length > 0: try writer.column_borrowed("precise", dtype_float64, precise.length, 3, u8[]((u8*)precise.data, precise.length * 24))
+    if precise.length > 0: try writer.column_borrowed("precise", dtype_float64, precise.length, 3, bytes_view(precise))
     var entries = Growing[const Attribute*]()
     defer entries.close()
     for index in 0..<(usize)mesh.attribute_count(): try entries.push(try attribute_entry(mesh, (i64)index))
@@ -255,7 +254,7 @@ func encode_points(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let origin = cloud_origin(cloud)
     try writer.crate.triple("origin", origin.x, origin.y, origin.z)
     let points = cloud_positions(cloud)
-    try writer.column_borrowed("P", dtype_float32, points.length, 3, float3_bytes(points))
+    try writer.column_borrowed("P", dtype_float32, points.length, 3, bytes_view(points))
     try writer.attributes(path, cloud_store(cloud))
 
 func encode_curves(data: const void*, writer: GeometryWriter*, path: str) -> !:
@@ -264,14 +263,14 @@ func encode_curves(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let origin = curves_origin(curves)
     try writer.crate.triple("origin", origin.x, origin.y, origin.z)
     let points = curves.position_span()
-    try writer.column_borrowed("P", dtype_float32, points.length, 3, float3_bytes(points))
+    try writer.column_borrowed("P", dtype_float32, points.length, 3, bytes_view(points))
     let offsets = curves.offset_span()
-    try writer.column_borrowed("offsets", dtype_int32, offsets.length, 1, i32_bytes(offsets))
+    try writer.column_borrowed("offsets", dtype_int32, offsets.length, 1, bytes_view(offsets))
     let knots = curves_knots(curves)
     if knots.length > 0:
-        try writer.column_borrowed("knots", dtype_float32, knots.length, 1, f32_bytes(knots))
+        try writer.column_borrowed("knots", dtype_float32, knots.length, 1, bytes_view(knots))
         let starts = curves_knot_offsets(curves)
-        try writer.column_borrowed("knot_offsets", dtype_int32, starts.length, 1, i32_bytes(starts))
+        try writer.column_borrowed("knot_offsets", dtype_int32, starts.length, 1, bytes_view(starts))
     try writer.attributes(path, curves.store())
 
 ## Instances: each prototype once (children p0, p1, …), then the instances'
