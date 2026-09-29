@@ -4,6 +4,7 @@ import memory
 import ownership
 import sync
 import geocore_parallel
+from geocore_kernel import clear_group_cache
 import polygon_checks
 import scale_checks
 import display_checks
@@ -59,8 +60,11 @@ struct Tracker: memory.Allocator:
 func restore(previous: memory.Allocator):
     memory.heap = previous
 
+## Nothing may stay live but the bounded, process-wide group-bits cache
+## (groups/cache.lucb: the last 16 evaluated groups), which is flushed first.
 func settle(tracker: Tracker*):
     tracker.remaining = none
+    clear_group_cache()
     ownership.collect()
     discard(ownership.finish_run(0))
     assert(tracker.live == 0)
