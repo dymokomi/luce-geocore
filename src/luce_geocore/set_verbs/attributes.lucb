@@ -1,0 +1,124 @@
+## Attribute nodes on the components meshes do not cover: curves (points,
+## vertices as points, primitives as curves, detail) and point clouds
+## (points and detail). luced-3d runs the mesh kernels on the mesh and these
+## on the rest, so an attribute node acts on every component with the
+## domain. Domains are the node's menu values: 0 points, 1 vertices,
+## 2 primitives, 3 detail.
+
+pub struct SetAttributes:
+    let reserved: u8 = 0
+
+    ## Whether the set has curves or a point cloud of its own.
+    pub static func present(geometry: interop.Reference[GeometrySet]) -> bool!:
+        let set = try geometry.get()
+        return set_curves(set) != none or set_find(set, &points_component) != none
+
+    ## Whether the set's curves (or else point cloud) have attribute `name`
+    ## on `domain` (0 points, 2 curves, 3 detail).
+    pub static func has(geometry: interop.Reference[GeometrySet], name: str, domain: i64) -> bool!:
+        let set = try geometry.get()
+        let wanted = Domain.point if domain == 0 or domain == 1 else (curve_domain if domain == 2 else Domain.detail)
+        if let lines = set_curves(set): return lines.find(name, wanted) != none
+        if let data = set_find(set, &points_component): return cloud_store((const PointCloud*)data).find(name, (i64)(u8)wanted) >= 0
+        return false
+
+    ## `name` = `values` (1..4 components) on `domain`, optionally scaled per
+    ## element by the mesh kernel's deterministic hash of the element id.
+    pub static func filled(geometry: interop.Reference[GeometrySet], name: str, domain: i64, values: const f64[], integer: bool, randomize: bool, seed: f64) -> interop.Reference[GeometrySet]!:
+        let edit = AttributeEdit(0, name, "", domain, values, integer, randomize, seed, "")
+        return try adopt_set(try edited(try geometry.get(), &edit))
+
+    ## Without attribute `name` on `domain`.
+    pub static func removed(geometry: interop.Reference[GeometrySet], name: str, domain: i64) -> interop.Reference[GeometrySet]!:
+        var none_values: f64[]
+        let edit = AttributeEdit(1, name, "", domain, none_values, false, false, 0.0, "")
+        return try adopt_set(try edited(try geometry.get(), &edit))
+
+    ## Attribute `name` on `domain` called `replacement`.
+    pub static func renamed(geometry: interop.Reference[GeometrySet], name: str, replacement: str, domain: i64) -> interop.Reference[GeometrySet]!:
+        var none_values: f64[]
+        let edit = AttributeEdit(2, name, replacement, domain, none_values, false, false, 0.0, "")
+        return try adopt_set(try edited(try geometry.get(), &edit))
+
+    ## A group `name` of the curves' elements `expression` selects on
+    ## `domain` (0 points, 2 curves; menu value 4 edges does not apply).
+    pub static func grouped(geometry: interop.Reference[GeometrySet], name: str, domain: i64, expression: str) -> interop.Reference[GeometrySet]!:
+        var none_values: f64[]
+        let edit = AttributeEdit(3, name, "", domain, none_values, false, false, 0.0, expression)
+        return try adopt_set(try edited(try geometry.get(), &edit))
+
+## One attribute edit: 0 fill, 1 remove, 2 rename, 3 group.
+struct AttributeEdit:
+    let kind: u8
+    let name: str
+    let replacement: str
+    let domain: i64
+    let values: const f64[]
+    let integer: bool
+    let randomize: bool
+    let seed: f64
+    let expression: str
+
+## A copy of `set` with the edit applied to its curves and point cloud.
+func edited(set: const GeometrySet*, edit: const AttributeEdit*) -> GeometrySet*!:
+    let storage = try set_storage(set)
+    errdefer dispose_set(storage)
+    if let found_curves = set_curves(set):
+        let lines = found_curves
+        # Curve vertices are their points; primitives are curves.
+        let domain = Domain.point if edit.domain == 0 or edit.domain == 1 else (curve_domain if edit.domain == 2 else Domain.detail)
+        let sizes: usize[3] = [lines.point_count(), lines.curve_count(), 1]
+        let size = sizes[0 if domain == Domain.point else (1 if domain == curve_domain else 2)]
+        var store = try lines.store().shared()
+        errdefer store.close()
+        if edit.kind == 3:
+            var report = GroupReport()
+            var bits = try curve_group_bits(lines, edit.expression if edit.expression.length > 0 else "*", domain, &report)
+            defer bits.close()
+            try store.put(try Attribute.group_of(edit.name, domain, size, bits.view().words))
+        else:
+            try apply_edit(&store, edit, domain, size)
+        let handed = store
+        store = AttributeStore()
+        try set_put(storage, curves_type(), (void*)(try curves_with_store(lines, handed)))
+    if let data = set_find(set, &points_component):
+        let cloud = (const PointCloud*)data
+        if edit.kind != 3 and (edit.domain == 0 or edit.domain == 3):
+            let domain = Domain.point if edit.domain == 0 else Domain.detail
+            var store = try cloud_store(cloud).shared()
+            errdefer store.close()
+            try apply_edit(&store, edit, domain, cloud_positions(cloud).length if domain == Domain.point else 1)
+            let handed = store
+            store = AttributeStore()
+            try set_put(storage, &points_component, (void*)(try cloud_with_store(cloud, handed)))
+    return storage
+
+func apply_edit(store: AttributeStore*, edit: const AttributeEdit*, domain: Domain, size: usize) -> !:
+    let found = store.find(edit.name, (i64)(u8)domain)
+    match edit.kind:
+        1:
+            if found >= 0: store.remove((usize)found)
+        2:
+            if found < 0: return
+            let renamed = try store.entry((usize)found).renamed(edit.replacement)
+            store.remove((usize)found)
+            try store.put(renamed)
+        _:
+            let width = edit.values.length
+            if width < 1 or width > 4: error(errors.invalid, "an attribute value has 1..4 components")
+            if not edit.randomize:
+                var rounded: f64[4]
+                for component in 0..<width:
+                    rounded[component] = math.floor(edit.values[component]) if edit.integer else edit.values[component]
+                var attribute = try Attribute.from_numbers(edit.name, domain, width, rounded[..<width], edit.integer, Storage.single)
+                attribute.elements = size
+                try store.put(attribute)
+                return
+            let generated = try alloc f64[size * width] in memory.heap
+            defer free(generated) in memory.heap
+            for id in 0..<size:
+                for component in 0..<width:
+                    let random = math.sin((f64)(id * 7 + component) * 12.9898 + edit.seed * 78.233) * 43758.5453
+                    let value = edit.values[component] * (random - math.floor(random))
+                    generated[id * width + component] = math.floor(value) if edit.integer else value
+            try store.put(try Attribute.from_numbers(edit.name, domain, width, generated, edit.integer))

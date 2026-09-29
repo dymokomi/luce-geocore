@@ -240,6 +240,16 @@ pub func verbs() -> !:
     defer again.release()
     let r2 = set_curves(again.value()) else trap("curves")
     for at in 0..<r.point_count(): assert(r.position_span()[at] == r2.position_span()[at])
+    # Every curve (the parallel path): the same points for curve 1, and the
+    # curve group and point weights carried.
+    let every = try apply("Resample Curve", set.value(), "", [0.0, 5.0, 0.1])
+    defer every.release()
+    let e = set_curves(every.value()) else trap("curves")
+    assert(e.point_count() == 15 and e.curve_count() == 3)
+    for at in 0..<(usize)5: assert(e.position_span()[5 + at] == r.position_span()[3 + at])
+    let every_weights = e.find("weight", Domain.point) else trap("weight")
+    assert(every_weights.number(5, 0) == 3.0 and every_weights.number(9, 0) == 5.0)
+    assert((e.find("picked", Domain.face) else trap("picked")).number(1, 0) == 1.0 and e.settings(2).kind == CurveType.poly)
     # Trim half of the L; its length halves.
     let trimmed = try apply("Trim Curve", set.value(), "0", [0.0, 0.0, 0.5])
     defer trimmed.release()

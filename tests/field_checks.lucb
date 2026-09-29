@@ -17,6 +17,7 @@ func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
     return math.abs(a - b) < tolerance
 
 pub func exercise() -> !:
+    try saddle()
     try keys()
     try programs()
     try level_sets()
@@ -71,6 +72,56 @@ pub func allocations() -> !:
 pub func run() -> !:
     try exercise()
     print("PASS volumes and SDFs: keys, programs, level sets, surface nets, slices, sets, files, verbs")
+
+## An L-shaped prism: its inner corner has a concave edge and saddle
+## vertices, where the nearest face's own normal gives the wrong side.
+## Pseudo-normals get every voxel of the band right.
+func l_prism() -> interop.Reference[Mesh]!:
+    let outline: f64[12] = [0.0, 0.0, 2.0, 0.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 0.0, 2.0]
+    var points: Vector3[12] = ---
+    for at in 0..<(usize)6:
+        points[at] = Vector3(outline[at * 2], outline[at * 2 + 1], 0.0)
+        points[at + 6] = Vector3(outline[at * 2], outline[at * 2 + 1], 1.0)
+    let sizes: i64[8] = [6, 6, 4, 4, 4, 4, 4, 4]
+    var corners: i64[36] = ---
+    for at in 0..<(usize)6:
+        corners[at] = (i64)(5 - at)
+        corners[6 + at] = (i64)(6 + at)
+        let next = (at + 1) % 6
+        corners[12 + at * 4] = (i64)at
+        corners[12 + at * 4 + 1] = (i64)next
+        corners[12 + at * 4 + 2] = (i64)(6 + next)
+        corners[12 + at * 4 + 3] = (i64)(6 + at)
+    return try interop.Reference[Mesh].adopt(try new Mesh(points, sizes, corners) in memory.heap, geocore.mesh_type, memory.heap)
+
+func inside_l(p: Vector3) -> bool:
+    if p.z <= 0.0 or p.z >= 1.0 or p.x <= 0.0 or p.y <= 0.0: return false
+    return (p.x < 2.0 and p.y < 1.0) or (p.x < 1.0 and p.y < 2.0)
+
+pub func saddle() -> !:
+    let mesh = try l_prism()
+    defer mesh.release()
+    for voxel in [0.05, 0.07]:
+        let grid = try mesh_level_set(mesh.value(), voxel, 3.0, "surface")
+        defer release_grid(grid)
+        var checked: usize = 0
+        let leaf_keys = grid.keys.view()
+        let values = grid.values.view()
+        for leaf in 0..<leaf_keys.length:
+            let (lx, ly, lz) = key_leaf(leaf_keys[leaf])
+            for at in 0..<(usize)512:
+                let value = (f64)values[leaf * 512 + at]
+                if math.abs(value) < 0.000001: continue
+                let p = Vector3((f64)(lx * 8 + (i64)(at & 7)) * voxel, (f64)(ly * 8 + (i64)((at >> 3) & 7)) * voxel, (f64)(lz * 8 + (i64)(at >> 6)) * voxel)
+                assert((value < 0.0) == inside_l(p))
+                checked += 1
+        assert(checked > 10000)
+    # The concave corner's own voxels: just inside and just outside.
+    let fine = try mesh_level_set(mesh.value(), 0.05, 3.0, "surface")
+    defer release_grid(fine)
+    var sampler = GridSampler.of(fine)
+    assert(sampler.sample(Vector3(0.95, 0.95, 0.5)) < 0.0 and sampler.sample(Vector3(1.05, 1.05, 0.5)) > 0.0)
+    assert(sampler.sample(Vector3(1.05, 1.05, 0.95)) > 0.0 and sampler.sample(Vector3(0.95, 0.95, 1.05)) > 0.0)
 
 pub func keys() -> !:
     for x in -3..<(i64)3:

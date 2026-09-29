@@ -9,6 +9,7 @@
 pub func resampled(curves: const Curves*, selected: Bits, mode: i64, count: i64, length: f64) -> Curves*!:
     if mode == 0 and (count < 1 or count > 10000000): error(errors.invalid, "resample needs 1..10000000 points")
     if mode == 1 and not (length > 0.0 and math.is_finite(length)): error(errors.invalid, "resample needs a positive length")
+    if selected.population() == curves.curve_count(): return try resampled_all(curves, mode, count, length)
     let offsets = try evaluated_offsets(curves)
     let points = try evaluated_positions(curves)
     let frames = try evaluated_frames(curves)
@@ -35,6 +36,96 @@ pub func resampled(curves: const Curves*, selected: Bits, mode: i64, count: i64,
             let (a, b, t) = control_parents(curves, curve, high - low, place.index, place.fraction)
             try builder.point_between(place.position.add(curves.origin), a, b, t)
     return try builder.finish(curves)
+
+## Samples on curve `curve` of total length `total` (see resampled).
+func sample_count(total: f64, cyclic: bool, mode: i64, count: i64, length: f64) -> usize!:
+    if total <= 0.0: return 1
+    if mode == 0: return (usize)count
+    let segments = math.max(1.0, math.round(total / length))
+    let samples = (usize)segments if cyclic else (usize)segments + 1
+    if samples > 10000000: error(errors.limit, "resample would make more than 10M points a curve")
+    return samples
+
+## Every curve resampled: samples counted, then placed in parallel by curve
+## straight into the output columns; point attributes mix their control
+## points, curve attributes are shared as they are.
+func resampled_all(curves: const Curves*, mode: i64, count: i64, length: f64) -> Curves*!:
+    let curve_total = curves.curve_count()
+    let frames = try evaluated_frames(curves)
+    var out_offsets = try Column[i32].allocate(curve_total + 1)
+    errdefer out_offsets.release()
+    var closed = try BitsBuilder.zeros(curve_total)
+    defer closed.close()
+    let starts = out_offsets.span()
+    var total: usize = 0
+    for curve in 0..<curve_total:
+        let cyclic = curves.settings(curve).cyclic
+        let samples = try sample_count((f64)frames.totals[curve], cyclic, mode, count, length)
+        starts[curve] = (i32)total
+        if cyclic and samples > 2: closed.set(curve)
+        total += samples
+        if total > 33554432: error(errors.limit, "curves exceed 32M points")
+    starts[curve_total] = (i32)total
+    var positions = try Column[Float3].allocate(total)
+    errdefer positions.release()
+    let parents = try alloc i32[total] in memory.heap
+    defer free(parents) in memory.heap
+    let others = try alloc i32[total] in memory.heap
+    defer free(others) in memory.heap
+    let mix = try alloc f32[total] in memory.heap
+    defer free(mix) in memory.heap
+    var work = ResampleWork(curves, try evaluated_offsets(curves), try evaluated_positions(curves), frames, out_offsets.view(), positions.span(), parents, others, mix)
+    parallel.parallel_for(curve_total, 64, resample_curves, (void*)&work)
+    var store = AttributeStore()
+    errdefer store.close()
+    var types = try Attribute.create("curve_type", curve_domain, DataType.int8, 1, curve_total, Storage.single)
+    types.data.span()[0] = 0
+    types.role = Role.index
+    try store.put(types)
+    var cyclic_flags = try Attribute.group_of("cyclic", curve_domain, curve_total, closed.view().words)
+    cyclic_flags.flags = 0
+    try store.put(cyclic_flags)
+    for index in 0..<curves.attributes.count():
+        let entry = curves.attributes.entry(index)
+        if is_builtin(entry.name(), entry.domain): continue
+        match entry.domain:
+            .point: try store.put(try mixed_points(entry, parents, others, mix))
+            .face, .detail: try store.put(entry.share())
+            _: continue
+    let handed = store
+    store = AttributeStore()
+    var empty_knots: Column[f32]
+    var empty_starts: Column[i32]
+    return try curves_assembled(positions.take(), curves.origin, out_offsets.take(), empty_knots, empty_starts, handed)
+
+struct ResampleWork:
+    let curves: const Curves*
+    let offsets: const i32[]
+    let points: const Float3[]
+    let frames: Frames
+    let out_offsets: const i32[]
+    let out: Float3[]
+    let parents: i32[]
+    let others: i32[]
+    let mix: f32[]
+
+func resample_curves(context: void*?, first: usize, end: usize):
+    let work = (ResampleWork*)(context else return)
+    for curve in first..<end:
+        let low = (usize)work.offsets[curve]
+        let high = (usize)work.offsets[curve + 1]
+        let cyclic = work.curves.settings(curve).cyclic
+        let total = (f64)work.frames.totals[curve]
+        let begin = (usize)work.out_offsets[curve]
+        let samples = (usize)work.out_offsets[curve + 1] - begin
+        let spacing = total / (f64)(samples if cyclic else (samples - 1 if samples > 1 else 1))
+        for at in 0..<samples:
+            let place = place_at(work.points[low..<high], work.frames.lengths[low..<high], total, cyclic, spacing * (f64)at)
+            let (a, b, t) = control_parents(work.curves, curve, high - low, place.index, place.fraction)
+            work.out[begin + at] = Float3.of(place.position)
+            work.parents[begin + at] = a
+            work.others[begin + at] = b
+            work.mix[begin + at] = (f32)t if b >= 0 else 0.0
 
 ## Selected curves cut to the part between `start` and `end`: fractions of
 ## their length (mode 0) or lengths from their start (mode 1). Cyclic curves

@@ -27,7 +27,7 @@ from luce_geocore.core.attributes import Attribute, AttributeStore, Domain, Data
 from luce_geocore.core.geometry import Bounds
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
-from luce_geocore.geometries.polygon import Mesh, MeshPart, concatenated, assembled, put_attribute, mesh_dispose, mesh_share, mesh_adopt, point_span, mesh_origin, offset_span, corner_span, triangle_span, face_normal_span
+from luce_geocore.geometries.polygon import Mesh, MeshPart, concatenated, assembled, put_attribute, mesh_dispose, mesh_share, mesh_adopt, point_span, mesh_origin, offset_span, corner_span, triangle_span, face_normal_span, corner_edge_span, point_face_span, edge_corner_span, corner_face_span
 from luce_geocore.geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, union_box, set_find, set_put, set_storage, set_mesh, empty_storage, dispose_set
 
 pub let leaf_size: i64 = 8
@@ -294,6 +294,40 @@ pub func sort_keys(keys: u64[]) -> !:
             counts[bucket] += 1
         from_keys = not from_keys
     # Eight passes end back in `keys`.
+
+## Sort `keys` ascending, moving `values` with them (a radix sort over
+## the key bytes that differ: nearby leaves' Morton codes share their high
+## bytes).
+pub func sort_pairs(keys: u64[], values: u64[]) -> !:
+    if keys.length < 2: return
+    var differ: u64 = 0
+    for key in keys: differ = differ | (key ^ keys[0])
+    var passes: usize = 0
+    while passes < 8 and (differ >> (u64)(passes * 8)) != 0: passes += 1
+    let key_scratch = try alloc u64[keys.length] in memory.heap
+    defer free(key_scratch) in memory.heap
+    let value_scratch = try alloc u64[keys.length] in memory.heap
+    defer free(value_scratch) in memory.heap
+    var in_place = true
+    for pass in 0..<passes:
+        let from_keys = keys if in_place else key_scratch
+        let from_values = values if in_place else value_scratch
+        let to_keys = key_scratch if in_place else keys
+        let to_values = value_scratch if in_place else values
+        var counts: usize[257]
+        for at in 0..<(usize)257: counts[at] = 0
+        let shift = (u64)(pass * 8)
+        for key in from_keys: counts[(usize)((key >> shift) & 255) + 1] += 1
+        for at in 1..<(usize)257: counts[at] += counts[at - 1]
+        for at in 0..<from_keys.length:
+            let bucket = (usize)((from_keys[at] >> shift) & 255)
+            to_keys[counts[bucket]] = from_keys[at]
+            to_values[counts[bucket]] = from_values[at]
+            counts[bucket] += 1
+        in_place = not in_place
+    if not in_place:
+        memory.copy(keys, key_scratch, keys.length)
+        memory.copy(values, value_scratch, values.length)
 
 ## Keys left after dropping repeats of a sorted list (in place); how many.
 pub func unique_keys(keys: u64[]) -> usize:

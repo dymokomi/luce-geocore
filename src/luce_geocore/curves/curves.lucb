@@ -190,6 +190,11 @@ pub func curves_knots(curves: const Curves*) -> const f32[]:
 pub func curves_knot_offsets(curves: const Curves*) -> const i32[]:
     return curves.knot_offsets.view()
 
+## `curves` with `attributes` (taken, even on failure) in place of its own:
+## every column shared, the evaluation cache seeded.
+pub func curves_with_store(curves: const Curves*, attributes: AttributeStore) -> Curves*!:
+    return try curves_assembled(curves.positions.share(), curves.origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), attributes, curves.cache)
+
 ## The origin positions (and handles) are measured from.
 pub func curves_origin(curves: const Curves*) -> Vector3:
     return curves.origin

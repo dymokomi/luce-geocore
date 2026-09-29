@@ -136,11 +136,18 @@ transform, and joining two SDFs makes their union. Every op keeps the field
     from the surface than their half diagonal plus the band. Then the same
     test runs per leaf.
   - The leaves left are sampled in parallel.
-- **Mesh to level set** (`mesh_level_set`):
-  - Leaves come from each face's grown box.
-  - Each voxel gets the exact distance to the nearest face (the mesh's BVH),
-    signed by that face's side. Leaves far from the surface take one side's
-    value from their center.
+- **Mesh to level set** (`mesh_level_set`, `mesh_distance.lucb`):
+  - Distances are rasterized per leaf. Each triangle is binned into the leaves
+    its band-grown box touches.
+  - A leaf walks its triangles over each grown box's voxels, keeping the
+    nearest point and its feature (vertex, edge or face). A cheap box test
+    against the best distance so far comes first.
+  - The sign is the side of that feature's angle-weighted pseudo-normal
+    (Bærentzen and Aanæs). It is exact for closed, consistently oriented
+    meshes, concave edges and saddle vertices included; an L-shaped prism in
+    `tests/field_checks.lucb` checks every band voxel.
+  - Voxels beyond the band take a neighbour's side. A region no band voxel
+    reaches asks the BVH once, and so does a leaf too dense to rasterize.
 - **Points to level set** (`points_level_set`): a union of spheres. Each
   point writes only the voxels within its reach.
 - **Surface nets** (`surface_mesh`):
@@ -310,7 +317,7 @@ save and reads the values back.
 | Curves: evaluate 10k Bezier curves, resolution 12 | 10.9 ms | 3,730,000 |
 | Curves: tangents, normals and lengths of those | 61.6 ms | 3,730,000 |
 | Curves: evaluate 10k NURBS curves (order 4), resolution 12 | 23.1 ms | 3,490,000 |
-| Resample Curve: 10k curves to 64 points | 165.2 ms | 640,000 |
+| Resample Curve: 10k curves to 64 points | 10.9 ms (165.2 ms serial) | 640,000 |
 | Curve to Mesh: 1k Catmull-Rom curves, 12-point circle | 82.1 ms | 4,466,000 |
 | Mesh to Curve: the 837×837 grid's boundary | 51.9 ms | 3,348 |
 | Mesh to Curve: every edge of the 837×837 grid | 345.9 ms | 1,402,808 |
@@ -319,7 +326,8 @@ save and reads the values back.
 | SDF to Volume: a smooth union, voxel 1/400 of its size (active voxels) | 57.1 ms | 3,706,635 |
 | Surface nets: that level set (faces) | 107.7 ms | 848,874 |
 | Surface nets projected onto the SDF (faces) | 165.4 ms | 848,874 |
-| Mesh to SDF: a 64-segment sphere, voxel 0.01 (active voxels) | 750.3 ms | 751,940 |
+| Mesh to SDF: a 64-segment sphere, voxel 0.01 (active voxels) | 57.4 ms (750.3 ms per-voxel BVH) | 751,940 |
+| Mesh to SDF: the 837×837 grid, 256 voxels across (active voxels) | 1,130.8 ms | 340,573 |
 | Volume from Points: 100k points, radius 0.02, voxel 0.01 (active voxels) | 105.2 ms | 3,044,352 |
 
 luced-3d's headless benchmark (`tests/bench/run.py`, `--native --opt 2`)
@@ -329,3 +337,10 @@ saves and loads cooked results:
 |---|---:|---:|---:|
 | 700k-face grid (OBJ) | 3.8 ms | 17.0 ms | 39 MB |
 | camera.step, tessellated (707k points, 655k faces, 9 attributes) | 11.8 ms | 25.5 ms | 122 MB |
+
+Mesh to SDF at 256 voxels across the bounds (luced-3d headless benchmark):
+
+| Case | Rasterized, pseudo-normals | Per-voxel BVH (before) |
+|---|---:|---:|
+| 700k-face grid (an open plane of tiny quads) | 1,595 ms | 691 ms |
+| camera.step, tessellated | 2,538 ms | 41,636 ms |

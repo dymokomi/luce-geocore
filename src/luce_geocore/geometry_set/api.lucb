@@ -48,6 +48,12 @@ extend GeometrySet:
         if index < 0 or (usize)index >= self.entries.count: error(errors.invalid, "component index out of range")
         return self.entries.items[(usize)index].kind.name
 
+    ## This set without its `name` component (shared otherwise).
+    pub func without(name: str) -> interop.Reference[GeometrySet]!:
+        let storage = try self.storage()
+        if let kind = component_type(name): storage.remove(kind)
+        return try adopt_set(storage)
+
     pub func has(name: str) -> bool:
         for entry in self.entries.view():
             if entry.kind.name == name: return true

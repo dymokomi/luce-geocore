@@ -36,6 +36,11 @@ pub func cloud_origin(cloud: const PointCloud*) -> Vector3:
 pub func cloud_store(cloud: const PointCloud*) -> const AttributeStore*:
     return &cloud.attributes
 
+## `cloud` with `attributes` (taken, even on failure) in place of its
+## own; the positions are shared.
+pub func cloud_with_store(cloud: const PointCloud*, attributes: AttributeStore) -> PointCloud*!:
+    return try cloud_assembled(cloud.positions.share(), cloud.origin, attributes)
+
 ## A heap cloud owning these columns (taken, even on failure).
 pub func cloud_assembled(positions: Column[Float3], origin: Vector3, attributes: AttributeStore) -> PointCloud*!:
     var owned_positions = positions
