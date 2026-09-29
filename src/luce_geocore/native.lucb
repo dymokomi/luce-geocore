@@ -10,7 +10,7 @@ import luce_geocore.geometries.polygon as polygon
 from luce_geocore.math.vector import Vector3
 from luce_geocore.core.attributes import DataType
 from luce_geocore.core.float3 import Float3
-from luce_geocore.geometries.polygon import PolygonMesh, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, edge_span, attribute_entry, mesh_origin, smooth_normal_span, smooth_normals_ids, curvature_span, curvature_id
+from luce_geocore.geometries.polygon import PolygonMesh, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, edge_span, attribute_entry, mesh_origin, smooth_normal_span, smooth_normals_ids, smooth_normals_corner_domain, curvature_span, curvature_id
 
 ## Positions as x, y, z f32 triples relative to `origin(mesh)`; `out` holds
 ## 3 per point. Positions are stored this way, so this is a copy.
@@ -49,12 +49,16 @@ pub func pack_face_normals(mesh: const PolygonMesh*, out: f32[]) -> !:
     if out.length != normals.length * 3: error(errors.invalid, "normal output needs three values per face")
     memory.copy(Float3[]((Float3*)out.data, normals.length), normals, normals.length)
 
-## Smooth corner normals (the shading of a mesh without N) as f32 triples,
-## computed on first use.
+## Smooth normals (the shading of a mesh without N) as f32 triples, one per
+## point or per corner (`smooth_domain`), computed on first use.
 pub func pack_smooth_normals(mesh: const PolygonMesh*, out: f32[]) -> !:
     let normals = try smooth_normal_span(mesh)
-    if out.length != normals.length * 3: error(errors.invalid, "normal output needs three values per corner")
+    if out.length != normals.length * 3: error(errors.invalid, "normal output needs three values per normal")
     memory.copy(Float3[]((Float3*)out.data, normals.length), normals, normals.length)
+
+## The domain of the smooth normals: 1 (corner) or 0 (point).
+pub func smooth_domain(mesh: const PolygonMesh*) -> i64!:
+    return 1 if (try smooth_normals_corner_domain(mesh)) else 0
 
 ## The smooth normals' column id and the id it was updated from (0: none).
 pub func smooth_ids(mesh: const PolygonMesh*) -> (u64, u64)!:

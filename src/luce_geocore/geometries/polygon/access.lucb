@@ -159,7 +159,8 @@ extend PolygonMesh:
     func shading_normal(corner: usize, face: usize) -> Vector3!:
         var normal = Vector3()
         if not self.has_normals():
-            return (try self.smooth_normals())[corner].vector()
+            let smooth = try self.smooth_normals()
+            return smooth[corner if self.shading.corner_domain() else (usize)self.corners.view()[corner]].vector()
         let domains: usize[4] = [3, 2, 0, 1]
         for domain in domains:
             let ni = self.attributes.normals[domain]
@@ -208,7 +209,8 @@ extend PolygonMesh:
         let values = try self.curvatures()
         return Vector3((f64)values[(usize)point * 2], (f64)values[(usize)point * 2 + 1], 0.0)
 
-    ## The smooth normal of every corner, computed on first use.
+    ## The smooth normals (per point, or per corner where a cusp splits a
+    ## point), computed on first use.
     func smooth_normals() -> const Float3[]!:
         let incidence = try self.incidence()
         let shape = Surface(self.positions.view(), self.offsets.view(), self.corners.view(), self.normals.view(), incidence.0, incidence.1)
@@ -293,10 +295,15 @@ pub func points_parent(mesh: const PolygonMesh*) -> u64:
 pub func normals_parent(mesh: const PolygonMesh*) -> u64:
     return mesh.normals.parent()
 
-## Smooth corner normals (the shading of a mesh without N), computed on first
-## use; and the id of their column, stable while the geometry is.
+## Smooth normals (the shading of a mesh without N), per point or per corner
+## (`smooth_normals_corner_domain`), computed on first use; and the id of
+## their column and the one it was updated from.
 pub func smooth_normal_span(mesh: const PolygonMesh*) -> const Float3[]!:
     return try mesh.smooth_normals()
+
+pub func smooth_normals_corner_domain(mesh: const PolygonMesh*) -> bool!:
+    discard(try mesh.smooth_normals())
+    return mesh.shading.corner_domain()
 
 pub func smooth_normals_ids(mesh: const PolygonMesh*) -> (u64, u64)!:
     discard(try mesh.smooth_normals())

@@ -1,28 +1,23 @@
-## Smooth shading normals for meshes without an authored N, computed on first
-## use and shared by the snapshots of one geometry: each corner averages the
-## normals of the faces around its point, weighted by their angle there, over
-## the faces within the cusp angle of its own face (60 degrees, as Houdini's
-## default), so hard edges stay hard. A mesh made by moving points keeps the
-## previous geometry's cache as its source and updates only the corners around
-## the moved points. The same cache holds the points' discrete principal
-## curvatures (curvature.lucb) once asked for.
-import math
+## Derived shading data of one geometry, computed on first use and shared by
+## its snapshots: smooth normals for meshes without an authored N (per point,
+## or per corner where a cusp splits a point; see smooth_normals.lucb) and the
+## points' discrete principal curvatures (curvature.lucb). A mesh made by
+## moving points keeps the previous geometry's cache as its source and redoes
+## only the normals around the moved points.
 import memory
 import sync
-import luce_geocore.core.parallel as parallel
 from luce_geocore.core.float3 import Float3
 from luce_geocore.core.shared import Column
-from luce_geocore.math.vector import Vector3
+from luce_geocore.geometries.smooth_normals import Surface, point_normals, corner_normals, affected_points, refresh_points, refresh_corners
 from luce_geocore.geometries.curvature import CurvatureShape, point_curvatures
-
-## cos(60 degrees): faces meeting at a sharper angle keep separate normals.
-let cusp_cosine: f64 = 0.5
 
 pub struct ShadingCache:
     pub var owners: @usize = 1
     var lock: sync.Mutex
     var ready: @u32
     var smooth: Column[Float3]
+    ## Whether `smooth` holds a normal per corner (true) or per point.
+    var per_corner: bool
     ## Before this cache is built: the previous geometry's cache and the
     ## points that moved since.
     var source: ShadingCache*? = none
@@ -46,29 +41,82 @@ pub struct ShadingCache:
         cache.moved = copy
         return cache
 
-    ## The smooth normal of every corner. Published once, immutable after.
+    ## The smooth normals, per point or per corner (`corner_domain`).
+    ## Published once, immutable after.
     pub mutating func get(shape: const Surface*) -> const Float3[]!:
         if self.ready.load(.acquire) == 0:
             self.lock.lock()
             defer self.lock.unlock()
             if self.ready.load(.acquire) == 0:
-                var column = try Column[Float3].allocate(shape.corners.length)
-                errdefer column.release()
                 if let source = self.source:
-                    memory.copy(column.span(), source.smooth.view(), shape.corners.length)
-                    try update(shape, self.moved, column.span())
-                    # Provenance: GPU copies of the old normals update in place.
-                    column.set_parent(source.smooth.id())
+                    try self.update_from(source, shape)
                 else:
-                    var work = SmoothWork(shape, column.span())
-                    parallel.parallel_for(shape.offsets.length - 1, 2048, smooth_faces, (void*)&work)
-                self.smooth = column
+                    try self.compute(shape)
                 self.ready.store(1, .release)
                 self.drop_source()
         return self.smooth.view()
 
     pub func is_ready() -> bool:
         return self.ready.load(.acquire) != 0
+
+    ## Whether the built normals are per corner (else per point).
+    pub func corner_domain() -> bool:
+        return self.per_corner
+
+    ## The smooth column's id and the column it was updated from (0: none);
+    ## meaningful once built.
+    pub func id() -> u64:
+        return self.smooth.id()
+
+    pub func parent() -> u64:
+        return self.smooth.parent()
+
+    ## Every normal from scratch: per point, or per corner where a cusp splits
+    ## some point's corners. Under the lock.
+    mutating func compute(shape: const Surface*) -> !:
+        let points = shape.positions.length
+        var point_column = try Column[Float3].allocate(points)
+        errdefer point_column.release()
+        let split = try alloc bool[points] in memory.heap
+        defer free(split) in memory.heap
+        if not point_normals(shape, point_column.span(), split):
+            self.smooth = point_column
+            self.per_corner = false
+            return
+        var corner_column = try Column[Float3].allocate(shape.corners.length)
+        corner_normals(shape, point_column.view(), split, corner_column.span())
+        point_column.release()
+        self.smooth = corner_column
+        self.per_corner = true
+
+    ## Copy `source`'s normals and redo those around the moved points. Per
+    ## point, a point that gained a cusp turns the storage per corner: the
+    ## other points had none, so their corners copy their point's normal.
+    ## Under the lock.
+    mutating func update_from(source: const ShadingCache*, shape: const Surface*) -> !:
+        let affected = try affected_points(shape, self.moved)
+        defer free(affected) in memory.heap
+        var column = try Column[Float3].allocate(source.smooth.count())
+        errdefer column.release()
+        memory.copy(column.span(), source.smooth.view(), column.count())
+        if source.per_corner:
+            refresh_corners(shape, affected, column.span())
+        else:
+            let points = shape.positions.length
+            let split = try alloc bool[points] in memory.heap
+            defer free(split) in memory.heap
+            memory.set(u8[]((u8*)split.data, points), 0)
+            if refresh_points(shape, affected, column.span(), split):
+                var corners = try Column[Float3].allocate(shape.corners.length)
+                corner_normals(shape, column.view(), split, corners.span())
+                column.release()
+                self.smooth = corners
+                self.per_corner = true
+                return
+        # Provenance: GPU copies of the old normals update in place.
+        column.set_parent(source.smooth.id())
+        self.smooth = column
+        self.per_corner = source.per_corner
 
     ## k1 and k2 of every point, computed on first use.
     pub mutating func curvatures(shape: const CurvatureShape*) -> const f32[]!:
@@ -92,14 +140,6 @@ pub struct ShadingCache:
     pub func curvature_id() -> u64:
         return self.curvature.id()
 
-    ## The smooth column's id and the column it was derived from (0: none);
-    ## meaningful once built.
-    pub func id() -> u64:
-        return self.smooth.id()
-
-    pub func parent() -> u64:
-        return self.smooth.parent()
-
     mutating func drop_source():
         if let source = self.source:
             self.source = none
@@ -120,91 +160,3 @@ pub func release_shading(cache: ShadingCache*):
     if cache.owners.sub(1, .acq_rel) > 1: return
     cache.close()
     free(cache) in memory.heap
-
-## The arrays smooth normals read.
-pub struct Surface:
-    pub let positions: const Float3[]
-    pub let offsets: const i32[]
-    pub let corners: const i32[]
-    pub let normals: const Float3[]
-    pub let incident_offsets: const i32[]
-    pub let incident_faces: const i32[]
-
-struct SmoothWork:
-    let shape: const Surface*
-    let output: Float3[]
-
-func smooth_faces(context: void*?, first: usize, end: usize):
-    let work = (SmoothWork*)(context else return)
-    for face in first..<end:
-        for corner in (usize)work.shape.offsets[face]..<(usize)work.shape.offsets[face + 1]:
-            work.output[corner] = Float3.of(corner_normal(work.shape, face, corner))
-
-## Recompute the corners at every point of a face around a moved point.
-func update(shape: const Surface*, moved: const u32[], output: Float3[]) -> !:
-    let points = shape.positions.length
-    let marked = try alloc bool[points] in memory.heap
-    defer free(marked) in memory.heap
-    memory.set(u8[]((u8*)marked.data, points), 0)
-    var count: usize = 0
-    for point in moved:
-        for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
-            let face = (usize)shape.incident_faces[at]
-            for corner in (usize)shape.offsets[face]..<(usize)shape.offsets[face + 1]:
-                let p = (usize)shape.corners[corner]
-                if not marked[p]:
-                    marked[p] = true
-                    count += 1
-    let affected = try alloc u32[count] in memory.heap
-    defer free(affected) in memory.heap
-    var written: usize = 0
-    for point in 0..<points:
-        if marked[point]:
-            affected[written] = (u32)point
-            written += 1
-    var work = UpdateWork(shape, affected, output)
-    parallel.parallel_for(affected.length, 1024, update_points, (void*)&work)
-
-struct UpdateWork:
-    let shape: const Surface*
-    let points: const u32[]
-    let output: Float3[]
-
-func update_points(context: void*?, first: usize, end: usize):
-    let work = (UpdateWork*)(context else return)
-    let shape = work.shape
-    for at in first..<end:
-        let point = work.points[at]
-        for index in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
-            let face = (usize)shape.incident_faces[index]
-            for corner in (usize)shape.offsets[face]..<(usize)shape.offsets[face + 1]:
-                if (u32)shape.corners[corner] == point:
-                    work.output[corner] = Float3.of(corner_normal(shape, face, corner))
-
-## The angle-weighted normal of `corner` (of `face`) over the faces around its
-## point within the cusp angle; the face normal when they cancel.
-func corner_normal(shape: const Surface*, face: usize, corner: usize) -> Vector3:
-    let own = shape.normals[face].vector()
-    let point = (usize)shape.corners[corner]
-    var sum = Vector3()
-    for index in (usize)shape.incident_offsets[point]..<(usize)shape.incident_offsets[point + 1]:
-        let other = (usize)shape.incident_faces[index]
-        let normal = shape.normals[other].vector()
-        if normal.dot(own) < cusp_cosine: continue
-        sum = sum.add(normal.multiply_scalar(corner_angle(shape, other, point)))
-    let length = sum.length()
-    return sum.multiply_scalar(1.0 / length) if length > 1e-20 else own
-
-## The interior angle of `face` at `point` (its first corner there).
-func corner_angle(shape: const Surface*, face: usize, point: usize) -> f64:
-    let start = (usize)shape.offsets[face]
-    let count = (usize)shape.offsets[face + 1] - start
-    for at in 0..<count:
-        if (usize)shape.corners[start + at] != point: continue
-        let here = shape.positions[point].vector()
-        let previous = shape.positions[(usize)shape.corners[start + (at + count - 1) % count]].vector().subtract(here)
-        let next = shape.positions[(usize)shape.corners[start + (at + 1) % count]].vector().subtract(here)
-        let lengths = previous.length() * next.length()
-        if lengths <= 1e-30: return 0.0
-        return math.acos(math.max(-1.0, math.min(1.0, previous.dot(next) / lengths)))
-    return 0.0
