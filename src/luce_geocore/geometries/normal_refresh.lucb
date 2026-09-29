@@ -6,6 +6,7 @@
 ## written copy-on-write, so snapshots sharing them keep theirs, and the new
 ## column names the old one as its parent (GPU copies update in place).
 import memory
+import luce_geocore.core.parallel as parallel
 from luce_geocore.core.attributes import AttributeStore, DataType, Domain
 from luce_geocore.core.attribute_ops import typed_mut
 from luce_geocore.math.vector import Vector3
@@ -24,21 +25,36 @@ pub func refresh_normals(attributes: AttributeStore*, shape: const Surface*, mov
         let domain = entry.domain
         let wide = entry.kind == DataType.float64
         let bytes = try attributes.writable(index)
-        if domain == Domain.point:
-            for point in affected:
-                write(bytes, wide, (usize)point, point_normal(shape, (usize)point).0)
-        elif domain == Domain.corner:
-            for point in affected:
-                for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
-                    let face = (usize)shape.incident_faces[at]
-                    for corner in (usize)shape.offsets[face]..<(usize)shape.offsets[face + 1]:
-                        if (u32)shape.corners[corner] == point:
-                            write(bytes, wide, corner, corner_normal(shape, face, corner))
-        else:
+        if domain == Domain.face:
             for point in moved:
                 for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
                     let face = (usize)shape.incident_faces[at]
                     write(bytes, wide, face, shape.normals[face].vector())
+            continue
+        # Each affected point writes only its own point or corners.
+        var work = Work(shape, affected, bytes, wide, domain == Domain.corner)
+        parallel.parallel_for(affected.length, 64, refresh_range, (void*)&work)
+
+struct Work:
+    let shape: const Surface*
+    let points: const u32[]
+    let bytes: u8[]
+    let wide: bool
+    let corners: bool
+
+func refresh_range(context: void*?, first: usize, end: usize):
+    let work = (Work*)(context else return)
+    let shape = work.shape
+    for index in first..<end:
+        let point = work.points[index]
+        if not work.corners:
+            write(work.bytes, work.wide, (usize)point, point_normal(shape, (usize)point).0)
+            continue
+        for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
+            let face = (usize)shape.incident_faces[at]
+            for corner in (usize)shape.offsets[face]..<(usize)shape.offsets[face + 1]:
+                if (u32)shape.corners[corner] == point:
+                    write(work.bytes, work.wide, corner, corner_normal(shape, face, corner))
 
 func write(bytes: u8[], wide: bool, element: usize, normal: Vector3):
     if wide:
