@@ -1,0 +1,143 @@
+## Face subsets: Blast, Delete and component filtering. The kept faces keep
+## their corner order, display triangles, normals (authored N included) and
+## attributes; points no kept face uses are dropped. Every array is gathered
+## in parallel: a subset of a 700k-face mesh costs a few milliseconds.
+
+extend Mesh:
+    func kept_faces(keep: Bits) -> interop.Reference[Mesh]!:
+        let faces = self.offsets.count() - 1
+        if keep.count != faces: error(errors.invalid, "face bits must cover the faces")
+        if keep.population() == faces: return try self.snapshot()
+        return try adopt_storage(try self.subset_storage(keep))
+
+    ## `faces` removed (or, with `keep`, only they kept); Luce's Blast/Delete.
+    pub func without_faces(faces: const i64[], keep: bool = false) -> interop.Reference[Mesh]!:
+        let count = self.offsets.count() - 1
+        var bits = try BitsBuilder.zeros(count)
+        defer bits.close()
+        for face in faces:
+            try checked(face, count)
+            bits.set((usize)face)
+        if not keep: bits.invert()
+        return try self.kept_faces(bits.view())
+
+    func subset_storage(keep: Bits) -> Mesh*!:
+        let offsets = self.offsets.view()
+        let corners = self.corners.view()
+        let faces = offsets.length - 1
+        # Output faces and corners in order: a serial prefix over faces.
+        let face_map = try alloc i32[faces] in memory.heap
+        defer free(face_map) in memory.heap
+        var face_total: usize = 0
+        var corner_total: usize = 0
+        for face in 0..<faces:
+            if keep.get(face):
+                face_map[face] = (i32)face_total
+                face_total += 1
+                corner_total += (usize)(offsets[face + 1] - offsets[face])
+            else:
+                face_map[face] = -1
+        # Points any kept face uses, numbered in point order.
+        let points = self.positions.count()
+        let point_map = try alloc i32[points] in memory.heap
+        defer free(point_map) in memory.heap
+        memory.set(u8[]((u8*)point_map.data, points * 4), 0)
+        for face in 0..<faces:
+            if face_map[face] < 0: continue
+            for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
+                point_map[(usize)corners[corner]] = 1
+        var point_total: usize = 0
+        for point in 0..<points:
+            if point_map[point] != 0:
+                point_map[point] = (i32)point_total
+                point_total += 1
+            else:
+                point_map[point] = -1
+        var point_parents = try Column[i32].allocate(point_total)
+        defer point_parents.release()
+        var face_parents = try Column[i32].allocate(face_total)
+        defer face_parents.release()
+        var corner_parents = try Column[i32].allocate(corner_total)
+        defer corner_parents.release()
+        var new_offsets = try Column[i32].allocate(face_total + 1)
+        defer new_offsets.release()
+        let pp = point_parents.span()
+        for point in 0..<points:
+            if point_map[point] >= 0: pp[(usize)point_map[point]] = (i32)point
+        let fp = face_parents.span()
+        let no = new_offsets.span()
+        var at: i32 = 0
+        for face in 0..<faces:
+            if face_map[face] < 0: continue
+            let slot = (usize)face_map[face]
+            fp[slot] = (i32)face
+            no[slot] = at
+            at += offsets[face + 1] - offsets[face]
+        no[face_total] = at
+        var new_corners = try Column[i32].allocate(corner_total)
+        defer new_corners.release()
+        var new_triangles = try Column[i32].allocate((corner_total - face_total * 2) * 3)
+        defer new_triangles.release()
+        var new_normals = try Column[Float3].allocate(face_total)
+        defer new_normals.release()
+        var new_positions = try Column[Float3].allocate(point_total)
+        defer new_positions.release()
+        var exact: Column[Vector3]
+        if self.is_precise(): exact = try Column[Vector3].allocate(point_total)
+        defer exact.release()
+        var work = SubsetWork(offsets, corners, self.triangles.view(), self.normals.view(), self.positions.view(), self.precise.view(),
+                              face_parents.view(), no, point_map, point_parents.view(), new_corners.span(), corner_parents.span(), new_triangles.span(), new_normals.span(), new_positions.span(), exact.span())
+        parallel.parallel_for(face_total, 4096, subset_faces, (void*)&work)
+        parallel.parallel_for(point_total, 65536, subset_points, (void*)&work)
+        let storage = try assembled(new_positions.take(), self.origin, new_offsets.take(), new_corners.take(), new_triangles.take(), new_normals.take(), exact.take())
+        errdefer dispose_detached(storage)
+        try self.transfer_attributes(storage, point_parents.view(), face_parents.view(), corner_parents.view(), true)
+        return storage
+
+struct SubsetWork:
+    let offsets: const i32[]
+    let corners: const i32[]
+    let triangles: const i32[]
+    let normals: const Float3[]
+    let positions: const Float3[]
+    let exact: const Vector3[]
+    let face_parents: const i32[]
+    let new_offsets: const i32[]
+    let point_map: const i32[]
+    let point_parents: const i32[]
+    let out_corners: i32[]
+    let corner_parents: i32[]
+    let out_triangles: i32[]
+    let out_normals: Float3[]
+    let out_positions: Float3[]
+    let out_exact: Vector3[]
+
+func subset_faces(context: void*?, first: usize, end: usize):
+    let work = (SubsetWork*)(context else return)
+    for face in first..<end:
+        let old = (usize)work.face_parents[face]
+        let start = (usize)work.offsets[old]
+        let count = (usize)work.offsets[old + 1] - start
+        let target = (usize)work.new_offsets[face]
+        for at in 0..<count:
+            work.out_corners[target + at] = work.point_map[(usize)work.corners[start + at]]
+            work.corner_parents[target + at] = (i32)(start + at)
+        # Triangles index corners: shift them from the old face's to the new.
+        let from_triangle = (start - old * 2) * 3
+        let to_triangle = (target - face * 2) * 3
+        let shift = (i32)target - (i32)start
+        for at in 0..<(count - 2) * 3:
+            work.out_triangles[to_triangle + at] = work.triangles[from_triangle + at] + shift
+        work.out_normals[face] = work.normals[old]
+
+func subset_points(context: void*?, first: usize, end: usize):
+    let work = (SubsetWork*)(context else return)
+    for point in first..<end:
+        let old = (usize)work.point_parents[point]
+        work.out_positions[point] = work.positions[old]
+        if work.out_exact.length > 0: work.out_exact[point] = work.exact[old]
+
+## The faces of `mesh` whose bits are set in `keep` (bits over the faces),
+## with the points they use; the same mesh (shared) when every face is kept.
+pub func kept_faces(mesh: const Mesh*, keep: Bits) -> interop.Reference[Mesh]!:
+    return try mesh.kept_faces(keep)

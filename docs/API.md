@@ -21,6 +21,9 @@ attribute domains, topology operators, primitive generators and BVH picking.
 | `MeshBuilder(precise=false)` | Bounded Base topology staging: `point`, `face`, `corner`, `finish`, `close`. Importers and operators share the same mesh limits. Copying a precise mesh's points makes the result precise. |
 | `PolygonTopology` | Borrowed read interface for points, polygon corners and edge endpoints. Numbering/lifetime are defined by the implementation. |
 | `DissolveWorkspace(source,edits=128)` | Base-only local edge-dissolve staging over a borrowed immutable `Mesh*`. `face_slots`, `active`, `neighbor`, `dissolve`, `finish`, `close`; see lifetime and ordering below. |
+| `GeometrySet` | A node's result: typed components, at most one per family (`mesh`, `points`, `instances`, and families other packages register, such as luce-cad's `cad`). Immutable; copies share every column. `of_mesh`, `mesh`, `with_mesh`, `with_instance(set, translation, rotation, scale, visible)`, `instance*`, `with_cloud_of(mesh)`, `cloud_*`, `merged`, `transformed`, `realized` (every polygon, instances baked, in one pass), `blasted(paths, keep)`, `paths`, `bounds`, `footprint` (shared arrays once), `description`. |
+| Groups and text | `with_group(name, domain, members)`, `attribute_group`, `group_size`, `find_edge(a, b)`; text attributes (`with_text`, `with_text_values`, `attribute_text`, `attribute_string*`) store an i32 per element into a shared string table. |
+| `without_faces(faces, keep)` | A face subset gathered in parallel: kept faces keep corners, triangles, normals and attributes; unused points go. |
 | `MeshOps`, `TopologyTools`, `MeshNormals`, `MeshPrimitives` | Modeling kernels returning new meshes: point/face operators, subdivision, fuse; bevel, fill, dissolve; grouped corner normals; grid, sphere, cylinder, torus. |
 
 ## Storage and precision
@@ -111,3 +114,40 @@ not change active topology and can be retried. `finish` materializes an independ
 mesh in the same order, with the same display triangles and attribute provenance,
 as sequential `TopologyTools.dissolve` calls. This is native single-owner scratch,
 not a concurrent mutable mesh or a CAD-specific merge policy.
+
+## Groups, text and roles
+
+A group is a boolean attribute flagged as a group, on the point, corner,
+face or edge domain; its bits are the members, 64 to a word. Edges are
+numbered by connectivity, so an edge group is exact while the topology is;
+its durable form is the point pairs of its edges (`edge_pairs`,
+`edge_bits_from_pairs` in `geocore_kernel`). Through topology changes an
+output edge continues an old edge when its two corners' parents are
+neighbours in an old face; wall sides and other new edges start empty.
+
+Text attributes hold an i32 per element into a string table, one shared
+column. CAD tessellation writes each face's B-rep path to the face text
+attribute `path`, which `GeometrySet.paths` and `blasted` read.
+
+Every attribute has a role (after Houdini's type info): `N` is a normal,
+`Cd` a color, `uv` a texture coordinate, `v` and `up` vectors, `id` and
+`class` indices. Concatenation turns normals and vectors with their part.
+
+## Geometry sets
+
+`GeometrySet` components are described by a `ComponentType`, a table of
+functions over the component's data (share, close, size, bytes, bounds,
+placed, joined, paths, filtered, describe), so the container never
+downcasts and a package adds a family without touching geocore. Putting a
+component registers its type. Instances hold other sets under a
+translation, rotation and scale; placing instances wraps them in one
+instance, so any composition stays exact. `realized` concatenates every
+mesh placed by its instance matrices in one parallel pass (`concatenated`);
+a family without polygons (CAD) makes it fail with what to do instead.
+
+Base code in other packages uses `geocore_kernel`: bit sets, string tables,
+path filters, `MeshPart`/`concatenated`, `kept_faces`, groups' edge pairs,
+and the component protocol (`set_find`, `set_put`, `set_remove`,
+`set_storage`, the built-in families). Import its names with
+`from geocore_kernel import …`: a qualified call of a re-exported function
+value does not compile (reported to the compiler owners).

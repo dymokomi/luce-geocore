@@ -3,11 +3,18 @@
 ## element (array storage) or one tuple for the whole domain (single storage,
 ## O(1) to add). Snapshots share every column; changing one attribute writes
 ## that column alone.
+##
+## A group is a boolean attribute flagged as a group (Houdini's element
+## groups): its bits are the members. Text attributes store an i32 index per
+## element into a string table (strings.lucb) shared like any column. A role
+## says how geometric operations treat the values (Houdini's type info):
+## transforms move positions and vectors, turn normals, and leave the rest.
 import math
 import memory
 import luce_geocore.errors as errors
 from luce_geocore.core.shared import Column
 from luce_geocore.core.growing import Growing
+from luce_geocore.core.strings import table_text
 
 ## Element domains. The numbers are the ones callers pass as integers.
 pub enum Domain as u8:
@@ -27,6 +34,34 @@ pub enum DataType as u8:
     int64 = 3
     float32 = 4
     float64 = 5
+    ## An i32 index into the attribute's string table.
+    text = 6
+
+## How geometric operations treat an attribute's values.
+pub enum Role as u8:
+    generic = 0
+    ## A point in space: transformed with the geometry.
+    position = 1
+    ## A direction with length: rotated and scaled.
+    vector = 2
+    ## A unit direction: inverse-transposed and renormalized.
+    normal = 3
+    color = 4
+    uv = 5
+    ## An element or class id: copied, never interpolated.
+    index = 6
+
+## Attribute flags.
+pub let group_flag: u8 = 1
+
+## The role an attribute gets by its name when none is given.
+pub func role_of(name: str) -> Role:
+    if name == "N": return Role.normal
+    if name == "Cd": return Role.color
+    if name == "uv": return Role.uv
+    if name == "v" or name == "up": return Role.vector
+    if name == "id" or name == "class": return Role.index
+    return Role.generic
 
 pub enum Storage as u8:
     array = 0
@@ -35,7 +70,7 @@ pub enum Storage as u8:
 pub func scalar_bytes(kind: DataType) -> usize:
     match kind:
         .int8: return 1
-        .int32, .float32: return 4
+        .int32, .float32, .text: return 4
         .int64, .float64: return 8
         _: return 0
 
@@ -57,18 +92,48 @@ pub struct Attribute:
     ## Elements covered: the domain's size (1 for single storage).
     pub var elements: usize
     pub var data: Column[u8]
+    ## `group_flag` marks a group (a boolean attribute).
+    pub var flags: u8 = 0
+    pub var role: Role = Role.generic
+    ## The string table of a text attribute; empty otherwise.
+    pub var table: Column[u8]
 
     ## An attribute whose column the caller fills: `elements` tuples, or one
     ## tuple for single storage. Booleans need width 1.
     pub static func create(name: str, domain: Domain, kind: DataType, width: usize, elements: usize, storage: Storage = Storage.array) -> Attribute!:
         try check_name(name)
-        if width < 1 or width > 4 or (kind == DataType.boolean and width != 1):
-            error(errors.invalid, "attribute tuples have 1..4 components; booleans have one")
+        if width < 1 or width > 4 or ((kind == DataType.boolean or kind == DataType.text) and width != 1):
+            error(errors.invalid, "attribute tuples have 1..4 components; booleans and text have one")
         let stored = 1 if storage == Storage.single else elements
         let bytes = (stored + 63) // 64 * 8 if kind == DataType.boolean else stored * width * scalar_bytes(kind)
         var label: u8[64]
         memory.copy(label[..<name.length], name.bytes, name.length)
-        return Attribute(label, name.length, domain, kind, width, storage, elements, try Column[u8].allocate(bytes))
+        var empty: Column[u8]
+        return Attribute(label, name.length, domain, kind, width, storage, elements, try Column[u8].allocate(bytes), 0, role_of(name), empty)
+
+    ## A group of `elements` on `domain`, with no members yet (every bit zero).
+    pub static func group(name: str, domain: Domain, elements: usize) -> Attribute!:
+        var attribute = try Attribute.create(name, domain, DataType.boolean, 1, elements)
+        let bytes = attribute.data.span()
+        if bytes.length > 0: memory.set(bytes, 0)
+        attribute.flags = group_flag
+        return attribute
+
+    ## A group whose members are the bits of `words` (`elements` of them).
+    pub static func group_of(name: str, domain: Domain, elements: usize, words: const u64[]) -> Attribute!:
+        var attribute = try Attribute.group(name, domain, elements)
+        let bytes = attribute.data.span()
+        memory.copy(bytes, u8[]((u8*)words.data, words.length * 8), bytes.length)
+        return attribute
+
+    ## A text attribute: element i is string `values[i]` of `table` (which it
+    ## shares), or one value for the domain with single storage.
+    pub static func text(name: str, domain: Domain, elements: usize, table: Column[u8], values: const i32[], storage: Storage = Storage.array) -> Attribute!:
+        var attribute = try Attribute.create(name, domain, DataType.text, 1, elements, storage)
+        let out = typed_mut_i32(attribute.data.span())
+        memory.copy(out, values, out.length)
+        attribute.table = table.share()
+        return attribute
 
     ## From f64 tuples: integers become int32 (int64 when out of range), and
     ## other numbers float64, so every value reads back exactly.
@@ -110,6 +175,15 @@ pub struct Attribute:
     pub func name() -> str:
         return (str)self.label[..<self.label_length]
 
+    pub func is_group() -> bool:
+        return self.flags & group_flag != 0
+
+    ## The text of element `element` of a text attribute ("" otherwise).
+    pub func text_at(element: usize) -> str:
+        if self.kind != DataType.text: return ""
+        let index = memory.read[i32]((void*)&self.data.view()[(0 if self.storage == Storage.single else element) * 4])
+        return table_text(self.table.view(), (usize)index) if index >= 0 else ""
+
     pub func integer() -> bool:
         return is_integer(self.kind)
 
@@ -121,7 +195,7 @@ pub struct Attribute:
         match self.kind:
             .boolean: return 1.0 if (bytes[index // 8] >> (u8)(index % 8)) & 1 != 0 else 0.0
             .int8: return (f64)(i8)bytes[index]
-            .int32: return (f64)memory.read[i32]((void*)&bytes[index * 4])
+            .int32, .text: return (f64)memory.read[i32]((void*)&bytes[index * 4])
             .int64: return (f64)memory.read[i64]((void*)&bytes[index * 8])
             .float32: return (f64)memory.read[f32]((void*)&bytes[index * 4])
             _: return memory.read[f64]((void*)&bytes[index * 8])
@@ -134,6 +208,7 @@ pub struct Attribute:
     pub func share() -> Attribute:
         var copy = self
         copy.data = self.data.share()
+        copy.table = self.table.share()
         return copy
 
     ## The same attribute under another name.
@@ -146,6 +221,11 @@ pub struct Attribute:
 
     pub mutating func release():
         self.data.release()
+        self.table.release()
+
+## i32 values of a column's bytes; columns are 64-byte aligned.
+func typed_mut_i32(bytes: u8[]) -> i32[]:
+    return i32[]((i32*)bytes.data, bytes.length // 4)
 
 ## The attributes of one mesh. (name, domain) pairs are unique; Cd, uv and N
 ## are found once per change, not per element.
@@ -233,7 +313,7 @@ pub struct AttributeStore:
     ## Bytes of every column, counting shared ones as if owned.
     pub func bytes() -> usize:
         var total: usize = 0
-        for entry in self.entries.view(): total += entry.data.bytes()
+        for entry in self.entries.view(): total += entry.data.bytes() + entry.table.bytes()
         return total
 
     pub mutating func close():

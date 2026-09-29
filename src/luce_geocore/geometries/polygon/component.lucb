@@ -1,0 +1,66 @@
+## What a geometry set asks of its mesh component: the bytes of columns not
+## counted yet, the object paths its faces carry, and a path filter (Blast).
+## Face paths are the text attribute `path` on faces: CAD tessellation writes
+## each face's B-rep path there.
+
+## Bytes of this mesh's columns whose blocks `ids` has not seen.
+pub func mesh_unique_bytes(mesh: const Mesh*, ids: IdSet*) -> usize!:
+    var total: usize = 256
+    total += try ids.charge(mesh.positions.id(), mesh.positions.bytes())
+    total += try ids.charge(mesh.offsets.id(), mesh.offsets.bytes())
+    total += try ids.charge(mesh.corners.id(), mesh.corners.bytes())
+    total += try ids.charge(mesh.normals.id(), mesh.normals.bytes())
+    total += try ids.charge(mesh.triangles.id(), mesh.triangles.bytes())
+    total += try ids.charge(mesh.precise.id(), mesh.precise.bytes())
+    for index in 0..<mesh.attributes.count():
+        let entry = mesh.attributes.entry(index)
+        total += try ids.charge(entry.data.id(), entry.data.bytes())
+        total += try ids.charge(entry.table.id(), entry.table.bytes())
+    return total
+
+## The face paths in use, interned into `out`.
+pub func mesh_paths(mesh: const Mesh*, out: TableBuilder*) -> !:
+    let index = mesh.attributes.find("path", (i64)(u8)Domain.face)
+    if index < 0: return
+    let entry = mesh.attributes.entry((usize)index)
+    if entry.kind != DataType.text: return
+    let table = entry.table.view()
+    let used = try alloc bool[table_count(table)] in memory.heap
+    defer free(used) in memory.heap
+    for at in 0..<used.length: used[at] = false
+    let values = attribute_ops.typed[i32](entry.data.view())
+    let count = 1 if entry.storage == Storage.single else entry.elements
+    for element in 0..<count:
+        let value = values[element]
+        if value >= 0 and (usize)value < used.length: used[(usize)value] = true
+    for at in 0..<used.length:
+        if used[at]: discard(try out.intern(table_text(table, at)))
+
+## The faces whose path `filter` matches (every face for an empty filter),
+## kept, or removed when not `keep`. Faces without a path never match a
+## nonempty filter.
+pub func mesh_filtered(mesh: const Mesh*, filter: const PathFilter*, keep: bool) -> Mesh*!:
+    let faces = mesh.offsets.count() - 1
+    var selected = try BitsBuilder.zeros(faces)
+    defer selected.close()
+    if filter.is_empty():
+        selected.set_range(0, faces)
+    else:
+        let index = mesh.attributes.find("path", (i64)(u8)Domain.face)
+        if index >= 0 and mesh.attributes.entry((usize)index).kind == DataType.text:
+            let entry = mesh.attributes.entry((usize)index)
+            let table = entry.table.view()
+            let hits = try alloc bool[table_count(table)] in memory.heap
+            defer free(hits) in memory.heap
+            for at in 0..<hits.length: hits[at] = filter.matches(table_text(table, at))
+            let values = attribute_ops.typed[i32](entry.data.view())
+            for face in 0..<faces:
+                let value = values[0 if entry.storage == Storage.single else face]
+                if value >= 0 and (usize)value < hits.length and hits[(usize)value]: selected.set(face)
+    if not keep: selected.invert()
+    if selected.view().population() == faces: return try mesh.snapshot_storage()
+    return try mesh.subset_storage(selected.view())
+
+## Another owner of `mesh`'s positions (relative to `mesh_origin(mesh)`).
+pub func mesh_positions(mesh: const Mesh*) -> Column[Float3]:
+    return mesh.positions.share()

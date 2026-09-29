@@ -1,0 +1,119 @@
+## The points family: a point cloud with point attributes and no faces
+## (scatter results, copy targets, particle-like data). Positions are f32
+## over an f64 origin, like a mesh's; every column is shared.
+
+pub struct PointCloud:
+    var positions: Column[Float3]
+    var origin: Vector3
+    var attributes: AttributeStore
+
+    pub func count() -> usize:
+        return self.positions.count()
+
+    pub func point(index: usize) -> Vector3:
+        return self.positions.view()[index].vector().add(self.origin)
+
+    ## Another owner of the same columns.
+    func shared_storage() -> PointCloud*!:
+        var attributes = try self.attributes.shared()
+        errdefer attributes.close()
+        let storage = try alloc PointCloud[1] in memory.heap
+        storage[0] = PointCloud(self.positions.share(), self.origin, attributes)
+        return storage.data
+
+    pub mutating func close():
+        self.positions.release()
+        self.attributes.close()
+
+## A point cloud of `mesh`'s points: its positions and point attributes,
+## shared.
+pub func cloud_of_mesh(mesh: const Mesh*) -> PointCloud*!:
+    var attributes = AttributeStore()
+    errdefer attributes.close()
+    for index in 0..<(usize)mesh.attribute_count():
+        let entry = try attribute_entry(mesh, (i64)index)
+        if entry.domain == Domain.point: try attributes.put(entry.share())
+    let storage = try alloc PointCloud[1] in memory.heap
+    storage[0] = PointCloud(mesh_positions(mesh), mesh_origin(mesh), attributes)
+    return storage.data
+
+pub let points_component: ComponentType = ComponentType("points", share_cloud, close_cloud, cloud_size, cloud_bytes, cloud_bounds, place_cloud, join_clouds, no_paths, keep_cloud, describe_cloud, "", no_trace)
+
+func share_cloud(data: const void*) -> void*!:
+    return (void*)(try ((const PointCloud*)data).shared_storage())
+
+func close_cloud(data: void*):
+    let cloud = (PointCloud*)data
+    cloud.close()
+    free(PointCloud[](cloud, 1)) in memory.heap
+
+func cloud_size(data: const void*) -> usize:
+    return ((const PointCloud*)data).count()
+
+func cloud_bytes(data: const void*, ids: IdSet*) -> usize!:
+    let cloud = (const PointCloud*)data
+    var total = try ids.charge(cloud.positions.id(), cloud.positions.bytes())
+    for index in 0..<cloud.attributes.count():
+        let entry = cloud.attributes.entry(index)
+        total += try ids.charge(entry.data.id(), entry.data.bytes())
+    return total + 64
+
+func cloud_bounds(data: const void*, matrix: Matrix4, out: Bounds*) -> bool!:
+    let cloud = (const PointCloud*)data
+    if cloud.count() == 0: return false
+    *out = placed_box(positions_bounds(cloud.positions.view(), cloud.origin), matrix)
+    return true
+
+func place_cloud(data: const void*, placement: const Placement*) -> void*!:
+    let cloud = (const PointCloud*)data
+    var positions = try Column[Float3].allocate(cloud.count())
+    defer positions.release()
+    let out = positions.span()
+    let origin = placement.matrix.transform_point(cloud.origin)
+    for at in 0..<out.length:
+        out[at] = Float3.of(placement.matrix.transform_point(cloud.point(at)).subtract(origin))
+    var attributes = try cloud.attributes.shared()
+    errdefer attributes.close()
+    let storage = try alloc PointCloud[1] in memory.heap
+    storage[0] = PointCloud(positions.take(), origin, attributes)
+    return (void*)storage.data
+
+func join_clouds(first: const void*, second: const void*) -> void*!:
+    let a = (const PointCloud*)first
+    let b = (const PointCloud*)second
+    var positions = try Column[Float3].allocate(a.count() + b.count())
+    defer positions.release()
+    let out = positions.span()
+    for at in 0..<a.count(): out[at] = Float3.of(a.point(at).subtract(a.origin))
+    for at in 0..<b.count(): out[a.count() + at] = Float3.of(b.point(at).subtract(a.origin))
+    var attributes = AttributeStore()
+    errdefer attributes.close()
+    for side in 0..<(usize)2:
+        let store = &a.attributes if side == 0 else &b.attributes
+        for index in 0..<store.count():
+            let entry = store.entry(index)
+            if side == 1 and a.attributes.find(entry.name(), (i64)(u8)entry.domain) >= 0: continue
+            let left = a.attributes.find(entry.name(), (i64)(u8)entry.domain)
+            let right = b.attributes.find(entry.name(), (i64)(u8)entry.domain)
+            let pieces: attribute_ops.Piece[2] = [attribute_ops.Piece(a.attributes.entry((usize)left) if left >= 0 else none, a.count()),
+                                                  attribute_ops.Piece(b.attributes.entry((usize)right) if right >= 0 else none, b.count())]
+            try attributes.put(try attribute_ops.concatenated(pieces))
+    let storage = try alloc PointCloud[1] in memory.heap
+    storage[0] = PointCloud(positions.take(), a.origin, attributes)
+    return (void*)storage.data
+
+func no_paths(data: const void*, out: TableBuilder*) -> !:
+    discard(data)
+    discard(out)
+
+## Points carry no paths: a filter keeps them all or none.
+func keep_cloud(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
+    if filter.is_empty() == keep:
+        return (void*)(try ((const PointCloud*)data).shared_storage())
+    let storage = try alloc PointCloud[1] in memory.heap
+    storage[0] = PointCloud(Column[Float3](), Vector3(), AttributeStore())
+    return (void*)storage.data
+
+func describe_cloud(data: const void*, out: Growing[u8]*) -> !:
+    try append_number(out, ((const PointCloud*)data).count())
+    try append_text(out, " cloud points")

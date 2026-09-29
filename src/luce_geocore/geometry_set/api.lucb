@@ -1,0 +1,199 @@
+## The set as Luce sees it: an immutable value whose operations return new
+## sets sharing everything they did not change. Luce orchestrates whole
+## components; it never loops over elements.
+
+extend GeometrySet:
+    ## A set holding `mesh` (shared, not copied).
+    pub static func of_mesh(mesh: interop.Reference[Mesh]) -> interop.Reference[GeometrySet]!:
+        let shared = try mesh_share(try mesh.get())
+        let storage = empty_storage() catch failure:
+            mesh_dispose(shared)
+            error(failure.code, failure.message)
+        storage.put(&mesh_component, (void*)shared) catch failure:
+            dispose_set(storage)
+            error(failure.code, failure.message)
+        return try adopt_set(storage)
+
+    pub func is_empty() -> bool:
+        return self.entries.count == 0
+
+    pub func has_mesh() -> bool:
+        return self.find(&mesh_component) != none
+
+    ## The set's own mesh (not its instances'), if it has one.
+    pub func mesh() -> interop.Reference[Mesh]?!:
+        let data = self.find(&mesh_component) else return none
+        return try mesh_adopt(try mesh_share((const Mesh*)data))
+
+    ## This set with `mesh` as its mesh, or without one.
+    pub func with_mesh(mesh: interop.Reference[Mesh]?) -> interop.Reference[GeometrySet]!:
+        let storage = try self.storage()
+        if let given = mesh:
+            let shared = mesh_share(try given.get()) catch failure:
+                dispose_set(storage)
+                error(failure.code, failure.message)
+            storage.put(&mesh_component, (void*)shared) catch failure:
+                dispose_set(storage)
+                error(failure.code, failure.message)
+        else:
+            storage.remove(&mesh_component)
+        # Adoption disposes the storage itself when it fails.
+        return try adopt_set(storage)
+
+    ## The names of the families present, and whether one is.
+    pub func component_count() -> i64:
+        return (i64)self.entries.count
+
+    pub func component_name(index: i64) -> str!:
+        if index < 0 or (usize)index >= self.entries.count: error(errors.invalid, "component index out of range")
+        return self.entries.items[(usize)index].kind.name
+
+    pub func has(name: str) -> bool:
+        for entry in self.entries.view():
+            if entry.kind.name == name: return true
+        return false
+
+    # mark: Points
+
+    ## Points in the set's point cloud (not the mesh's points).
+    pub func cloud_count() -> i64:
+        let data = self.find(&points_component) else return 0
+        return (i64)((const PointCloud*)data).count()
+
+    pub func cloud_point(index: i64) -> Vector3!:
+        let data = self.find(&points_component) else error(errors.invalid, "the geometry has no point cloud")
+        let cloud = (const PointCloud*)data
+        if index < 0 or (usize)index >= cloud.count(): error(errors.invalid, "point index out of range")
+        return cloud.point((usize)index)
+
+    ## This set with a point cloud of `mesh`'s points and point attributes.
+    pub func with_cloud_of(mesh: interop.Reference[Mesh]) -> interop.Reference[GeometrySet]!:
+        return try adopt_set(try self.with_component(&points_component, (void*)(try cloud_of_mesh(try mesh.get()))))
+
+    # mark: Instances
+
+    pub func instance_count() -> i64:
+        let data = self.find(&instances_component) else return 0
+        return (i64)((const Instances*)data).count()
+
+    ## Instance `index`'s set (shared).
+    pub func instance(index: i64) -> interop.Reference[GeometrySet]!:
+        return try adopt_set(try (try self.instance_item(index)).set.storage())
+
+    pub func instance_translation(index: i64) -> Vector3!:
+        return (try self.instance_item(index)).translation
+
+    ## XYZ rotation in radians.
+    pub func instance_rotation(index: i64) -> Vector3!:
+        return (try self.instance_item(index)).rotation
+
+    pub func instance_scale(index: i64) -> Vector3!:
+        return (try self.instance_item(index)).scale
+
+    pub func instance_visible(index: i64) -> bool!:
+        return (try self.instance_item(index)).visible
+
+    func instance_item(index: i64) -> const Instance*!:
+        let data = self.find(&instances_component) else error(errors.invalid, "the geometry has no instances")
+        let instances = (const Instances*)data
+        if index < 0 or (usize)index >= instances.count(): error(errors.invalid, "instance index out of range")
+        return instances.item((usize)index)
+
+    ## This set with one more instance: `child` placed by translation,
+    ## rotation (XYZ radians) and scale.
+    pub func with_instance(child: interop.Reference[GeometrySet], translation: Vector3, rotation: Vector3, scale: Vector3, visible: bool = true) -> interop.Reference[GeometrySet]!:
+        let instances = try new_instances()
+        if let existing = self.find(&instances_component):
+            instances.add_all((const Instances*)existing) catch failure:
+                close_instances((void*)instances)
+                error(failure.code, failure.message)
+        let copy = (try child.get()).storage() catch failure:
+            close_instances((void*)instances)
+            error(failure.code, failure.message)
+        let placement = Placement.compose(translation, rotation, scale)
+        instances.add(copy, &placement, visible) catch failure:
+            close_instances((void*)instances)
+            error(failure.code, failure.message)
+        return try adopt_set(try self.with_component(&instances_component, (void*)instances))
+
+    ## A heap copy of this set with `data` (taken) as its `kind` component.
+    func with_component(kind: const ComponentType*, data: void*) -> GeometrySet*!:
+        let storage = self.storage() catch failure:
+            let close = kind.close
+            close(data)
+            error(failure.code, failure.message)
+        storage.put(kind, data) catch failure:
+            dispose_set(storage)
+            error(failure.code, failure.message)
+        return storage
+
+    # mark: Whole-set operations
+
+    ## Both sets' components, this one's elements first.
+    pub func merged(other: interop.Reference[GeometrySet]) -> interop.Reference[GeometrySet]!:
+        return try adopt_set(try set_joined(&self, try other.get()))
+
+    ## Every component placed by translation, rotation (XYZ radians) and
+    ## scale; the identity shares the set.
+    pub func transformed(translation: Vector3, rotation: Vector3, scale: Vector3) -> interop.Reference[GeometrySet]!:
+        let placement = Placement.compose(translation, rotation, scale)
+        if placement.matrix.is_identity(): return try adopt_set(try self.storage())
+        if not placement.matrix.is_finite() or math.abs(placement.matrix.determinant()) < 0.000000000001:
+            error(errors.invalid, "geometry transform must be finite and nonsingular")
+        return try adopt_set(try set_placed(&self, &placement))
+
+    ## One mesh of every polygon in the set and its instances (see
+    ## set_realized); fails for families without polygons, such as CAD.
+    pub func realized() -> interop.Reference[Mesh]!:
+        return try set_realized(&self)
+
+    ## Elements whose object path matches `expression` (see PathFilter)
+    ## kept, or removed when not `keep`.
+    pub func blasted(expression: str, keep: bool) -> interop.Reference[GeometrySet]!:
+        var filter = try PathFilter.parse(expression)
+        defer filter.close()
+        return try adopt_set(try set_filtered(&self, &filter, keep))
+
+    ## The object paths the set's elements carry, one per line, first seen
+    ## first.
+    pub func paths() -> interop.Owned[str]!:
+        var table = TableBuilder()
+        defer table.close()
+        try set_paths(&self, &table)
+        var text = Growing[u8]()
+        defer text.close()
+        for index in 0..<table.count():
+            if index > 0: try append_text(&text, "\n")
+            try append_text(&text, table.text(index))
+        return try interop.copy_text((str)text.view())
+
+    ## Bytes of the arrays the set holds, each shared array once.
+    pub func footprint() -> i64!:
+        var ids = IdSet()
+        defer ids.close()
+        return (i64)(try set_bytes(&self, &ids))
+
+    pub func has_bounds() -> bool!:
+        var box = Bounds(Vector3(), Vector3())
+        return try set_bounds(&self, Matrix4(), &box)
+
+    pub func bounds() -> Bounds!:
+        var box = Bounds(Vector3(), Vector3())
+        if not (try set_bounds(&self, Matrix4(), &box)): error(errors.invalid, "the geometry is empty")
+        return box
+
+    ## "12 points / 6 faces / 0 attributes / 2 scene branches".
+    pub func description() -> interop.Owned[str]!:
+        var text = Growing[u8]()
+        defer text.close()
+        for entry in self.entries.view():
+            if text.count > 0: try append_text(&text, " / ")
+            let describe = entry.kind.describe
+            try describe(entry.data, &text)
+        if text.count == 0: return interop.Owned[str]("Empty geometry")
+        return try interop.copy_text((str)text.view())
+
+## The mesh of `set`, for Base kernels (borrowed while the set lives).
+pub func set_mesh(set: const GeometrySet*) -> const Mesh*?:
+    let data = set.find(&mesh_component) else return none
+    return (const Mesh*)data

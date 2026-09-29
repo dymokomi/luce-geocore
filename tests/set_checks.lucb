@@ -1,0 +1,183 @@
+## Groups, text attributes, bit sets, face subsets, concatenation and the
+## geometry set: instances, points, paths, placement and realization.
+import geocore
+import geocore_kernel
+import interop
+import math
+import memory
+from geocore import Mesh, MeshPrimitives, Vector3, GeometrySet
+from geocore_kernel import Bits, BitsBuilder, MeshPart, Domain, popcount, trailing_zeros, edge_pairs, edge_bits_from_pairs, with_group_bits, concatenated
+from geocore_growing import Growing
+
+func near(a: f64, b: f64):
+    assert(math.abs(a - b) < 0.000001)
+
+pub func exercise() -> !:
+    try bit_sets()
+    try groups_and_text()
+    try subsets_and_concatenation()
+    try sets()
+
+func bit_sets() -> !:
+    var bits = try BitsBuilder.zeros(200)
+    defer bits.close()
+    bits.set_range(3, 130)
+    assert(bits.view().population() == 127 and bits.view().get(3) and bits.view().get(129) and not bits.view().get(130))
+    var stride = try BitsBuilder.zeros(200)
+    defer stride.close()
+    stride.set_stride(0, 20, 1, 4)
+    assert(stride.view().population() == 5 and stride.view().get(16) and not stride.view().get(17))
+    bits.subtract(stride.view())
+    assert(bits.view().population() == 127 - 4)
+    bits.invert()
+    # Bits past the count stay clear after a complement.
+    assert(bits.view().population() == 200 - 123)
+    var ids: i64[80]
+    bits.view().indices(ids[..<77])
+    assert(ids[0] == 0 and ids[1] == 1 and ids[2] == 2 and ids[3] == 4)
+    assert(popcount(0xF0F0) == 8 and trailing_zeros(0x100) == 8)
+
+func groups_and_text() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 2)
+    defer grid.release()
+    let mesh = grid.value()
+    let grouped = try mesh.with_group("top", 2, [0, 3])
+    defer grouped.release()
+    let top = grouped.value().find_attribute("top", 2)
+    assert(top >= 0 and (try grouped.value().attribute_group(top)) and grouped.value().group_size("top", 2) == 2)
+    assert((try grouped.value().attribute_value(top, 3)) == 1.0 and (try grouped.value().attribute_value(top, 1)) == 0.0)
+    assert(grouped.value().points_id() == mesh.points_id())
+    # An edge group's durable form: point pairs that resolve back exactly.
+    let edges = (usize)(try mesh.edge_count())
+    var chosen = try BitsBuilder.zeros(edges)
+    defer chosen.close()
+    chosen.set(1)
+    chosen.set(5)
+    var pairs = Growing[i32]()
+    defer pairs.close()
+    try edge_pairs(mesh, chosen.view(), &pairs)
+    assert(pairs.count == 4)
+    var back = try BitsBuilder.zeros(edges)
+    defer back.close()
+    let misses = try edge_bits_from_pairs(mesh, pairs.view(), &back)
+    assert(misses == 0 and back.view().population() == 2 and back.view().get(1) and back.view().get(5))
+    let unknown: i32[2] = [0, 8]
+    assert((try edge_bits_from_pairs(mesh, unknown, &back)) == 1)
+    assert((try mesh.find_edge((try mesh.edge_point(5, 0)), (try mesh.edge_point(5, 1)))) == 5)
+    # Edge groups follow extrusion: a wall's bottom continues its old edge.
+    let edge_group = try with_group_bits(mesh, "seam", Domain.edge, chosen.view())
+    defer edge_group.release()
+    let extruded = try edge_group.value().extruded_faces([0], 0.5)
+    defer extruded.release()
+    let seam = extruded.value().find_attribute("seam", 4)
+    var members: i64 = 0
+    for edge in 0..<(try extruded.value().edge_count()):
+        if (try extruded.value().attribute_value(seam, edge)) != 0.0:
+            members += 1
+            let a = try extruded.value().edge_point(edge, 0)
+            let b = try extruded.value().edge_point(edge, 1)
+            assert((try mesh.find_edge(a, b)) == 1 or (try mesh.find_edge(a, b)) == 5 or a >= 9 or b >= 9)
+    assert(members >= 2)
+    # Text attributes: one value for a domain, and tables joined by a merge.
+    let named = try mesh.with_text("path", 2, "root/a")
+    defer named.release()
+    let other = try mesh.with_text("path", 2, "root/b")
+    defer other.release()
+    let both = try named.value().merged(other)
+    defer both.release()
+    let path = both.value().find_attribute("path", 2)
+    assert((try both.value().attribute_text(path, 0)) == "root/a" and (try both.value().attribute_text(path, 7)) == "root/b")
+    assert((try both.value().attribute_string_count(path)) == 2)
+
+func subsets_and_concatenation() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let weighted = try grid.value().with_group("left", 2, [0, 4, 8, 12])
+    defer weighted.release()
+    let kept = try weighted.value().without_faces([0, 1, 2, 3])
+    defer kept.release()
+    assert(kept.value().face_count() == 12 and kept.value().point_count() == 20)
+    let left = kept.value().find_attribute("left", 2)
+    assert((try kept.value().attribute_value(left, 0)) == 1.0 and (try kept.value().attribute_value(left, 1)) == 0.0)
+    near((try kept.value().point(0)).z, (try grid.value().point(5)).z)
+    let only = try weighted.value().without_faces([5], true)
+    defer only.release()
+    assert(only.value().face_count() == 1 and only.value().point_count() == 4 and only.value().index_count() == 6)
+    # Three placed copies in one pass; normals turn with their copy.
+    let normals = try geocore.AttributeKernels.normals(grid, 2)
+    defer normals.release()
+    let parts: MeshPart[3] = [MeshPart(normals.value(), geocore.Matrix4()),
+                              MeshPart(normals.value(), geocore.Matrix4.compose(Vector3(5.0, 0.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))),
+                              MeshPart(normals.value(), geocore.Matrix4.compose(Vector3(), Vector3(3.141592653589793, 0.0, 0.0), Vector3(1.0, 1.0, 1.0)))]
+    let joined = try concatenated(parts)
+    defer joined.release()
+    assert(joined.value().face_count() == 48 and joined.value().point_count() == 75)
+    let n = joined.value().find_attribute("N", 2)
+    near(try joined.value().attribute_value(n, 16, 1), 1.0)
+    near(try joined.value().attribute_value(n, 40, 1), -1.0)
+    near((try joined.value().point(25)).x, (try grid.value().point(0)).x + 5.0)
+    # A reflected copy reverses its winding and keeps its normals outward.
+    let mirrored: MeshPart[1] = [MeshPart(normals.value(), geocore.Matrix4.compose(Vector3(), Vector3(), Vector3(1.0, -1.0, 1.0)))]
+    let flipped = try concatenated(mirrored)
+    defer flipped.release()
+    near((try flipped.value().face_normal(0)).y, -1.0)
+
+func sets() -> !:
+    let cube = try Mesh.cube()
+    defer cube.release()
+    let named = try cube.value().with_text("path", 2, "root/box")
+    defer named.release()
+    let box = try GeometrySet.of_mesh(named)
+    defer box.release()
+    assert(box.value().has_mesh() and box.value().component_count() == 1)
+    let desc = try box.value().description()
+    assert(desc.value == "8 points / 6 faces / 1 attributes")
+    desc.release()
+    # Two instances of the same box share its columns.
+    let empty = try interop.Reference[GeometrySet].adopt(try new GeometrySet() in memory.heap, geocore.geometry_set_type, memory.heap)
+    defer empty.release()
+    let one = try empty.value().with_instance(box, Vector3(3.0, 0.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer one.release()
+    let two = try one.value().with_instance(box, Vector3(-3.0, 0.0, 0.0), Vector3(), Vector3(2.0, 2.0, 2.0), false)
+    defer two.release()
+    assert(two.value().instance_count() == 2 and not (try two.value().instance_visible(1)))
+    near((try two.value().instance_scale(1)).y, 2.0)
+    assert((try two.value().footprint()) < (try box.value().footprint()) * 2)
+    let realized = try two.value().realized()
+    defer realized.release()
+    assert(realized.value().face_count() == 12 and realized.value().point_count() == 16)
+    let bounds = try two.value().bounds()
+    near(bounds.minimum.x, -5.0)
+    near(bounds.maximum.x, 4.0)
+    near(bounds.maximum.y, 4.0)
+    # Placement wraps instances; a mesh moves.
+    let moved = try two.value().merged(box)
+    defer moved.release()
+    let placed = try moved.value().transformed(Vector3(0.0, 10.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer placed.release()
+    near((try placed.value().bounds()).minimum.y, 10.0)
+    assert(placed.value().instance_count() == 1 and placed.value().has_mesh())
+    let flat = try placed.value().realized()
+    defer flat.release()
+    assert(flat.value().face_count() == 18)
+    # Paths and a path filter reach instanced meshes too.
+    let paths = try placed.value().paths()
+    assert(paths.value == "root/box")
+    paths.release()
+    let blasted = try placed.value().blasted("root", false)
+    defer blasted.release()
+    let rest = try blasted.value().realized()
+    defer rest.release()
+    assert(rest.value().face_count() == 0 and not blasted.value().has_mesh())
+    let kept = try placed.value().blasted("'root/box'", true)
+    defer kept.release()
+    let whole = try kept.value().realized()
+    defer whole.release()
+    assert(whole.value().face_count() == 18)
+    # A point cloud of a mesh's points, placed with the set.
+    let cloud = try empty.value().with_cloud_of(cube)
+    defer cloud.release()
+    let lifted = try cloud.value().transformed(Vector3(0.0, 1.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer lifted.release()
+    assert(lifted.value().cloud_count() == 8)
+    near((try lifted.value().cloud_point(6)).y, (try cube.value().point(6)).y + 1.0)

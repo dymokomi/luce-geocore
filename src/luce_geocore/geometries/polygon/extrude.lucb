@@ -1,4 +1,4 @@
-## Region extrusion, and joining two meshes' attributes for `merged`.
+## Region extrusion.
 
 extend Mesh:
     ## Region extrusion: duplicate selected points once, replace caps in place,
@@ -109,17 +109,3 @@ extend Mesh:
         for at in old_triangles.length..<display.length:
             display[at] = -1
         return try self.remapped(points, sizes, corners, point_parents, face_parents, corner_parents, false, display)
-
-## `output`'s attributes: each (name, domain) of either input, `a`'s elements
-## first. A side without the attribute contributes zeros.
-func merge_attributes(a: const Mesh*, b: const Mesh*, output: Mesh*) -> !:
-    for index in 0..<a.attributes.count():
-        let entry = a.attributes.entry(index)
-        let found = b.attributes.find(entry.name(), (i64)(u8)entry.domain)
-        let other: const Attribute*? = b.attributes.entry((usize)found) if found >= 0 else none
-        try output.attributes.put(try attribute_ops.joined(entry, (try a.domain_size(entry.domain)), other, (try b.domain_size(entry.domain))))
-    for index in 0..<b.attributes.count():
-        let entry = b.attributes.entry(index)
-        if a.attributes.find(entry.name(), (i64)(u8)entry.domain) >= 0:
-            continue
-        try output.attributes.put(try attribute_ops.joined(none, (try a.domain_size(entry.domain)), entry, (try b.domain_size(entry.domain))))

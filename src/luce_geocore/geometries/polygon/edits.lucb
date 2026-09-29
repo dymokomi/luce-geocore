@@ -28,31 +28,62 @@ extend Mesh:
                 unchanged_geometry = unchanged_geometry and sizes[at] == (i64)(old_offsets[at + 1] - old_offsets[at])
             for at in 0..<corners.length:
                 unchanged_geometry = unchanged_geometry and corners[at] == (i64)old_corners[at]
-        var edge_parents: i64[]
+        let pp = try narrowed(point_parents)
+        defer free(pp) in memory.heap
+        let fp = try narrowed(face_parents)
+        defer free(fp) in memory.heap
+        let cp = try narrowed(corner_parents)
+        defer free(cp) in memory.heap
+        try self.transfer_attributes(output, pp, fp, cp, unchanged_geometry or preserve_normals)
+        return result
+
+    ## Put every attribute of this mesh on `output` through the parent maps
+    ## (empty: unchanged indexing); edge attributes follow `edge_parents_of`.
+    ## An authored N is dropped unless `keep_normals`: after an arbitrary edit
+    ## the derived normals are right and the old ones stale.
+    func transfer_attributes(output: Mesh*, point_parents: const i32[], face_parents: const i32[], corner_parents: const i32[], keep_normals: bool) -> !:
+        var edge_parents: i32[]
         defer:
             if edge_parents.length > 0: free(edge_parents) in memory.heap
         for index in 0..<self.attributes.count():
             let entry = self.attributes.entry(index)
-            # Derived shading normals become stale after arbitrary modeling edits.
-            # Rigid/affine transforms explicitly retain and inverse-transpose them.
-            if entry.name() == "N" and not unchanged_geometry and not preserve_normals:
+            if entry.name() == "N" and not keep_normals:
                 continue
             if entry.domain == Domain.edge and edge_parents.length == 0 and corner_parents.length > 0:
                 edge_parents = try self.edge_parents_of(output, corner_parents)
             let parents = point_parents if entry.domain == Domain.point else (corner_parents if entry.domain == Domain.corner else (edge_parents if entry.domain == Domain.edge else face_parents))
             try output.attributes.put(try attribute_ops.remapped(entry, parents, (try output.domain_size(entry.domain))))
-        return result
 
-    ## Each of `output`'s edges takes the old edge of its first corner's parent.
-    func edge_parents_of(output: const Mesh*, corner_parents: const i64[]) -> i64[]!:
+    ## The old edge each of `output`'s edges continues, or -1 for a new edge.
+    ## An output corner and the next one in its face continue an old edge when
+    ## their parents are neighbours in an old face (in either direction): the
+    ## bottom of an extrusion wall continues its old edge, while the wall's
+    ## sides, whose ends share one parent, are new.
+    func edge_parents_of(output: const Mesh*, corner_parents: const i32[]) -> i32[]!:
         let new_edges = (try output.edge_arrays()).1
         let old_edges = (try self.edge_arrays()).1
-        let parents = try alloc i64[(usize)(try output.edge_count())] in memory.heap
+        let old_faces = try self.corner_faces()
+        let old_offsets = self.offsets.view()
+        let offsets = output.offsets.view()
+        let parents = try alloc i32[(usize)(try output.edge_count())] in memory.heap
         for at in 0..<parents.length: parents[at] = -1
-        for corner in 0..<corner_parents.length:
-            let edge = (usize)new_edges[corner]
-            if parents[edge] < 0 and corner_parents[corner] >= 0:
-                parents[edge] = (i64)old_edges[(usize)corner_parents[corner]]
+        for face in 0..<offsets.length - 1:
+            let start = (usize)offsets[face]
+            let end = (usize)offsets[face + 1]
+            for corner in start..<end:
+                let edge = (usize)new_edges[corner]
+                if parents[edge] >= 0: continue
+                let a = corner_parents[corner]
+                let b = corner_parents[corner + 1 if corner + 1 < end else start]
+                if a < 0 or b < 0 or a == b: continue
+                let old_face = (usize)old_faces[(usize)a]
+                if old_face != (usize)old_faces[(usize)b]: continue
+                let old_start = old_offsets[old_face]
+                let size = old_offsets[old_face + 1] - old_start
+                if old_start + (a - old_start + 1) % size == b:
+                    parents[edge] = old_edges[(usize)a]
+                elif old_start + (b - old_start + 1) % size == a:
+                    parents[edge] = old_edges[(usize)b]
         return parents
 
     ## Position-only edits keep this mesh's topology, its caches and its
@@ -253,45 +284,16 @@ extend Mesh:
         if let result = kept: return result
         return try self.remapped(points, sizes, corners, unchanged, unchanged, unchanged, preserve_normals)
 
+    ## This mesh's points and faces, then `other`'s (see concatenated).
     pub func merged(other: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
-        let rhs = try other.get()
-        let left_points = self.positions.count()
-        let right_points = rhs.positions.count()
-        let left_corners = self.corners.view()
-        let right_corners = rhs.corners.view()
-        if left_points + right_points > 8388608 or left_corners.length + right_corners.length > 33554432:
-            error(errors.limit, "merged mesh exceeds geometry limits")
-        let identity = Matrix4()
-        let first_points = try self.world_points(identity)
-        defer free(first_points) in memory.heap
-        let second_points = try rhs.world_points(identity)
-        defer free(second_points) in memory.heap
-        let points = try alloc Vector3[left_points + right_points] in memory.heap
-        defer free(points) in memory.heap
-        memory.copy(points, first_points, left_points)
-        memory.copy(points[left_points..], second_points, right_points)
-        let left_faces = self.offsets.count() - 1
-        let right_faces = rhs.offsets.count() - 1
-        let sizes = try alloc i64[left_faces + right_faces] in memory.heap
-        defer free(sizes) in memory.heap
-        for face in 0..<left_faces: sizes[face] = (i64)(self.offsets.view()[face + 1] - self.offsets.view()[face])
-        for face in 0..<right_faces: sizes[left_faces + face] = (i64)(rhs.offsets.view()[face + 1] - rhs.offsets.view()[face])
-        let corners = try alloc i64[left_corners.length + right_corners.length] in memory.heap
-        defer free(corners) in memory.heap
-        for index in 0..<left_corners.length: corners[index] = (i64)left_corners[index]
-        for index in 0..<right_corners.length:
-            corners[left_corners.length + index] = (i64)right_corners[index] + (i64)left_points
-        let left_triangles = self.triangles.view()
-        let right_triangles = rhs.triangles.view()
-        let display = try alloc i64[left_triangles.length + right_triangles.length] in memory.heap
-        defer free(display) in memory.heap
-        for at in 0..<left_triangles.length: display[at] = (i64)left_triangles[at]
-        for at in 0..<right_triangles.length:
-            display[left_triangles.length + at] = (i64)right_triangles[at] + (i64)left_corners.length
-        let result = try make_mesh(points, sizes, corners, display, self.is_precise() or rhs.is_precise())
-        errdefer result.release()
-        try merge_attributes(&self, rhs, result.value())
-        return result
+        let parts: MeshPart[2] = [MeshPart(&self, Matrix4()), MeshPart(try other.get(), Matrix4())]
+        return try concatenated(parts)
+
+## A parent map in i32 (the caller frees it); empty stays empty.
+func narrowed(parents: const i64[]) -> i32[]!:
+    let result = try alloc i32[parents.length] in memory.heap
+    for at in 0..<parents.length: result[at] = (i32)parents[at]
+    return result
 
 ## The points whose stored positions differ between `previous` and `next`.
 ## The caller frees the list.

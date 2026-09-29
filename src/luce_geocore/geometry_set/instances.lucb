@@ -1,0 +1,120 @@
+## The instances family: other sets placed by a transform, without copying
+## them (Houdini's packed primitives, Blender's instances). Groups and
+## assemblies produce them; the viewport draws each reference under its
+## transform, and `realized` bakes them into one mesh only when a node
+## needs polygons. The component is immutable and shared by count.
+
+pub struct Instance:
+    pub let set: GeometrySet*
+    pub let translation: Vector3
+    pub let rotation: Vector3
+    pub let scale: Vector3
+    ## Hidden instances still cook; only the viewport skips them.
+    pub let visible: bool
+
+    pub func matrix() -> Matrix4:
+        return Matrix4.compose(self.translation, self.rotation, self.scale)
+
+pub struct Instances:
+    var users: @usize
+    var items: Growing[Instance]
+
+    pub func count() -> usize:
+        return self.items.count
+
+    pub func item(index: usize) -> const Instance*:
+        return &self.items.items[index]
+
+    ## Add an instance owning `set` (closed on failure).
+    pub mutating func add(set: GeometrySet*, placement: const Placement*, visible: bool) -> !:
+        self.items.push(Instance(set, placement.translation, placement.rotation, placement.scale, visible)) catch failure:
+            dispose_set(set)
+            error(failure.code, failure.message)
+
+    ## Add a share of every instance of `other`.
+    pub mutating func add_all(other: const Instances*) -> !:
+        for item in other.items.view():
+            let copy = try item.set.storage()
+            let placement = Placement(item.translation, item.rotation, item.scale, item.matrix())
+            try self.add(copy, &placement, item.visible)
+
+## A new, empty instances component (one user).
+pub func new_instances() -> Instances*!:
+    let storage = try alloc Instances[1] in memory.heap
+    storage[0].users.store(1, .relaxed)
+    storage[0].items = Growing[Instance]()
+    return storage.data
+
+pub let instances_component: ComponentType = ComponentType("instances", share_instances, close_instances, instances_size, instances_bytes, instances_bounds, place_instances, join_instances, instance_paths, filter_instances, describe_instances, "", trace_instances)
+
+func share_instances(data: const void*) -> void*!:
+    let instances = (Instances*)data
+    discard(instances.users.add(1, .relaxed))
+    return (void*)instances
+
+func close_instances(data: void*):
+    let instances = (Instances*)data
+    if instances.users.sub(1, .acq_rel) != 1: return
+    for item in instances.items.view(): dispose_set(item.set)
+    instances.items.close()
+    free(Instances[](instances, 1)) in memory.heap
+
+func instances_size(data: const void*) -> usize:
+    return ((const Instances*)data).count()
+
+func instances_bytes(data: const void*, ids: IdSet*) -> usize!:
+    var total: usize = 64
+    for item in ((const Instances*)data).items.view():
+        total += 96 + (try set_bytes(item.set, ids))
+    return total
+
+func instances_bounds(data: const void*, matrix: Matrix4, out: Bounds*) -> bool!:
+    var found = false
+    for item in ((const Instances*)data).items.view():
+        var box = Bounds(Vector3(), Vector3())
+        if not (try set_bounds(item.set, matrix.multiply(item.matrix()), &box)): continue
+        *out = union_box(*out, box) if found else box
+        found = true
+    return found
+
+## Placing instances wraps them in one instance under the placement, which
+## keeps any composition of rotations and nonuniform scales exact.
+func place_instances(data: const void*, placement: const Placement*) -> void*!:
+    let inner = try empty_storage()
+    inner.put(&instances_component, try share_instances(data)) catch failure:
+        dispose_set(inner)
+        error(failure.code, failure.message)
+    let wrapped = new_instances() catch failure:
+        dispose_set(inner)
+        error(failure.code, failure.message)
+    wrapped.add(inner, placement, true) catch failure:
+        close_instances((void*)wrapped)
+        error(failure.code, failure.message)
+    return (void*)wrapped
+
+func join_instances(first: const void*, second: const void*) -> void*!:
+    let joined = try new_instances()
+    errdefer close_instances((void*)joined)
+    try joined.add_all((const Instances*)first)
+    try joined.add_all((const Instances*)second)
+    return (void*)joined
+
+func instance_paths(data: const void*, out: TableBuilder*) -> !:
+    for item in ((const Instances*)data).items.view(): try set_paths(item.set, out)
+
+## Each instance filtered in turn; instances left empty stay, empty.
+func filter_instances(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
+    let result = try new_instances()
+    errdefer close_instances((void*)result)
+    for item in ((const Instances*)data).items.view():
+        let filtered = try set_filtered(item.set, filter, keep)
+        let placement = Placement(item.translation, item.rotation, item.scale, item.matrix())
+        try result.add(filtered, &placement, item.visible)
+    return (void*)result
+
+func describe_instances(data: const void*, out: Growing[u8]*) -> !:
+    try append_number(out, ((const Instances*)data).count())
+    try append_text(out, " scene branches")
+
+func trace_instances(data: const void*, visit: func(ownership.Object*, void*) -> unit, context: void*):
+    for item in ((const Instances*)data).items.view(): item.set.trace(visit, context)

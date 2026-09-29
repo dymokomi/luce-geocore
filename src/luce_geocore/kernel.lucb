@@ -1,0 +1,85 @@
+## The geocore_kernel export: what Base kernels in other packages build on.
+## Bit sets and groups, string tables, path filters, mesh assembly and
+## concatenation, and the geometry set's component protocol (luce-cad's CAD
+## family implements it). Luce code never imports it: these take spans and
+## pointers.
+import luce_geocore.core.bits as bits
+import luce_geocore.core.strings as strings
+import luce_geocore.core.paths as paths
+import luce_geocore.core.idset as idset
+import luce_geocore.core.attributes as attributes
+import luce_geocore.geometries.polygon as polygon
+import luce_geocore.geometry_set as geometry_set
+
+pub type Domain = attributes.Domain
+pub type DataType = attributes.DataType
+pub type Attribute = attributes.Attribute
+pub type AttributeStore = attributes.AttributeStore
+pub type Bits = bits.Bits
+pub type BitsBuilder = bits.BitsBuilder
+pub let word_count = bits.word_count
+pub let popcount = bits.popcount
+pub let trailing_zeros = bits.trailing_zeros
+
+pub type TableBuilder = strings.TableBuilder
+pub let table_count = strings.table_count
+pub let table_text = strings.table_text
+pub type PathFilter = paths.PathFilter
+pub let glob = paths.glob
+pub type IdSet = idset.IdSet
+
+pub type MeshPart = polygon.MeshPart
+pub let concatenated = polygon.concatenated
+pub let group_bits = polygon.group_bits
+pub let with_group_bits = polygon.with_group_bits
+pub let edge_pairs = polygon.edge_pairs
+pub let edge_bits_from_pairs = polygon.edge_bits_from_pairs
+pub let mesh_share = polygon.mesh_share
+pub let mesh_dispose = polygon.mesh_dispose
+pub let mesh_adopt = polygon.mesh_adopt
+pub let mesh_unique_bytes = polygon.mesh_unique_bytes
+pub let with_attribute_entry = polygon.with_attribute_entry
+pub let kept_faces = polygon.kept_faces
+
+## A text attribute of `elements` whose element i is string `values[i]` of
+## `texts` (-1: "").
+pub func text_attribute(name: str, domain: Domain, elements: usize, texts: const TableBuilder*, values: const i32[]) -> Attribute!:
+    var table = try texts.finish()
+    defer table.release()
+    return try Attribute.text(name, domain, elements, table, values)
+
+pub type GeometrySet = geometry_set.GeometrySet
+pub type ComponentType = geometry_set.ComponentType
+pub type Component = geometry_set.Component
+pub type Placement = geometry_set.Placement
+pub type PointCloud = geometry_set.PointCloud
+pub type Instances = geometry_set.Instances
+pub type Instance = geometry_set.Instance
+pub let register_component = geometry_set.register
+pub let new_instances = geometry_set.new_instances
+pub let component_type = geometry_set.component_type
+pub let no_trace = geometry_set.no_trace
+pub let adopt_set = geometry_set.adopt_set
+pub let dispose_set = geometry_set.dispose_set
+pub let empty_set = geometry_set.empty_storage
+pub let set_mesh = geometry_set.set_mesh
+pub let set_find = geometry_set.set_find
+pub let set_put = geometry_set.set_put
+pub let set_remove = geometry_set.set_remove
+pub let set_storage = geometry_set.set_storage
+pub let set_realized = geometry_set.set_realized
+pub let append_text = geometry_set.append_text
+pub let append_number = geometry_set.append_number
+pub let placed_box = geometry_set.placed_box
+pub let union_box = geometry_set.union_box
+
+## The built-in families (taking a global's address in a global initializer
+## does not compile through the C backend).
+pub func mesh_component() -> const ComponentType*:
+    return &geometry_set.mesh_component
+
+pub func points_component() -> const ComponentType*:
+    return &geometry_set.points_component
+
+pub func instances_component() -> const ComponentType*:
+    return &geometry_set.instances_component

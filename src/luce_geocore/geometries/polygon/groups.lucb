@@ -1,0 +1,146 @@
+## Groups and text attributes. A group is a flagged boolean attribute on the
+## point, corner, face or edge domain; adding one shares every other column.
+## Edges are numbered by connectivity alone, so an edge group is exact while
+## the topology is; its durable form is the sorted point pairs of its edges,
+## which survive a re-derivation of the edges (`edge_pairs`,
+## `edge_bits_from_pairs`).
+
+extend Mesh:
+    ## Whether attribute `index` is a group.
+    pub func attribute_group(index: i64) -> bool!:
+        try checked(index, self.attributes.count())
+        return self.attributes.entry((usize)index).is_group()
+
+    ## The text of `element` of text attribute `index` ("" for other kinds).
+    pub func attribute_text(index: i64, element: i64) -> str!:
+        try checked(index, self.attributes.count())
+        let entry = self.attributes.entry((usize)index)
+        try checked(element, (try self.domain_size(entry.domain)))
+        return entry.text_at((usize)element)
+
+    ## The distinct strings of text attribute `index`, and string `at`.
+    pub func attribute_string_count(index: i64) -> i64!:
+        try checked(index, self.attributes.count())
+        return (i64)table_count(self.attributes.entry((usize)index).table.view())
+
+    pub func attribute_string(index: i64, at: i64) -> str!:
+        try checked(index, self.attributes.count())
+        let table = self.attributes.entry((usize)index).table.view()
+        try checked(at, table_count(table))
+        return table_text(table, (usize)at)
+
+    ## A snapshot with group `name` on `domain` whose members are `members`.
+    pub func with_group(name: str, domain: i64, members: const i64[]) -> interop.Reference[Mesh]!:
+        let count = try self.domain_count(domain)
+        var bits = try BitsBuilder.zeros((usize)count)
+        defer bits.close()
+        for member in members:
+            try checked(member, (usize)count)
+            bits.set((usize)member)
+        return try self.with_entry(try Attribute.group_of(name, Domain((u8)domain), (usize)count, bits.view().words))
+
+    ## One text value for a whole domain (single storage, O(1)).
+    pub func with_text(name: str, domain: i64, value: str) -> interop.Reference[Mesh]!:
+        let count = try self.domain_count(domain)
+        var table = TableBuilder()
+        defer table.close()
+        let index: i32[1] = [try table.intern(value)]
+        var column = try table.finish()
+        defer column.release()
+        return try self.with_entry(try Attribute.text(name, Domain((u8)domain), (usize)count, column, index, Storage.single))
+
+    ## A text attribute: element i is line `values[i]` of `lines` (strings
+    ## separated by newlines), or "" for -1.
+    pub func with_text_values(name: str, domain: i64, lines: str, values: const i64[]) -> interop.Reference[Mesh]!:
+        let count = (usize)(try self.domain_count(domain))
+        if values.length != count: error(errors.invalid, "text values must cover their domain")
+        var table = TableBuilder()
+        defer table.close()
+        var start: usize = 0
+        let bytes = lines.bytes
+        for at in 0..<bytes.length + 1:
+            if at == bytes.length or bytes[at] == 10:
+                discard(try table.intern((str)bytes[start..<at]))
+                start = at + 1
+        let indices = try alloc i32[count] in memory.heap
+        defer free(indices) in memory.heap
+        for at in 0..<count:
+            let value = values[at]
+            if value < -1 or value >= (i64)table.count(): error(errors.invalid, "text value names no line")
+            indices[at] = (i32)value
+        var column = try table.finish()
+        defer column.release()
+        return try self.with_entry(try Attribute.text(name, Domain((u8)domain), count, column, indices))
+
+    ## Members of group `name` on `domain`, or -1 when there is no such group.
+    pub func group_size(name: str, domain: i64) -> i64:
+        let index = self.attributes.find(name, domain)
+        if index < 0 or not self.attributes.entry((usize)index).is_group(): return -1
+        let entry = self.attributes.entry((usize)index)
+        return (i64)Bits.of_bytes(entry.data.view(), entry.elements).population()
+
+    ## The edge between points `a` and `b`, or -1.
+    pub func find_edge(a: i64, b: i64) -> i64!:
+        let points = self.positions.count()
+        if a < 0 or b < 0 or (usize)a >= points or (usize)b >= points: return -1
+        let edges = try self.edge_arrays()
+        let incidence = try self.incidence()
+        return edge_between(self.offsets.view(), self.corners.view(), edges.1, incidence.0, incidence.1, (i32)a, (i32)b)
+
+## The bits of group attribute `index`, for Base kernels.
+pub func group_bits(mesh: const Mesh*, index: i64) -> Bits!:
+    let entry = try attribute_entry(mesh, index)
+    if entry.kind != DataType.boolean: error(errors.invalid, "a group is a boolean attribute")
+    return Bits.of_bytes(entry.data.view(), entry.elements)
+
+## A snapshot of `mesh` with group `name` on `domain` holding `bits`.
+pub func with_group_bits(mesh: const Mesh*, name: str, domain: Domain, bits: Bits) -> interop.Reference[Mesh]!:
+    let count = try mesh.domain_size(domain)
+    if bits.count != count: error(errors.invalid, "group bits must cover their domain")
+    return try mesh.with_entry(try Attribute.group_of(name, domain, count, bits.words))
+
+## The edge of points a and b: a corner at `a` whose next or previous corner
+## is at `b` names it. -1 when they share no edge.
+func edge_between(offsets: const i32[], corners: const i32[], corner_edges: const i32[], face_starts: const i32[], point_faces: const i32[], a: i32, b: i32) -> i64:
+    for at in (usize)face_starts[(usize)a]..<(usize)face_starts[(usize)a + 1]:
+        let face = (usize)point_faces[at]
+        let start = (usize)offsets[face]
+        let end = (usize)offsets[face + 1]
+        for corner in start..<end:
+            if corners[corner] != a: continue
+            let next = corner + 1 if corner + 1 < end else start
+            if corners[next] == b: return (i64)corner_edges[corner]
+            let previous = corner - 1 if corner > start else end - 1
+            if corners[previous] == b: return (i64)corner_edges[previous]
+    return -1
+
+## The durable form of edge bits: a (low, high) point pair per member edge,
+## in edge order, appended to `out`.
+pub func edge_pairs(mesh: const Mesh*, edges: Bits, out: Growing[i32]*) -> !:
+    let points = (try mesh.edge_arrays()).0
+    if edges.count != points.length // 2: error(errors.invalid, "edge bits must cover the mesh's edges")
+    try out.reserve(out.count + edges.population() * 2)
+    for word in 0..<edges.words.length:
+        var bits = edges.words[word]
+        while bits != 0:
+            let edge = word * 64 + (usize)trailing_zeros(bits)
+            out.items[out.count] = points[edge * 2]
+            out.items[out.count + 1] = points[edge * 2 + 1]
+            out.count += 2
+            bits = bits & (bits - 1)
+
+## Set the bits of the edges named by point pairs; pairs that match no edge
+## (the points were renumbered) are counted and returned.
+pub func edge_bits_from_pairs(mesh: const Mesh*, pairs: const i32[], out: BitsBuilder*) -> usize!:
+    let edges = try mesh.edge_arrays()
+    let incidence = try mesh.incidence()
+    if out.count != edges.0.length // 2: error(errors.invalid, "edge bits must cover the mesh's edges")
+    let points = (i32)mesh.positions.count()
+    var misses: usize = 0
+    for at in 0..<pairs.length // 2:
+        let a = pairs[at * 2]
+        let b = pairs[at * 2 + 1]
+        let edge = -1 if a < 0 or b < 0 or a >= points or b >= points else edge_between(mesh.offsets.view(), mesh.corners.view(), edges.1, incidence.0, incidence.1, a, b)
+        if edge < 0: misses += 1
+        else: out.set((usize)edge)
+    return misses

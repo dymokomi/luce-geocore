@@ -1,0 +1,162 @@
+## Trusted construction from columns that kernels built: subsets, joins and
+## verb outputs. Their topology is valid by construction, so nothing is
+## validated again: supplied display triangles are kept as given (they come
+## from valid meshes), faces whose first triangle index is -1 are ear
+## clipped, and face normals and bounds are computed, all in parallel.
+
+## A mesh owning these columns (taken even on failure). `triangles` has
+## 3*(size-2) entries per face; `normals` may be empty to compute them. The
+## caller puts the attributes.
+pub func assembled(positions: Column[Float3], origin: Vector3, offsets: Column[i32], corners: Column[i32], triangles: Column[i32], normals: Column[Float3], precise: Column[Vector3]) -> Mesh*!:
+    var owned_positions = positions
+    errdefer owned_positions.release()
+    var owned_offsets = offsets
+    errdefer owned_offsets.release()
+    var owned_corners = corners
+    errdefer owned_corners.release()
+    var owned_triangles = triangles
+    errdefer owned_triangles.release()
+    var owned_normals = normals
+    errdefer owned_normals.release()
+    var owned_precise = precise
+    errdefer owned_precise.release()
+    let faces = owned_offsets.count() - 1
+    if owned_normals.is_empty() or owned_normals.count() != faces:
+        owned_normals.release()
+        owned_normals = try Column[Float3].allocate(faces)
+        var work = FinishWork(owned_positions.view(), owned_precise.view(), owned_corners.view(), owned_offsets.view(), owned_triangles.span(), owned_normals.span(), true)
+        parallel.parallel_for(faces, 1024, finish_faces, (void*)&work)
+        if work.failed.load(.acquire) != 0: error(errors.invalid, "a polygon has degenerate area")
+    else:
+        var work = FinishWork(owned_positions.view(), owned_precise.view(), owned_corners.view(), owned_offsets.view(), owned_triangles.span(), owned_normals.span(), false)
+        parallel.parallel_for(faces, 1024, finish_faces, (void*)&work)
+        if work.failed.load(.acquire) != 0: error(errors.invalid, "a polygon has degenerate area")
+    let extent = positions_bounds(owned_positions.view(), origin)
+    let topology = try new TopologyCache() in memory.heap
+    errdefer free(topology) in memory.heap
+    let queries = try new QueryCache() in memory.heap
+    errdefer free(queries) in memory.heap
+    let shading = try new ShadingCache() in memory.heap
+    errdefer free(shading) in memory.heap
+    let storage = try alloc Mesh[1] in memory.heap
+    storage[0].positions = owned_positions
+    storage[0].origin = origin
+    storage[0].offsets = owned_offsets
+    storage[0].corners = owned_corners
+    storage[0].normals = owned_normals
+    storage[0].triangles = owned_triangles
+    storage[0].extent = extent
+    storage[0].precise = owned_precise
+    storage[0].attributes = AttributeStore()
+    storage[0].topology = topology
+    storage[0].queries = queries
+    storage[0].shading = shading
+    return storage.data
+
+struct FinishWork:
+    let positions: const Float3[]
+    let exact: const Vector3[]
+    let corners: const i32[]
+    let offsets: const i32[]
+    let triangles: i32[]
+    let normals: Float3[]
+    ## Compute every face's normal (else only faces being triangulated).
+    let all_normals: bool
+    var failed: @u32
+
+func finish_faces(context: void*?, first: usize, end: usize):
+    let work = (FinishWork*)(context else return)
+    for face in first..<end:
+        finish_face(work, face) catch failure:
+            discard(failure)
+            work.failed.store(1, .relaxed)
+
+## The face's normal and, when its first index is -1, its triangles.
+func finish_face(work: FinishWork*, face: usize) -> !:
+    let start = (usize)work.offsets[face]
+    let count = (usize)work.offsets[face + 1] - start
+    let first = (start - face * 2) * 3
+    let missing = work.triangles[first] < 0
+    if not missing and not work.all_normals: return
+    var points: Vector3[256] = ---
+    var indices: i64[256] = ---
+    for at in 0..<count:
+        let point = (usize)work.corners[start + at]
+        points[at] = work.exact[point] if work.exact.length > 0 else work.positions[point].vector()
+        indices[at] = (i64)at
+    var normal = Vector3()
+    var extent2: f64 = 0.0
+    let origin = points[0]
+    for at in 0..<count:
+        let delta = points[at].subtract(origin)
+        extent2 = math.max(extent2, delta.dot(delta))
+        normal = normal.add(delta.cross(points[(at + 1) % count].subtract(origin)))
+    let facing = try area_normal(normal, extent2)
+    if work.all_normals: work.normals[face] = Float3.of(facing)
+    if missing:
+        var output: i64[762] = ---
+        let size = (count - 2) * 3
+        try triangulate(points[..<count], indices[..<count], 0, count, facing, output[..<size])
+        for at in 0..<size: work.triangles[first + at] = (i32)((i64)start + output[at])
+
+## The bounds of positions measured from `origin`, in f64.
+pub func positions_bounds(positions: const Float3[], origin: Vector3) -> Bounds:
+    if positions.length == 0: return Bounds(origin, origin)
+    var work = BoundsWork(positions)
+    let chunks = (positions.length + 65535) // 65536
+    var low: Vector3[64] = ---
+    var high: Vector3[64] = ---
+    work.low = low[..<(chunks if chunks < 64 else 64)]
+    work.high = high[..<(chunks if chunks < 64 else 64)]
+    let grain = (positions.length + work.low.length - 1) // work.low.length
+    work.grain = grain
+    parallel.run(work.low.length, bounds_chunk, (void*)&work)
+    var minimum = work.low[0]
+    var maximum = work.high[0]
+    for at in 1..<work.low.length:
+        minimum = Vector3(math.min(minimum.x, work.low[at].x), math.min(minimum.y, work.low[at].y), math.min(minimum.z, work.low[at].z))
+        maximum = Vector3(math.max(maximum.x, work.high[at].x), math.max(maximum.y, work.high[at].y), math.max(maximum.z, work.high[at].z))
+    return Bounds(minimum.add(origin), maximum.add(origin))
+
+struct BoundsWork:
+    let positions: const Float3[]
+    var low: Vector3[]
+    var high: Vector3[]
+    var grain: usize = 1
+
+func bounds_chunk(context: void*?, index: usize):
+    let work = (BoundsWork*)(context else return)
+    let first = index * work.grain
+    let end = first + work.grain if work.positions.length - first > work.grain else work.positions.length
+    var lx = work.positions[first].x
+    var ly = work.positions[first].y
+    var lz = work.positions[first].z
+    var hx = lx
+    var hy = ly
+    var hz = lz
+    for at in first + 1..<end:
+        let p = work.positions[at]
+        lx = p.x if p.x < lx else lx
+        ly = p.y if p.y < ly else ly
+        lz = p.z if p.z < lz else lz
+        hx = p.x if p.x > hx else hx
+        hy = p.y if p.y > hy else hy
+        hz = p.z if p.z > hz else hz
+    work.low[index] = Vector3((f64)lx, (f64)ly, (f64)lz)
+    work.high[index] = Vector3((f64)hx, (f64)hy, (f64)hz)
+
+## Heap storage for components and transfers: a new owner sharing every
+## column and cache (O(columns)), its disposal, and adoption as a reference.
+pub func mesh_share(mesh: const Mesh*) -> Mesh*!:
+    return try mesh.snapshot_storage()
+
+pub func mesh_dispose(mesh: Mesh*):
+    dispose_detached(mesh)
+
+pub func mesh_adopt(storage: Mesh*) -> interop.Reference[Mesh]!:
+    return try adopt_storage(storage)
+
+## Attributes of `source` put on `output` through i32 parent maps (see
+## Mesh.transfer_attributes); for kernels outside this module.
+pub func transfer_attributes(source: const Mesh*, output: Mesh*, point_parents: const i32[], face_parents: const i32[], corner_parents: const i32[], keep_normals: bool) -> !:
+    try source.transfer_attributes(output, point_parents, face_parents, corner_parents, keep_normals)

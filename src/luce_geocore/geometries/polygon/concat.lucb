@@ -1,0 +1,196 @@
+## Concatenation of many placed meshes in one pass: Merge, realizing
+## instances, copies, and assembling CAD tessellations. Each part's arrays are
+## copied once, offset, in parallel; pairwise merging would copy the growing
+## result once per part. Parts under a reflection are placed first (their
+## winding reverses); the others are transformed while they are copied.
+
+## One mesh of a concatenation and where it goes.
+pub struct MeshPart:
+    pub let mesh: const Mesh*
+    pub let matrix: Matrix4
+
+## Every part's points, faces and attributes, in part order. Attributes of
+## the same name and domain join (zero where a part lacks one); normals and
+## vectors turn with their part.
+pub func concatenated(parts: const MeshPart[]) -> interop.Reference[Mesh]!:
+    if parts.length == 1 and parts[0].matrix.is_identity(): return try parts[0].mesh.snapshot()
+    # Adoption disposes the storage itself when it fails.
+    return try adopt_storage(try concatenated_storage(parts))
+
+func concatenated_storage(parts: const MeshPart[]) -> Mesh*!:
+    # Reflected parts are placed first; `placed` keeps them alive meanwhile.
+    let placed = try alloc (interop.Reference[Mesh]?)[parts.length] in memory.heap
+    for at in 0..<parts.length: placed[at] = none
+    defer:
+        for at in 0..<parts.length:
+            if let owner = placed[at]: owner.release()
+        free(placed) in memory.heap
+    let meshes = try alloc (const Mesh*)[parts.length] in memory.heap
+    defer free(meshes) in memory.heap
+    let matrices = try alloc Matrix4[parts.length] in memory.heap
+    defer free(matrices) in memory.heap
+    var points: usize = 0
+    var faces: usize = 0
+    var corners: usize = 0
+    var triangles: usize = 0
+    var precise = false
+    var minimum = Vector3()
+    var maximum = Vector3()
+    var bounded = false
+    for at in 0..<parts.length:
+        var mesh = parts[at].mesh
+        var matrix = parts[at].matrix
+        if not matrix.is_finite() or math.abs(matrix.determinant()) < 0.000000000001:
+            error(errors.invalid, "a part's placement must be finite and nonsingular")
+        if matrix.determinant() < 0.0:
+            let owner = try mesh.placed(matrix)
+            placed[at] = owner
+            mesh = owner.value()
+            matrix = Matrix4()
+        meshes[at] = mesh
+        matrices[at] = matrix
+        points += mesh.positions.count()
+        faces += mesh.offsets.count() - 1
+        corners += mesh.corners.count()
+        triangles += mesh.triangles.count()
+        precise = precise or mesh.is_precise()
+        if mesh.positions.count() == 0: continue
+        # The part's box corners, placed: bounds for the shared origin.
+        for corner in 0..<(usize)8:
+            let box = mesh.extent
+            let near = Vector3(box.minimum.x if corner & 1 == 0 else box.maximum.x, box.minimum.y if corner & 2 == 0 else box.maximum.y, box.minimum.z if corner & 4 == 0 else box.maximum.z)
+            let world = matrix.transform_point(near)
+            if not bounded:
+                minimum = world
+                maximum = world
+                bounded = true
+            minimum = Vector3(math.min(minimum.x, world.x), math.min(minimum.y, world.y), math.min(minimum.z, world.z))
+            maximum = Vector3(math.max(maximum.x, world.x), math.max(maximum.y, world.y), math.max(maximum.z, world.z))
+    if points > 8388608 or faces > 8388608 or corners > 33554432:
+        error(errors.limit, "merged mesh exceeds geometry limits")
+    let size = maximum.subtract(minimum)
+    let reach = math.max(math.max(math.max(math.abs(minimum.x), math.abs(maximum.x)), math.max(math.abs(minimum.y), math.abs(maximum.y))), math.max(math.abs(minimum.z), math.abs(maximum.z)))
+    let span = math.max(size.x, math.max(size.y, size.z))
+    let origin = minimum.add(size.multiply_scalar(0.5)) if reach > origin_limit or reach > span * origin_ratio else Vector3()
+    var positions = try Column[Float3].allocate(points)
+    defer positions.release()
+    var offsets = try Column[i32].allocate(faces + 1)
+    defer offsets.release()
+    var corner_points = try Column[i32].allocate(corners)
+    defer corner_points.release()
+    var display = try Column[i32].allocate(triangles)
+    defer display.release()
+    var exact: Column[Vector3]
+    if precise: exact = try Column[Vector3].allocate(points)
+    defer exact.release()
+    # Where each part starts in the points, faces, corners and triangles.
+    let bases = try alloc usize[parts.length * 4] in memory.heap
+    defer free(bases) in memory.heap
+    var sums: usize[4] = [0, 0, 0, 0]
+    for at in 0..<parts.length:
+        for which in 0..<(usize)4: bases[at * 4 + which] = sums[which]
+        sums[0] += meshes[at].positions.count()
+        sums[1] += meshes[at].offsets.count() - 1
+        sums[2] += meshes[at].corners.count()
+        sums[3] += meshes[at].triangles.count()
+    var work = ConcatWork(meshes[..<parts.length], matrices[..<parts.length], bases, origin, positions.span(), exact.span(), offsets.span(), corner_points.span(), display.span())
+    parallel.run(parts.length, concat_part, (void*)&work)
+    offsets.span()[faces] = (i32)corners
+    let storage = try assembled(positions.take(), origin, offsets.take(), corner_points.take(), display.take(), Column[Float3](), exact.take())
+    errdefer dispose_detached(storage)
+    try concatenate_attributes(meshes[..<parts.length], matrices[..<parts.length], storage)
+    return storage
+
+struct ConcatWork:
+    let meshes: const (const Mesh*)[]
+    let matrices: const Matrix4[]
+    ## Per part: its first point, face, corner and triangle index.
+    let bases: const usize[]
+    let origin: Vector3
+    let positions: Float3[]
+    let exact: Vector3[]
+    let offsets: i32[]
+    let corners: i32[]
+    let triangles: i32[]
+
+## Copy part `index` into its place: points placed, and faces, corners and
+## triangles offset by the parts before it.
+func concat_part(context: void*?, index: usize):
+    let work = (ConcatWork*)(context else return)
+    let point_base = work.bases[index * 4]
+    let face_base = work.bases[index * 4 + 1]
+    let corner_base = work.bases[index * 4 + 2]
+    let triangle_base = work.bases[index * 4 + 3]
+    let mesh = work.meshes[index]
+    let matrix = work.matrices[index]
+    let identity = matrix.is_identity() and mesh.origin == work.origin
+    let source = mesh.positions.view()
+    for at in 0..<source.length:
+        if identity:
+            work.positions[point_base + at] = source[at]
+        else:
+            work.positions[point_base + at] = Float3.of(matrix.transform_point(mesh.point_at(at)).subtract(work.origin))
+        if work.exact.length > 0: work.exact[point_base + at] = matrix.transform_point(mesh.point_at(at))
+    let offsets = mesh.offsets.view()
+    for face in 0..<offsets.length - 1: work.offsets[face_base + face] = offsets[face] + (i32)corner_base
+    let corners = mesh.corners.view()
+    for at in 0..<corners.length: work.corners[corner_base + at] = corners[at] + (i32)point_base
+    let triangles = mesh.triangles.view()
+    for at in 0..<triangles.length: work.triangles[triangle_base + at] = triangles[at] + (i32)corner_base
+
+## The union of the parts' attributes on `output`, each part's range turned
+## by its matrix when the attribute is a normal or a vector.
+func concatenate_attributes(meshes: const (const Mesh*)[], matrices: const Matrix4[], output: Mesh*) -> !:
+    let pieces = try alloc Piece[meshes.length] in memory.heap
+    defer free(pieces) in memory.heap
+    for at in 0..<meshes.length:
+        for index in 0..<meshes[at].attributes.count():
+            let entry = meshes[at].attributes.entry(index)
+            let domain = (i64)(u8)entry.domain
+            # Each (name, domain) once: from the first part that has it.
+            var seen = false
+            for earlier in 0..<at:
+                seen = seen or meshes[earlier].attributes.find(entry.name(), domain) >= 0
+            if seen: continue
+            for part in 0..<meshes.length:
+                let found = meshes[part].attributes.find(entry.name(), domain)
+                pieces[part] = Piece(meshes[part].attributes.entry((usize)found) if found >= 0 else none, try meshes[part].domain_size(entry.domain))
+            var joined = try attribute_ops.concatenated(pieces[..<meshes.length])
+            turn_pieces(&joined, meshes, matrices) catch failure:
+                joined.release()
+                error(failure.code, failure.message)
+            # `put` releases the attribute itself when it fails.
+            try output.attributes.put(joined)
+
+## Normals and vectors of each part turned by the part's matrix.
+func turn_pieces(attribute: Attribute*, meshes: const (const Mesh*)[], matrices: const Matrix4[]) -> !:
+    if attribute.width != 3 or (attribute.role != Role.normal and attribute.role != Role.vector) or attribute.storage == Storage.single: return
+    if attribute.kind != DataType.float32 and attribute.kind != DataType.float64: return
+    var base: usize = 0
+    for at in 0..<meshes.length:
+        let count = try meshes[at].domain_size(attribute.domain)
+        let matrix = matrices[at]
+        if not matrix.is_identity():
+            let wide = attribute.kind == DataType.float64
+            let bytes = attribute.data.span()
+            for element in base..<base + count:
+                var value = Vector3()
+                if wide:
+                    let values = attribute_ops.typed_mut[f64](bytes)
+                    value = Vector3(values[element * 3], values[element * 3 + 1], values[element * 3 + 2])
+                else:
+                    let values = attribute_ops.typed_mut[f32](bytes)
+                    value = Vector3((f64)values[element * 3], (f64)values[element * 3 + 1], (f64)values[element * 3 + 2])
+                if value.length() <= 0.000000001: continue
+                let turned = (try matrix.transform_normal(value)) if attribute.role == Role.normal else matrix.transform_direction(value)
+                if wide:
+                    let values = attribute_ops.typed_mut[f64](bytes)
+                    values[element * 3] = turned.x
+                    values[element * 3 + 1] = turned.y
+                    values[element * 3 + 2] = turned.z
+                else:
+                    let values = attribute_ops.typed_mut[f32](bytes)
+                    values[element * 3] = (f32)turned.x
+                    values[element * 3 + 1] = (f32)turned.y
+                    values[element * 3 + 2] = (f32)turned.z
+        base += count

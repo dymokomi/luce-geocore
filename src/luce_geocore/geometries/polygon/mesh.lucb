@@ -22,8 +22,14 @@ from luce_geocore.core.geometry import Vertex, Bounds
 from luce_geocore.core.polygon_topology import PolygonTopology
 from luce_geocore.core.shared import Column
 from luce_geocore.core.float3 import Float3
-from luce_geocore.core.attributes import Attribute, AttributeStore, Domain, DataType, Storage
+from luce_geocore.core.attributes import Attribute, AttributeStore, Domain, DataType, Storage, Role
+from luce_geocore.core.attribute_ops import Piece
 import luce_geocore.core.attribute_ops as attribute_ops
+from luce_geocore.core.bits import Bits, BitsBuilder, trailing_zeros
+from luce_geocore.core.strings import TableBuilder, table_count, table_text
+from luce_geocore.core.growing import Growing
+from luce_geocore.core.idset import IdSet
+from luce_geocore.core.paths import PathFilter
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
 from luce_geocore.geometries.query_cache import QueryCache, release_query

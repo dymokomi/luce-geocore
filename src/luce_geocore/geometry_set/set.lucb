@@ -1,0 +1,238 @@
+## One geometry value: the result every node cooks, and what the viewport,
+## the spreadsheet and the Edit engine read. A set holds typed components, at
+## most one of each family: a mesh, points, instances, and families other
+## packages register (luce-cad's CAD models). The container never downcasts:
+## each family is a ComponentType, a table of functions over its data (after
+## Blender's GeometryComponent and its attribute accessor tables). Copying a
+## set shares every component (O(columns)); a component changes by being
+## replaced, so a published set is immutable and any thread may read it.
+import interop
+import math
+import memory
+import ownership
+import sync
+import luce_geocore.errors as errors
+from luce_geocore.core.growing import Growing
+from luce_geocore.core.idset import IdSet
+from luce_geocore.core.strings import TableBuilder, table_text
+from luce_geocore.core.paths import PathFilter
+from luce_geocore.core.geometry import Bounds
+from luce_geocore.core.float3 import Float3
+from luce_geocore.core.shared import Column
+from luce_geocore.core.attributes import Attribute, AttributeStore, Domain
+import luce_geocore.core.attribute_ops as attribute_ops
+from luce_geocore.math.vector import Vector3
+from luce_geocore.math.matrix import Matrix4
+from luce_geocore.geometries.polygon import Mesh, MeshPart, concatenated, mesh_share, mesh_dispose, mesh_adopt, mesh_unique_bytes, mesh_paths, mesh_filtered, positions_bounds, attribute_entry, mesh_origin, mesh_positions
+
+## Where a component is placed: the matrix, and the translation, rotation
+## (XYZ radians) and scale it was composed from, which instances keep.
+pub struct Placement:
+    pub let translation: Vector3
+    pub let rotation: Vector3
+    pub let scale: Vector3
+    pub let matrix: Matrix4
+
+    pub static func compose(translation: Vector3, rotation: Vector3, scale: Vector3) -> Placement:
+        return Placement(translation, rotation, scale, Matrix4.compose(translation, rotation, scale))
+
+## A component family: what a set may do with a component's data without
+## knowing its layout. Data is an owned heap object; `share` makes another
+## owner of the same contents and `close` gives one up.
+pub struct ComponentType:
+    pub let name: str
+    pub let share: func(const void*) -> void*!
+    pub let close: func(void*) -> unit
+    ## Its elements (faces, points, instances, surfaces); 0 is empty.
+    pub let size: func(const void*) -> usize
+    ## Bytes of the arrays `ids` has not seen, which it then records.
+    pub let bytes: func(const void*, IdSet*) -> usize!
+    ## Its bounds under a matrix, into the Bounds; false when it has none.
+    pub let bounds: func(const void*, Matrix4, Bounds*) -> bool!
+    pub let placed: func(const void*, const Placement*) -> void*!
+    ## Both inputs' elements, the first's first.
+    pub let joined: func(const void*, const void*) -> void*!
+    ## The object paths its elements carry, interned into the table.
+    pub let paths: func(const void*, TableBuilder*) -> unit!
+    ## The elements whose path the filter matches kept (or removed).
+    pub let filtered: func(const void*, const PathFilter*, bool) -> void*!
+    ## A short summary appended to the text ("12 faces").
+    pub let describe: func(const void*, Growing[u8]*) -> unit!
+    ## Why a set with this component cannot become one mesh ("" when it can:
+    ## its faces join the mesh, or it has none).
+    pub let unrealizable: str
+    ## Luce-visible objects the data holds (see interop.Type's trace).
+    pub let trace: func(const void*, func(ownership.Object*, void*) -> unit, void*) -> unit
+
+func trace_nothing(data: const void*, visit: func(ownership.Object*, void*) -> unit, context: void*):
+    discard(data)
+    discard(visit)
+    discard(context)
+
+pub let no_trace: func(const void*, func(ownership.Object*, void*) -> unit, void*) -> unit = trace_nothing
+
+# mark: Registry =====================================================================
+
+var registry_lock: sync.Mutex
+var registry: (const ComponentType*?)[64]
+var registered: usize = 0
+
+## Record a family. Putting a component registers its type, so a package
+## need not run anything at startup.
+pub func register(kind: const ComponentType*) -> !:
+    registry_lock.lock()
+    defer registry_lock.unlock()
+    for at in 0..<registered:
+        let known = registry[at] else continue
+        if known == kind: return
+        if known.name == kind.name: error(errors.invalid, "two component families share a name")
+    if registered == registry.length: error(errors.limit, "at most 64 component families")
+    registry[registered] = kind
+    registered += 1
+
+## The registered family called `name`.
+pub func component_type(name: str) -> const ComponentType*?:
+    registry_lock.lock()
+    defer registry_lock.unlock()
+    for at in 0..<registered:
+        let known = registry[at] else continue
+        if known.name == name: return known
+    return none
+
+# mark: The container ================================================================
+
+pub struct Component:
+    pub let kind: const ComponentType*
+    pub var data: void*
+
+pub struct GeometrySet:
+    var entries: Growing[Component]
+
+    pub func init():
+        self.entries = Growing[Component]()
+
+    ## The data of the `kind` component, if there is one.
+    func find(kind: const ComponentType*) -> const void*?:
+        for entry in self.entries.view():
+            if entry.kind == kind: return entry.data
+        return none
+
+    ## Put `data` (taken, closed on failure) as the `kind` component,
+    ## replacing any. Empty data is dropped instead.
+    mutating func put(kind: const ComponentType*, data: void*) -> !:
+        let close = kind.close
+        register(kind) catch failure:
+            close(data)
+            error(failure.code, failure.message)
+        let size = kind.size
+        let empty = size(data) == 0
+        for index in 0..<self.entries.count:
+            if self.entries.items[index].kind != kind: continue
+            let old = self.entries.items[index].data
+            if empty:
+                close(data)
+                self.remove_at(index)
+            else:
+                self.entries.items[index].data = data
+            close(old)
+            return
+        if empty:
+            close(data)
+            return
+        self.entries.push(Component(kind, data)) catch failure:
+            close(data)
+            error(failure.code, failure.message)
+
+    mutating func remove_at(index: usize):
+        for at in index + 1..<self.entries.count: self.entries.items[at - 1] = self.entries.items[at]
+        self.entries.count -= 1
+
+    mutating func remove(kind: const ComponentType*):
+        for index in 0..<self.entries.count:
+            if self.entries.items[index].kind == kind:
+                let data = self.entries.items[index].data
+                self.remove_at(index)
+                let close = kind.close
+                close(data)
+                return
+
+    ## A set sharing every component: O(columns).
+    func shared() -> GeometrySet!:
+        var copy = GeometrySet()
+        errdefer copy.close()
+        try copy.entries.reserve(self.entries.count)
+        for entry in self.entries.view():
+            let share = entry.kind.share
+            copy.entries.items[copy.entries.count] = Component(entry.kind, try share(entry.data))
+            copy.entries.count += 1
+        return copy
+
+    ## A heap set sharing every component, for instances and adoption.
+    func storage() -> GeometrySet*!:
+        var copy = try self.shared()
+        let storage = alloc GeometrySet[1] in memory.heap catch failure:
+            copy.close()
+            error(failure.code, failure.message)
+        storage[0] = copy
+        return storage.data
+
+    func component(index: usize) -> const Component*:
+        return &self.entries.items[index]
+
+    pub mutating func close():
+        for entry in self.entries.view():
+            let close = entry.kind.close
+            close(entry.data)
+        self.entries.close()
+
+    func trace(visit: func(ownership.Object*, void*) -> unit, context: void*):
+        for entry in self.entries.view():
+            let trace = entry.kind.trace
+            trace(entry.data, visit, context)
+
+## For other packages' families (Luce cannot take pointers, so these are
+## functions, not methods): a component's data, putting one (taking the
+## data), removing one, and a heap copy sharing every component.
+pub func set_find(set: const GeometrySet*, kind: const ComponentType*) -> const void*?:
+    return set.find(kind)
+
+pub func set_put(set: GeometrySet*, kind: const ComponentType*, data: void*) -> !:
+    try set.put(kind, data)
+
+pub func set_remove(set: GeometrySet*, kind: const ComponentType*):
+    set.remove(kind)
+
+pub func set_storage(set: const GeometrySet*) -> GeometrySet*!:
+    return try set.storage()
+
+pub let geometry_set_type: interop.Type[GeometrySet] = interop.Type[GeometrySet]("GeometrySet", GeometrySet.close, GeometrySet.trace, closeable = true)
+
+## Adopt heap storage as a Luce-visible set (disposing it on failure).
+pub func adopt_set(storage: GeometrySet*) -> interop.Reference[GeometrySet]!:
+    return try interop.Reference[GeometrySet].adopt(storage, geometry_set_type, memory.heap)
+
+pub func dispose_set(storage: GeometrySet*):
+    storage.close()
+    free(storage) in memory.heap
+
+## A heap set holding nothing yet.
+pub func empty_storage() -> GeometrySet*!:
+    return try new GeometrySet() in memory.heap
+
+## Append `text` to a growing byte buffer.
+pub func append_text(out: Growing[u8]*, text: str) -> !:
+    try out.reserve(out.count + text.length)
+    if text.length > 0: memory.copy(out.items[out.count..], text.bytes, text.length)
+    out.count += text.length
+
+## Append a whole number in decimal.
+pub func append_number(out: Growing[u8]*, value: usize) -> !:
+    var digits: u8[24]
+    var at: usize = 24
+    var rest = value
+    while true:
+        at -= 1
+        digits[at] = (u8)(48 + rest % 10)
+        rest = rest // 10
+        if rest == 0: break
+    try append_text(out, (str)digits[at..])

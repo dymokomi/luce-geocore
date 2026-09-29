@@ -1,0 +1,69 @@
+## The mesh family: a set's polygons. Its data is a heap Mesh sharing its
+## columns with every other owner.
+
+pub let mesh_component: ComponentType = ComponentType("mesh", share_mesh, close_mesh, mesh_size, mesh_bytes, mesh_bounds, place_mesh, join_meshes, collect_mesh_paths, filter_mesh, describe_mesh, "", no_trace)
+
+func share_mesh(data: const void*) -> void*!:
+    return (void*)(try mesh_share((const Mesh*)data))
+
+func close_mesh(data: void*):
+    mesh_dispose((Mesh*)data)
+
+func mesh_size(data: const void*) -> usize:
+    let mesh = (const Mesh*)data
+    return (usize)mesh.face_count() + (usize)mesh.point_count()
+
+func mesh_bytes(data: const void*, ids: IdSet*) -> usize!:
+    return try mesh_unique_bytes((const Mesh*)data, ids)
+
+func mesh_bounds(data: const void*, matrix: Matrix4, out: Bounds*) -> bool!:
+    let mesh = (const Mesh*)data
+    if mesh.point_count() == 0: return false
+    *out = placed_box(mesh.bounds(), matrix)
+    return true
+
+func place_mesh(data: const void*, placement: const Placement*) -> void*!:
+    let placed = try ((const Mesh*)data).placed(placement.matrix)
+    defer placed.release()
+    return (void*)(try mesh_share(placed.value()))
+
+func join_meshes(first: const void*, second: const void*) -> void*!:
+    let parts: MeshPart[2] = [MeshPart((const Mesh*)first, Matrix4()), MeshPart((const Mesh*)second, Matrix4())]
+    let joined = try concatenated(parts)
+    defer joined.release()
+    return (void*)(try mesh_share(joined.value()))
+
+func collect_mesh_paths(data: const void*, out: TableBuilder*) -> !:
+    try mesh_paths((const Mesh*)data, out)
+
+func filter_mesh(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
+    return (void*)(try mesh_filtered((const Mesh*)data, filter, keep))
+
+func describe_mesh(data: const void*, out: Growing[u8]*) -> !:
+    let mesh = (const Mesh*)data
+    try append_number(out, (usize)mesh.point_count())
+    try append_text(out, " points / ")
+    try append_number(out, (usize)mesh.face_count())
+    try append_text(out, " faces / ")
+    try append_number(out, (usize)mesh.attribute_count())
+    try append_text(out, " attributes")
+
+## The box of `box`'s corners under `matrix`.
+pub func placed_box(box: Bounds, matrix: Matrix4) -> Bounds:
+    if matrix.is_identity(): return box
+    var minimum = Vector3()
+    var maximum = Vector3()
+    for corner in 0..<(usize)8:
+        let near = Vector3(box.minimum.x if corner & 1 == 0 else box.maximum.x, box.minimum.y if corner & 2 == 0 else box.maximum.y, box.minimum.z if corner & 4 == 0 else box.maximum.z)
+        let point = matrix.transform_point(near)
+        if corner == 0:
+            minimum = point
+            maximum = point
+        minimum = Vector3(math.min(minimum.x, point.x), math.min(minimum.y, point.y), math.min(minimum.z, point.z))
+        maximum = Vector3(math.max(maximum.x, point.x), math.max(maximum.y, point.y), math.max(maximum.z, point.z))
+    return Bounds(minimum, maximum)
+
+## The union of two boxes.
+pub func union_box(a: Bounds, b: Bounds) -> Bounds:
+    return Bounds(Vector3(math.min(a.minimum.x, b.minimum.x), math.min(a.minimum.y, b.minimum.y), math.min(a.minimum.z, b.minimum.z)),
+                  Vector3(math.max(a.maximum.x, b.maximum.x), math.max(a.maximum.y, b.maximum.y), math.max(a.maximum.z, b.maximum.z)))

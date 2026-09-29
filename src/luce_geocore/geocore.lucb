@@ -15,6 +15,7 @@ import luce_geocore.geometries.primitives as primitives
 import luce_geocore.geometries.topology_tools as topology_tools
 import luce_geocore.geometries.dissolve_workspace as dissolve_workspace
 import luce_geocore.geometries.attribute_kernels as attribute_kernels
+import luce_geocore.geometry_set as geometry_set
 import luce_geocore.errors as errors
 
 pub type Vector3 = vector.Vector3
@@ -36,6 +37,8 @@ pub type MeshPrimitives = primitives.MeshPrimitives
 pub type TopologyTools = topology_tools.TopologyTools
 pub type DissolveWorkspace = dissolve_workspace.DissolveWorkspace
 pub type AttributeKernels = attribute_kernels.AttributeKernels
+pub type GeometrySet = geometry_set.GeometrySet
+pub let geometry_set_type = geometry_set.geometry_set_type
 pub let invalid: ErrorCode = errors.invalid
 pub let busy: ErrorCode = errors.busy
 pub let limit: ErrorCode = errors.limit

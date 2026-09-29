@@ -142,6 +142,13 @@ pub struct Column[T]:
         if block.parent == 0: return (0, block.count)
         return (block.changed_first, block.changed_end)
 
+    ## This handle's share, moved out: the handle is left empty, so a later
+    ## `release` of it (a defer) does nothing.
+    pub mutating func take() -> Column[T]:
+        let moved = Column[T](self.block)
+        self.block = none
+        return moved
+
     ## Give up this share; the last one frees the block.
     pub mutating func release():
         let block = self.block else return

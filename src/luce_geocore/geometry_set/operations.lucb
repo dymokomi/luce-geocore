@@ -1,0 +1,79 @@
+## Whole-set operations, component by component: bytes, bounds, paths,
+## filters, placement, joining and realization into one mesh.
+
+## Bytes of the arrays of every component that `ids` has not seen.
+pub func set_bytes(set: const GeometrySet*, ids: IdSet*) -> usize!:
+    var total: usize = 64
+    for entry in set.entries.view():
+        let bytes = entry.kind.bytes
+        total += try bytes(entry.data, ids)
+    return total
+
+## The set's bounds under `matrix`; false when it has none.
+pub func set_bounds(set: const GeometrySet*, matrix: Matrix4, out: Bounds*) -> bool!:
+    var found = false
+    for entry in set.entries.view():
+        var box = Bounds(Vector3(), Vector3())
+        let bounds = entry.kind.bounds
+        if not (try bounds(entry.data, matrix, &box)): continue
+        *out = union_box(*out, box) if found else box
+        found = true
+    return found
+
+pub func set_paths(set: const GeometrySet*, out: TableBuilder*) -> !:
+    for entry in set.entries.view():
+        let paths = entry.kind.paths
+        try paths(entry.data, out)
+
+## Each component filtered by path (see ComponentType.filtered); components
+## left empty are dropped.
+pub func set_filtered(set: const GeometrySet*, filter: const PathFilter*, keep: bool) -> GeometrySet*!:
+    let result = try empty_storage()
+    errdefer dispose_set(result)
+    for entry in set.entries.view():
+        let filtered = entry.kind.filtered
+        try result.put(entry.kind, try filtered(entry.data, filter, keep))
+    return result
+
+## Each component placed.
+pub func set_placed(set: const GeometrySet*, placement: const Placement*) -> GeometrySet*!:
+    let result = try empty_storage()
+    errdefer dispose_set(result)
+    for entry in set.entries.view():
+        let placed = entry.kind.placed
+        try result.put(entry.kind, try placed(entry.data, placement))
+    return result
+
+## Both sets' components; a family both have is joined, `first`'s first.
+pub func set_joined(first: const GeometrySet*, second: const GeometrySet*) -> GeometrySet*!:
+    let result = try first.storage()
+    errdefer dispose_set(result)
+    for entry in second.entries.view():
+        if let mine = first.find(entry.kind):
+            let joined = entry.kind.joined
+            try result.put(entry.kind, try joined(mine, entry.data))
+        else:
+            let share = entry.kind.share
+            try result.put(entry.kind, try share(entry.data))
+    return result
+
+## Every mesh in the set and its instances, placed and joined into one mesh
+## in one pass. A family that has no polygons yet (CAD) is an error that
+## says what to do; point clouds have no faces and add nothing.
+pub func set_realized(set: const GeometrySet*) -> interop.Reference[Mesh]!:
+    var parts = Growing[MeshPart]()
+    defer parts.close()
+    try collect_parts(set, Matrix4(), &parts, 0)
+    if parts.count == 0: return try Mesh.empty()
+    return try concatenated(parts.view())
+
+func collect_parts(set: const GeometrySet*, matrix: Matrix4, parts: Growing[MeshPart]*, depth: usize) -> !:
+    if depth > 64: error(errors.invalid, "instances nest more than 64 deep")
+    for entry in set.entries.view():
+        if entry.kind == &mesh_component:
+            try parts.push(MeshPart((const Mesh*)entry.data, matrix))
+        elif entry.kind == &instances_component:
+            for item in ((const Instances*)entry.data).items.view():
+                try collect_parts(item.set, matrix.multiply(item.matrix()), parts, depth + 1)
+        elif entry.kind.unrealizable != "":
+            error(errors.invalid, entry.kind.unrealizable)
