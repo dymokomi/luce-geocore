@@ -19,7 +19,7 @@ from luce_geocore.core.attributes import Attribute, AttributeStore, Domain, Data
 from luce_geocore.core.geometry import Bounds
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
-from luce_geocore.geometries.polygon import Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, attribute_entry, point_span, mesh_origin, offset_span, corner_span, corner_face_span, edge_span, corner_edge_span, face_normal_span, triangle_span, point_face_span, edge_corner_span, point_edge_span, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute
+from luce_geocore.geometries.polygon import with_group_bits, Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, attribute_entry, point_span, mesh_origin, offset_span, corner_span, corner_face_span, edge_span, corner_edge_span, face_normal_span, triangle_span, point_face_span, edge_corner_span, point_edge_span, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute
 from luce_geocore.geometries.polygon_triangulation import area_normal
 from luce_geocore.geometries.topology_tools import TopologyTools
 from luce_geocore.geometries.dissolve_workspace import DissolveWorkspace
@@ -90,6 +90,9 @@ pub struct VerbInput:
     pub let mesh: const Mesh*
     pub let group: Bits
     pub let parms: Parms
+    ## Mirror across X, Y or Z (1..3; 0 none): the group is symmetric already,
+    ## and point verbs move mirrored points to mirrored places.
+    pub let symmetry: i64 = 0
 
 ## What a kernel returns: new positions over the same topology, a topology
 ## built with parents, or a finished mesh; and the output selection.
@@ -160,15 +163,34 @@ pub struct VerbRun:
         self.selection.release()
 
 ## Run `verb` on `mesh`: the group (text; empty is every element) on
-## `group_type`'s domain, converted to the verb's.
-pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[]) -> VerbRun!:
+## `group_type`'s domain, made symmetric across `symmetry` (0 none, 1 X,
+## 2 Y, 3 Z), converted to the verb's domain. With `keep`, the output
+## selection is the group carried through the verb (a new element is
+## selected when all its parents were) instead of what the verb made.
+pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false) -> VerbRun!:
     let expression = group if not blank(group) else "*"
     var domain = try group_domain(group_type, verb.domain)
     if group_type == 0: domain = try guess_domain(mesh, expression, verb.domain)
     if not verb.converts and domain != verb.domain: error(errors.invalid, "this operation works on another component type")
+    if symmetry < 0 or symmetry > 3: error(errors.invalid, "symmetry is 0 (none), 1 (X), 2 (Y) or 3 (Z)")
     var result = try group_bits(mesh, expression, domain)
     defer result.bits.release()
-    var bits = try BitsBuilder.copy_of(Bits(result.bits.view(), (usize)(try mesh.domain_count((i64)(u8)domain))))
+    var chosen = try BitsBuilder.copy_of(Bits(result.bits.view(), (usize)(try mesh.domain_count((i64)(u8)domain))))
+    defer chosen.close()
+    if symmetry > 0:
+        var mirrored = try symmetric(mesh, chosen.view(), domain, symmetry)
+        chosen.close()
+        chosen = mirrored
+    # The group rides through the verb as `.carried` when it is kept.
+    var carrier: interop.Reference[Mesh]? = none
+    defer:
+        if let owner = carrier: owner.release()
+    var source = mesh
+    if keep:
+        let owner = try with_group_bits(mesh, ".carried", domain, chosen.view())
+        carrier = owner
+        source = owner.value()
+    var bits = try BitsBuilder.copy_of(chosen.view())
     defer bits.close()
     if domain != verb.domain:
         let topology = try Topology.of(mesh)
@@ -177,29 +199,36 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
         bits = moved
     var output = VerbOutput()
     defer output.close()
-    let input = VerbInput(mesh, bits.view(), Parms(numbers))
+    let input = VerbInput(source, bits.view(), Parms(numbers), symmetry)
     let cook = verb.cook
     try cook(&input, &output)
-    let product = try finish(mesh, &output)
+    let product = try finish(source, &output)
     var selection = output.selection.finish()
+    var selection_domain = output.selection_domain
+    if keep:
+        let carried_index = product.find_attribute(".carried", (i64)(u8)domain)
+        if carried_index >= 0:
+            let entry = attribute_entry(product, carried_index) catch failure:
+                mesh_dispose(product)
+                selection.release()
+                error(failure.code, failure.message)
+            selection.release()
+            selection = Column[u64].copy_of(u64[]((u64*)entry.data.view().data, entry.data.view().length // 8)) catch failure:
+                mesh_dispose(product)
+                error(failure.code, failure.message)
+            selection_domain = domain
+            remove_attribute(product, ".carried", domain)
     # The output selection also rides in the mesh as the group `.selection`
     # (Houdini's cook selection), so it reaches the viewport with the result.
-    mark_selection(product, &selection, output.selection_domain) catch failure:
+    mark_selection(product, &selection, selection_domain) catch failure:
         mesh_dispose(product)
         selection.release()
         error(failure.code, failure.message)
-    let count = (usize)(product.domain_count((i64)(u8)output.selection_domain) catch failure:
+    let count = (usize)(product.domain_count((i64)(u8)selection_domain) catch failure:
         mesh_dispose(product)
         selection.release()
         error(failure.code, failure.message))
-    if selection.count() < (count + 63) // 64:
-        # Kernels that set no selection select nothing.
-        selection.release()
-        var empty = BitsBuilder.zeros(count) catch failure:
-            mesh_dispose(product)
-            error(failure.code, failure.message)
-        selection = empty.finish()
-    return VerbRun(product, selection, count, output.selection_domain, output.warning, result.report.misses)
+    return VerbRun(product, selection, count, selection_domain, output.warning, result.report.misses)
 
 ## The kernel's output as a mesh: moved positions share everything else, a
 ## built topology carries every attribute through its provenance.

@@ -1,0 +1,179 @@
+## Positional symmetry and soft falloff for the Edit engine. A mirror map
+## pairs each element with the one at its reflection across an axis plane
+## through the origin (within a tolerance scaled to the model), found through
+## a hash of quantized positions; a group becomes symmetric by adding the
+## mirrors of its members. Soft weights fall off with the distance to the
+## nearest group point, found through a grid of cells one radius wide.
+
+## Reflection across the plane normal to `axis` (1 X, 2 Y, 3 Z).
+pub func reflect(point: Vector3, axis: i64) -> Vector3:
+    if axis == 1: return Vector3(-point.x, point.y, point.z)
+    if axis == 2: return Vector3(point.x, -point.y, point.z)
+    return Vector3(point.x, point.y, -point.z)
+
+## Points bucketed by position quantized to `size`: nearest-position lookups.
+struct PointHash:
+    var size: f64
+    var heads: Growing[i32]
+    var next: Growing[i32]
+
+    static func build(positions: const Vector3[], size: f64) -> PointHash!:
+        var grid = PointHash(size, Growing[i32](), Growing[i32]())
+        errdefer grid.close()
+        var buckets: usize = 1024
+        while buckets < positions.length * 2: buckets *= 2
+        try grid.heads.fill(buckets, -1)
+        try grid.next.fill(positions.length, -1)
+        for at in 0..<positions.length:
+            let bucket = grid.bucket_of(positions[at])
+            grid.next.items[at] = grid.heads.items[bucket]
+            grid.heads.items[bucket] = (i32)at
+        return grid
+
+    func bucket_at(x: i64, y: i64, z: i64) -> usize:
+        let value = (x *% 73856093) ^ (y *% 19349663) ^ (z *% 83492791)
+        return (usize)(value & 0x7FFFFFFFFFFF) & (self.heads.count - 1)
+
+    func bucket_of(point: Vector3) -> usize:
+        return self.bucket_at((i64)math.floor(point.x / self.size), (i64)math.floor(point.y / self.size), (i64)math.floor(point.z / self.size))
+
+    ## The element nearest `point` within `reach` (<= size), or -1.
+    func nearest(positions: const Vector3[], point: Vector3, reach: f64) -> i32:
+        let x = (i64)math.floor(point.x / self.size)
+        let y = (i64)math.floor(point.y / self.size)
+        let z = (i64)math.floor(point.z / self.size)
+        var found: i32 = -1
+        var best = reach
+        for dx in (i64)-1..<(i64)2:
+            for dy in (i64)-1..<(i64)2:
+                for dz in (i64)-1..<(i64)2:
+                    var candidate = self.heads.items[self.bucket_at(x + dx, y + dy, z + dz)]
+                    while candidate >= 0:
+                        let distance = positions[(usize)candidate].subtract(point).length()
+                        if distance <= best:
+                            best = distance
+                            found = candidate
+                        candidate = self.next.items[(usize)candidate]
+        return found
+
+    mutating func close():
+        self.heads.close()
+        self.next.close()
+
+## The tolerance mirrors are matched within: a ten-thousandth of the
+## model's size.
+pub func mirror_tolerance(mesh: const Mesh*) -> f64:
+    let box = mesh.bounds()
+    return math.max(0.000000001, box.maximum.subtract(box.minimum).length() * 0.0001)
+
+## Where each element of `domain` sits, in f64: points, face centers, edge
+## midpoints.
+func element_positions(mesh: const Mesh*, topology: const Topology*, domain: Domain, out: Growing[Vector3]*) -> !:
+    let points = point_span(mesh)
+    let origin = mesh_origin(mesh)
+    let count = topology.size(domain)
+    try out.reserve(count)
+    out.count = count
+    for at in 0..<count:
+        var p = Vector3()
+        if domain == Domain.point:
+            p = points[at].vector()
+        elif domain == Domain.edge:
+            p = points[(usize)topology.edge_points[at * 2]].vector().add(points[(usize)topology.edge_points[at * 2 + 1]].vector()).multiply_scalar(0.5)
+        else:
+            let start = (usize)topology.offsets[at]
+            let end = (usize)topology.offsets[at + 1]
+            for corner in start..<end: p = p.add(points[(usize)topology.corners[corner]].vector())
+            p = p.multiply_scalar(1.0 / (f64)(end - start))
+        out.items[at] = p.add(origin)
+
+## Each element's mirror across `axis` (-1 when nothing sits there).
+pub func mirror_map(mesh: const Mesh*, domain: Domain, axis: i64, out: Growing[i32]*) -> !:
+    let topology = try Topology.of(mesh)
+    let tolerance = mirror_tolerance(mesh)
+    if domain == Domain.corner:
+        var points = Growing[i32]()
+        defer points.close()
+        try mirror_map(mesh, Domain.point, axis, &points)
+        var faces = Growing[i32]()
+        defer faces.close()
+        try mirror_map(mesh, Domain.face, axis, &faces)
+        try out.fill(topology.corners.length, -1)
+        for corner in 0..<topology.corners.length:
+            let face = faces.items[(usize)topology.corner_faces[corner]]
+            let point = points.items[(usize)topology.corners[corner]]
+            if face < 0 or point < 0: continue
+            for at in (usize)topology.offsets[(usize)face]..<(usize)topology.offsets[(usize)face + 1]:
+                if topology.corners[at] == point: out.items[corner] = (i32)at
+        return
+    var positions = Growing[Vector3]()
+    defer positions.close()
+    try element_positions(mesh, &topology, domain, &positions)
+    var grid = try PointHash.build(positions.view(), tolerance * 4.0)
+    defer grid.close()
+    try out.fill(positions.count, -1)
+    for at in 0..<positions.count:
+        out.items[at] = grid.nearest(positions.view(), reflect(positions.items[at], axis), tolerance)
+
+## `bits` with the mirror of every member added.
+pub func symmetric(mesh: const Mesh*, bits: Bits, domain: Domain, axis: i64) -> BitsBuilder!:
+    var result = try BitsBuilder.copy_of(bits)
+    errdefer result.close()
+    var mirrors = Growing[i32]()
+    defer mirrors.close()
+    try mirror_map(mesh, domain, axis, &mirrors)
+    for word in 0..<bits.words.length:
+        var pending = bits.words[word]
+        while pending != 0:
+            let element = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            let mirror = mirrors.items[element]
+            if mirror >= 0: result.set((usize)mirror)
+    return result
+
+## Soft weights of every point: 1 in `group`, falloff(1 - d / radius) within
+## `radius` of its nearest member, 0 beyond. Falloff 0 linear, 1 quadratic,
+## 2 cubic, 3 smooth (Houdini's Edit SOP falloffs).
+pub func soft_weights(mesh: const Mesh*, group: Bits, radius: f64, falloff: i64, weights: f32[]) -> !:
+    let points = point_span(mesh)
+    var members = Growing[Vector3]()
+    defer members.close()
+    try members.reserve(group.population())
+    for word in 0..<group.words.length:
+        var pending = group.words[word]
+        while pending != 0:
+            let point = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            members.items[members.count] = points[point].vector()
+            members.count += 1
+    var grid = try PointHash.build(members.view(), radius)
+    defer grid.close()
+    var work = SoftWork(points, group, members.view(), &grid, radius, falloff, weights)
+    parallel.parallel_for(points.length, 4096, soft_points, (void*)&work)
+
+struct SoftWork:
+    let points: const Float3[]
+    let group: Bits
+    let members: const Vector3[]
+    let grid: const PointHash*
+    let radius: f64
+    let falloff: i64
+    let weights: f32[]
+
+func soft_points(context: void*?, first: usize, end: usize):
+    let work = (SoftWork*)(context else return)
+    for point in first..<end:
+        if work.group.get(point):
+            work.weights[point] = 1.0
+            continue
+        let p = work.points[point].vector()
+        let nearest = work.grid.nearest(work.members, p, work.radius)
+        if nearest < 0:
+            work.weights[point] = 0.0
+            continue
+        let t = 1.0 - work.members[(usize)nearest].subtract(p).length() / work.radius
+        var weight = t
+        if work.falloff == 1: weight = t * t
+        elif work.falloff == 2: weight = t * t * t
+        elif work.falloff == 3: weight = t * t * (3.0 - 2.0 * t)
+        work.weights[point] = (f32)math.max(0.0, math.min(1.0, weight))

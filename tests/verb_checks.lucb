@@ -14,6 +14,7 @@ pub func exercise() -> !:
     try point_verbs(mesh)
     try face_verbs(mesh)
     try topology_verbs(mesh)
+    try edit_options(mesh)
     try registry()
 
 func fixture() -> interop.Reference[Mesh]!:
@@ -226,8 +227,40 @@ func topology_verbs(mesh: interop.Reference[Mesh]) -> !:
     defer same.release()
     assert(same.value().point_count() == 25)
 
+## The Edit engine's options: symmetry, soft falloff, and a kept selection.
+func edit_options(mesh: interop.Reference[Mesh]) -> !:
+    let up: f64[15] = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let mirrored = try Verbs.run("Transform Components", mesh, "0", 1, up, 1)
+    defer mirrored.release()
+    let both = try mirrored.value().mesh()
+    defer both.release()
+    near((try both.value().point(0)).y, 1.0)
+    near((try both.value().point(4)).y, 1.0)
+    near((try both.value().point(2)).y, 0.0)
+    let points = try mirrored.value().selection()
+    defer points.release()
+    assert(points.value().count() == 2)
+    var soft: f64[15] = up
+    soft[13] = 0.6
+    let falloff = try Verbs.run("Transform Components", mesh, "12", 1, soft)
+    defer falloff.release()
+    let smooth = try falloff.value().mesh()
+    defer smooth.release()
+    near((try smooth.value().point(12)).y, 1.0)
+    # Linear falloff (Falloff 0): the weight at 0.5 of a 0.6 radius.
+    near((try smooth.value().point(7)).y, 1.0 - 0.5 / 0.6)
+    near((try smooth.value().point(0)).y, 0.0)
+    let kept = try Verbs.run("PolyExtrude", mesh, "5", 3, [1.0], 0, true)
+    defer kept.release()
+    let carried = try kept.value().selection()
+    defer carried.release()
+    assert(carried.value().domain() == 2 and carried.value().count() == 5 and carried.value().contains(5))
+    let result = try kept.value().mesh()
+    defer result.release()
+    assert(result.value().find_attribute(".carried", 2) < 0)
+
 func registry() -> !:
     assert(Verbs.count() >= 19 and Verbs.index_of("PolyExtrude") >= 0 and Verbs.index_of("nothing") == -1)
     let transform = Verbs.index_of("Transform Components")
-    assert(Verbs.parm_count(transform) == 5 and Verbs.parm_components(transform, 0) == 3 and Verbs.parm_kind(transform, 3) == 4)
+    assert(Verbs.parm_count(transform) == 7 and Verbs.parm_components(transform, 0) == 3 and Verbs.parm_kind(transform, 3) == 4)
     assert(Verbs.domain(Verbs.index_of("Fill")) == 4 and not Verbs.changes_topology(transform))
