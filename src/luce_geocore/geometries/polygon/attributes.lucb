@@ -37,11 +37,12 @@ extend PolygonMesh:
         try checked(element, (try self.domain_size(entry.domain)))
         return entry.number((usize)element, (usize)component)
 
-    pub func with_attribute(name: str, domain: i64, width: i64, values: const f64[], integer: bool = false) -> interop.Reference[PolygonMesh]!:
+    ## `float32` stores the values as f32 instead of f64.
+    pub func with_attribute(name: str, domain: i64, width: i64, values: const f64[], integer: bool = false, float32: bool = false) -> interop.Reference[PolygonMesh]!:
         let count = try self.domain_count(domain)
         if width < 1 or width > 4 or values.length != (usize)(count * width):
             error(errors.invalid, "attribute length must match its geometry domain")
-        return try self.with_entry(try Attribute.from_numbers(name, Domain((u8)domain), (usize)width, values, integer))
+        return try self.with_entry(try Attribute.from_numbers(name, Domain((u8)domain), (usize)width, values, integer, Storage.array, float32))
 
     ## One value for the whole domain: O(1) whatever the domain's size.
     pub func with_single_attribute(name: str, domain: i64, values: const f64[], integer: bool = false) -> interop.Reference[PolygonMesh]!:

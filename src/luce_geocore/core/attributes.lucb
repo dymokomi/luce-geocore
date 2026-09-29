@@ -72,7 +72,9 @@ pub struct Attribute:
 
     ## From f64 tuples: integers become int32 (int64 when out of range), and
     ## other numbers float64, so every value reads back exactly.
-    pub static func from_numbers(name: str, domain: Domain, width: usize, values: const f64[], integer: bool, storage: Storage = Storage.array) -> Attribute!:
+    ## `float32` stores non-integer values as f32 (half the bytes; about 7
+    ## significant digits), as display and analysis attributes want.
+    pub static func from_numbers(name: str, domain: Domain, width: usize, values: const f64[], integer: bool, storage: Storage = Storage.array, float32: bool = false) -> Attribute!:
         if width < 1 or width > 4 or values.length % width != 0:
             error(errors.invalid, "attribute needs a tuple size of 1..4 dividing its values")
         if values.length // width > 33554432:
@@ -85,9 +87,9 @@ pub struct Attribute:
                 wide = wide or value < -2147483648.0 or value > 2147483647.0
         else:
             for value in values:
-                if not math.is_finite(value):
+                if not math.is_finite(value) or (float32 and math.abs(value) > 3.4e38):
                     error(errors.invalid, "attribute values must be finite and integer values exactly representable")
-        let kind = (DataType.int64 if wide else DataType.int32) if integer else DataType.float64
+        let kind = (DataType.int64 if wide else DataType.int32) if integer else (DataType.float32 if float32 else DataType.float64)
         let tuples = values.length // width
         var attribute = try Attribute.create(name, domain, kind, width, tuples if storage == Storage.array else 0, storage)
         let stored = attribute.data.span()
@@ -99,6 +101,9 @@ pub struct Attribute:
             .int64:
                 let output = i64[]((i64*)stored.data, count)
                 for at in 0..<count: output[at] = (i64)values[at]
+            .float32:
+                let output = f32[]((f32*)stored.data, count)
+                for at in 0..<count: output[at] = (f32)values[at]
             _: memory.copy(f64[]((f64*)stored.data, count), values[..<count], count)
         return attribute
 

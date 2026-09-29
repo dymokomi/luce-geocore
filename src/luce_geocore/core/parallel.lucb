@@ -4,14 +4,23 @@
 ## spawn threads per call. `run` hands out `count` items and works on them too,
 ## so a batch finishes even when every worker is busy or it is started from
 ## inside another batch. `parallel_for` splits a range into chunks of about
-## `grain` elements. Items are Base functions with a context pointer: pool
-## threads never call into full Luce.
+## `grain` elements. Items are Base functions with a context pointer.
+##
+## On a worker each item runs in its own runtime context (entered before,
+## finished after), so it may create ARC temporaries but must release all it
+## creates and touch none of the caller's objects: only raw data crosses back.
+## Items the caller runs share its context. Workers have deep stacks: B-rep
+## tessellation runs whole faces as items.
 import os
 import sync
 import thread
+import ownership
 
 ## The most workers the pool keeps.
 let most_workers: usize = 63
+let worker_stack: usize = 8 * 1024 * 1024
+## Set on pool workers: items there enter their own runtime context.
+local var on_worker: bool = false
 
 ## A batch of work: `count` items, each `entry(context, index)` once, on at
 ## most `limit` threads at a time. Owned by its caller, who must keep it
@@ -99,6 +108,10 @@ pub func start(job: Job*, count: usize, entry: func(void*?, usize) -> unit, cont
 pub func finished(job: const Job*) -> bool:
     return job.finished.load(.acquire) >= job.count
 
+## How many of `job`'s items have finished (progress reports).
+pub func completed(job: const Job*) -> usize:
+    return job.finished.load(.acquire)
+
 ## Work on `job`'s remaining items here, then wait until no worker holds it;
 ## after this the caller may free it.
 pub func wait(job: Job*):
@@ -137,7 +150,12 @@ func work_on(job: Job*):
         if index >= job.count:
             return
         let entry = job.entry
-        entry(job.context, index)
+        if on_worker:
+            ownership.enter()
+            entry(job.context, index)
+            ownership.finish_task()
+        else:
+            entry(job.context, index)
         discard(job.finished.add(1, .acq_rel))
 
 ## Drop `job` from the queue if it is there; under `lock`.
@@ -168,7 +186,7 @@ func ensure_workers():
     let spare = processors - 1 if processors > 1 else 0
     let wanted = most_workers if spare > most_workers else spare
     for _ in 0..<wanted:
-        let handle = thread.spawn(worker_main, none, name = "luce-pool") catch failure:
+        let handle = thread.spawn(worker_main, none, stack = worker_stack, name = "luce-pool") catch failure:
             # Fewer workers only means less help: callers do the rest.
             discard(failure)
             break
@@ -190,6 +208,7 @@ func next_job() -> Job*?:
 
 func worker_main(context: void*?):
     discard(context)
+    on_worker = true
     lock.lock()
     while true:
         if let job = next_job():

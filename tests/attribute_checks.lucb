@@ -27,6 +27,11 @@ pub func exercise() -> !:
     let id = tagged.value().find_attribute("id", 1)
     assert((try tagged.value().attribute_integer(id)) and (try tagged.value().attribute_type(id)) == 2)
     near(try tagged.value().attribute_value(w, 8), 4.0)
+    # f32 storage on request (analysis attributes such as curvature).
+    let compact = try mesh.with_attribute("k", 0, 1, weights, false, true)
+    defer compact.release()
+    let k = compact.value().find_attribute("k", 0)
+    assert((try compact.value().attribute_type(k)) == 4 and (try compact.value().attribute_value(k, 3)) == 1.5)
     # A Move shares every attribute column and the topology.
     let moved = try tagged.value().moved_points([4], Vector3(0.0, 1.0, 0.0))
     defer moved.release()
