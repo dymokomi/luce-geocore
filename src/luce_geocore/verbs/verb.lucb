@@ -203,7 +203,13 @@ func finish(source: const Mesh*, output: VerbOutput*) -> Mesh*!:
         return made
     if output.built: return try output.builder.finish(source)
     if not output.positions.is_empty():
-        return try moved_storage(source, output.positions, output.moved.view())
+        # Points moved onto each other collapse faces: nothing sensible to
+        # make, so the input passes through with a warning.
+        let moved: Mesh*? = moved_storage(source, output.positions, output.moved.view()) catch failure:
+            if failure.code != errors.invalid: error(failure.code, failure.message)
+            output.warning = "The operation would collapse faces; the input passes through"
+            recover none
+        if let made = moved: return made
     return try mesh_share(source)
 
 func blank(text: str) -> bool:
