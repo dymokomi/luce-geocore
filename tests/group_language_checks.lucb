@@ -118,6 +118,13 @@ func members() -> !:
     assert(grown.value().count() == 8 and (try grown.value().fits(mesh)))
     let center = try faces.value().center(mesh)
     assert(math.abs(center.z - 0.75) < 0.000001 and math.abs(center.x) < 0.000001)
+    # Its box: the selected faces' points; nothing selected: the mesh's.
+    let box = try faces.value().bounds(mesh)
+    assert(math.abs(box.maximum.z - 1.0) < 0.000001 and math.abs(box.minimum.z - 0.5) < 0.000001)
+    let none_selected = try Selection.empty(mesh, 2)
+    defer none_selected.release()
+    let whole = try none_selected.value().bounds(mesh)
+    assert(whole.minimum.z == mesh.value().bounds().minimum.z)
     # A Group node's result: a flagged group from an expression.
     let grouped = try Groups.with_group(mesh, "front", 2, "0-3")
     defer grouped.release()
