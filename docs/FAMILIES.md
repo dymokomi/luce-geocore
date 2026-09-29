@@ -110,7 +110,9 @@ curves for luced-3d's Edit Sketch.
   Segments). Segments run between consecutive control points and are
   numbered across curves.
 - Steps name points, segments or curves by a group on that cloud (Group Type
-  points, edges or primitives): moves keep their translation in the plane;
+  points, edges or primitives): moves keep their translation in the plane
+  and snap as they happen when the numbers after Transform Components'
+  fifteen give a grid spacing or an end reach;
   grid snaps, end snaps (onto the nearest other end), deletes (a segment
   splits an open curve and opens a closed one), close and open.
 - Every position change goes through `placed_curves(curves, targets, moved,

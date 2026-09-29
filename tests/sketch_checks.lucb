@@ -96,6 +96,25 @@ pub func exercise() -> !:
     defer side.release()
     assert(same(try point_of(side, 1, 0), try point_of(all, 1, 0)) and same(try point_of(side, 1, 1), (try point_of(all, 1, 1)).add(Vector3(0.0, 1.0, 0.0))))
     assert(same(try point_of(side, 1, 2), (try point_of(all, 1, 2)).add(Vector3(0.0, 1.0, 0.0))))
+    # Snapping while dragging, from the numbers after the fifteen: the
+    # point lands on the half-unit grid; the line's end lands on the
+    # polyline's start (-1.5, -3.5, 1) when dragged within 0.1 of it.
+    var gridded_move: f64[17] = ---
+    let base_move = moves(0.23, 0.0, 0.0, 0.0)
+    for at in 0..<(usize)15: gridded_move[at] = base_move[at]
+    gridded_move[15] = 0.5
+    gridded_move[16] = 0.0
+    let snapped_drag = try Sketches.moved(all, points, "0", 1, gridded_move[..<17])
+    defer snapped_drag.release()
+    assert(same(try point_of(snapped_drag, 0, 0), Vector3(-1.0, 0.0, 1.0)))
+    let reach_move = moves(-2.45, -3.45, 0.0, 0.0)
+    var reaching: f64[17] = ---
+    for at in 0..<(usize)15: reaching[at] = reach_move[at]
+    reaching[15] = 0.0
+    reaching[16] = 0.1
+    let joined_drag = try Sketches.moved(all, points, "1", 1, reaching[..<17])
+    defer joined_drag.release()
+    assert(same(try point_of(joined_drag, 0, 1), try point_of(all, 3, 0)))
     # Grid snapping: the dragged point back onto the half-unit grid.
     let dragged_points = try picked(dragged, 2)
     defer dragged_points.release()

@@ -80,7 +80,10 @@ pub struct Sketches:
 
     ## The set with what `group` names (on `group_type`, see SketchChoice)
     ## moved by Transform Components' numbers; the translation stays in the
-    ## sketch plane. The centroid pivot is the picked points'.
+    ## sketch plane. The centroid pivot is the picked points'. Edit Sketch's
+    ## snapping follows the fifteen numbers: a grid spacing (the moved
+    ## points land on the plane's grid) and an end reach (a moved end of an
+    ## open curve lands on an unmoved end within it); 0 is off.
     pub static func moved(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
         if numbers.length < 13: error(errors.invalid, "a transform needs its thirteen numbers")
         let source = try geometry.get()
@@ -98,9 +101,28 @@ pub struct Sketches:
         let delta = Matrix4(linear.x, linear.y, linear.z, shift.add(pivot).subtract(linear.transform_point(pivot)))
         var targets = Growing[Vector3]()
         defer targets.close()
+        let grid = numbers[15] if numbers.length > 15 else 0.0
+        let reach = numbers[16] if numbers.length > 16 else 0.0
         for at in 0..<curves.point_count():
             let here = curves.point(at)
-            try targets.push(delta.transform_point(here) if chosen.points.items[at] else here)
+            if not chosen.points.items[at]:
+                try targets.push(here)
+                continue
+            let moved = delta.transform_point(here)
+            try targets.push(on_grid(plane, moved, grid) if grid > 0.0 else moved)
+        if reach > 0.0:
+            var ends = Growing[usize]()
+            defer ends.close()
+            try open_ends(curves, &ends)
+            for end in ends.view():
+                if not chosen.points.items[end]: continue
+                var best = reach
+                for other in ends.view():
+                    if chosen.points.items[other]: continue
+                    let distance = curves.point(other).subtract(targets.items[end]).length()
+                    if distance <= best:
+                        best = distance
+                        targets.items[end] = curves.point(other)
         return try adopt_set(try with_curves(source, try placed_curves(curves, targets.view(), chosen.points.view(), linear)))
 
     ## The set with the chosen control points snapped to a grid of
@@ -119,10 +141,7 @@ pub struct Sketches:
             if not chosen.points.items[at]:
                 try targets.push(here)
                 continue
-            let offset = here.subtract(plane.origin)
-            let a = math.round(offset.dot(plane.u) / spacing) * spacing
-            let b = math.round(offset.dot(plane.v) / spacing) * spacing
-            try targets.push(plane.at(a, b).add(plane.normal.multiply_scalar(offset.dot(plane.normal))))
+            try targets.push(on_grid(plane, here, spacing))
         return try adopt_set(try with_curves(source, try placed_curves(curves, targets.view(), chosen.points.view(), Matrix4())))
 
     ## The set with each chosen end point of an open curve moved onto the
@@ -136,11 +155,7 @@ pub struct Sketches:
         defer chosen.close()
         var ends = Growing[usize]()
         defer ends.close()
-        for curve in 0..<curves.curve_count():
-            let (first, points) = curves.range(curve)
-            if points < 2 or curves.settings(curve).cyclic: continue
-            try ends.push(first)
-            try ends.push(first + points - 1)
+        try open_ends(curves, &ends)
         var targets = Growing[Vector3]()
         defer targets.close()
         for at in 0..<curves.point_count(): try targets.push(curves.point(at))
@@ -224,6 +239,21 @@ pub struct Sketches:
             for at in first..<first + points: try every.push(at)
             try copy_points(&out, curves, curve, every.view(), cyclic)
         return try adopt_set(try with_curves(source, try out.finish(curves)))
+
+## `point` on the grid of `spacing` in `plane` (its height off it kept).
+func on_grid(plane: SketchPlane, point: Vector3, spacing: f64) -> Vector3:
+    let offset = point.subtract(plane.origin)
+    let a = math.round(offset.dot(plane.u) / spacing) * spacing
+    let b = math.round(offset.dot(plane.v) / spacing) * spacing
+    return plane.at(a, b).add(plane.normal.multiply_scalar(offset.dot(plane.normal)))
+
+## The end points of the open curves (global point ids).
+func open_ends(curves: const Curves*, ends: Growing[usize]*) -> !:
+    for curve in 0..<curves.curve_count():
+        let (first, points) = curves.range(curve)
+        if points < 2 or curves.settings(curve).cyclic: continue
+        try ends.push(first)
+        try ends.push(first + points - 1)
 
 ## Size `at` of a shape's sizes, else `fallback`.
 func sized(sizes: const f64[], at: usize, fallback: f64) -> f64:
