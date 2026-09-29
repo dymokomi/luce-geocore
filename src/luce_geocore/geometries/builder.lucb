@@ -21,8 +21,11 @@ pub struct MeshBuilder:
     pub var np: usize
     pub var nf: usize
     pub var nc: usize
+    ## Build a precise mesh (f64 points kept; see PolygonMesh). Copying a
+    ## precise mesh's points turns it on.
+    pub var precise: bool
 
-    pub func init() -> !:
+    pub func init(precise: bool = false) -> !:
         let p = try alloc Vector3[256] in memory.heap
         errdefer free(p) in memory.heap
         let s = try alloc i64[256] in memory.heap
@@ -45,6 +48,7 @@ pub struct MeshBuilder:
         self.np = 0
         self.nf = 0
         self.nc = 0
+        self.precise = precise
 
     pub mutating func point(position: Vector3, parent: i64 = -1) -> i64!:
         if self.np == self.points.length:
@@ -83,6 +87,7 @@ pub struct MeshBuilder:
         self.nc += 1
 
     pub mutating func copy_points(mesh: const PolygonMesh*) -> !:
+        if mesh.is_precise(): self.precise = true
         for id in 0..<mesh.point_count():
             discard(try self.point(try mesh.point(id), id))
 
@@ -170,8 +175,8 @@ pub struct MeshBuilder:
         var triangles: const i64[]? = none
         if self.display.length > 0: triangles = self.display[..<(self.nc-self.nf*2)*3]
         if let original = source:
-            return try original.remapped(self.points[..<self.np], self.sizes[..<self.nf], self.corners[..<self.nc], self.point_parents[..<self.np], self.face_parents[..<self.nf], self.corner_parents[..<self.nc], preserve_normals, triangles)
-        return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(self.points[..<self.np], self.sizes[..<self.nf], self.corners[..<self.nc], triangles) in memory.heap, polygon_mesh_type, memory.heap)
+            return try original.remapped(self.points[..<self.np], self.sizes[..<self.nf], self.corners[..<self.nc], self.point_parents[..<self.np], self.face_parents[..<self.nf], self.corner_parents[..<self.nc], preserve_normals, triangles, self.precise)
+        return try interop.Reference[PolygonMesh].adopt(new PolygonMesh(self.points[..<self.np], self.sizes[..<self.nf], self.corners[..<self.nc], triangles, self.precise) in memory.heap, polygon_mesh_type, memory.heap)
 
     pub mutating func close():
         free(self.points) in memory.heap

@@ -7,7 +7,7 @@ from luce_geocore.math.matrix import Matrix4
 ## Base-only owned heap endpoints. The caller frees the result on its thread.
 ## Normals are per-face guides; false extracts unique polygon edges.
 pub func mesh_overlay_points(mesh: PolygonMesh*, matrix: Matrix4, normals: bool = false) -> Vector3[]!:
-    let count = mesh.face_count() if normals else mesh.edge_count()
+    let count = mesh.face_count() if normals else (try mesh.edge_count())
     let points = try alloc Vector3[(usize)count * 2] in memory.heap
     errdefer free(points) in memory.heap
     let length = mesh.bounds().maximum.subtract(mesh.bounds().minimum).length() * 0.015

@@ -1,4 +1,5 @@
-## Element access, the per-vertex Geometry interface and spatial queries.
+## Element access, the per-vertex Geometry interface, lazy topology caches and
+## spatial queries.
 
 extend PolygonMesh:
     pub static func cube(size: f64 = 2.0) -> interop.Reference[PolygonMesh]!:
@@ -18,101 +19,115 @@ extend PolygonMesh:
         return try make_mesh(points, sizes, corners)
 
     pub func point_count() -> i64:
-        return (i64)self.points.count()
-    ## Nonzero 64-bit connectivity hash (bit pattern as a signed integer).
-    pub func topology_hash() -> i64:
-        return (i64)self.topology_key
-    pub func domain_count(domain: i64) -> i64!:
-        if domain < 0 or domain > 4:
-            error(errors.invalid, "unknown attribute domain")
-        return (i64)self.domain_size(Domain((u8)domain))
-    func domain_size(domain: Domain) -> usize:
-        match domain:
-            .point: return self.points.count()
-            .corner: return self.corners.count()
-            .face: return self.sizes.count()
-            .edge: return self.edge_points.count() // 2
-            _: return 1
+        return (i64)self.positions.count()
     pub func face_count() -> i64:
-        return (i64)self.sizes.count()
-    pub func edge_count() -> i64:
-        return (i64)self.edge_points.count() // 2
+        return (i64)self.offsets.count() - 1
     pub func vertex_count() -> i64:
         return (i64)self.corners.count()
     pub func index_count() -> i64:
         return (i64)self.triangles.count()
+    ## Edges are derived on first use, which can fail for memory.
+    pub func edge_count() -> i64!:
+        return (i64)(try self.edge_arrays()).0.length // 2
     pub func bounds() -> Bounds:
         return self.extent
 
-    ## Change ids of the arrays (equal ids: equal contents, on any thread);
-    ## caches such as GPU buffers key on them.
-    pub func points_id() -> u64:
-        return self.points.id()
-    pub func corners_id() -> u64:
-        return self.corners.id()
-    pub func triangles_id() -> u64:
-        return self.triangles.id()
-    pub func normals_id() -> u64:
-        return self.normals.id()
-    pub func edges_id() -> u64:
-        return self.edge_points.id()
+    ## Nonzero 64-bit connectivity hash (bit pattern as a signed integer).
+    pub func topology_hash() -> i64:
+        return (i64)self.topology.connectivity_hash(self.offsets.view(), self.corners.view(), self.positions.count())
+
+    pub func domain_count(domain: i64) -> i64!:
+        if domain < 0 or domain > 4:
+            error(errors.invalid, "unknown attribute domain")
+        return (i64)(try self.domain_size(Domain((u8)domain)))
+    func domain_size(domain: Domain) -> usize!:
+        match domain:
+            .point: return self.positions.count()
+            .corner: return self.corners.count()
+            .face: return self.offsets.count() - 1
+            .edge: return (usize)(try self.edge_count())
+            _: return 1
+
+    ## The face of each corner, built on first use.
+    func corner_faces() -> const i32[]!:
+        return try self.topology.faces(self.offsets.view(), self.corners.count())
+
+    ## Edge endpoints (two per edge) and each corner's edge, built on first use.
+    func edge_arrays() -> (const i32[], const i32[])!:
+        return try self.topology.edges(self.offsets.view(), self.corners.view(), self.positions.count())
+
+    ## Faces around each point, built on first use.
+    func incidence() -> (const i32[], const i32[])!:
+        return try self.topology.incidence(self.offsets.view(), self.corners.view(), self.positions.count())
 
     pub func corner_point(corner: i64) -> i64!:
         try checked(corner, self.corners.count())
-        return self.corners.view()[(usize)corner]
+        return (i64)self.corners.view()[(usize)corner]
     pub func corner_face(corner: i64) -> i64!:
         try checked(corner, self.corners.count())
-        return (i64)self.corner_faces.view()[(usize)corner]
+        return (i64)(try self.corner_faces())[(usize)corner]
     pub func corner_edge(corner: i64) -> i64!:
         try checked(corner, self.corners.count())
-        return (i64)self.corner_edges.view()[(usize)corner]
+        return (i64)(try self.edge_arrays()).1[(usize)corner]
     pub func face_offset(face: i64) -> i64!:
-        try checked(face, self.sizes.count())
+        try checked(face, self.offsets.count() - 1)
         return (i64)self.offsets.view()[(usize)face]
     pub func triangle_face(triangle: i64) -> i64!:
         try checked(triangle, self.triangles.count() // 3)
-        return (i64)self.corner_faces.view()[(usize)self.triangles.view()[(usize)triangle * 3]]
+        return (i64)(try self.corner_faces())[(usize)self.triangles.view()[(usize)triangle * 3]]
 
     pub func point(index: i64) -> Vector3!:
-        try checked(index, self.points.count())
-        return self.points.view()[(usize)index]
+        try checked(index, self.positions.count())
+        return self.point_at((usize)index)
+
+    ## Whether this mesh keeps f64 points (see PolygonMesh).
+    pub func is_precise() -> bool:
+        return not self.precise.is_empty()
+
+    ## A point in f64: the precise point, or the f32 position plus the origin.
+    func point_at(index: usize) -> Vector3:
+        if not self.precise.is_empty(): return self.precise.view()[index]
+        return self.positions.view()[index].vector().add(self.origin)
     pub func face_size(face: i64) -> i64!:
-        try checked(face, self.sizes.count())
-        return self.sizes.view()[(usize)face]
+        try checked(face, self.offsets.count() - 1)
+        let offsets = self.offsets.view()
+        return (i64)(offsets[(usize)face + 1] - offsets[(usize)face])
     pub func face_point(face: i64, corner: i64) -> i64!:
-        try checked(face, self.sizes.count())
-        try checked(corner, (usize)self.sizes.view()[(usize)face])
-        return self.corners.view()[self.offsets.view()[(usize)face] + (usize)corner]
+        let size = try self.face_size(face)
+        try checked(corner, (usize)size)
+        return (i64)self.corners.view()[(usize)self.offsets.view()[(usize)face] + (usize)corner]
 
     ## Shared undirected edge ID for a polygon's outgoing corner edge.
     pub func face_edge(face: i64, corner: i64) -> i64!:
-        try checked(face, self.sizes.count())
-        try checked(corner, (usize)self.sizes.view()[(usize)face])
-        return (i64)self.corner_edges.view()[self.offsets.view()[(usize)face] + (usize)corner]
+        let size = try self.face_size(face)
+        try checked(corner, (usize)size)
+        return (i64)(try self.edge_arrays()).1[(usize)self.offsets.view()[(usize)face] + (usize)corner]
     pub func face_normal(face: i64) -> Vector3!:
-        try checked(face, self.sizes.count())
-        return self.normals.view()[(usize)face]
+        try checked(face, self.offsets.count() - 1)
+        return self.normals.view()[(usize)face].vector()
     pub func face_center(face: i64) -> Vector3!:
-        try checked(face, self.sizes.count())
-        let points = self.points.view()
+        let size = try self.face_size(face)
         let corners = self.corners.view()
-        let offsets = self.offsets.view()
+        let start = (usize)self.offsets.view()[(usize)face]
         var sum = Vector3()
-        for at in offsets[(usize)face]..<offsets[(usize)face + 1]:
-            sum = sum.add(points[(usize)corners[at]])
-        return sum.multiply_scalar(1.0 / (f64)self.sizes.view()[(usize)face])
+        for at in start..<start + (usize)size:
+            sum = sum.add(self.point_at((usize)corners[at]))
+        return sum.multiply_scalar(1.0 / (f64)size)
     pub func edge_point(edge: i64, end: i64) -> i64!:
-        try checked(edge, self.edge_points.count() // 2)
+        let edges = (try self.edge_arrays()).0
+        try checked(edge, edges.length // 2)
         if end != 0 and end != 1:
             error(errors.invalid, "edge endpoint must be 0 or 1")
-        return self.edge_points.view()[(usize)edge * 2 + (usize)end]
+        return (i64)edges[(usize)edge * 2 + (usize)end]
 
     pub func vertex(index: i64) -> interop.Outcome[Vertex]:
         if index < 0 or (usize)index >= self.corners.count():
             return errors.failure[Vertex](errors.invalid, "polygon vertex out of range")
-        let face = self.corner_faces.view()[(usize)index]
-        let at = (usize)index - self.offsets.view()[face]
-        let point = self.corners.view()[(usize)index]
+        let faces = self.corner_faces() catch failure:
+            return errors.failure[Vertex](failure.code, failure.message)
+        let face = (usize)faces[(usize)index]
+        let at = (usize)index - (usize)self.offsets.view()[face]
+        let point = (usize)self.corners.view()[(usize)index]
         var color = Vector3(1.0, 1.0, 1.0)
         let normal = self.shading_normal((usize)index, face)
         var u = 1.0 if at == 1 or at == 2 else 0.0
@@ -120,7 +135,7 @@ extend PolygonMesh:
         # Houdini-style corner > point > primitive > detail lookup precedence.
         let domains: usize[4] = [3, 2, 0, 1]
         for domain in domains:
-            let element = 0 if domain == 3 else (face if domain == 2 else ((usize)point if domain == 0 else (usize)index))
+            let element = 0 if domain == 3 else (face if domain == 2 else (point if domain == 0 else (usize)index))
             let cd = self.attributes.colors[domain]
             if cd >= 0 and self.attributes.entry((usize)cd).width >= 3:
                 let entry = self.attributes.entry((usize)cd)
@@ -130,18 +145,18 @@ extend PolygonMesh:
                 let entry = self.attributes.entry((usize)uv)
                 u = entry.number(element, 0)
                 v = entry.number(element, 1)
-        return errors.success[Vertex](Vertex(self.points.view()[(usize)point], normal, u, v, color))
+        return errors.success[Vertex](Vertex(self.point_at(point), normal, u, v, color))
 
     ## A corner's shading normal alone, without building a whole Vertex; bulk
     ## overlay extraction calls it for every corner.
     pub func corner_normal(corner: i64) -> Vector3!:
         try checked(corner, self.corners.count())
-        return self.shading_normal((usize)corner, self.corner_faces.view()[(usize)corner])
+        return self.shading_normal((usize)corner, (usize)(try self.corner_faces())[(usize)corner])
 
     ## The N attribute by corner > point > primitive > detail precedence,
     ## else the face normal.
     func shading_normal(corner: usize, face: usize) -> Vector3:
-        var normal = self.normals.view()[face]
+        var normal = self.normals.view()[face].vector()
         let domains: usize[4] = [3, 2, 0, 1]
         for domain in domains:
             let ni = self.attributes.normals[domain]
@@ -157,17 +172,17 @@ extend PolygonMesh:
     pub func index(offset: i64) -> interop.Outcome[i64]:
         if offset < 0 or (usize)offset >= self.triangles.count():
             return errors.failure[i64](errors.invalid, "polygon triangle index out of range")
-        return errors.success[i64](self.triangles.view()[(usize)offset])
+        return errors.success[i64]((i64)self.triangles.view()[(usize)offset])
 
     ## Nearest Euclidean distance to the mesh surface; -1 for an empty mesh.
     pub func surface_distance(point: Vector3) -> f64!:
         if not point.is_finite(): error(errors.invalid, "distance query requires a finite point")
-        return (try self.query_index()).distance(point)
+        return (try self.query_index()).distance(point.subtract(self.origin))
 
     ## Primitive containing the closest surface point, or -1 for empty geometry.
     pub func closest_face(point: Vector3) -> i64!:
         if not point.is_finite(): error(errors.invalid, "distance query requires a finite point")
-        return (try self.query_index()).nearest(point).face
+        return (try self.query_index()).nearest(point.subtract(self.origin)).face
 
     ## Build the shared query index now, for example before worker-to-UI transfer.
     ## Otherwise the first ray/distance query builds it. Failure is retryable.
@@ -177,39 +192,58 @@ extend PolygonMesh:
     ## Nearest two-sided face intersection. -1 means no hit; direction must be
     ## normalized for the returned distance to be world-space distance.
     pub func ray_face(origin: Vector3, direction: Vector3) -> i64!:
-        return (try self.query_index()).ray(origin, direction).face
+        return (try self.query_index()).ray(origin.subtract(self.origin), direction).face
 
     pub func ray_distance(origin: Vector3, direction: Vector3) -> f64!:
-        return (try self.query_index()).ray(origin, direction).distance
+        return (try self.query_index()).ray(origin.subtract(self.origin), direction).distance
+
+    ## Change ids of the arrays (equal ids: equal contents, on any thread);
+    ## caches such as GPU buffers key on them.
+    pub func points_id() -> u64:
+        return self.positions.id()
+    pub func corners_id() -> u64:
+        return self.corners.id()
+    pub func triangles_id() -> u64:
+        return self.triangles.id()
+    pub func normals_id() -> u64:
+        return self.normals.id()
+    ## Edges are derived from the corners, so their id is the corners' id.
+    pub func edges_id() -> u64:
+        return self.corners.id()
 
     func query_index() -> const TriangleIndex*!:
-        return try self.queries.get(self.points.view(), self.corners.view(), self.triangles.view(), self.corner_faces.view())
+        let faces = try self.corner_faces()
+        return try self.queries.get(self.positions.view(), self.corners.view(), self.triangles.view(), faces)
 
 ## Whole arrays for Base kernels, valid while `mesh` is. Free functions, not
-## methods: spans cannot cross into Luce.
-pub func point_span(mesh: const PolygonMesh*) -> const Vector3[]:
-    return mesh.points.view()
-pub func corner_span(mesh: const PolygonMesh*) -> const i64[]:
-    return mesh.corners.view()
-pub func offset_span(mesh: const PolygonMesh*) -> const usize[]:
+## methods: spans cannot cross into Luce. Positions are relative to
+## `mesh_origin(mesh)`.
+pub func point_span(mesh: const PolygonMesh*) -> const Float3[]:
+    return mesh.positions.view()
+pub func mesh_origin(mesh: const PolygonMesh*) -> Vector3:
+    return mesh.origin
+pub func offset_span(mesh: const PolygonMesh*) -> const i32[]:
     return mesh.offsets.view()
-pub func corner_face_span(mesh: const PolygonMesh*) -> const usize[]:
-    return mesh.corner_faces.view()
-pub func face_normal_span(mesh: const PolygonMesh*) -> const Vector3[]:
+pub func corner_span(mesh: const PolygonMesh*) -> const i32[]:
+    return mesh.corners.view()
+pub func corner_face_span(mesh: const PolygonMesh*) -> const i32[]!:
+    return try mesh.corner_faces()
+pub func face_normal_span(mesh: const PolygonMesh*) -> const Float3[]:
     return mesh.normals.view()
-pub func triangle_span(mesh: const PolygonMesh*) -> const i64[]:
+pub func triangle_span(mesh: const PolygonMesh*) -> const i32[]:
     return mesh.triangles.view()
-pub func edge_span(mesh: const PolygonMesh*) -> const i64[]:
-    return mesh.edge_points.view()
+pub func edge_span(mesh: const PolygonMesh*) -> const i32[]!:
+    return (try mesh.edge_arrays()).0
+pub func corner_edge_span(mesh: const PolygonMesh*) -> const i32[]!:
+    return (try mesh.edge_arrays()).1
 
 ## Attribute `index` of `mesh`, for Base readers.
 pub func attribute_entry(mesh: const PolygonMesh*, index: i64) -> const Attribute*!:
     try checked(index, mesh.attributes.count())
     return mesh.attributes.entry((usize)index)
 
-## The arrays positions and face normals were derived from by a position
-## edit (0: none), for caches that update in place.
+## The arrays a position edit derived positions and face normals from, or 0.
 pub func points_parent(mesh: const PolygonMesh*) -> u64:
-    return mesh.points.parent()
+    return mesh.positions.parent()
 pub func normals_parent(mesh: const PolygonMesh*) -> u64:
     return mesh.normals.parent()

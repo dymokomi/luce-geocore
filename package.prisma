@@ -15,6 +15,10 @@ def package "luce-geocore" {
         str module = "luce_geocore.native"
     }
 
+    def export "geocore_parallel" {
+        str module = "luce_geocore.core.parallel"
+    }
+
     def export "geocore_growing" {
         str module = "luce_geocore.core.growing"
     }

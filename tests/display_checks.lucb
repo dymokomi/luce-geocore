@@ -41,7 +41,7 @@ pub func exercise() -> !:
     var raw = try PolygonMesh(points,[5],corners,display)
     defer raw.close()
     try indices(&raw,display)
-    assert(raw.face_count() == 1 and raw.edge_count() == 5)
+    assert(raw.face_count() == 1 and (try raw.edge_count()) == 5)
     var normals: f64[15]
     for at in 0..<corners.length:
         let p = points[(usize)corners[at]]
@@ -77,7 +77,7 @@ pub func exercise() -> !:
     let compact = try MeshOps.compact(removed)
     defer compact.release()
     try indices(compact.value(),display)
-    assert(compact.value().point_count() == 5 and compact.value().edge_count() == 5)
+    assert(compact.value().point_count() == 5 and (try compact.value().edge_count()) == 5)
     let reversed = try MeshOps.faces(mesh,[0],1)
     defer reversed.release()
     var reversed_indices: i64[9]
@@ -133,13 +133,13 @@ func dissolved(scale: f64, width: f64, bend: f64) -> !:
     let source = try builder.finish()
     defer source.release()
     var seam: i64 = -1
-    for edge in 0..<source.value().edge_count():
+    for edge in 0..<(try source.value().edge_count()):
         if (try source.value().edge_point(edge,0)) == 1 and (try source.value().edge_point(edge,1)) == 4: seam = edge
     assert(seam >= 0)
     let result = try TopologyTools.dissolve(source,seam)
     defer result.release()
     let mesh = result.value()
-    assert(mesh.face_count() == 1 and mesh.edge_count() == 6 and mesh.point_count() == 6 and mesh.index_count() == 12)
+    assert(mesh.face_count() == 1 and (try mesh.edge_count()) == 6 and mesh.point_count() == 6 and mesh.index_count() == 12)
     for at in 0..<source.value().index_count():
         let expected = try source.value().corner_point(try index(source.value(),at))
         let actual = try mesh.corner_point(try index(mesh,at))
@@ -163,10 +163,11 @@ func pinched_dissolve() -> !:
 
 ## A small well-conditioned corner triangle remains the same valid triangle
 ## after its internal edge is dissolved into a much larger neighboring face.
+## Its size stays within f32 point resolution (about 1e-7 relative).
 func tiny_face_union(scale: f64, offset: f64) -> !:
     var builder = try MeshBuilder()
     defer builder.close()
-    for p in [Vector3(),Vector3(1e-8,0.0,0.0),Vector3(1.0,0.0,0.0),Vector3(1.0,1.0,0.0),Vector3(0.0,1e-8,0.0)]:
+    for p in [Vector3(),Vector3(1e-4,0.0,0.0),Vector3(1.0,0.0,0.0),Vector3(1.0,1.0,0.0),Vector3(0.0,1e-4,0.0)]:
         discard(try builder.point(p.multiply_scalar(scale).add(Vector3(offset,offset,offset))))
     try builder.face(3)
     for id in [0,1,4]: try builder.corner(id)
@@ -175,12 +176,12 @@ func tiny_face_union(scale: f64, offset: f64) -> !:
     let source = try builder.finish()
     defer source.release()
     var seam: i64 = -1
-    for edge in 0..<source.value().edge_count():
+    for edge in 0..<(try source.value().edge_count()):
         if (try source.value().edge_point(edge,0)) == 1 and (try source.value().edge_point(edge,1)) == 4: seam = edge
     assert(seam >= 0)
     let result = try TopologyTools.dissolve(source,seam)
     defer result.release()
-    assert(result.value().face_count() == 1 and result.value().edge_count() == 5)
+    assert(result.value().face_count() == 1 and (try result.value().edge_count()) == 5)
     assert(result.value().point_count() == 5 and result.value().index_count() == 9)
     for at in 0..<9:
         assert((try result.value().corner_point(try index(result.value(),at))) == (try source.value().corner_point(try index(source.value(),at))))

@@ -5,7 +5,7 @@ from geocore import PolygonMesh, MeshBuilder, TopologyTools, DissolveWorkspace, 
 
 func equal(a: const PolygonMesh*, b: const PolygonMesh*) -> !:
     assert(a.point_count() == b.point_count() and a.face_count() == b.face_count())
-    assert(a.vertex_count() == b.vertex_count() and a.index_count() == b.index_count() and a.edge_count() == b.edge_count())
+    assert(a.vertex_count() == b.vertex_count() and a.index_count() == b.index_count() and (try a.edge_count()) == (try b.edge_count()))
     for at in 0..<a.point_count(): assert((try a.point(at)) == (try b.point(at)))
     for face in 0..<a.face_count():
         assert((try a.face_size(face)) == (try b.face_size(face)))
@@ -56,7 +56,7 @@ func make(bent: bool, reverse: bool) -> interop.Reference[PolygonMesh]!:
     return mesh
 
 func find(mesh: const PolygonMesh*, a: i64, b: i64) -> i64!:
-    for edge in 0..<mesh.edge_count():
+    for edge in 0..<(try mesh.edge_count()):
         if (try mesh.edge_point(edge,0)) == a and (try mesh.edge_point(edge,1)) == b: return edge
     return -1
 
@@ -69,7 +69,7 @@ pub func single(bent: bool = false, reverse: bool = false) -> !:
     defer current.release()
     var accepted: usize = 0
     var rejected: usize = 0
-    for edge in 0..<source.value().edge_count():
+    for edge in 0..<(try source.value().edge_count()):
         let a = try source.value().edge_point(edge,0)
         let b = try source.value().edge_point(edge,1)
         let id = try find(current.value(),a,b)

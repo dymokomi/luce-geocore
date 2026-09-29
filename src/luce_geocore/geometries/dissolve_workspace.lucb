@@ -52,7 +52,7 @@ pub struct DissolveWorkspace: PolygonTopology:
         errdefer free(edges) in memory.heap
         let triangles = try alloc i64[nt+edits*762] in memory.heap
         errdefer free(triangles) in memory.heap
-        let first = try alloc i64[(usize)mesh.edge_count()] in memory.heap
+        let first = try alloc i64[(usize)(try mesh.edge_count())] in memory.heap
         errdefer free(first) in memory.heap
         let second = try alloc i64[first.length] in memory.heap
         errdefer free(second) in memory.heap

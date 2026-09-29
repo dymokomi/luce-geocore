@@ -1,30 +1,33 @@
 ## Operators that publish new meshes: remapping through parent maps, position
-## edits, placement, merging and region extrusion.
+## edits, placement and merging. Position edits copy the positions once, share
+## the topology, its caches, the triangles and every attribute, recompute only
+## the faces around moved points, and refit the spatial index.
 
 extend PolygonMesh:
     ## All operators publish new meshes. Parent maps are output-to-input indices;
     ## -1 means a genuinely new element (zero-valued attributes). Empty maps mean
     ## unchanged indexing, valid only when domain cardinality is unchanged. Edge
-    ## attributes follow their corners.
+    ## attributes follow their corners. The result is precise when this mesh
+    ## is, or when `precise` asks.
     pub func remapped(points: const Vector3[], sizes: const i64[], corners: const i64[],
-                      point_parents: const i64[], face_parents: const i64[], corner_parents: const i64[], preserve_normals: bool = false, display: const i64[]? = none) -> interop.Reference[PolygonMesh]!:
-        try validate_map(point_parents, points.length, self.points.count())
-        try validate_map(face_parents, sizes.length, self.sizes.count())
+                      point_parents: const i64[], face_parents: const i64[], corner_parents: const i64[], preserve_normals: bool = false, display: const i64[]? = none, precise: bool = false) -> interop.Reference[PolygonMesh]!:
+        try validate_map(point_parents, points.length, self.positions.count())
+        try validate_map(face_parents, sizes.length, self.offsets.count() - 1)
         try validate_map(corner_parents, corners.length, self.corners.count())
-        let result = try make_mesh(points, sizes, corners, display)
+        let result = try make_mesh(points, sizes, corners, display, precise or self.is_precise())
         errdefer result.release()
         let output = result.value()
-        var unchanged_geometry = points.length == self.points.count() and sizes.length == self.sizes.count() and corners.length == self.corners.count()
+        var unchanged_geometry = points.length == self.positions.count() and sizes.length == self.offsets.count() - 1 and corners.length == self.corners.count()
         if unchanged_geometry and not preserve_normals:
-            let old_points = self.points.view()
-            let old_sizes = self.sizes.view()
+            let old_offsets = self.offsets.view()
             let old_corners = self.corners.view()
             for at in 0..<points.length:
-                unchanged_geometry = unchanged_geometry and points[at].x == old_points[at].x and points[at].y == old_points[at].y and points[at].z == old_points[at].z
+                let old = self.point_at(at)
+                unchanged_geometry = unchanged_geometry and points[at].x == old.x and points[at].y == old.y and points[at].z == old.z
             for at in 0..<sizes.length:
-                unchanged_geometry = unchanged_geometry and sizes[at] == old_sizes[at]
+                unchanged_geometry = unchanged_geometry and sizes[at] == (i64)(old_offsets[at + 1] - old_offsets[at])
             for at in 0..<corners.length:
-                unchanged_geometry = unchanged_geometry and corners[at] == old_corners[at]
+                unchanged_geometry = unchanged_geometry and corners[at] == (i64)old_corners[at]
         var edge_parents: i64[]
         defer:
             if edge_parents.length > 0: free(edge_parents) in memory.heap
@@ -37,61 +40,115 @@ extend PolygonMesh:
             if entry.domain == Domain.edge and edge_parents.length == 0 and corner_parents.length > 0:
                 edge_parents = try self.edge_parents_of(output, corner_parents)
             let parents = point_parents if entry.domain == Domain.point else (corner_parents if entry.domain == Domain.corner else (edge_parents if entry.domain == Domain.edge else face_parents))
-            try output.attributes.put(try attribute_ops.remapped(entry, parents, output.domain_size(entry.domain)))
+            try output.attributes.put(try attribute_ops.remapped(entry, parents, (try output.domain_size(entry.domain))))
         return result
 
     ## Each of `output`'s edges takes the old edge of its first corner's parent.
     func edge_parents_of(output: const PolygonMesh*, corner_parents: const i64[]) -> i64[]!:
-        let parents = try alloc i64[output.edge_points.count() // 2] in memory.heap
+        let new_edges = (try output.edge_arrays()).1
+        let old_edges = (try self.edge_arrays()).1
+        let parents = try alloc i64[(usize)(try output.edge_count())] in memory.heap
         for at in 0..<parents.length: parents[at] = -1
-        let new_edges = output.corner_edges.view()
-        let old_edges = self.corner_edges.view()
         for corner in 0..<corner_parents.length:
-            let edge = new_edges[corner]
+            let edge = (usize)new_edges[corner]
             if parents[edge] < 0 and corner_parents[corner] >= 0:
                 parents[edge] = (i64)old_edges[(usize)corner_parents[corner]]
         return parents
 
-    ## Position-only edits keep this mesh's topology (edges, corner maps) and
-    ## its triangle indices, recomputing moved faces' normals and the bounds.
-    ## The spatial index is rebuilt lazily on the first query. Stale shading
-    ## normals ("N") are dropped once any point moves, as for other edits.
+    ## Position-only edits keep this mesh's topology, its caches and its
+    ## triangle indices, recomputing moved faces' normals and the bounds. The
+    ## spatial index refits lazily on the first query. Stale shading normals
+    ## ("N") are dropped once any point moves, as for other edits.
     pub func with_positions(points: const Vector3[]) -> interop.Reference[PolygonMesh]!:
-        return try self.repositioned(points, false)
+        if points.length != self.positions.count(): error(errors.invalid, "a position edit keeps the point count")
+        if self.is_precise(): return try self.rebuilt(points, false)
+        let previous = self.positions.view()
+        var fresh = try Column[Float3].allocate(points.length)
+        defer fresh.release()
+        let output = fresh.span()
+        for at in 0..<points.length:
+            if not points[at].is_finite(): error(errors.invalid, "mesh points must be finite and bounded to 1e6")
+            output[at] = Float3.of(points[at].subtract(self.origin))
+        let moved = try changed_points(previous, output)
+        defer free(moved) in memory.heap
+        return try self.repositioned(fresh, self.origin, moved, false)
 
-    func repositioned(points: const Vector3[], rigid: bool) -> interop.Reference[PolygonMesh]!:
-        var edit = try positions.reposition(self.points.view(), points, self.sizes.view(), self.corners.view(), self.offsets.view(), self.normals.view(), self.triangles.view(), rigid)
-        if not edit.moved:
-            edit.close()
-            return try self.snapshot()
-        return try adopt_storage(try self.repositioned_storage(&edit, rigid))
+    pub func moved_points(selection: const i64[], delta: Vector3) -> interop.Reference[PolygonMesh]!:
+        if not delta.is_finite():
+            error(errors.invalid, "point displacement must be finite")
+        let count = self.positions.count()
+        let marked = try alloc bool[count] in memory.heap
+        defer free(marked) in memory.heap
+        memory.set(u8[]((u8*)marked.data, count), 0)
+        var unique: usize = 0
+        for index in selection:
+            try checked(index, count)
+            if not marked[(usize)index]:
+                marked[(usize)index] = true
+                unique += 1
+        if self.is_precise():
+            let points = try self.world_points(Matrix4())
+            defer free(points) in memory.heap
+            for point in 0..<count:
+                if marked[point]: points[point] = points[point].add(delta)
+            return try self.rebuilt(points, false)
+        var fresh = self.positions.share()
+        defer fresh.release()
+        let output = try fresh.writable()
+        let moved = try alloc u32[unique] in memory.heap
+        defer free(moved) in memory.heap
+        var written: usize = 0
+        for point in 0..<count:
+            if not marked[point]: continue
+            let next = Float3.of(output[point].vector().add(delta))
+            if next.x != output[point].x or next.y != output[point].y or next.z != output[point].z:
+                output[point] = next
+                moved[written] = (u32)point
+                written += 1
+        return try self.repositioned(fresh, self.origin, moved[..<written], false)
 
-    ## Takes the edit's columns on success and on failure.
-    func repositioned_storage(edit: positions.Repositioned*, keep_normals: bool) -> PolygonMesh*!:
+    ## Share `fresh` (positions relative to `origin`) whose points `moved`
+    ## changed; the caller keeps its own reference. `rigid` promises an orientation-preserving affine map: no
+    ## triangle folds and shading normals stay valid.
+    func repositioned(fresh: Column[Float3], origin: Vector3, moved: const u32[], rigid: bool) -> interop.Reference[PolygonMesh]!:
+        # Once filled, the storage belongs to adopt, which disposes it on failure.
+        return try adopt_storage(try self.repositioned_storage(fresh, origin, moved, rigid))
+
+    func repositioned_storage(fresh: Column[Float3], origin: Vector3, moved: const u32[], rigid: bool) -> PolygonMesh*!:
+        var owned = fresh.share()
+        if moved.length == 0 and origin == self.origin:
+            owned.release()
+            return try self.snapshot_storage()
+        errdefer owned.release()
+        let incidence = try self.incidence()
+        let shape = position_edit.Shape(self.positions.view(), owned.view(), origin, self.offsets.view(), self.corners.view(), self.triangles.view(), incidence.0, incidence.1)
+        var edit = try position_edit.reposition(&shape, self.normals, moved, rigid)
         errdefer edit.close()
         var attributes = try self.attributes.shared()
         errdefer attributes.close()
-        if not keep_normals:
+        if not rigid:
             for domain in 0..<(i64)5:
                 let found = attributes.find("N", domain)
                 if found >= 0: attributes.remove((usize)found)
-        let queries = try new QueryCache() in memory.heap
-        errdefer free(queries) in memory.heap
+        let reuse_triangles = edit.triangles.is_empty()
+        let queries = try QueryCache.after(self.queries)
+        errdefer release_query(queries)
         let storage = try alloc PolygonMesh[1] in memory.heap
         storage[0] = self.shared_columns()
-        storage[0].attributes = attributes
-        storage[0].queries = queries
-        # Record provenance: caches keyed on the old arrays can update in place.
-        edit.points.set_parent(self.points.id())
-        edit.normals.set_parent(self.normals.id())
-        storage[0].points.release()
-        storage[0].points = edit.points
+        # Record provenance: caches keyed on the old positions update in place.
+        owned.set_parent(self.positions.id())
+        storage[0].positions.release()
+        storage[0].positions = owned
+        storage[0].origin = origin
         storage[0].normals.release()
         storage[0].normals = edit.normals
-        if not edit.triangles.is_empty():
+        if not reuse_triangles:
             storage[0].triangles.release()
             storage[0].triangles = edit.triangles
         storage[0].extent = edit.extent
+        storage[0].attributes = attributes
+        storage[0].queries = queries
+        discard(self.topology.users.add(1, .relaxed))
         return storage.data
 
     pub func transformed(translation: Vector3, rotation: Vector3, scale: Vector3) -> interop.Reference[PolygonMesh]!:
@@ -104,31 +161,49 @@ extend PolygonMesh:
     pub func placed(matrix: Matrix4) -> interop.Reference[PolygonMesh]!:
         if not matrix.is_finite() or math.abs(matrix.determinant()) < 0.000000000001:
             error(errors.invalid, "mesh placement must be finite and nonsingular")
-        let source = self.points.view()
-        let points = try alloc Vector3[source.length] in memory.heap
-        defer free(points) in memory.heap
-        for index in 0..<points.length:
-            points[index] = matrix.transform_point(source[index])
         # Without a reflection, placement is a position-only edit: topology and
-        # triangles are shared, and no triangle can fold.
+        # triangles are shared, and no triangle can fold. The origin moves with
+        # the mesh, so positions only take the linear part.
+        if matrix.determinant() > 0.0 and self.is_precise():
+            let points = try self.world_points(matrix)
+            defer free(points) in memory.heap
+            let result = try self.rebuilt(points, true)
+            errdefer result.release()
+            try position_edit.transform_normals(&result.value().attributes, matrix)
+            return result
         if matrix.determinant() > 0.0:
-            let moved = try self.repositioned(points, true)
-            errdefer moved.release()
-            try positions.transform_normals(&moved.value().attributes, matrix)
-            return moved
+            let origin = matrix.transform_point(self.origin)
+            let previous = self.positions.view()
+            var fresh = try Column[Float3].allocate(previous.length)
+            defer fresh.release()
+            let output = fresh.span()
+            for at in 0..<previous.length:
+                output[at] = Float3.of(matrix.transform_direction(previous[at].vector()))
+            let moved = try alloc u32[previous.length] in memory.heap
+            defer free(moved) in memory.heap
+            for at in 0..<moved.length: moved[at] = (u32)at
+            let placed_mesh = try self.repositioned(fresh, origin, moved, true)
+            errdefer placed_mesh.release()
+            try position_edit.transform_normals(&placed_mesh.value().attributes, matrix)
+            return placed_mesh
         # Reversing corners preserves outward normals under a reflection.
+        let points = try self.world_points(matrix)
+        defer free(points) in memory.heap
         let old_corners = self.corners.view()
-        let old_sizes = self.sizes.view()
         let offsets = self.offsets.view()
+        let faces = offsets.length - 1
+        let sizes = try alloc i64[faces] in memory.heap
+        defer free(sizes) in memory.heap
         let corners = try alloc i64[old_corners.length] in memory.heap
         defer free(corners) in memory.heap
         let parents = try alloc i64[old_corners.length] in memory.heap
         defer free(parents) in memory.heap
-        for face in 0..<old_sizes.length:
-            let start = offsets[face]
-            let count = (usize)old_sizes[face]
+        for face in 0..<faces:
+            let start = (usize)offsets[face]
+            let count = (usize)offsets[face + 1] - start
+            sizes[face] = (i64)count
             for at in 0..<count:
-                corners[start + at] = old_corners[start + count - 1 - at]
+                corners[start + at] = (i64)old_corners[start + count - 1 - at]
                 parents[start + at] = (i64)(start + count - 1 - at)
         var unchanged: i64[]
         let old_triangles = self.triangles.view()
@@ -138,57 +213,95 @@ extend PolygonMesh:
             for at in 0..<(usize)3:
                 let old = (usize)old_triangles[triangle*3+(2-at)]
                 display[triangle*3+at] = parents[old]
-        let result = try self.remapped(points, old_sizes, corners, unchanged, unchanged, parents, true, display)
+        let result = try self.remapped(points, sizes, corners, unchanged, unchanged, parents, true, display)
         errdefer result.release()
-        try positions.transform_normals(&result.value().attributes, matrix)
+        try position_edit.transform_normals(&result.value().attributes, matrix)
         return result
 
-    pub func moved_points(selection: const i64[], delta: Vector3) -> interop.Reference[PolygonMesh]!:
-        if not delta.is_finite():
-            error(errors.invalid, "point displacement must be finite")
-        let source = self.points.view()
-        let marked = try alloc bool[source.length] in memory.heap
-        defer free(marked) in memory.heap
-        for index in 0..<marked.length:
-            marked[index] = false
-        for index in selection:
-            try checked(index, source.length)
-            marked[(usize)index] = true
-        let points = try alloc Vector3[source.length] in memory.heap
-        defer free(points) in memory.heap
-        for index in 0..<points.length:
-            points[index] = source[index].add(delta) if marked[index] else source[index]
-        return try self.with_positions(points)
+    ## Every point placed by `matrix`, in f64; the caller frees them.
+    func world_points(matrix: Matrix4) -> Vector3[]!:
+        let points = try alloc Vector3[self.positions.count()] in memory.heap
+        for at in 0..<points.length:
+            points[at] = matrix.transform_point(self.point_at(at))
+        return points
+
+    ## This topology over new `points`, rebuilt through `remapped`: the
+    ## position edit of a precise mesh, whose f64 points need a full
+    ## construction. The triangles are kept unless one of them folds.
+    func rebuilt(points: const Vector3[], preserve_normals: bool) -> interop.Reference[PolygonMesh]!:
+        let offsets = self.offsets.view()
+        let old_corners = self.corners.view()
+        let old_triangles = self.triangles.view()
+        let sizes = try alloc i64[offsets.length - 1] in memory.heap
+        defer free(sizes) in memory.heap
+        for face in 0..<sizes.length: sizes[face] = (i64)(offsets[face + 1] - offsets[face])
+        let corners = try alloc i64[old_corners.length] in memory.heap
+        defer free(corners) in memory.heap
+        for at in 0..<corners.length: corners[at] = (i64)old_corners[at]
+        let display = try alloc i64[old_triangles.length] in memory.heap
+        defer free(display) in memory.heap
+        for at in 0..<display.length: display[at] = (i64)old_triangles[at]
+        var unchanged: i64[]
+        let kept: interop.Reference[PolygonMesh]? = self.remapped(points, sizes, corners, unchanged, unchanged, unchanged, preserve_normals, display) catch failure:
+            if failure.code != errors.invalid: error(failure.code, failure.message)
+            recover none
+        if let result = kept: return result
+        return try self.remapped(points, sizes, corners, unchanged, unchanged, unchanged, preserve_normals)
 
     pub func merged(other: interop.Reference[PolygonMesh]) -> interop.Reference[PolygonMesh]!:
         let rhs = try other.get()
-        let left_points = self.points.view()
-        let right_points = rhs.points.view()
+        let left_points = self.positions.count()
+        let right_points = rhs.positions.count()
         let left_corners = self.corners.view()
         let right_corners = rhs.corners.view()
-        if left_points.length + right_points.length > 8388608 or left_corners.length + right_corners.length > 33554432:
+        if left_points + right_points > 8388608 or left_corners.length + right_corners.length > 33554432:
             error(errors.limit, "merged mesh exceeds geometry limits")
-        let points = try alloc Vector3[left_points.length + right_points.length] in memory.heap
+        let identity = Matrix4()
+        let first_points = try self.world_points(identity)
+        defer free(first_points) in memory.heap
+        let second_points = try rhs.world_points(identity)
+        defer free(second_points) in memory.heap
+        let points = try alloc Vector3[left_points + right_points] in memory.heap
         defer free(points) in memory.heap
-        memory.copy(points, left_points, left_points.length)
-        memory.copy(points[left_points.length..], right_points, right_points.length)
-        let sizes = try alloc i64[self.sizes.count() + rhs.sizes.count()] in memory.heap
+        memory.copy(points, first_points, left_points)
+        memory.copy(points[left_points..], second_points, right_points)
+        let left_faces = self.offsets.count() - 1
+        let right_faces = rhs.offsets.count() - 1
+        let sizes = try alloc i64[left_faces + right_faces] in memory.heap
         defer free(sizes) in memory.heap
-        memory.copy(sizes, self.sizes.view(), self.sizes.count())
-        memory.copy(sizes[self.sizes.count()..], rhs.sizes.view(), rhs.sizes.count())
+        for face in 0..<left_faces: sizes[face] = (i64)(self.offsets.view()[face + 1] - self.offsets.view()[face])
+        for face in 0..<right_faces: sizes[left_faces + face] = (i64)(rhs.offsets.view()[face + 1] - rhs.offsets.view()[face])
         let corners = try alloc i64[left_corners.length + right_corners.length] in memory.heap
         defer free(corners) in memory.heap
-        memory.copy(corners, left_corners, left_corners.length)
+        for index in 0..<left_corners.length: corners[index] = (i64)left_corners[index]
         for index in 0..<right_corners.length:
-            corners[left_corners.length + index] = right_corners[index] + (i64)left_points.length
+            corners[left_corners.length + index] = (i64)right_corners[index] + (i64)left_points
         let left_triangles = self.triangles.view()
         let right_triangles = rhs.triangles.view()
         let display = try alloc i64[left_triangles.length + right_triangles.length] in memory.heap
         defer free(display) in memory.heap
-        memory.copy(display, left_triangles, left_triangles.length)
+        for at in 0..<left_triangles.length: display[at] = (i64)left_triangles[at]
         for at in 0..<right_triangles.length:
-            display[left_triangles.length + at] = right_triangles[at] + (i64)left_corners.length
-        let result = try make_mesh(points, sizes, corners, display)
+            display[left_triangles.length + at] = (i64)right_triangles[at] + (i64)left_corners.length
+        let result = try make_mesh(points, sizes, corners, display, self.is_precise() or rhs.is_precise())
         errdefer result.release()
         try merge_attributes(&self, rhs, result.value())
         return result
+
+## The points whose stored positions differ between `previous` and `next`.
+## The caller frees the list.
+func changed_points(previous: const Float3[], next: const Float3[]) -> u32[]!:
+    var count: usize = 0
+    for at in 0..<next.length:
+        let a = previous[at]
+        let b = next[at]
+        if a.x != b.x or a.y != b.y or a.z != b.z: count += 1
+    let moved = try alloc u32[count] in memory.heap
+    var written: usize = 0
+    for at in 0..<next.length:
+        let a = previous[at]
+        let b = next[at]
+        if a.x != b.x or a.y != b.y or a.z != b.z:
+            moved[written] = (u32)at
+            written += 1
+    return moved

@@ -69,6 +69,9 @@ func retry(gate: Gate*, stage: usize) -> bool!:
     defer source.release()
     let snapshot = try source.value().without_attribute("absent",0)
     defer snapshot.release()
+    # The face of each corner is a topology cache the index reads; build it
+    # first, so the baseline counts only what the index itself allocates.
+    discard(try source.value().triangle_face(0))
     let baseline = gate.live
     gate.remaining = stage
     defer clear_limit(gate)
@@ -158,12 +161,15 @@ pub func exercise() -> !:
     memory.heap = &gate
     defer restore(previous)
     var failures: usize = 0
-    for stage in 0..<(usize)10:
+    # Fail each allocation of the index build in turn until one build succeeds.
+    var succeeded = false
+    for stage in 0..<(usize)256:
         if try retry(&gate,stage): failures += 1
+        else: succeeded = true
         ownership.collect()
         discard(ownership.finish_run(0))
         assert(gate.live == 0)
-    assert(failures >= 4 and failures < 10)
+    assert(failures >= 4 and succeeded)
     for iteration in 0..<8:
         try concurrent()
         ownership.collect()

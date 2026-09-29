@@ -8,7 +8,7 @@ import luce_geocore.errors as errors
 from luce_geocore.math.vector import Vector3
 from luce_geocore.core.attributes import Attribute, Domain, DataType, Storage
 from luce_geocore.core.attribute_ops import typed_mut
-from luce_geocore.geometries.polygon import PolygonMesh, with_attribute_entry, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span
+from luce_geocore.geometries.polygon import PolygonMesh, with_attribute_entry, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, mesh_origin
 
 pub struct AttributeKernels:
     let reserved: u8 = 0
@@ -19,10 +19,11 @@ pub struct AttributeKernels:
         if not math.is_finite(scale): error(errors.invalid, "UV scale must be finite")
         let corners = corner_span(mesh)
         let points = point_span(mesh)
+        let origin = mesh_origin(mesh)
         var attribute = try Attribute.create("uv", Domain.corner, DataType.float64, 2, corners.length)
         let values = typed_mut[f64](attribute.data.span())
         for corner in 0..<corners.length:
-            let p = points[(usize)corners[corner]]
+            let p = points[(usize)corners[corner]].vector().add(origin)
             values[corner * 2] = p.x * scale
             values[corner * 2 + 1] = p.z * scale
         return try with_attribute_entry(mesh, attribute)
@@ -38,9 +39,9 @@ pub struct AttributeKernels:
         let values = typed_mut[f64](attribute.data.span())
         if face_domain:
             for face in 0..<count:
-                values[face * 3] = normals[face].x
-                values[face * 3 + 1] = normals[face].y
-                values[face * 3 + 2] = normals[face].z
+                values[face * 3] = (f64)normals[face].x
+                values[face * 3 + 1] = (f64)normals[face].y
+                values[face * 3 + 2] = (f64)normals[face].z
             return try with_attribute_entry(mesh, attribute)
         let sums = alloc Vector3[count] in memory.heap catch failure:
             attribute.release()
@@ -50,9 +51,9 @@ pub struct AttributeKernels:
         let offsets = offset_span(mesh)
         let corners = corner_span(mesh)
         for face in 0..<normals.length:
-            for corner in offsets[face]..<offsets[face + 1]:
+            for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
                 let point = (usize)corners[corner]
-                sums[point] = sums[point].add(normals[face])
+                sums[point] = sums[point].add(normals[face].vector())
         for at in 0..<count:
             let length = sums[at].length()
             let n = sums[at].multiply_scalar(1.0 / length) if length > 0.000001 else Vector3()
@@ -66,16 +67,16 @@ pub struct AttributeKernels:
         let mesh = try source.get()
         let points = point_span(mesh)
         let corners = corner_span(mesh)
-        let faces = corner_face_span(mesh)
+        let faces = try corner_face_span(mesh)
         let triangles = triangle_span(mesh)
         var attribute = try Attribute.create("area", Domain.face, DataType.float64, 1, (usize)mesh.face_count())
         let values = typed_mut[f64](attribute.data.span())
         for at in 0..<values.length: values[at] = 0.0
         for triangle in 0..<triangles.length // 3:
-            let a = points[(usize)corners[(usize)triangles[triangle * 3]]]
-            let b = points[(usize)corners[(usize)triangles[triangle * 3 + 1]]]
-            let c = points[(usize)corners[(usize)triangles[triangle * 3 + 2]]]
-            values[faces[(usize)triangles[triangle * 3]]] += b.subtract(a).cross(c.subtract(a)).length() * 0.5
+            let a = points[(usize)corners[(usize)triangles[triangle * 3]]].vector()
+            let b = points[(usize)corners[(usize)triangles[triangle * 3 + 1]]].vector()
+            let c = points[(usize)corners[(usize)triangles[triangle * 3 + 2]]].vector()
+            values[(usize)faces[(usize)triangles[triangle * 3]]] += b.subtract(a).cross(c.subtract(a)).length() * 0.5
         return try with_attribute_entry(mesh, attribute)
 
     ## `name` = `values` (1..4 components) on every element, optionally scaled

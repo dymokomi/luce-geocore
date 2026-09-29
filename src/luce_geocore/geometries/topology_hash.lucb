@@ -1,17 +1,20 @@
 ## 64-bit fingerprint of polygon connectivity: point count, face sizes and
 ## corner indices, not positions or display triangles. Editors compare it to
 ## guard recipes that address elements by index; a word-wise mix keeps the
-## pass over millions of corners in the millisecond range.
+## pass over millions of corners in the millisecond range. The value does not
+## depend on how the arrays are stored, so saved guards keep matching.
 
 func mix(state: u64, value: u64) -> u64:
     let scrambled = state ^ (value *% 0x9E3779B97F4A7C15)
     return ((scrambled << 27) | (scrambled >> 37)) *% 5 +% 0x52DCE729
 
-## Never zero: callers use zero for "no guard recorded".
-pub func topology_hash(points: usize, sizes: const i64[], corners: const i64[]) -> u64:
-    var state = mix(mix(0x6A09E667F3BCC908, (u64)points), (u64)sizes.length)
-    for size in sizes:
-        state = mix(state, (u64)size)
+## Never zero: callers use zero for "no guard recorded". `offsets` has one
+## entry per face and a final one; face f's size is offsets[f + 1] - offsets[f].
+pub func topology_hash(points: usize, offsets: const i32[], corners: const i32[]) -> u64:
+    let faces = offsets.length - 1 if offsets.length > 0 else 0
+    var state = mix(mix(0x6A09E667F3BCC908, (u64)points), (u64)faces)
+    for face in 0..<faces:
+        state = mix(state, (u64)(offsets[face + 1] - offsets[face]))
     for corner in corners:
         state = mix(state, (u64)corner)
     # fmix64 avalanche so nearby topologies spread over all 64 bits.

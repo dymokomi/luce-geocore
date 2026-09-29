@@ -76,7 +76,7 @@ pub struct TopologyTools:
         let mesh = try source.get()
         if selection.length < 3 or selection.length > 256:
             error(errors.invalid, "Fill needs 3..256 boundary edges forming one loop")
-        let marked = try selection_mask(selection, mesh.edge_count())
+        let marked = try selection_mask(selection, (try mesh.edge_count()))
         defer free(marked) in memory.heap
         let opposite = try opposite_corners(mesh, false)
         defer free(opposite) in memory.heap
@@ -193,7 +193,7 @@ func previous_corner(mesh: const PolygonMesh*, corner: i64) -> i64!:
 func opposite_corners(mesh: const PolygonMesh*, closed: bool) -> i64[]!:
     let result = try alloc i64[(usize)mesh.vertex_count()] in memory.heap
     errdefer free(result) in memory.heap
-    let first = try alloc i64[(usize)mesh.edge_count()] in memory.heap
+    let first = try alloc i64[(usize)(try mesh.edge_count())] in memory.heap
     defer free(first) in memory.heap
     for index in 0..<first.length:
         first[index] = -1

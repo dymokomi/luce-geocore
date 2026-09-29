@@ -51,9 +51,10 @@ func chain(scale: f64, pose: i64, reverse: bool, start: i64, noise: f64) -> !:
             defer index.release()
             ids[(usize)at] = try index.get()
             assert(ids[(usize)at] >= 0 and ids[(usize)at] < 7)
-        let a = points[(usize)corners[(usize)ids[0]]]
-        let b = points[(usize)corners[(usize)ids[1]]]
-        let c = points[(usize)corners[(usize)ids[2]]]
+        # Triangles are built from the stored (f32) positions.
+        let a = try mesh.point(corners[(usize)ids[0]])
+        let b = try mesh.point(corners[(usize)ids[1]])
+        let c = try mesh.point(corners[(usize)ids[2]])
         let cross = b.subtract(a).cross(c.subtract(a)).dot(normal)
         assert(cross > scale*scale*1e-13)
         area += cross*0.5
@@ -63,10 +64,11 @@ func chain(scale: f64, pose: i64, reverse: bool, start: i64, noise: f64) -> !:
             let slot = (usize)((ea if ea < eb else eb)*7+(eb if ea < eb else ea))
             incidence[slot] += 1
             direction[slot] += 1 if ea < eb else -1
-    assert(math.abs(area/(scale*scale)-4.0) < 1e-9)
+    # Positions are stored in f32: areas agree to single precision.
+    assert(math.abs(area/(scale*scale)-4.0) < 1e-5)
     var diagonals: i64 = 0
     for i in 0..<(usize)7:
-        assert((try mesh.point((i64)i)) == points[i])
+        assert((try mesh.point((i64)i)).subtract(points[i]).length() <= 1e-6 * (points[i].length() + scale))
         assert((try mesh.face_point(0,(i64)i)) == corners[i])
         for j in i+1..<(usize)7:
             let boundary = j == i+1 or (i == 0 and j == 6)

@@ -11,17 +11,43 @@ attribute domains, topology operators, primitive generators and BVH picking.
 | `Vector3(x=0,y=0,z=0)` | Immutable operations `add`, `subtract`, `multiply_scalar`, `dot`, `cross`, `length`, `normalized`, `rotated`; public coordinates are values. |
 | `Matrix4` | Affine column vectors and translation, implicit final row `(0,0,0,1)`; `compose`, `multiply`, `transform_point`, `transform_direction`, `transform_normal`. |
 | `Vertex`, `Bounds`, `Geometry` | The per-vertex drawing interface a renderer consumes (luce-3d), and axis-aligned bounds. |
-| `PolygonMesh(points,sizes,corners,display=none)` | Immutable shared-point polygon topology implementing Geometry. Optional validated display triangles are independent of wire edges (see below). `cube(size=2)` builds a grounded cube; `empty()` builds an empty result. `point_count`, `point`, `face_count`, `face_size`, `face_point`, `face_normal`, `face_center`, `edge_count`, `edge_point`, `triangle_face` expose topology. |
+| `PolygonMesh(points,sizes,corners,display=none,precise=false)` | Immutable shared-point polygon topology implementing Geometry. Optional validated display triangles are independent of wire edges (see below). `cube(size=2)` builds a grounded cube; `empty()` builds an empty result. `point_count`, `point`, `face_count`, `face_size`, `face_point`, `face_normal`, `face_center`, `edge_count` (fallible: edges are a lazy cache), `edge_point`, `triangle_face` expose topology. `is_precise`, `without_precision` (see storage below). |
 | `PolygonMesh.transformed(translation,rotation,scale)` | Returns a new mesh with transformed points and regenerated normals. Rotation is XYZ radians; scale must be nonsingular. Reflections reverse winding. |
 | `PolygonMesh.moved_points(selection,delta)` / `merged(other)` | Return a new displaced or concatenated mesh without modifying either input. |
 | `PolygonMesh.extruded_faces(selection,distance)` | Extrudes a face region along averaged selected-face normals. Shares new points across selected faces and adds walls only on boundary edges; cap face IDs remain stable. Requires a nonzero distance and a region boundary. |
 | `PolygonMesh.ray_face(origin,direction)` / `ray_distance(origin,direction)` | Fallible nearest two-sided intersection, or `-1`. Normalize direction for world-space distances. |
 | `PolygonMesh.surface_distance(point)` / `closest_face(point)` | BVH nearest surface distance / primitive ID; `-1` for empty geometry. Points must be finite. |
 | `PolygonMesh.prepare_queries()` | Builds the shared spatial index before first use, e.g. on a worker before handing a final viewport mesh to the UI. Idempotent and fallible; no topology change. |
-| `MeshBuilder` | Bounded Base topology staging: `point`, `face`, `corner`, `finish`, `close`. Importers and operators share the same mesh limits. |
+| `MeshBuilder(precise=false)` | Bounded Base topology staging: `point`, `face`, `corner`, `finish`, `close`. Importers and operators share the same mesh limits. Copying a precise mesh's points makes the result precise. |
 | `PolygonTopology` | Borrowed read interface for points, polygon corners and edge endpoints. Numbering/lifetime are defined by the implementation. |
 | `DissolveWorkspace(source,edits=128)` | Base-only local edge-dissolve staging over a borrowed immutable `PolygonMesh*`. `face_slots`, `active`, `neighbor`, `dissolve`, `finish`, `close`; see lifetime and ordering below. |
 | `MeshOps`, `TopologyTools`, `MeshNormals`, `MeshPrimitives` | Modeling kernels returning new meshes: point/face operators, subdivision, fuse; bevel, fill, dissolve; grouped corner normals; grid, sphere, cylinder, torus. |
+
+## Storage and precision
+
+A mesh is structure-of-arrays, each array a shared column (`Column[T]`,
+copy-on-write, with a change id): f32 positions measured from an f64 `origin`,
+i32 face offsets and corner points, f32 face normals and i32 display
+triangles. The origin is the bounds center when coordinates exceed 4096 or 8×
+the model's size, else zero, so f32 positions keep about 1e-7 of the model's
+size. Construction validates and computes normals and triangles in parallel on
+the `geocore_parallel` pool (`parallel_for`, `run`, `warm`).
+
+What connectivity alone determines (the face of each corner, the edges, numbered
+by first corner in a deterministic parallel build, point-to-face incidence and
+the connectivity hash) is a lazy cache shared by every mesh with that topology.
+A position edit (`moved_points`, `with_positions`, rigid `placed`) copies the
+positions once, recomputes only the faces around moved points, shares the
+topology, its caches and every attribute, and refits the previous BVH on the
+next query instead of building one.
+
+A precise mesh also keeps its f64 points; `point`, normals, triangulation and
+derived meshes use them, while display and queries use the f32 positions. B-rep
+tessellation builds its chart meshes this way (trims resolve features far below
+f32 spacing) and publishes `without_precision()`. Position edits of a precise
+mesh rebuild it.
+
+## Limits
 
 Polygon meshes allow 8,388,608 points/faces, 33,554,432 corners, and 3–256 corners per
 face. Their topology and triangulation are copied/owned; concave faces use ear

@@ -3,39 +3,41 @@
 ## these are free functions in their own export, which Luce code never imports.
 ## The pack functions write a mesh's arrays in the GPU's layout (f32 vectors,
 ## u32 indices); their cost is a plain pass over the array.
+import memory
 import luce_geocore.errors as errors
 import luce_geocore.geometries.polygon as polygon
 from luce_geocore.math.vector import Vector3
 from luce_geocore.core.attributes import DataType
-from luce_geocore.geometries.polygon import PolygonMesh, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, edge_span, attribute_entry
+from luce_geocore.core.float3 import Float3
+from luce_geocore.geometries.polygon import PolygonMesh, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, edge_span, attribute_entry, mesh_origin
 
-## Positions as x, y, z f32 triples; `out` holds 3 per point.
+## Positions as x, y, z f32 triples relative to `origin(mesh)`; `out` holds
+## 3 per point. Positions are stored this way, so this is a copy.
 pub func pack_positions(mesh: const PolygonMesh*, out: f32[]) -> !:
     let points = point_span(mesh)
     if out.length != points.length * 3: error(errors.invalid, "position output needs three values per point")
-    for at in 0..<points.length:
-        out[at * 3] = (f32)points[at].x
-        out[at * 3 + 1] = (f32)points[at].y
-        out[at * 3 + 2] = (f32)points[at].z
+    memory.copy(Float3[]((Float3*)out.data, points.length), points, points.length)
+
+## Where stored positions are measured from.
+pub func origin(mesh: const PolygonMesh*) -> Vector3:
+    return mesh_origin(mesh)
 
 ## The corner of each vertex of triangles first..<first + out.length / 3.
 pub func pack_triangles(mesh: const PolygonMesh*, first: usize, out: u32[]) -> !:
     let triangles = triangle_span(mesh)
     if first * 3 + out.length > triangles.length: error(errors.invalid, "triangle range leaves the mesh")
-    for at in 0..<out.length:
-        out[at] = (u32)triangles[first * 3 + at]
+    memory.copy(i32[]((i32*)out.data, out.length), triangles[first * 3..<first * 3 + out.length], out.length)
 
 ## The point of every corner.
 pub func pack_corner_points(mesh: const PolygonMesh*, out: u32[]) -> !:
     let corners = corner_span(mesh)
     if out.length != corners.length: error(errors.invalid, "corner output needs one value per corner")
-    for at in 0..<corners.length:
-        out[at] = (u32)corners[at]
+    memory.copy(i32[]((i32*)out.data, out.length), corners, corners.length)
 
 ## The face of each of triangles first..<first + out.length.
 pub func pack_triangle_faces(mesh: const PolygonMesh*, first: usize, out: u32[]) -> !:
     let triangles = triangle_span(mesh)
-    let faces = corner_face_span(mesh)
+    let faces = try corner_face_span(mesh)
     if (first + out.length) * 3 > triangles.length: error(errors.invalid, "triangle range leaves the mesh")
     for at in 0..<out.length:
         out[at] = (u32)faces[(usize)triangles[(first + at) * 3]]
@@ -44,17 +46,13 @@ pub func pack_triangle_faces(mesh: const PolygonMesh*, first: usize, out: u32[])
 pub func pack_face_normals(mesh: const PolygonMesh*, out: f32[]) -> !:
     let normals = face_normal_span(mesh)
     if out.length != normals.length * 3: error(errors.invalid, "normal output needs three values per face")
-    for at in 0..<normals.length:
-        out[at * 3] = (f32)normals[at].x
-        out[at * 3 + 1] = (f32)normals[at].y
-        out[at * 3 + 2] = (f32)normals[at].z
+    memory.copy(Float3[]((Float3*)out.data, normals.length), normals, normals.length)
 
 ## The two points of every edge.
 pub func pack_edges(mesh: const PolygonMesh*, out: u32[]) -> !:
-    let edges = edge_span(mesh)
+    let edges = try edge_span(mesh)
     if out.length != edges.length: error(errors.invalid, "edge output needs two values per edge")
-    for at in 0..<edges.length:
-        out[at] = (u32)edges[at]
+    memory.copy(i32[]((i32*)out.data, out.length), edges, edges.length)
 
 ## The first three components of attribute `index` per stored tuple (one for
 ## single storage), as f32; `out` holds 3 per tuple.

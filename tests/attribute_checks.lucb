@@ -46,11 +46,11 @@ pub func exercise() -> !:
     let extruded = try creased.value().extruded_faces([0], 0.5)
     defer extruded.release()
     let crease = extruded.value().find_attribute("crease", 4)
-    assert(crease >= 0 and (try extruded.value().domain_count(4)) == extruded.value().edge_count())
-    for edge in 0..<creased.value().edge_count():
+    assert(crease >= 0 and (try extruded.value().domain_count(4)) == (try extruded.value().edge_count()))
+    for edge in 0..<(try creased.value().edge_count()):
         let a = try creased.value().edge_point(edge, 0)
         let b = try creased.value().edge_point(edge, 1)
-        for other in 0..<extruded.value().edge_count():
+        for other in 0..<(try extruded.value().edge_count()):
             if (try extruded.value().edge_point(other, 0)) == a and (try extruded.value().edge_point(other, 1)) == b:
                 near(try extruded.value().attribute_value(crease, other), (f64)edge)
     # Merging an integer i32 with an out-of-range i64 widens to i64.

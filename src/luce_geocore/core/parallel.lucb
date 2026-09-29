@@ -1,0 +1,294 @@
+## One persistent pool of worker threads for geometry kernels, the pattern of
+## luce-canvas's engine pool: workers start once, on first use (one fewer than
+## the processors, at most 63), and stay for the process, so kernels never
+## spawn threads per call. `run` hands out `count` items and works on them too,
+## so a batch finishes even when every worker is busy or it is started from
+## inside another batch. `parallel_for` splits a range into chunks of about
+## `grain` elements. Items are Base functions with a context pointer: pool
+## threads never call into full Luce.
+import os
+import sync
+import thread
+
+## The most workers the pool keeps.
+let most_workers: usize = 63
+
+## A batch of work: `count` items, each `entry(context, index)` once, on at
+## most `limit` threads at a time. Owned by its caller, who must keep it
+## until `wait` (or `run`) returns.
+pub struct Job:
+    var entry: func(void*?, usize) -> unit = skip_item
+    var context: void*? = none
+    var count: usize = 0
+    ## The next item to hand out, and how many have finished.
+    var next: @usize
+    var finished: @usize
+    ## Pool workers on this batch now (under the lock), and the most allowed.
+    var working: usize = 0
+    var helpers: usize = 0
+    ## Its place in the queue while it has items to hand out.
+    var queued: bool = false
+    var after: Job*? = none
+
+func skip_item(context: void*?, index: usize):
+    discard(context)
+    discard(index)
+
+## Batches with items still to hand out, oldest first; guarded by `lock`.
+var lock: sync.Mutex
+var work_ready: sync.Condition
+var job_done: sync.Condition
+var first_job: Job*? = none
+var last_job: Job*? = none
+var started: bool = false
+var worker_count: usize = 0
+
+## How many threads a batch can have at once: the pool's workers and the caller.
+pub func width() -> usize:
+    lock.lock()
+    ensure_workers()
+    let count = worker_count
+    lock.unlock()
+    return count + 1
+
+## Run `entry(context, index)` for every index in `0..<count` across the pool,
+## this thread included, on at most `limit` threads (0: as many as there are),
+## and return once all are done.
+pub func run(count: usize, entry: func(void*?, usize) -> unit, context: void*?, limit: usize = 0):
+    if count == 0:
+        return
+    if count == 1 or limit == 1:
+        for index in 0..<count:
+            entry(context, index)
+        return
+    var job = Job()
+    # The caller is one of the `limit` threads.
+    enqueue(&job, count, entry, context, 0 if limit == 0 else limit - 1)
+    wait(&job)
+
+## Start the workers now and return once every one is running. Allocation
+## trackers (tests, benchmarks) install after this: a starting thread frees
+## its start block in whatever memory.heap is current then.
+pub func warm():
+    var barrier = Barrier(threads = width())
+    run(barrier.threads, meet, (void*)&barrier)
+
+## Every thread of a batch holds one item until all of them do.
+struct Barrier:
+    let threads: usize
+    var arrived: @usize
+
+func meet(context: void*?, index: usize):
+    discard(index)
+    let barrier = (Barrier*)(context else return)
+    discard(barrier.arrived.add(1, .acq_rel))
+    while barrier.arrived.load(.acquire) < barrier.threads: thread.yield()
+
+## Put a batch out on the pool's workers alone (at most `limit`, 0: all of
+## them) and return at once; `finished` tells when it is done and `wait`
+## collects it. With no worker to be had it runs here before returning.
+pub func start(job: Job*, count: usize, entry: func(void*?, usize) -> unit, context: void*?, limit: usize = 0):
+    enqueue(job, count, entry, context, limit)
+    lock.lock()
+    let alone = worker_count == 0
+    lock.unlock()
+    if alone:
+        work_on(job)
+
+## Whether every item of `job` has finished.
+pub func finished(job: const Job*) -> bool:
+    return job.finished.load(.acquire) >= job.count
+
+## Work on `job`'s remaining items here, then wait until no worker holds it;
+## after this the caller may free it.
+pub func wait(job: Job*):
+    work_on(job)
+    lock.lock()
+    while job.finished.load(.acquire) < job.count or job.working > 0:
+        job_done.wait(&lock)
+    unlink(job)
+    lock.unlock()
+
+func enqueue(job: Job*, count: usize, entry: func(void*?, usize) -> unit, context: void*?, helpers: usize):
+    job.entry = entry
+    job.context = context
+    job.count = count
+    job.next.store(0, .relaxed)
+    job.finished.store(0, .relaxed)
+    job.working = 0
+    job.after = none
+    lock.lock()
+    ensure_workers()
+    job.helpers = worker_count if helpers == 0 or helpers > worker_count else helpers
+    job.queued = count > 0 and job.helpers > 0
+    if job.queued:
+        if let last = last_job:
+            last.after = job
+        else:
+            first_job = job
+        last_job = job
+        work_ready.broadcast()
+    lock.unlock()
+
+## Take `job`'s items until none are left to hand out.
+func work_on(job: Job*):
+    while true:
+        let index = job.next.add(1, .relaxed)
+        if index >= job.count:
+            return
+        let entry = job.entry
+        entry(job.context, index)
+        discard(job.finished.add(1, .acq_rel))
+
+## Drop `job` from the queue if it is there; under `lock`.
+func unlink(job: Job*):
+    if not job.queued:
+        return
+    job.queued = false
+    var previous: Job*? = none
+    var cursor = first_job
+    while let current = cursor:
+        if current == job:
+            if let before = previous:
+                before.after = current.after
+            else:
+                first_job = current.after
+            if last_job == job:
+                last_job = previous
+            return
+        previous = cursor
+        cursor = current.after
+
+## Start the workers the first time the pool is used; under `lock`.
+func ensure_workers():
+    if started:
+        return
+    started = true
+    let processors = (usize)os.cpus()
+    let spare = processors - 1 if processors > 1 else 0
+    let wanted = most_workers if spare > most_workers else spare
+    for _ in 0..<wanted:
+        let handle = thread.spawn(worker_main, none, name = "luce-pool") catch failure:
+            # Fewer workers only means less help: callers do the rest.
+            discard(failure)
+            break
+        handle.detach()
+        worker_count += 1
+
+## A queued batch with items left and room for one more worker; batches
+## with nothing left to hand out leave the queue. Under `lock`.
+func next_job() -> Job*?:
+    var cursor = first_job
+    while let job = cursor:
+        cursor = job.after
+        if job.next.load(.relaxed) >= job.count:
+            unlink(job)
+            continue
+        if job.working < job.helpers:
+            return job
+    return none
+
+func worker_main(context: void*?):
+    discard(context)
+    lock.lock()
+    while true:
+        if let job = next_job():
+            job.working += 1
+            lock.unlock()
+            work_on(job)
+            lock.lock()
+            job.working -= 1
+            if job.working == 0:
+                job_done.broadcast()
+        else:
+            work_ready.wait(&lock)
+
+struct Tally:
+    var hits: @usize
+    var seen: @u64
+
+func count_item(context: void*?, index: usize):
+    let tally = (Tally*)(context else return)
+    discard(tally.hits.add(1, .relaxed))
+    discard(tally.seen.add((u64)1 << (u64)(index % 64), .relaxed))
+
+func nested_item(context: void*?, index: usize):
+    discard(index)
+    # Each item runs a batch of its own: every worker may be busy in the outer
+    # one, so the inner caller must be able to finish it alone.
+    run(8, count_item, context)
+
+test "a batch runs every item once, across the pool and the caller":
+    var tally = Tally()
+    run(64, count_item, (void*)&tally)
+    assert(tally.hits.load(.acquire) == 64)
+    assert(tally.seen.load(.acquire) == 0xFFFFFFFFFFFFFFFF)
+    run(3, count_item, (void*)&tally, limit = 1)
+    assert(tally.hits.load(.acquire) == 67)
+    run(0, count_item, (void*)&tally)
+    assert(tally.hits.load(.acquire) == 67)
+    assert(width() >= 1)
+
+test "batches started inside batches finish":
+    var tally = Tally()
+    run(32, nested_item, (void*)&tally, limit = 4)
+    assert(tally.hits.load(.acquire) == 256)
+
+test "a background batch finishes and waits cleanly":
+    var tally = Tally()
+    var job = Job()
+    start(&job, 100, count_item, (void*)&tally, limit = 2)
+    wait(&job)
+    assert(finished(&job))
+    assert(tally.hits.load(.acquire) == 100)
+    # A job can be reused once collected.
+    start(&job, 5, count_item, (void*)&tally)
+    wait(&job)
+    assert(tally.hits.load(.acquire) == 105)
+
+## A range split into chunks for `parallel_for`.
+struct Chunks:
+    var body: func(void*?, usize, usize) -> unit = skip_range
+    var context: void*? = none
+    var count: usize = 0
+    var grain: usize = 1
+
+func skip_range(context: void*?, first: usize, end: usize):
+    discard(context)
+    discard(first)
+    discard(end)
+
+func run_chunk(context: void*?, index: usize):
+    let chunks = (Chunks*)(context else return)
+    let first = index * chunks.grain
+    let end = first + chunks.grain if chunks.count - first > chunks.grain else chunks.count
+    let body = chunks.body
+    body(chunks.context, first, end)
+
+## Call `body(context, first, end)` over `0..<count` in chunks of `grain`
+## elements (at least one), across the pool and this thread, and return once
+## every chunk is done. A range of one chunk runs here, with no handoff.
+pub func parallel_for(count: usize, grain: usize, body: func(void*?, usize, usize) -> unit, context: void*?):
+    if count == 0:
+        return
+    let size = grain if grain > 0 else 1
+    if count <= size:
+        body(context, 0, count)
+        return
+    var chunks = Chunks(body = body, context = context, count = count, grain = size)
+    run((count + size - 1) // size, run_chunk, (void*)&chunks)
+
+struct Sum:
+    var total: @usize
+
+func add_range(context: void*?, first: usize, end: usize):
+    let sum = (Sum*)(context else return)
+    var part: usize = 0
+    for index in first..<end: part += index
+    discard(sum.total.add(part, .relaxed))
+
+test "parallel_for covers the range once in chunks":
+    var sum = Sum()
+    parallel_for(100001, 1000, add_range, (void*)&sum)
+    assert(sum.total.load(.acquire) == 100001 * 100000 // 2)
+    parallel_for(0, 10, add_range, (void*)&sum)

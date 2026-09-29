@@ -34,7 +34,7 @@ extend PolygonMesh:
         try checked(index, self.attributes.count())
         let entry = self.attributes.entry((usize)index)
         try checked(component, entry.width)
-        try checked(element, self.domain_size(entry.domain))
+        try checked(element, (try self.domain_size(entry.domain)))
         return entry.number((usize)element, (usize)component)
 
     pub func with_attribute(name: str, domain: i64, width: i64, values: const f64[], integer: bool = false) -> interop.Reference[PolygonMesh]!:
@@ -101,11 +101,11 @@ extend PolygonMesh:
         for at in 0..<count:
             weights[at] = 0
         let corners = self.corners.view()
-        let corner_faces = self.corner_faces.view()
+        let corner_faces = try self.corner_faces()
         let contributions = count if domain == target or domain == 3 else (source_count if target == 3 else corners.length)
         for at in 0..<contributions:
-            let source = at if domain == target or target == 3 else (0 if domain == 3 else ((usize)corners[at] if domain == 0 else (corner_faces[at] if domain == 2 else at)))
-            let destination = at if domain == target or domain == 3 else (0 if target == 3 else ((usize)corners[at] if target == 0 else (corner_faces[at] if target == 2 else at)))
+            let source = at if domain == target or target == 3 else (0 if domain == 3 else ((usize)corners[at] if domain == 0 else ((usize)corner_faces[at] if domain == 2 else at)))
+            let destination = at if domain == target or domain == 3 else (0 if target == 3 else ((usize)corners[at] if target == 0 else ((usize)corner_faces[at] if target == 2 else at)))
             for component in 0..<width:
                 if not entry.integer() or weights[destination] == 0:
                     values[destination * width + component] += entry.number(source, component)
@@ -128,9 +128,10 @@ extend PolygonMesh:
         if normals.length > 0: try result.value().attributes.put(try Attribute.from_numbers("N", Domain.corner, 3, normals, false))
         return result
 
-    ## Bytes of the columns this mesh holds, shared ones included.
+    ## Bytes of the columns this mesh holds, shared ones included (lazy
+    ## topology caches are not).
     pub func column_bytes() -> i64:
-        let columns = self.points.bytes() + self.sizes.bytes() + self.corners.bytes() + self.offsets.bytes() + self.corner_faces.bytes() + self.normals.bytes() + self.triangles.bytes() + self.edge_points.bytes() + self.corner_edges.bytes()
+        let columns = self.positions.bytes() + self.offsets.bytes() + self.corners.bytes() + self.normals.bytes() + self.triangles.bytes() + self.precise.bytes()
         return (i64)(columns + self.attributes.bytes())
 
 ## A snapshot of `mesh` with `attribute` added (taking its share), for Base

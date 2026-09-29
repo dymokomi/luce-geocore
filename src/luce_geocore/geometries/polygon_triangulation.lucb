@@ -22,7 +22,20 @@ pub func triangulate(points: const Vector3[], corners: const i64[], start: usize
     # Orientation has area units. A fixed world-space threshold rejects valid
     # small trim cells (and the same polygon merely expressed in smaller units).
     let epsilon = math.max(1e-30,extent2*1e-14)
-    var remaining: usize[256]
+    # A strictly convex quad clips its first ear at corner 0: the same two
+    # triangles the loop below would produce, without it.
+    if count == 4:
+        var convex = true
+        for index in 0..<(usize)4:
+            let a = points[(usize)corners[start + (index + 3) % 4]]
+            let b = points[(usize)corners[start + index]]
+            let c = points[(usize)corners[start + (index + 1) % 4]]
+            convex = convex and b.subtract(a).cross(c.subtract(a)).dot(normal) > epsilon
+        if convex:
+            let quad: usize[6] = [3, 0, 1, 1, 2, 3]
+            for at in 0..<(usize)6: output[at] = (i64)(start + quad[at])
+            return
+    var remaining: usize[256] = ---
     for index in 0..<count:
         remaining[index] = start + index
     var length = count

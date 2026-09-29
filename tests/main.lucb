@@ -2,6 +2,8 @@
 ## injected at each stage and no allocation left live afterwards.
 import memory
 import ownership
+import sync
+import geocore_parallel
 import polygon_checks
 import scale_checks
 import display_checks
@@ -11,15 +13,20 @@ import partition_checks
 import query_checks
 import dissolve_checks
 import attribute_checks
+import precision_checks
 
 ## Counts live blocks and fails the allocation after `remaining` more.
+## Kernels allocate on pool workers too, so it takes a lock.
 struct Tracker: memory.Allocator:
     var upstream: memory.Allocator
     var live: usize
     var remaining: usize?
+    var lock: sync.Mutex
 
     pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
         if size == 0: return self.upstream.allocate(size, alignment)
+        self.lock.lock()
+        defer self.lock.unlock()
         if let remaining = self.remaining:
             if remaining == 0:
                 return none
@@ -33,6 +40,8 @@ struct Tracker: memory.Allocator:
 
     pub mutating func release(block: u8[]):
         if block.length == 0: return
+        self.lock.lock()
+        defer self.lock.unlock()
         assert(self.live > 0)
         self.live -= 1
         self.upstream.release(block)
@@ -56,9 +65,11 @@ func inject(tracker: Tracker*, stages: usize, check: func() -> unit!):
         settle(tracker)
 
 pub func main(arguments: str[]) -> i32!:
+    # Start the pool first: its starting threads free blocks in the current heap.
+    geocore_parallel.warm()
     try query_checks.exercise()
     let previous = memory.heap
-    var tracker = Tracker(previous, 0, none)
+    var tracker = Tracker(previous, 0, none, sync.Mutex())
     memory.heap = &tracker
     defer restore(previous)
     inject(&tracker, 96, polygon_checks.exercise)
@@ -78,6 +89,9 @@ pub func main(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 160, attribute_checks.exercise)
     try attribute_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 160, precision_checks.exercise)
+    try precision_checks.exercise()
     settle(&tracker)
     print("ok polygon meshes, operators, queries and allocation failures")
     return 0

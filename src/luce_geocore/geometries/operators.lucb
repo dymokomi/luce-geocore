@@ -152,7 +152,7 @@ pub struct MeshOps:
                 total += 1.0
         center = center.multiply_scalar(1.0 / math.max(1.0, total))
         if operation == 0:
-            for edge in 0..<mesh.edge_count():
+            for edge in 0..<(try mesh.edge_count()):
                 let a = (usize)(try mesh.edge_point(edge, 0))
                 let b = (usize)(try mesh.edge_point(edge, 1))
                 sums[a] = sums[a].add(points[b])
@@ -188,12 +188,12 @@ pub struct MeshOps:
     ## Shared quad subdivision; optional Catmull-Clark position rules.
     pub static func subdivide(source: interop.Reference[PolygonMesh], smooth: bool = false) -> interop.Reference[PolygonMesh]!:
         let mesh = try source.get()
-        if mesh.point_count() + mesh.edge_count() + mesh.face_count() > 16384 or mesh.vertex_count() * 4 > 65536:
+        if mesh.point_count() + (try mesh.edge_count()) + mesh.face_count() > 16384 or mesh.vertex_count() * 4 > 65536:
             error(errors.limit, "subdivision would exceed mesh limits")
         var out = try MeshBuilder()
         defer out.close()
         try out.copy_points(mesh)
-        for edge in 0..<mesh.edge_count():
+        for edge in 0..<(try mesh.edge_count()):
             let a = try mesh.edge_point(edge, 0)
             let b = try mesh.edge_point(edge, 1)
             discard(try out.point((try mesh.point(a)).add(try mesh.point(b)).multiply_scalar(0.5), a))
@@ -225,7 +225,7 @@ pub struct MeshOps:
                 for point in 0..<mesh.point_count():
                     for component in 0..<width:
                         values[(usize)(point * width + component)] = try mesh.attribute_value(attribute, point, component)
-                for edge in 0..<mesh.edge_count():
+                for edge in 0..<(try mesh.edge_count()):
                     for component in 0..<width:
                         values[(usize)((mesh.point_count() + edge) * width + component)] = ((try mesh.attribute_value(attribute, try mesh.edge_point(edge, 0), component)) + (try mesh.attribute_value(attribute, try mesh.edge_point(edge, 1), component))) * 0.5
                 for face in 0..<mesh.face_count():
@@ -234,7 +234,7 @@ pub struct MeshOps:
                         var sum = 0.0
                         for at in 0..<count:
                             sum += try mesh.attribute_value(attribute, try mesh.face_point(face, at), component)
-                        values[(usize)((mesh.point_count() + mesh.edge_count() + face) * width + component)] = sum / (f64)count
+                        values[(usize)((mesh.point_count() + (try mesh.edge_count()) + face) * width + component)] = sum / (f64)count
             else:
                 var written: usize = 0
                 for face in 0..<mesh.face_count():
@@ -329,7 +329,7 @@ func hash_cell(x: i64, y: i64, z: i64) -> usize:
 ## boundary 3/4 P + 1/8 each boundary neighbor. Edge attributes remain linear.
 func smooth_subdivision(mesh: const PolygonMesh*, out: MeshBuilder*) -> !:
     let np = (usize)mesh.point_count()
-    let ne = (usize)mesh.edge_count()
+    let ne = (usize)(try mesh.edge_count())
     let sums = try alloc Vector3[np * 3 + ne] in memory.heap
     defer free(sums) in memory.heap
     let counts = try alloc i64[np * 3 + ne] in memory.heap
