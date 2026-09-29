@@ -197,14 +197,3 @@ func grow[T](values: T[]*, limit: usize) -> !:
         replacement[index] = (*values)[index]
     free(*values) in memory.heap
     *values = replacement
-
-pub func selection_mask(selection: const i64[], count: i64) -> bool[]!:
-    let result = try alloc bool[(usize)count] in memory.heap
-    errdefer free(result) in memory.heap
-    for index in 0..<result.length:
-        result[index] = false
-    for index in selection:
-        if index < 0 or index >= count:
-            error(errors.invalid, "selected component no longer exists")
-        result[(usize)index] = true
-    return result

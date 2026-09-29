@@ -22,12 +22,6 @@ pub func table_text(table: const u8[], index: usize) -> str:
     let end = (usize)memory.read[u32]((void*)&table[4 + index * 4])
     return (str)table[bytes + start..<bytes + end]
 
-## The index of `text` in `table`, or -1. Linear: tables are small.
-pub func table_find(table: const u8[], text: str) -> i64:
-    for index in 0..<table_count(table):
-        if table_text(table, index) == text: return (i64)index
-    return -1
-
 ## Interns strings and publishes their table. Lookups hash into an open
 ## addressing index over the interned strings.
 pub struct TableBuilder:

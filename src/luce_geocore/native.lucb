@@ -10,7 +10,7 @@ import luce_geocore.geometries.polygon as polygon
 from luce_geocore.math.vector import Vector3
 from luce_geocore.core.attributes import DataType
 from luce_geocore.core.float3 import Float3
-from luce_geocore.geometries.polygon import Mesh, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, edge_span, attribute_entry, mesh_origin, smooth_normal_span, smooth_normals_ids, smooth_normals_corner_domain, curvature_span, curvature_id
+from luce_geocore.geometries.polygon import Mesh, point_span, corner_span, offset_span, corner_face_span, triangle_span, edge_span, attribute_entry, mesh_origin, smooth_normal_span, smooth_normals_ids, smooth_normals_corner_domain, curvature_span, curvature_id
 
 ## Positions as x, y, z f32 triples relative to `origin(mesh)`; `out` holds
 ## 3 per point. Positions are stored this way, so this is a copy.
@@ -81,12 +81,6 @@ pub func pack_triangle_faces(mesh: const Mesh*, first: usize, out: u32[]) -> !:
     if (first + out.length) * 3 > triangles.length: error(errors.invalid, "triangle range leaves the mesh")
     for at in 0..<out.length:
         out[at] = (u32)faces[(usize)triangles[(first + at) * 3]]
-
-## Face normals as f32 triples.
-pub func pack_face_normals(mesh: const Mesh*, out: f32[]) -> !:
-    let normals = face_normal_span(mesh)
-    if out.length != normals.length * 3: error(errors.invalid, "normal output needs three values per face")
-    memory.copy(Float3[]((Float3*)out.data, normals.length), normals, normals.length)
 
 ## Smooth normals (the shading of a mesh without N) as f32 triples, one per
 ## point or per corner (`smooth_domain`), computed on first use.
