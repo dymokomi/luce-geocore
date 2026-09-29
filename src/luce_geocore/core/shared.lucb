@@ -28,6 +28,9 @@ pub struct Block:
     ## The block this one was derived from by editing some elements, or 0.
     ## Incremental caches (a GPU sub-range upload, a BVH refit) key on it.
     pub var parent: u64 = 0
+    ## The elements that may differ from the parent's: first..<end.
+    pub var changed_first: usize = 0
+    pub var changed_end: usize = 0
 
 assert(sizeof(Block) <= 64, "the block header must fit before the elements")
 
@@ -46,6 +49,8 @@ pub struct Column[T]:
         block.count = count
         block.bytes = bytes
         block.parent = 0
+        block.changed_first = 0
+        block.changed_end = 0
         return Column[T](block)
 
     ## A new column holding a copy of `values`.
@@ -111,12 +116,31 @@ pub struct Column[T]:
             self.block = copy.block
             return self.span()
         block.parent = block.id
+        block.changed_first = 0
+        block.changed_end = block.count
         block.id = fresh_id()
         return self.span()
 
     ## Record that these contents were derived from the block `id`.
     pub mutating func set_parent(id: u64):
-        if let block = self.block: block.parent = id
+        if let block = self.block:
+            block.parent = id
+            block.changed_first = 0
+            block.changed_end = block.count
+
+    ## Narrow what differs from the parent to elements first..<end (a local
+    ## edit), so incremental caches copy only those.
+    pub mutating func set_changed(first: usize, end: usize):
+        if let block = self.block:
+            block.changed_first = first if first < block.count else block.count
+            block.changed_end = end if end < block.count else block.count
+            if block.changed_end < block.changed_first: block.changed_end = block.changed_first
+
+    ## The elements that may differ from the parent's (all, without one).
+    pub func changed() -> (usize, usize):
+        let block = self.block else return (0, 0)
+        if block.parent == 0: return (0, block.count)
+        return (block.changed_first, block.changed_end)
 
     ## Give up this share; the last one frees the block.
     pub mutating func release():

@@ -139,6 +139,8 @@ extend Mesh:
         storage[0] = self.shared_columns()
         # Record provenance: caches keyed on the old positions update in place.
         owned.set_parent(self.positions.id())
+        if moved.length > 0 and moved.length < owned.count():
+            owned.set_changed((usize)min_of(moved), (usize)max_of(moved) + 1)
         storage[0].positions.release()
         storage[0].positions = owned
         storage[0].origin = origin
@@ -308,3 +310,13 @@ func changed_points(previous: const Float3[], next: const Float3[]) -> u32[]!:
             moved[written] = (u32)at
             written += 1
     return moved
+
+func min_of(values: const u32[]) -> u32:
+    var least = values[0]
+    for value in values: least = value if value < least else least
+    return least
+
+func max_of(values: const u32[]) -> u32:
+    var most = values[0]
+    for value in values: most = value if value > most else most
+    return most

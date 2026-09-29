@@ -317,3 +317,11 @@ pub func curvature_span(mesh: const Mesh*) -> const f32[]!:
 pub func curvature_id(mesh: const Mesh*) -> u64!:
     discard(try mesh.curvatures())
     return mesh.shading.curvature_id()
+
+## The positions' and smooth normals' changed elements (see Column.changed).
+pub func points_changed(mesh: const Mesh*) -> (usize, usize):
+    return mesh.positions.changed()
+
+pub func smooth_changed(mesh: const Mesh*) -> (usize, usize)!:
+    discard(try mesh.smooth_normals())
+    return mesh.shading.changed()

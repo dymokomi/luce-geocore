@@ -34,6 +34,8 @@ pub func refresh_normals(attributes: AttributeStore*, shape: const Surface*, mov
         # Each affected point writes only its own point or corners.
         var work = Work(shape, affected, bytes, wide, domain == Domain.corner)
         parallel.parallel_for(affected.length, 64, refresh_range, (void*)&work)
+        let range = written_range(shape, affected, domain == Domain.corner)
+        attributes.set_changed(index, range.0, range.1)
 
 struct Work:
     let shape: const Surface*
@@ -67,3 +69,19 @@ func write(bytes: u8[], wide: bool, element: usize, normal: Vector3):
         values[element * 3] = (f32)normal.x
         values[element * 3 + 1] = (f32)normal.y
         values[element * 3 + 2] = (f32)normal.z
+
+## The elements the refresh wrote: the affected points (sorted), or the
+## corners of their faces.
+func written_range(shape: const Surface*, affected: const u32[], corners: bool) -> (usize, usize):
+    if affected.length == 0: return (0, 0)
+    if not corners: return ((usize)affected[0], (usize)affected[affected.length - 1] + 1)
+    var first = shape.corners.length
+    var end: usize = 0
+    for point in affected:
+        for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
+            let face = (usize)shape.incident_faces[at]
+            let start = (usize)shape.offsets[face]
+            let stop = (usize)shape.offsets[face + 1]
+            first = start if start < first else first
+            end = stop if stop > end else end
+    return (first, end)

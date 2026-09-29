@@ -19,6 +19,45 @@ pub func pack_positions(mesh: const Mesh*, out: f32[]) -> !:
     if out.length != points.length * 3: error(errors.invalid, "position output needs three values per point")
     memory.copy(Float3[]((Float3*)out.data, points.length), points, points.length)
 
+## The elements of positions, smooth normals and attribute `index` that may
+## differ from the arrays they were edited from (points_parent, smooth_ids,
+## attribute_parent): a Move's neighbourhood. All of them without a parent.
+pub func points_changed(mesh: const Mesh*) -> (usize, usize):
+    return polygon.points_changed(mesh)
+
+pub func smooth_changed(mesh: const Mesh*) -> (usize, usize)!:
+    return try polygon.smooth_changed(mesh)
+
+pub func attribute_changed(mesh: const Mesh*, index: i64) -> (usize, usize)!:
+    let entry = try attribute_entry(mesh, index)
+    let bytes = entry.data.changed()
+    let tuple = entry.tuple_bytes()
+    return (bytes.0 // tuple, (bytes.1 + tuple - 1) // tuple)
+
+## Positions first..<end as f32 triples (relative to `origin`) into `out`.
+pub func pack_positions_range(mesh: const Mesh*, first: usize, end: usize, out: f32[]) -> !:
+    let points = point_span(mesh)
+    if end > points.length or first > end or out.length != (end - first) * 3: error(errors.invalid, "position range leaves the mesh")
+    memory.copy(Float3[]((Float3*)out.data, end - first), points[first..<end], end - first)
+
+## Smooth normals first..<end (of their domain) into `out`.
+pub func pack_smooth_range(mesh: const Mesh*, first: usize, end: usize, out: f32[]) -> !:
+    let normals = try smooth_normal_span(mesh)
+    if end > normals.length or first > end or out.length != (end - first) * 3: error(errors.invalid, "normal range leaves the mesh")
+    memory.copy(Float3[]((Float3*)out.data, end - first), normals[first..<end], end - first)
+
+## Tuples first..<end of a width-3 float attribute as f32 triples.
+pub func pack_attribute3_range(mesh: const Mesh*, index: i64, first: usize, end: usize, out: f32[]) -> !:
+    let entry = try attribute_entry(mesh, index)
+    if entry.width != 3 or (entry.kind != DataType.float32 and entry.kind != DataType.float64) or (u8)entry.storage == 1: error(errors.invalid, "range packing needs a float attribute of three components")
+    if end > entry.elements or first > end or out.length != (end - first) * 3: error(errors.invalid, "attribute range leaves the mesh")
+    let bytes = entry.data.view()
+    if entry.kind == DataType.float32:
+        memory.copy(out, f32[]((f32*)bytes.data, entry.elements * 3)[first * 3..<end * 3], (end - first) * 3)
+        return
+    let values = f64[]((f64*)bytes.data, entry.elements * 3)
+    for at in 0..<(end - first) * 3: out[at] = (f32)values[first * 3 + at]
+
 ## Where stored positions are measured from.
 pub func origin(mesh: const Mesh*) -> Vector3:
     return mesh_origin(mesh)

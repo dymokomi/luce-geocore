@@ -194,6 +194,12 @@ pub struct AttributeStore:
     pub mutating func writable(index: usize) -> u8[]!:
         return try self.entries.items[index].data.writable()
 
+    ## After `writable`: only tuples first..<end of attribute `index` differ
+    ## from the column it was written from.
+    pub mutating func set_changed(index: usize, first: usize, end: usize):
+        let tuple = self.entries.items[index].tuple_bytes()
+        self.entries.items[index].data.set_changed(first * tuple, end * tuple)
+
     pub mutating func remove(index: usize):
         self.entries.items[index].release()
         for at in index + 1..<self.entries.count:
