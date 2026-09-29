@@ -8,7 +8,9 @@ renderer in [luce-3d](https://github.com/dymokomi/luce-3d) draws them.
 
 A result is immutable once published. Operators return new meshes and share
 everything they did not change, so a snapshot or a worker-to-UI hand-off costs
-no copies. See [the API](docs/API.md), [mesh modeling](docs/MESH_MODELING.md)
+no copies. Besides meshes, a geometry set holds points, instances and curves
+(poly, Bezier, NURBS, Catmull-Rom). See [the API](docs/API.md),
+[curves and set verbs](docs/FAMILIES.md), [mesh modeling](docs/MESH_MODELING.md)
 and [validation](docs/VALIDATION.md).
 
 ```prisma

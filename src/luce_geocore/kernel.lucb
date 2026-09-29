@@ -93,3 +93,57 @@ pub type Selection = groups.Selection
 pub let group_bits_of = groups.group_bits
 pub let clear_group_cache = groups.clear_group_cache
 pub let selection_bits = groups.selection_bits
+
+## Curves (the curves family): the structure, its builder, its evaluated
+## caches and its place in a set.
+import luce_geocore.curves as curves
+pub type Curves = curves.Curves
+pub type CurvesBuilder = curves.CurvesBuilder
+pub type CurveType = curves.CurveType
+pub type KnotMode = curves.KnotMode
+pub type CurveSettings = curves.CurveSettings
+pub type CurveFrames = curves.Frames
+pub type OwnedCurves = curves.Owned
+pub let curve_domain = curves.curve_domain
+pub let curves_origin = curves.curves_origin
+pub let curve_float3_span = curves.float3_span
+import luce_geocore.core.float3 as float3
+## f32 positions and normals, as columns store them.
+pub type Float3 = float3.Float3
+pub let curves_type = curves.curves_type
+pub let set_curves = curves.set_curves
+pub let with_curves = curves.with_curves
+pub let curves_share = curves.curves_share
+pub let curves_dispose = curves.curves_dispose
+pub let curves_subset = curves.curves_subset
+pub let curves_reordered = curves.curves_reordered
+pub let evaluated_offsets = curves.evaluated_offsets
+pub let evaluated_positions = curves.evaluated_positions
+pub let evaluated_frames = curves.evaluated_frames
+pub let evaluated_id = curves.evaluated_id
+pub let curve_group_bits = curves.curve_group_bits
+pub let guess_curve_domain = curves.guess_curve_domain
+pub let convert_curve_bits = curves.convert_curve_bits
+pub type CurvePlace = curves.CurvePlace
+pub type CurveProfile = curves.Profile
+pub let place_at = curves.place_at
+pub let control_parents = curves.control_parents
+pub let line_curves = curves.line_curves
+pub let arc_curves = curves.arc_curves
+pub let spiral_curves = curves.spiral_curves
+pub let resampled_curves = curves.resampled
+pub let trimmed_curves = curves.trimmed
+pub let filleted_curves = curves.filleted
+pub let reversed_curves = curves.reversed
+pub let curves_with_type = curves.with_type
+pub let circle_profile = curves.circle_profile
+pub let curve_profile = curves.curve_profile
+pub let swept_curves = curves.swept
+pub let mesh_edge_curves = curves.mesh_edge_curves
+
+## Set verbs, for Base callers and tests.
+import luce_geocore.set_verbs as set_verbs
+pub type SetVerb = set_verbs.SetVerb
+pub type SetVerbOutput = set_verbs.SetVerbOutput
+pub let run_set_verb = set_verbs.run_set_verb
+pub let find_set_verb = set_verbs.find_set_verb

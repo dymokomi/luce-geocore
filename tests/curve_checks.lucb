@@ -1,0 +1,333 @@
+## Curves: construction and evaluation (poly, Bezier, Catmull-Rom, NURBS
+## with uniform, endpoint and custom knots), frames and lengths, the lazy
+## cache, the set family (bounds, merge, placement, paths), the group
+## language on curves, and every curve verb: counts, attribute and group
+## propagation and determinism.
+import geocore
+import geocore_kernel
+import interop
+import math
+import memory
+from geocore import Vector3, Matrix4, Mesh, MeshPrimitives, GeometrySet
+from geocore_kernel import Curves, CurvesBuilder, CurveType, KnotMode, BitsBuilder, Bits, Attribute, Domain, DataType, GroupReport, SetVerbOutput
+from geocore_kernel import evaluated_offsets, evaluated_positions, evaluated_frames, evaluated_id, curves_dispose, curves_share, curves_subset, curve_group_bits, set_curves, curves_type, set_find, set_put, empty_set, dispose_set, adopt_set, run_set_verb, find_set_verb, arc_curves, line_curves, spiral_curves, clear_group_cache
+
+func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
+    return math.abs(a - b) < tolerance
+
+pub func exercise() -> !:
+    # Mesh to Curve reads its group through the shared group cache.
+    defer clear_group_cache()
+    try evaluation()
+    try nurbs()
+    try frames_and_cache()
+    try sets()
+    try groups()
+    try verbs()
+    try conversions()
+
+## The checks once more, reporting.
+pub func run() -> !:
+    try exercise()
+    print("PASS curves: evaluation, NURBS circles, frames, cache, sets, groups, verbs, conversions")
+
+## A small set of curves: a poly L, a Catmull-Rom S, a Bezier with handles.
+func sample_curves() -> Curves*!:
+    var builder = CurvesBuilder()
+    defer builder.close()
+    try builder.begin(CurveType.poly)
+    try builder.point(Vector3(0.0, 0.0, 0.0))
+    try builder.point(Vector3(1.0, 0.0, 0.0))
+    try builder.point(Vector3(1.0, 1.0, 0.0))
+    try builder.begin(CurveType.catmull_rom, resolution = 4)
+    try builder.point(Vector3(0.0, 0.0, 1.0))
+    try builder.point(Vector3(1.0, 0.0, 1.0))
+    try builder.point(Vector3(2.0, 1.0, 1.0))
+    try builder.begin(CurveType.bezier, resolution = 8)
+    try builder.point(Vector3(0.0, 2.0, 0.0))
+    builder.handles(Vector3(-0.5, 2.0, 0.0), Vector3(0.5, 2.0, 0.0))
+    try builder.point(Vector3(2.0, 2.0, 0.0))
+    builder.handles(Vector3(1.5, 3.0, 0.0), Vector3(2.5, 1.0, 0.0))
+    return try builder.finish()
+
+pub func evaluation() -> !:
+    let curves = try sample_curves()
+    defer curves_dispose(curves)
+    assert(curves.curve_count() == 3 and curves.point_count() == 8)
+    let offsets = try evaluated_offsets(curves)
+    assert(offsets[0] == 0 and offsets[1] == 3 and offsets[2] == 3 + 2 * 4 + 1 and offsets[3] == 12 + 9)
+    let points = try evaluated_positions(curves)
+    # Catmull-Rom passes through its points; its first segment's midpoint
+    # follows the mirrored-end tangents.
+    assert(near((f64)points[3].x, 0.0))
+    assert(near((f64)points[7].x, 1.0))
+    assert(near((f64)points[11].x, 2.0))
+    # The Bezier's midpoint: (p0 + 3 h0r + 3 h1l + p1) / 8.
+    assert(near((f64)points[12 + 4].x, (0.0 + 1.5 + 4.5 + 2.0) / 8.0))
+    assert(near((f64)points[12 + 4].y, (2.0 + 6.0 + 9.0 + 2.0) / 8.0))
+    # Automatic Bezier handles give the Catmull-Rom curve.
+    var builder = CurvesBuilder()
+    defer builder.close()
+    try builder.begin(CurveType.bezier, resolution = 4)
+    try builder.point(Vector3(0.0, 0.0, 1.0))
+    try builder.point(Vector3(1.0, 0.0, 1.0))
+    try builder.point(Vector3(2.0, 1.0, 1.0))
+    let automatic = try builder.finish()
+    defer curves_dispose(automatic)
+    let same = try evaluated_positions(automatic)
+    for at in 0..<(usize)9:
+        assert(near((f64)same[at].x, (f64)points[3 + at].x))
+        assert(near((f64)same[at].y, (f64)points[3 + at].y))
+
+pub func nurbs() -> !:
+    # An exact NURBS circle: every evaluated point on the circle.
+    let circle = try arc_curves(2.0, 0.0, 360.0, 4, 2, 2, 16)
+    defer curves_dispose(circle)
+    assert(circle.curve_count() == 1 and circle.point_count() == 9)
+    let points = try evaluated_positions(circle)
+    assert(points.length == 4 * 16 + 1)
+    for point in points:
+        assert(near(point.vector().length(), 2.0, 0.00001))
+        assert(near((f64)point.y, 0.0))
+    let frames = try evaluated_frames(circle)
+    assert(near((f64)frames.totals[0], 4.0 * math.pi, 0.01))
+    # Endpoint knots reach the end points; uniform ones do not.
+    for mode in 0..<(usize)2:
+        var builder = CurvesBuilder()
+        defer builder.close()
+        try builder.begin(CurveType.nurbs, false, 8, 3, KnotMode.endpoint if mode == 1 else KnotMode.uniform)
+        for at in 0..<(usize)5:
+            try builder.point(Vector3((f64)at, (f64)(at % 2), 0.0))
+        let spline = try builder.finish()
+        defer curves_dispose(spline)
+        let evaluated = try evaluated_positions(spline)
+        let offsets = try evaluated_offsets(spline)
+        # Endpoint: 3 spans; uniform: 5 - 3 + 1 spans, 8 points each, plus one.
+        assert(offsets[1] == 3 * 8 + 1)
+        if mode == 1:
+            assert(near((f64)evaluated[0].x, 0.0))
+            assert(near((f64)evaluated[evaluated.length - 1].x, 4.0))
+        else:
+            assert((f64)evaluated[0].x > 0.4)
+
+pub func frames_and_cache() -> !:
+    let spiral = try spiral_curves(2.0, 24, 1.0, 1.0, 2.0, 3, false, 6)
+    defer curves_dispose(spiral)
+    let frames = try evaluated_frames(spiral)
+    let count = frames.tangents.length
+    for at in 0..<count:
+        let t = frames.tangents[at].vector()
+        let n = frames.normals[at].vector()
+        assert(near(t.length(), 1.0, 0.001))
+        assert(near(n.length(), 1.0, 0.001))
+        assert(near(t.dot(n), 0.0, 0.001))
+        if at > 0: assert(frames.lengths[at] >= frames.lengths[at - 1])
+    # A helix of radius 1 and pitch 1: length 2 * sqrt((2π)² + 1).
+    assert(near((f64)frames.totals[0], 2.0 * math.sqrt(4.0 * math.pi * math.pi + 1.0), 0.05))
+    # Shares keep the cache; asking twice builds once.
+    let id = try evaluated_id(spiral)
+    let shared = try curves_share(spiral)
+    defer curves_dispose(shared)
+    assert((try evaluated_id(shared)) == id and (try evaluated_id(spiral)) == id)
+
+pub func sets() -> !:
+    let set = try set_of(try sample_curves())
+    defer set.release()
+    assert(set.value().has("curves") and not set.value().has_mesh())
+    let box = try set.value().bounds()
+    assert(near(box.minimum.x, 0.0))
+    assert(box.maximum.y > 2.3 and box.maximum.y < 2.6)
+    let merged = try set.value().merged(set)
+    defer merged.release()
+    let joined = set_curves(merged.value()) else trap("merged curves")
+    assert(joined.curve_count() == 6 and joined.point_count() == 16)
+    # The handles of the Bezier half survive; the others got automatic ones.
+    assert(joined.find("handle_l", Domain.point) != none)
+    let moved = try set.value().transformed(Vector3(0.0, 5.0, 0.0), Vector3(), Vector3(2.0, 2.0, 2.0))
+    defer moved.release()
+    let placed = set_curves(moved.value()) else trap("placed curves")
+    let original = set_curves(set.value()) else trap("curves")
+    assert(near(placed.point(1).x, 2.0))
+    assert(near(placed.point(1).y, 5.0))
+    # Placement re-evaluates points but keeps the evaluation shape.
+    assert((try evaluated_offsets(placed)).data == (try evaluated_offsets(original)).data)
+    let described = try set.value().description()
+    defer described.release()
+    assert(described.value == "3 curves / 8 curve points")
+
+pub func groups() -> !:
+    let curves = try sample_curves()
+    defer curves_dispose(curves)
+    var report = GroupReport()
+    var first = try curve_group_bits(curves, "0-1", Domain.face, &report)
+    defer first.close()
+    assert(first.view().population() == 2 and first.view().get(1))
+    var high = try curve_group_bits(curves, "@P.y>1.5", Domain.point, &report)
+    defer high.close()
+    assert(high.view().population() == 2 and high.view().get(6) and high.view().get(7))
+    # Point tests convert to curves whose every point passes.
+    var whole = try curve_group_bits(curves, "@P.y>1.5", Domain.face, &report)
+    defer whole.close()
+    assert(whole.view().population() == 1 and whole.view().get(2))
+    var grown = try curve_group_bits(curves, "grow(1)", Domain.point, &report)
+    defer grown.close()
+    assert(grown.view().population() == 3)
+    var edge = try curve_group_bits(curves, "border(0-2)", Domain.point, &report)
+    defer edge.close()
+    assert(edge.view().population() == 2 and edge.view().get(0) and edge.view().get(2))
+    var numbers = try curve_group_bits(curves, "@primnum=2", Domain.point, &report)
+    defer numbers.close()
+    assert(numbers.view().population() == 2)
+
+## A set of `curves` (taken) with a point attribute `weight` (the point
+## number) and a curve group `picked` on curve 1.
+func tagged(curves: Curves*) -> interop.Reference[GeometrySet]!:
+    return try set_of(try tagged_copy(curves))
+
+## A copy of `curves` (taken) with the tags.
+func tagged_copy(curves: Curves*) -> Curves*!:
+    defer curves_dispose(curves)
+    let copy = try curves_share(curves)
+    errdefer curves_dispose(copy)
+    var values = try alloc f64[copy.point_count()] in memory.heap
+    defer free(values) in memory.heap
+    for at in 0..<values.length: values[at] = (f64)at
+    let weights = try Attribute.from_numbers("weight", Domain.point, 1, values, false, float32 = true)
+    try copy.put_attribute(weights)
+    var picked = try BitsBuilder.zeros(copy.curve_count())
+    defer picked.close()
+    picked.set(1)
+    let group = try Attribute.group_of("picked", Domain.face, copy.curve_count(), picked.view().words)
+    try copy.put_attribute(group)
+    return copy
+
+## A set of `curves` (taken, even on failure).
+func set_of(curves: Curves*) -> interop.Reference[GeometrySet]!:
+    let storage = empty_set() catch failure:
+        curves_dispose(curves)
+        error(failure.code, failure.message)
+    set_put(storage, curves_type(), (void*)curves) catch failure:
+        dispose_set(storage)
+        error(failure.code, failure.message)
+    return try adopt_set(storage)
+
+## Run set verb `name` on `set`.
+func apply(name: str, set: const GeometrySet*, group: str, numbers: const f64[], second: const GeometrySet*? = none) -> interop.Reference[GeometrySet]!:
+    let verb = find_set_verb(name) else trap("no such verb")
+    var output = try run_set_verb(&verb, set, second, group, 0, numbers)
+    defer output.close()
+    let made = output.set else trap("no set")
+    output.set = none
+    return try adopt_set(made)
+
+pub func verbs() -> !:
+    let set = try tagged(try sample_curves())
+    defer set.release()
+    # Resample the picked curve to 5 points; the others pass untouched.
+    let resampled = try apply("Resample Curve", set.value(), "picked", [0.0, 5.0, 0.1])
+    defer resampled.release()
+    let r = set_curves(resampled.value()) else trap("curves")
+    assert(r.curve_count() == 3 and r.range(1).1 == 5 and r.range(0).1 == 3 and r.range(2).1 == 2)
+    assert(near(r.point(3).x, 0.0))
+    assert(near(r.point(7).x, 2.0))
+    # Weights interpolate between control points; the group stays on curve 1.
+    let weights = r.find("weight", Domain.point) else trap("weight")
+    assert(weights.number(3, 0) == 3.0 and weights.number(7, 0) == 5.0 and weights.number(5, 0) > 3.0 and weights.number(5, 0) < 5.0)
+    let group = r.find("picked", Domain.face) else trap("picked")
+    assert(group.is_group() and group.number(1, 0) == 1.0 and group.number(0, 0) == 0.0)
+    # The same run gives the same bytes.
+    let again = try apply("Resample Curve", set.value(), "picked", [0.0, 5.0, 0.1])
+    defer again.release()
+    let r2 = set_curves(again.value()) else trap("curves")
+    for at in 0..<r.point_count(): assert(r.position_span()[at] == r2.position_span()[at])
+    # Trim half of the L; its length halves.
+    let trimmed = try apply("Trim Curve", set.value(), "0", [0.0, 0.0, 0.5])
+    defer trimmed.release()
+    let t = set_curves(trimmed.value()) else trap("curves")
+    let tf = try evaluated_frames(t)
+    assert(near((f64)tf.totals[0], 1.0))
+    assert(t.range(0).1 == 2)
+    # A fillet rounds the L's corner with 4 segments: 2 + 5 points.
+    let filleted = try apply("Fillet Curve", set.value(), "0", [0.25, 4.0, 1.0])
+    defer filleted.release()
+    let f = set_curves(filleted.value()) else trap("curves")
+    assert(f.range(0).1 == 7)
+    assert(near(f.point(1).x, 0.75))
+    # Reverse flips points and swaps Bezier handles.
+    var nothing: f64[]
+    let reversed = try apply("Reverse Curve", set.value(), "2", nothing)
+    defer reversed.release()
+    let rv = set_curves(reversed.value()) else trap("curves")
+    let before = set_curves(set.value()) else trap("curves")
+    assert(near(rv.point(6).x, 2.0))
+    let left = rv.find("handle_l", Domain.point) else trap("handles")
+    assert(near(left.number(6, 0), 2.5))
+    # Set type: the L becomes a Catmull-Rom curve of 2 * 12 + 1 points.
+    let typed = try apply("Set Curve Type", set.value(), "0", [3.0])
+    defer typed.release()
+    assert((try evaluated_offsets(set_curves(typed.value()) else trap("curves")))[1] == 25)
+    discard(before)
+    # Generators.
+    let line = try apply("Curve Line", set.value(), "", [0.0, 0.0, 0.0, 1.0, 3.0, 4.0, 0.0])
+    defer line.release()
+    let l = set_curves(line.value()) else trap("curves")
+    assert(l.point_count() == 4)
+    assert(near(l.point(3).y, 3.0))
+    let circle = try apply("Curve Circle", set.value(), "", [1.5, 12.0, 1.0, 0.0, 6.0])
+    defer circle.release()
+    let c = set_curves(circle.value()) else trap("curves")
+    assert(c.point_count() == 12 and c.settings(0).cyclic)
+    let arc = try apply("Curve Arc", set.value(), "", [1.0, 0.0, 180.0, 4.0, 0.0, 2.0, 12.0])
+    defer arc.release()
+    assert((set_curves(arc.value()) else trap("curves")).point_count() == 5)
+
+pub func sweep_only() -> !:
+    let path = try tagged(try line_curves(Vector3(), Vector3(0.0, 2.0, 0.0), 3, 0, 12))
+    defer path.release()
+    let tube = try apply("Curve to Mesh", path.value(), "", [0.0, 0.25, 12.0, 1.0, 1.0, 0.0])
+    defer tube.release()
+
+pub func outline_only() -> !:
+    let grid = try MeshPrimitives.grid(3.0, 3)
+    defer grid.release()
+    let sheet = try GeometrySet.of_mesh(grid)
+    defer sheet.release()
+    let outline = try apply("Mesh to Curve", sheet.value(), "", [1.0])
+    defer outline.release()
+
+pub func conversions() -> !:
+    let path = try tagged(try line_curves(Vector3(), Vector3(0.0, 2.0, 0.0), 3, 0, 12))
+    defer path.release()
+    # A 12-segment circle swept along 3 points: 2 rings of quads, 2 caps.
+    let tube = try apply("Curve to Mesh", path.value(), "", [0.0, 0.25, 12.0, 1.0, 1.0, 0.0])
+    defer tube.release()
+    assert(set_curves(tube.value()) == none)
+    let mesh = (try tube.value().mesh()) else trap("mesh")
+    defer mesh.release()
+    assert(mesh.value().point_count() == 36 and mesh.value().face_count() == 24 + 2)
+    assert(mesh.value().find_attribute("uv", 1) >= 0 and mesh.value().find_attribute("weight", 0) >= 0)
+    let bounds = mesh.value().bounds()
+    assert(near(bounds.maximum.x, 0.25))
+    assert(near(bounds.maximum.y, 2.0))
+    # The circle's normals point out: a face on +X faces +X.
+    var outward = false
+    for face in 0..<mesh.value().face_count():
+        let center = try mesh.value().face_center(face)
+        let normal = try mesh.value().face_normal(face)
+        if center.x > 0.2 and center.y > 0.2 and center.y < 1.8: outward = outward or normal.x > 0.9
+    assert(outward)
+    # Mesh to Curve: a 3x3 grid's boundary is one closed curve of 12 points.
+    let grid = try MeshPrimitives.grid(3.0, 3)
+    defer grid.release()
+    let sheet = try GeometrySet.of_mesh(grid)
+    defer sheet.release()
+    let outline = try apply("Mesh to Curve", sheet.value(), "", [1.0])
+    defer outline.release()
+    let o = set_curves(outline.value()) else trap("curves")
+    assert(o.curve_count() == 1 and o.point_count() == 12 and o.settings(0).cyclic and not outline.value().has_mesh())
+    let every = try apply("Mesh to Curve", sheet.value(), "", [0.0])
+    defer every.release()
+    let e = set_curves(every.value()) else trap("curves")
+    var total: usize = 0
+    for curve in 0..<e.curve_count(): total += e.range(curve).1 - (0 if e.settings(curve).cyclic else 1)
+    assert(total == 24)

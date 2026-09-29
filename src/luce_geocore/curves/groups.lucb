@@ -1,0 +1,266 @@
+## The group language on curves: the same programs (groups/program.lucb)
+## evaluated over curve points and curves (the primitive domain). Numbers,
+## names, `@` tests and name filters work as on meshes; conversions go
+## point -> curve when all its points are members, curve -> point for every
+## point of a member curve. grow and shrink walk along curves, border is the
+## ends of each run of members, connected takes whole curves. Edge forms and
+## loop/ring have no meaning on curves and fail.
+
+## Bits of `target` (point or curve domain) selected by `text` on `curves`;
+## empty text selects everything.
+pub func curve_group_bits(curves: const Curves*, text: str, target: Domain, report: GroupReport*) -> BitsBuilder!:
+    if target != Domain.point and target != curve_domain: error(errors.invalid, "curve groups are point or primitive groups")
+    var blank = true
+    for byte in text.bytes: blank = blank and (byte == 32 or byte == 9 or byte == 10)
+    let size = curves.point_count() if target == Domain.point else curves.curve_count()
+    if blank: return try BitsBuilder.ones(size)
+    var program = try GroupProgram.parse(text)
+    defer program.close()
+    var run = CurveEvaluation(&program, curves, report)
+    return try run.terms(program.top_first, program.top_count, target)
+
+## The domain an expression's first name or attribute lives on, else
+## `fallback` (Houdini's "guess from group").
+pub func guess_curve_domain(curves: const Curves*, text: str, fallback: Domain) -> Domain:
+    var program = GroupProgram.parse(text) catch failure: return fallback
+    defer program.close()
+    for index in program.top_first..<program.top_first + program.top_count:
+        let term = &program.terms.items[(usize)index]
+        if term.kind != AtomKind.name and term.kind != AtomKind.attribute: continue
+        let name = program.text(term)
+        if name == "ptnum" or name == "P": return Domain.point
+        if name == "primnum": return curve_domain
+        for at in 0..<curves.attributes.count():
+            let entry = curves.attributes.entry(at)
+            if entry.domain != Domain.point and entry.domain != curve_domain: continue
+            if term.kind == AtomKind.name and entry.is_group() and glob(name, entry.name()): return entry.domain
+            if term.kind == AtomKind.attribute and entry.name() == name: return entry.domain
+    return fallback
+
+struct CurveEvaluation:
+    let program: const GroupProgram*
+    let curves: const Curves*
+    let report: GroupReport*
+
+    func size(domain: Domain) -> usize:
+        return self.curves.point_count() if domain == Domain.point else self.curves.curve_count()
+
+    mutating func terms(first: u32, count: u32, target: Domain) -> BitsBuilder!:
+        var result = try BitsBuilder.zeros(self.size(target))
+        errdefer result.close()
+        for index in first..<first + count:
+            let term = &self.program.terms.items[(usize)index]
+            var atom = try self.atom(term, target)
+            defer atom.close()
+            match term.combine:
+                .add: result.unite(atom.view())
+                .add_complement: result.unite_complement(atom.view())
+                .remove: result.subtract(atom.view())
+                _: result.intersect(atom.view())
+        return result
+
+    mutating func atom(term: const Term*, target: Domain) -> BitsBuilder!:
+        match term.kind:
+            .all: return try BitsBuilder.ones(self.size(target))
+            .range: return try self.range(term, target)
+            .name: return try self.name(self.program.text(term), target)
+            .names: return try self.terms(term.first, term.count, target)
+            .attribute: return try self.attribute(term, target)
+            .point_edges, .face_edge: error(errors.invalid, "group syntax: curves have no edge groups")
+            _: return try self.call(term, target)
+
+    mutating func range(term: const Term*, target: Domain) -> BitsBuilder!:
+        let size = self.size(target)
+        var bits = try BitsBuilder.zeros(size)
+        errdefer bits.close()
+        let numbers = self.program.numbers.view()[(usize)term.first..<(usize)(term.first + term.count)]
+        let first = numbers[0]
+        var last = numbers[1]
+        if last < 0.0: last = (f64)size - 1.0
+        let keep = (usize)numbers[2]
+        let step = (usize)numbers[3]
+        if last < first:
+            self.report.misses += 1
+            return bits
+        let end = (usize)last + 1
+        if end > size: self.report.misses += (end - (usize)math.max(first, (f64)size) + step - 1) // step
+        if (usize)first < size: bits.set_stride((usize)first, end if end < size else size, keep, step)
+        return bits
+
+    ## Groups matching `pattern` on the target, else on the other domain,
+    ## converted.
+    mutating func name(pattern: str, target: Domain) -> BitsBuilder!:
+        let order: Domain[2] = [target, Domain.point if target == curve_domain else curve_domain]
+        for domain in order:
+            var bits = try BitsBuilder.zeros(self.size(domain))
+            var found = false
+            for index in 0..<self.curves.attributes.count():
+                let entry = self.curves.attributes.entry(index)
+                if not entry.is_group() or entry.domain != domain or not glob(pattern, entry.name()): continue
+                bits.unite(Bits.of_bytes(entry.data.view(), entry.elements))
+                found = true
+            if not found:
+                bits.close()
+                continue
+            if domain == target: return bits
+            defer bits.close()
+            self.report.converted = true
+            return try convert_curve_bits(self.curves, bits.view(), domain, target)
+        self.report.unknown_names += 1
+        return try BitsBuilder.zeros(self.size(target))
+
+    ## `@name op values` on the target, else on the attribute's own domain,
+    ## converted. `@ptnum`, `@primnum`, `@elemnum` and `@P` are built in.
+    mutating func attribute(term: const Term*, target: Domain) -> BitsBuilder!:
+        let name = self.program.text(term)
+        var kind: u8 = 3
+        var domain = target
+        var entry: const Attribute*? = none
+        if name == "ptnum":
+            kind = 1
+            domain = Domain.point
+        elif name == "primnum":
+            kind = 1
+            domain = curve_domain
+        elif name == "elemnum" or name == "intrinsic:indexorder":
+            kind = 1
+        elif name == "P":
+            kind = 2
+            domain = Domain.point
+        else:
+            let order: Domain[3] = [target, Domain.point if target == curve_domain else curve_domain, Domain.detail]
+            for candidate in order:
+                if let found = self.curves.find(name, candidate):
+                    if entry == none:
+                        entry = found
+                        domain = target if candidate == Domain.detail else candidate
+            if entry == none: error(errors.invalid, "group syntax: no such attribute")
+        var bits = try self.tested(term, kind, entry, domain)
+        if domain == target: return bits
+        defer bits.close()
+        self.report.converted = self.report.converted or kind != 1
+        return try convert_curve_bits(self.curves, bits.view(), domain, target)
+
+    mutating func tested(term: const Term*, kind: u8, entry: const Attribute*?, domain: Domain) -> BitsBuilder!:
+        let size = self.size(domain)
+        var bits = try BitsBuilder.zeros(size)
+        errdefer bits.close()
+        let component = (usize)(term.component if term.component >= 0 else 0)
+        if let attribute = entry:
+            if attribute.kind == DataType.text:
+                for element in 0..<size:
+                    let text = attribute.text_at(element)
+                    var hit = text.length > 0
+                    if term.compare != Compare.exists:
+                        hit = false
+                        for span in term.spans_first..<term.spans_first + term.spans_count:
+                            hit = hit or glob(self.program.span(span), text)
+                        if term.compare == Compare.not_equal: hit = not hit
+                    if hit: bits.set(element)
+                return bits
+            if component >= attribute.width: error(errors.invalid, "group syntax: the attribute has fewer components")
+        elif kind == 2 and component >= 3:
+            error(errors.invalid, "group syntax: the attribute has fewer components")
+        let values = self.program.numbers.view()[(usize)term.first..<(usize)term.first + (usize)term.count * 2]
+        let positions = self.curves.positions.view()
+        for element in 0..<size:
+            var value = (f64)element
+            if kind == 2:
+                let p = positions[element]
+                value = (f64)p.x + self.curves.origin.x if component == 0 else ((f64)p.y + self.curves.origin.y if component == 1 else (f64)p.z + self.curves.origin.z)
+            elif kind == 3:
+                let attribute = entry else trap("attribute")
+                value = attribute.number(0 if attribute.storage == Storage.single or attribute.domain == Domain.detail else element, component)
+            if compared(term.compare, values, value): bits.set(element)
+        return bits
+
+    mutating func call(term: const Term*, target: Domain) -> BitsBuilder!:
+        let steps = (usize)math.max(0.0, term.argument)
+        match term.function:
+            .loop, .ring: error(errors.invalid, "group syntax: loop and ring need polygon edges")
+            .convert:
+                var inner = try self.terms(term.first, term.count, target)
+                return inner
+            _:
+                var inner = try self.terms(term.first, term.count, Domain.point)
+                defer inner.close()
+                var walked = try BitsBuilder.copy_of(inner.view())
+                defer walked.close()
+                match term.function:
+                    .grow:
+                        for step in 0..<steps: try step_along(self.curves, &walked, true)
+                    .shrink:
+                        for step in 0..<steps: try step_along(self.curves, &walked, false)
+                    .border: try border_points(self.curves, &walked)
+                    _:
+                        var whole = try convert_curve_bits(self.curves, walked.view(), Domain.point, curve_domain, false)
+                        defer whole.close()
+                        walked.close()
+                        walked = try convert_curve_bits(self.curves, whole.view(), curve_domain, Domain.point)
+                if target == Domain.point: return try BitsBuilder.copy_of(walked.view())
+                return try convert_curve_bits(self.curves, walked.view(), Domain.point, target)
+
+func compared(compare: Compare, values: const f64[], value: f64) -> bool:
+    let pairs = values.length // 2
+    match compare:
+        .exists: return value != 0.0
+        .equal, .not_equal:
+            var hit = false
+            for at in 0..<pairs:
+                hit = hit or (value >= values[at * 2] and value <= values[at * 2 + 1])
+            return hit if compare == Compare.equal else not hit
+        .less: return value < values[0]
+        .greater: return value > values[0]
+        .less_equal: return value <= values[0]
+        .greater_equal: return value >= values[0]
+        _: return ((i64)value & (i64)values[0]) != 0
+
+## Point bits as curve bits (a curve when all its points are members, or any
+## when not `all`), or curve bits as the bits of their points.
+pub func convert_curve_bits(curves: const Curves*, bits: Bits, source: Domain, destination: Domain, all: bool = true) -> BitsBuilder!:
+    if source == destination: return try BitsBuilder.copy_of(bits)
+    let count = curves.curve_count()
+    if source == Domain.point:
+        var result = try BitsBuilder.zeros(count)
+        errdefer result.close()
+        for curve in 0..<count:
+            let (first, size) = curves.range(curve)
+            var every = size > 0
+            var some = false
+            for at in first..<first + size:
+                let member = bits.get(at)
+                every = every and member
+                some = some or member
+            if (every if all else some): result.set(curve)
+        return result
+    var result = try BitsBuilder.zeros(curves.point_count())
+    errdefer result.close()
+    for curve in 0..<count:
+        if not bits.get(curve): continue
+        let (first, size) = curves.range(curve)
+        result.set_range(first, first + size)
+    return result
+
+## One step of grow (members' neighbours along the curve join) or shrink
+## (members with a non-member or missing neighbour leave).
+func step_along(curves: const Curves*, bits: BitsBuilder*, grow: bool) -> !:
+    var before = try BitsBuilder.copy_of(bits.view())
+    defer before.close()
+    for curve in 0..<curves.curve_count():
+        let (first, size) = curves.range(curve)
+        let cyclic = curves.settings(curve).cyclic
+        for at in 0..<size:
+            let previous = (at + size - 1) % size if cyclic or at > 0 else size
+            let next = (at + 1) % size if cyclic or at + 1 < size else size
+            let here = before.view().get(first + at)
+            let left = previous < size and before.view().get(first + previous)
+            let right = next < size and before.view().get(first + next)
+            if grow and not here and (left or right): bits.set(first + at)
+            if not grow and here and not (left and right): bits.clear(first + at)
+
+## Members with a non-member or missing neighbour: the ends of each run.
+func border_points(curves: const Curves*, bits: BitsBuilder*) -> !:
+    var inner = try BitsBuilder.copy_of(bits.view())
+    defer inner.close()
+    try step_along(curves, &inner, false)
+    bits.subtract(inner.view())

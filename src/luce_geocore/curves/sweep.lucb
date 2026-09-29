@@ -1,0 +1,219 @@
+## Curve to Mesh: a profile swept along each selected curve (Blender's Curve
+## to Mesh, Houdini's Sweep). The profile is a curve's evaluated points in its
+## XY plane, or a circle; each evaluated point of the path places one ring of
+## it on the minimum-twist frame (tangent, normal, binormal). Rings join in
+## quads; an open path with a closed profile can be capped. Faces take their
+## curve's attributes, ring points their control points' (interpolated), and
+## corners get `uv`: around the profile, then along the path's length.
+
+## A profile: 2D points and whether they close.
+pub struct Profile:
+    pub var points: Growing[Vector3]
+    pub var cyclic: bool = false
+
+    pub mutating func close():
+        self.points.close()
+
+## A circle profile of `segments` points.
+pub func circle_profile(radius: f64, segments: i64) -> Profile!:
+    if not (radius > 0.0 and math.is_finite(radius)) or segments < 3 or segments > 4096: error(errors.invalid, "a circle profile needs a positive radius and 3..4096 segments")
+    var profile = Profile(Growing[Vector3](), true)
+    errdefer profile.close()
+    for at in 0..<(usize)segments:
+        let angle = 2.0 * math.pi * (f64)at / (f64)segments
+        try profile.points.push(Vector3(radius * math.cos(angle), radius * math.sin(angle), 0.0))
+    return profile
+
+## The first curve of `curves`, evaluated, as a profile (its X and Y).
+pub func curve_profile(curves: const Curves*, scale: f64) -> Profile!:
+    if curves.curve_count() == 0: error(errors.invalid, "the profile input has no curves")
+    let offsets = try evaluated_offsets(curves)
+    let points = try evaluated_positions(curves)
+    let count = (usize)offsets[1]
+    if count < 2: error(errors.invalid, "the profile curve needs two or more points")
+    var profile = Profile(Growing[Vector3](), curves.settings(0).cyclic)
+    errdefer profile.close()
+    for at in 0..<count:
+        let p = points[at].vector().add(curves.origin)
+        try profile.points.push(Vector3(p.x * scale, p.y * scale, 0.0))
+    return profile
+
+## A mesh of `profile` swept along the selected curves (with caps on open
+## paths when the profile is closed and `caps` is on). Each curve's share of
+## points, faces and corners is counted first; the curves then fill their
+## ranges in parallel.
+pub func swept(curves: const Curves*, selected: Bits, profile: const Profile*, caps: bool) -> Mesh*!:
+    let offsets = try evaluated_offsets(curves)
+    let path = try evaluated_positions(curves)
+    let frames = try evaluated_frames(curves)
+    let ring = profile.points.count
+    let around = ring if profile.cyclic else ring - 1
+    let count = curves.curve_count()
+    # Per curve: first point, face, corner (and triangle entry) of its part.
+    var starts = try alloc SweepStart[count + 1] in memory.heap
+    defer free(starts) in memory.heap
+    var points: usize = 0
+    var faces: usize = 0
+    var corners: usize = 0
+    var triangles: usize = 0
+    for curve in 0..<count:
+        starts[curve] = SweepStart(points, faces, corners, triangles)
+        let evaluated = (usize)offsets[curve + 1] - (usize)offsets[curve]
+        if not selected.get(curve) or evaluated < 2: continue
+        let cyclic = curves.settings(curve).cyclic
+        let along = evaluated if cyclic else evaluated - 1
+        points += evaluated * ring
+        faces += along * around
+        corners += along * around * 4
+        triangles += along * around * 6
+        if caps and profile.cyclic and not cyclic and ring >= 3:
+            faces += 2
+            corners += 2 * ring
+            triangles += 2 * (ring - 2) * 3
+        if corners > 33554432 or points > 8388608: error(errors.limit, "the swept mesh exceeds 8M points or 32M corners")
+    starts[count] = SweepStart(points, faces, corners, triangles)
+    var positions = try Column[Float3].allocate(points)
+    errdefer positions.release()
+    var face_offsets = try Column[i32].allocate(faces + 1)
+    errdefer face_offsets.release()
+    var corner_points = try Column[i32].allocate(corners)
+    errdefer corner_points.release()
+    var triangle_corners = try Column[i32].allocate(triangles)
+    errdefer triangle_corners.release()
+    var uv = try Attribute.create("uv", Domain.corner, DataType.float32, 2, corners)
+    defer uv.release()
+    let face_parents = try alloc i32[faces] in memory.heap
+    defer free(face_parents) in memory.heap
+    let point_parents = try alloc i32[points] in memory.heap
+    defer free(point_parents) in memory.heap
+    let point_others = try alloc i32[points] in memory.heap
+    defer free(point_others) in memory.heap
+    let point_mix = try alloc f32[points] in memory.heap
+    defer free(point_mix) in memory.heap
+    var work = SweepWork(curves, selected, profile, caps, offsets, path, frames, starts, positions.span(), face_offsets.span(), corner_points.span(),
+                         triangle_corners.span(), attribute_ops.typed_mut[f32](uv.data.span()), face_parents, point_parents, point_others, point_mix)
+    parallel.parallel_for(count, 16, sweep_curves, (void*)&work)
+    face_offsets.span()[faces] = (i32)corners
+    var empty_normals: Column[Float3]
+    var empty_precise: Column[Vector3]
+    let mesh = try assembled(positions.take(), curves.origin, face_offsets.take(), corner_points.take(), triangle_corners.take(), empty_normals, empty_precise)
+    errdefer mesh_dispose(mesh)
+    # Curve attributes to faces, point attributes to ring points, uv.
+    for index in 0..<curves.attributes.count():
+        let entry = curves.attributes.entry(index)
+        if is_builtin(entry.name(), entry.domain): continue
+        if entry.domain == curve_domain:
+            try put_attribute(mesh, try attribute_ops.remapped(entry, face_parents, faces))
+        elif entry.domain == Domain.point:
+            try put_attribute(mesh, try mixed_points(entry, point_parents, point_others, point_mix))
+        elif entry.domain == Domain.detail:
+            try put_attribute(mesh, entry.share())
+    try put_attribute(mesh, uv.share())
+    return mesh
+
+struct SweepStart:
+    let point: usize
+    let face: usize
+    let corner: usize
+    let triangle: usize
+
+struct SweepWork:
+    let curves: const Curves*
+    let selected: Bits
+    let profile: const Profile*
+    let caps: bool
+    let offsets: const i32[]
+    let path: const Float3[]
+    let frames: Frames
+    let starts: const SweepStart[]
+    let positions: Float3[]
+    let face_offsets: i32[]
+    let corners: i32[]
+    let triangles: i32[]
+    let uvs: f32[]
+    let face_parents: i32[]
+    let point_parents: i32[]
+    let point_others: i32[]
+    let point_mix: f32[]
+
+func sweep_curves(context: void*?, first: usize, end: usize):
+    let work = (SweepWork*)(context else return)
+    for curve in first..<end:
+        if work.starts[curve + 1].point > work.starts[curve].point: sweep_curve(work, curve)
+
+func sweep_curve(work: SweepWork*, curve: usize):
+    let start = work.starts[curve]
+    let profile = work.profile
+    let ring = profile.points.count
+    let around = ring if profile.cyclic else ring - 1
+    let low = (usize)work.offsets[curve]
+    let count = (usize)work.offsets[curve + 1] - low
+    let cyclic = work.curves.settings(curve).cyclic
+    let total = (f64)work.frames.totals[curve]
+    for at in 0..<count:
+        let center = work.path[low + at].vector()
+        let tangent = work.frames.tangents[low + at].vector()
+        let normal = work.frames.normals[low + at].vector()
+        let binormal = tangent.cross(normal)
+        let (a, b, t) = control_parents(work.curves, curve, count, at, 0.0)
+        for side in 0..<ring:
+            let point = profile.points.items[side]
+            let index = start.point + at * ring + side
+            work.positions[index] = Float3.of(center.add(normal.multiply_scalar(point.x)).add(binormal.multiply_scalar(point.y)))
+            work.point_parents[index] = a
+            work.point_others[index] = b
+            work.point_mix[index] = (f32)t
+    var face = start.face
+    var corner = start.corner
+    var triangle = start.triangle
+    let base = (i32)start.point
+    let along = count if cyclic else count - 1
+    for step in 0..<along:
+        let next = (step + 1) % count
+        let v0 = (f32)((f64)work.frames.lengths[low + step] / total) if total > 0.0 else (f32)0.0
+        let v1 = ((f32)1.0 if next == 0 else (f32)((f64)work.frames.lengths[low + next] / total)) if total > 0.0 else (f32)0.0
+        for side in 0..<around:
+            let other = (side + 1) % ring
+            work.face_offsets[face] = (i32)corner
+            work.face_parents[face] = (i32)curve
+            work.corners[corner] = base + (i32)(step * ring + side)
+            work.corners[corner + 1] = base + (i32)(step * ring + other)
+            work.corners[corner + 2] = base + (i32)(next * ring + other)
+            work.corners[corner + 3] = base + (i32)(next * ring + side)
+            let c = (i32)corner
+            work.triangles[triangle] = c
+            work.triangles[triangle + 1] = c + 1
+            work.triangles[triangle + 2] = c + 2
+            work.triangles[triangle + 3] = c
+            work.triangles[triangle + 4] = c + 2
+            work.triangles[triangle + 5] = c + 3
+            let u0 = (f32)side / (f32)around
+            let u1 = (f32)(side + 1) / (f32)around
+            let uv = corner * 2
+            work.uvs[uv] = u0
+            work.uvs[uv + 1] = v0
+            work.uvs[uv + 2] = u1
+            work.uvs[uv + 3] = v0
+            work.uvs[uv + 4] = u1
+            work.uvs[uv + 5] = v1
+            work.uvs[uv + 6] = u0
+            work.uvs[uv + 7] = v1
+            face += 1
+            corner += 4
+            triangle += 6
+    if work.caps and profile.cyclic and not cyclic and ring >= 3:
+        for end in 0..<(usize)2:
+            work.face_offsets[face] = (i32)corner
+            work.face_parents[face] = (i32)curve
+            for side in 0..<ring:
+                # The start cap faces back along the path, the end forward.
+                let index = ring - 1 - side if end == 0 else side
+                let row = 0 if end == 0 else count - 1
+                work.corners[corner] = base + (i32)(row * ring + index)
+                let point = profile.points.items[index]
+                work.uvs[corner * 2] = (f32)(point.x * 0.5 + 0.5)
+                work.uvs[corner * 2 + 1] = (f32)(point.y * 0.5 + 0.5)
+                corner += 1
+            for at in 0..<(ring - 2) * 3: work.triangles[triangle + at] = -1
+            triangle += (ring - 2) * 3
+            face += 1

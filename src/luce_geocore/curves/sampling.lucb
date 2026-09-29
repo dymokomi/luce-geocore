@@ -1,0 +1,62 @@
+## Sampling evaluated curves: a position at an arc length, and which two
+## control points an evaluated position lies between, so kernels that make
+## new points (Resample, Trim, Curve to Mesh) carry point attributes by
+## interpolating the control points' values.
+
+## A place on an evaluated curve: evaluated point `index` and `fraction` of
+## the way to the next (the first again past the end of a cyclic curve).
+pub struct CurvePlace:
+    pub let position: Vector3
+    pub let index: usize
+    pub let fraction: f64
+
+## The place `length` along curve `curve` from its start (clamped to the
+## curve). `points` and `lengths` are the curve's evaluated points and arc
+## lengths, `total` its whole length.
+pub func place_at(points: const Float3[], lengths: const f32[], total: f64, cyclic: bool, length: f64) -> CurvePlace:
+    let count = points.length
+    if count == 0: return CurvePlace(Vector3(), 0, 0.0)
+    if count == 1 or length <= 0.0: return CurvePlace(points[0].vector(), 0, 0.0)
+    let last = (f64)lengths[count - 1]
+    if length >= last:
+        if cyclic and total > last:
+            let fraction = math.min(1.0, (length - last) / (total - last))
+            let position = points[count - 1].vector().multiply_scalar(1.0 - fraction).add(points[0].vector().multiply_scalar(fraction))
+            return CurvePlace(position, count - 1, fraction)
+        return CurvePlace(points[count - 1].vector(), count - 1, 0.0)
+    # The last evaluated point at or before `length`.
+    var low: usize = 0
+    var high: usize = count - 1
+    while high - low > 1:
+        let middle = (low + high) // 2
+        if (f64)lengths[middle] <= length: low = middle
+        else: high = middle
+    let span = (f64)lengths[low + 1] - (f64)lengths[low]
+    let fraction = (length - (f64)lengths[low]) / span if span > 0.0 else 0.0
+    let position = points[low].vector().multiply_scalar(1.0 - fraction).add(points[low + 1].vector().multiply_scalar(fraction))
+    return CurvePlace(position, low, fraction)
+
+## The control points (global ids) evaluated point `index` + `fraction` of
+## curve `curve` lies between, and the share of the second.
+pub func control_parents(curves: const Curves*, curve: usize, evaluated: usize, index: usize, fraction: f64) -> (i32, i32, f64):
+    let (first, points) = curves.range(curve)
+    let settings = curves.settings(curve)
+    if points <= 1: return ((i32)first, -1, 0.0)
+    var position = (f64)index + fraction
+    match settings.kind:
+        .bezier, .catmull_rom:
+            position = position / (f64)settings.resolution
+        .nurbs:
+            let spans = (f64)(evaluated if settings.cyclic else evaluated - 1)
+            let segments = (f64)(points if settings.cyclic else points - 1)
+            if evaluated != points and spans > 0.0: position = position / spans * segments
+        _: discard(0)
+    var a = (usize)math.floor(position)
+    var t = position - (f64)a
+    if not settings.cyclic and a >= points - 1:
+        a = points - 1
+        t = 0.0
+    a = a % points
+    let b = (a + 1) % points
+    if t <= 0.0: return ((i32)(first + a), -1, 0.0)
+    return ((i32)(first + a), (i32)(first + b), t)

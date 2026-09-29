@@ -1,0 +1,347 @@
+## The curves family in a geometry set: sharing, bounds, placement (the
+## Transform node), joining (Merge), path filters (Blast) and descriptions,
+## plus whole-curve subsets and reorders that carry every attribute.
+
+pub let curves_component: ComponentType = ComponentType("curves", share_curves, close_curves, curves_size, curves_bytes, curves_bounds, place_curves, join_curves, curve_paths, filter_curves, describe_curves, "", no_trace)
+
+## The curves family, for callers outside this module (a global's address
+## does not compile in a global initializer through the C backend).
+pub func curves_type() -> const ComponentType*:
+    return &curves_component
+
+## The set's curves, if it has any (borrowed while the set lives).
+pub func set_curves(set: const GeometrySet*) -> const Curves*?:
+    let data = set_find(set, &curves_component) else return none
+    return (const Curves*)data
+
+## A heap copy of `set` with `curves` (taken) as its curves.
+pub func with_curves(set: const GeometrySet*, curves: Curves*) -> GeometrySet*!:
+    let storage = set_storage(set) catch failure:
+        curves_dispose(curves)
+        error(failure.code, failure.message)
+    set_put(storage, &curves_component, (void*)curves) catch failure:
+        dispose_set(storage)
+        error(failure.code, failure.message)
+    return storage
+
+func share_curves(data: const void*) -> void*!:
+    return (void*)(try ((const Curves*)data).shared_storage())
+
+func close_curves(data: void*):
+    curves_dispose((Curves*)data)
+
+func curves_size(data: const void*) -> usize:
+    return ((const Curves*)data).point_count()
+
+func curves_bytes(data: const void*, ids: IdSet*) -> usize!:
+    let curves = (const Curves*)data
+    var total: usize = 128
+    total += try ids.charge(curves.positions.id(), curves.positions.bytes())
+    total += try ids.charge(curves.offsets.id(), curves.offsets.bytes())
+    total += try ids.charge(curves.knots.id(), curves.knots.bytes())
+    total += try ids.charge(curves.knot_offsets.id(), curves.knot_offsets.bytes())
+    for index in 0..<curves.attributes.count():
+        let entry = curves.attributes.entry(index)
+        total += try ids.charge(entry.data.id(), entry.data.bytes())
+        total += try ids.charge(entry.table.id(), entry.table.bytes())
+    return total
+
+## The bounds of what the curves draw: their evaluated points.
+func curves_bounds(data: const void*, matrix: Matrix4, out: Bounds*) -> bool!:
+    let curves = (const Curves*)data
+    if curves.point_count() == 0: return false
+    let points = try evaluated_positions(curves)
+    *out = placed_box(positions_bounds(points, curves.origin), matrix)
+    return true
+
+## Points and handles take the placement; vectors turn with it and normals
+## take its inverse transpose. The evaluation shape is shared.
+func place_curves(data: const void*, placement: const Placement*) -> void*!:
+    let curves = (const Curves*)data
+    let matrix = placement.matrix
+    let origin = matrix.transform_point(curves.origin)
+    let previous = curves.positions.view()
+    var positions = try Column[Float3].allocate(previous.length)
+    errdefer positions.release()
+    let out = positions.span()
+    for at in 0..<previous.length: out[at] = Float3.of(matrix.transform_direction(previous[at].vector()))
+    var attributes = try curves.attributes.shared()
+    errdefer attributes.close()
+    try transform_attributes(&attributes, matrix)
+    let handed = attributes
+    attributes = AttributeStore()
+    return (void*)(try curves_assembled(positions.take(), origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), handed, curves.cache))
+
+## Width-3 float attributes by role: positions and vectors take the linear
+## part (they are measured in the positions' frame), normals its inverse
+## transpose. Columns are written copy-on-write.
+pub func transform_attributes(attributes: AttributeStore*, matrix: Matrix4) -> !:
+    for index in 0..<attributes.count():
+        let entry = attributes.entry(index)
+        if entry.width != 3 or (entry.kind != DataType.float32 and entry.kind != DataType.float64): continue
+        if entry.role != Role.position and entry.role != Role.vector and entry.role != Role.normal: continue
+        let role = entry.role
+        let wide = entry.kind == DataType.float64
+        let bytes = try attributes.writable(index)
+        let count = bytes.length // (24 if wide else 12)
+        for at in 0..<count:
+            var value = Vector3()
+            if wide:
+                let values = attribute_ops.typed_mut[f64](bytes)
+                value = Vector3(values[at * 3], values[at * 3 + 1], values[at * 3 + 2])
+            else:
+                let values = attribute_ops.typed_mut[f32](bytes)
+                value = Vector3((f64)values[at * 3], (f64)values[at * 3 + 1], (f64)values[at * 3 + 2])
+            var moved = matrix.transform_direction(value)
+            if role == Role.normal:
+                if value.length() <= 0.000000001: continue
+                moved = try matrix.transform_normal(value)
+            if wide:
+                let values = attribute_ops.typed_mut[f64](bytes)
+                values[at * 3] = moved.x
+                values[at * 3 + 1] = moved.y
+                values[at * 3 + 2] = moved.z
+            else:
+                let values = attribute_ops.typed_mut[f32](bytes)
+                values[at * 3] = (f32)moved.x
+                values[at * 3 + 1] = (f32)moved.y
+                values[at * 3 + 2] = (f32)moved.z
+
+## Both inputs' curves, the first's first. Where only one side has weights or
+## handles, the other gets its defaults (1, automatic handles) first.
+func join_curves(first: const void*, second: const void*) -> void*!:
+    let a = (const Curves*)first
+    let b = (const Curves*)second
+    var left = try with_point_builtins(a, b)
+    defer left.release()
+    var right = try with_point_builtins(b, a)
+    defer right.release()
+    let x = left.value()
+    let y = right.value()
+    var positions = try Column[Float3].allocate(x.point_count() + y.point_count())
+    errdefer positions.release()
+    let out = positions.span()
+    let shift = y.origin.subtract(x.origin)
+    memory.copy(out[..<x.point_count()], x.positions.view(), x.point_count())
+    let tail = y.positions.view()
+    for at in 0..<tail.length: out[x.point_count() + at] = Float3.of(tail[at].vector().add(shift))
+    var offsets = try Column[i32].allocate(x.curve_count() + y.curve_count() + 1)
+    errdefer offsets.release()
+    let joined = offsets.span()
+    memory.copy(joined[..<x.curve_count()], x.offsets.view(), x.curve_count())
+    let base = (i32)x.point_count()
+    let upper = y.offsets.view()
+    for at in 0..<upper.length: joined[x.curve_count() + at] = upper[at] + base
+    var knots: Column[f32]
+    errdefer knots.release()
+    var knot_offsets: Column[i32]
+    errdefer knot_offsets.release()
+    if not x.knots.is_empty() or not y.knots.is_empty():
+        knots = try Column[f32].allocate(x.knots.count() + y.knots.count())
+        let values = knots.span()
+        memory.copy(values[..<x.knots.count()], x.knots.view(), x.knots.count())
+        memory.copy(values[x.knots.count()..], y.knots.view(), y.knots.count())
+        knot_offsets = try Column[i32].allocate(x.curve_count() + y.curve_count() + 1)
+        let starts = knot_offsets.span()
+        for curve in 0..<x.curve_count(): starts[curve] = x.knot_offsets.view()[curve] if x.knot_offsets.count() > 0 else 0
+        let knot_base = (i32)x.knots.count()
+        for curve in 0..=y.curve_count(): starts[x.curve_count() + curve] = (y.knot_offsets.view()[curve] if y.knot_offsets.count() > 0 else 0) + knot_base
+    var attributes = AttributeStore()
+    errdefer attributes.close()
+    for side in 0..<(usize)2:
+        let store = &x.attributes if side == 0 else &y.attributes
+        for index in 0..<store.count():
+            let entry = store.entry(index)
+            if side == 1 and x.attributes.find(entry.name(), (i64)(u8)entry.domain) >= 0: continue
+            if entry.domain != Domain.point and entry.domain != curve_domain and entry.domain != Domain.detail: continue
+            let lower = x.attributes.find(entry.name(), (i64)(u8)entry.domain)
+            let higher = y.attributes.find(entry.name(), (i64)(u8)entry.domain)
+            let lower_count = x.point_count() if entry.domain == Domain.point else x.curve_count()
+            let higher_count = y.point_count() if entry.domain == Domain.point else y.curve_count()
+            let pieces: attribute_ops.Piece[2] = [attribute_ops.Piece(x.attributes.entry((usize)lower) if lower >= 0 else none, lower_count),
+                                                  attribute_ops.Piece(y.attributes.entry((usize)higher) if higher >= 0 else none, higher_count)]
+            var joined_attribute = try attribute_ops.concatenated(pieces)
+            if is_builtin(entry.name(), entry.domain) and (lower < 0 or higher < 0):
+                try fill_default(&joined_attribute, 0 if lower < 0 else lower_count, lower_count if lower < 0 else lower_count + higher_count)
+            try attributes.put(joined_attribute)
+    let handed = attributes
+    attributes = AttributeStore()
+    return (void*)(try curves_assembled(positions.take(), x.origin, offsets.take(), knots.take(), knot_offsets.take(), handed))
+
+## Builtin defaults (resolution 12, order 4, endpoint knots, weight 1) over
+## elements first..<end of a joined builtin one side lacked.
+func fill_default(attribute: Attribute*, first: usize, end: usize) -> !:
+    var value = 0.0
+    let name = attribute.name()
+    if name == "resolution": value = (f64)default_resolution
+    elif name == "order": value = (f64)default_order
+    elif name == "knot_mode": value = 1.0
+    elif name == "w": value = 1.0
+    if value == 0.0: return
+    let bytes = try attribute.data.writable()
+    for element in first..<end:
+        for component in 0..<attribute.width:
+            attribute_ops.write_number(bytes, attribute.kind, element * attribute.width + component, value)
+
+## `curves`, with automatic handles when `other` has handles and it has none.
+func with_point_builtins(curves: const Curves*, other: const Curves*) -> Owned!:
+    if curves.find("handle_l", Domain.point) != none or other.find("handle_l", Domain.point) == none:
+        return Owned(try curves.shared_storage())
+    var attributes = try curves.attributes.shared()
+    errdefer attributes.close()
+    let positions = curves.positions.view()
+    for side in 0..<(usize)2:
+        var handles = try Attribute.create("handle_l" if side == 0 else "handle_r", Domain.point, DataType.float32, 3, positions.length)
+        handles.role = Role.position
+        let out = attribute_ops.typed_mut[f32](handles.data.span())
+        for curve in 0..<curves.curve_count():
+            let (start, count) = curves.range(curve)
+            let cyclic = curves.settings(curve).cyclic
+            for at in 0..<count:
+                let here = positions[start + at].vector()
+                let tangent = auto_tangent(positions, start, count, at, cyclic) if count > 1 else Vector3()
+                let value = here.subtract(tangent) if side == 0 else here.add(tangent)
+                out[(start + at) * 3] = (f32)value.x
+                out[(start + at) * 3 + 1] = (f32)value.y
+                out[(start + at) * 3 + 2] = (f32)value.z
+        try attributes.put(handles)
+    let handed = attributes
+    attributes = AttributeStore()
+    return Owned(try curves_assembled(curves.positions.share(), curves.origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), handed, curves.cache))
+
+## Heap curves owned by one scope.
+pub struct Owned:
+    var storage: Curves*?
+
+    pub func value() -> const Curves*:
+        return self.storage else trap("released curves")
+
+    ## Hand the storage on; the scope's release then does nothing.
+    pub mutating func take() -> Curves*:
+        let storage = self.storage else trap("released curves")
+        self.storage = none
+        return storage
+
+    pub mutating func release():
+        if let storage = self.storage: curves_dispose(storage)
+        self.storage = none
+
+# mark: Paths and subsets
+
+## Curve paths: the text attribute `path` on curves.
+func curve_paths(data: const void*, out: TableBuilder*) -> !:
+    let curves = (const Curves*)data
+    let entry = curves.find("path", curve_domain) else return
+    if entry.kind != DataType.text: return
+    let table = entry.table.view()
+    for at in 0..<table_count(table): discard(try out.intern(table_text(table, at)))
+
+func filter_curves(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
+    let curves = (const Curves*)data
+    let count = curves.curve_count()
+    var selected = try BitsBuilder.zeros(count)
+    defer selected.close()
+    if filter.is_empty():
+        selected.set_range(0, count)
+    elif let entry = curves.find("path", curve_domain):
+        if entry.kind == DataType.text:
+            for curve in 0..<count:
+                if filter.matches(entry.text_at(curve)): selected.set(curve)
+    if not keep: selected.invert()
+    return (void*)(try curves_subset(curves, selected.view()))
+
+## The curves whose bits are set, every attribute and group carried.
+pub func curves_subset(curves: const Curves*, keep: Bits) -> Curves*!:
+    let count = curves.curve_count()
+    if keep.population() == count: return try curves.shared_storage()
+    var order = Growing[i32]()
+    defer order.close()
+    for curve in 0..<count:
+        if keep.get(curve): try order.push((i32)curve)
+    var none_reversed: bool[]
+    return try curves_reordered(curves, order.view(), none_reversed)
+
+## The curves listed (source curve ids, in order), the i-th reversed when
+## `reverse[i]` (an empty list reverses none), every attribute and group
+## carried. Reversed curves swap their handles' sides and mirror their
+## custom knots.
+pub func curves_reordered(curves: const Curves*, order: const i32[], reverse_flags: const bool[]) -> Curves*!:
+    var point_parents = Growing[i32]()
+    defer point_parents.close()
+    var point_flags = Growing[bool]()
+    defer point_flags.close()
+    var offsets = try Column[i32].allocate(order.length + 1)
+    errdefer offsets.release()
+    let starts = offsets.span()
+    var knots = Growing[f32]()
+    defer knots.close()
+    var knot_starts = Growing[i32]()
+    defer knot_starts.close()
+    for at in 0..<order.length:
+        let curve = (usize)order[at]
+        let reverse = reverse_flags.length > 0 and reverse_flags[at]
+        let (first, size) = curves.range(curve)
+        starts[at] = (i32)point_parents.count
+        for step in 0..<size:
+            try point_parents.push((i32)(first + (size - 1 - step if reverse else step)))
+            try point_flags.push(reverse)
+        try knot_starts.push((i32)knots.count)
+        let own = curves.custom_knots(curve)
+        for step in 0..<own.length:
+            # Reversed knots mirror about the last: k'[i] = k[n-1] - k[n-1-i].
+            try knots.push(own[own.length - 1] - own[own.length - 1 - step] if reverse else own[step])
+    starts[order.length] = (i32)point_parents.count
+    try knot_starts.push((i32)knots.count)
+    var positions = try Column[Float3].allocate(point_parents.count)
+    errdefer positions.release()
+    let out = positions.span()
+    let source = curves.positions.view()
+    for at in 0..<point_parents.count: out[at] = source[(usize)point_parents.items[at]]
+    var attributes = AttributeStore()
+    errdefer attributes.close()
+    for index in 0..<curves.attributes.count():
+        let entry = curves.attributes.entry(index)
+        match entry.domain:
+            .point:
+                # A reversed curve's left handles are its old right ones.
+                if entry.name() == "handle_l" or entry.name() == "handle_r":
+                    let other = curves.find("handle_r" if entry.name() == "handle_l" else "handle_l", Domain.point)
+                    if let swapped = other:
+                        try attributes.put(try swapped_handles(entry, swapped, point_parents.view(), point_flags.view()))
+                        continue
+                try attributes.put(try attribute_ops.remapped(entry, point_parents.view(), point_parents.count))
+            .face: try attributes.put(try attribute_ops.remapped(entry, order, order.length))
+            .detail: try attributes.put(entry.share())
+            _: continue
+    var knot_column: Column[f32]
+    errdefer knot_column.release()
+    var knot_offsets: Column[i32]
+    errdefer knot_offsets.release()
+    if knots.count > 0:
+        knot_column = try Column[f32].copy_of(knots.view())
+        knot_offsets = try Column[i32].copy_of(knot_starts.view())
+    let handed = attributes
+    attributes = AttributeStore()
+    return try curves_assembled(positions.take(), curves.origin, offsets.take(), knot_column.take(), knot_offsets.take(), handed)
+
+## Handles `entry` over new points, taking `other` (the opposite side) where
+## the point's curve was reversed.
+func swapped_handles(entry: const Attribute*, other: const Attribute*, parents: const i32[], flipped: const bool[]) -> Attribute!:
+    var result = try attribute_ops.remapped(entry, parents, parents.length)
+    errdefer result.release()
+    let tuple = entry.tuple_bytes()
+    if other.kind != entry.kind or other.width != entry.width or other.storage != Storage.array: return result
+    let bytes = try result.data.writable()
+    let source = other.data.view()
+    for at in 0..<parents.length:
+        if not flipped[at]: continue
+        let parent = (usize)parents[at]
+        memory.copy(bytes[at * tuple..<(at + 1) * tuple], source[parent * tuple..<(parent + 1) * tuple], tuple)
+    return result
+
+func describe_curves(data: const void*, out: Growing[u8]*) -> !:
+    let curves = (const Curves*)data
+    try append_number(out, curves.curve_count())
+    try append_text(out, " curves / ")
+    try append_number(out, curves.point_count())
+    try append_text(out, " curve points")

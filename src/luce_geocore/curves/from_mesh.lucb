@@ -1,0 +1,75 @@
+## Mesh to Curve: chains of mesh edges as poly curves (Blender's Mesh to
+## Curve). Edges join through points where exactly two chosen edges meet;
+## a chain ends at a point where one or three or more do. Chains that close
+## on themselves become cyclic curves. Curve points keep their mesh point's
+## attributes; each curve is numbered in edge order, so the result is
+## deterministic.
+
+## Poly curves along the chosen edges of `mesh` (the boundary among them
+## only, when `boundary`).
+pub func mesh_edge_curves(mesh: const Mesh*, chosen: Bits, boundary: bool) -> Curves*!:
+    let edges = try edge_span(mesh)
+    let edge_count = edges.length // 2
+    var used = try BitsBuilder.copy_of(chosen)
+    defer used.close()
+    if boundary:
+        let (edge_offsets, edge_corners) = try edge_corner_span(mesh)
+        discard(edge_corners)
+        for edge in 0..<edge_count:
+            if edge_offsets[edge + 1] - edge_offsets[edge] != 1: used.clear(edge)
+    let (point_offsets, point_edges) = try point_edge_span(mesh)
+    let points = point_span(mesh)
+    let origin = mesh_origin(mesh)
+    # Chosen edges at each point.
+    let degree = try alloc u32[points.length] in memory.heap
+    defer free(degree) in memory.heap
+    for point in 0..<points.length:
+        var chosen_here: u32 = 0
+        for at in (usize)point_offsets[point]..<(usize)point_offsets[point + 1]:
+            if used.view().get((usize)point_edges[at]): chosen_here += 1
+        degree[point] = chosen_here
+    var visited = try BitsBuilder.zeros(edge_count)
+    defer visited.close()
+    var builder = CurvesBuilder()
+    defer builder.close()
+    var chain = Growing[i32]()
+    defer chain.close()
+    # Open chains first, from every point that is not a pass-through, then
+    # the closed loops left.
+    for pass in 0..<(usize)2:
+        for edge in 0..<edge_count:
+            if not used.view().get(edge) or visited.view().get(edge): continue
+            let a = (usize)edges[edge * 2]
+            let b = (usize)edges[edge * 2 + 1]
+            var start = a
+            if pass == 0:
+                if degree[a] == 2 and degree[b] == 2: continue
+                start = a if degree[a] != 2 else b
+            chain.clear()
+            try chain.push((i32)start)
+            var here = start
+            var along = edge
+            while true:
+                visited.set(along)
+                let there = (usize)edges[along * 2] + (usize)edges[along * 2 + 1] - here
+                if there == start and pass == 1: break
+                try chain.push((i32)there)
+                if degree[there] != 2: break
+                var next = edge_count
+                for at in (usize)point_offsets[there]..<(usize)point_offsets[there + 1]:
+                    let candidate = (usize)point_edges[at]
+                    if used.view().get(candidate) and not visited.view().get(candidate): next = candidate
+                if next == edge_count: break
+                here = there
+                along = next
+            try builder.begin(CurveType.poly, pass == 1)
+            for point in chain.view():
+                try builder.point(points[(usize)point].vector().add(origin), point)
+    let curves = try builder.finish()
+    errdefer curves_dispose(curves)
+    # Mesh point attributes follow their points.
+    for index in 0..<(usize)mesh.attribute_count():
+        let entry = try attribute_entry(mesh, (i64)index)
+        if entry.domain != Domain.point or is_builtin(entry.name(), Domain.point): continue
+        try curves.attributes.put(try attribute_ops.remapped(entry, builder.point_parents.view(), builder.point_parents.count))
+    return curves

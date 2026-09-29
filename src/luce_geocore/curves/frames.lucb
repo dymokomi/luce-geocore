@@ -1,0 +1,145 @@
+## Frames of evaluated curves: tangents from the neighbours' directions,
+## minimum-twist normals (Blender's poly tangents and normals) and arc
+## lengths, built in parallel over curves.
+
+func build_frames(curves: const Curves*, cache: CurveCache*) -> !:
+    let total = cache.evaluated.count()
+    var tangents = try Column[Float3].allocate(total)
+    errdefer tangents.release()
+    var normals = try Column[Float3].allocate(total)
+    errdefer normals.release()
+    var lengths = try Column[f32].allocate(total)
+    errdefer lengths.release()
+    var totals = try Column[f32].allocate(curves.curve_count())
+    errdefer totals.release()
+    var work = FrameWork(curves, cache.eval_offsets.view(), cache.evaluated.view(), tangents.span(), normals.span(), lengths.span(), totals.span())
+    parallel.parallel_for(curves.curve_count(), 64, frame_curves, (void*)&work)
+    cache.tangents.release()
+    cache.normals.release()
+    cache.lengths.release()
+    cache.totals.release()
+    cache.tangents = tangents.take()
+    cache.normals = normals.take()
+    cache.lengths = lengths.take()
+    cache.totals = totals.take()
+
+struct FrameWork:
+    let curves: const Curves*
+    let offsets: const i32[]
+    let points: const Float3[]
+    let tangents: Float3[]
+    let normals: Float3[]
+    let lengths: f32[]
+    let totals: f32[]
+
+func frame_curves(context: void*?, first: usize, end: usize):
+    let work = (FrameWork*)(context else return)
+    for curve in first..<end:
+        let low = (usize)work.offsets[curve]
+        let high = (usize)work.offsets[curve + 1]
+        let cyclic = work.curves.settings(curve).cyclic
+        let points = work.points[low..<high]
+        curve_tangents(points, cyclic, work.tangents[low..<high])
+        curve_normals(work.tangents[low..<high], cyclic, work.normals[low..<high])
+        var length = 0.0
+        for at in 0..<points.length:
+            if at > 0: length += points[at].vector().subtract(points[at - 1].vector()).length()
+            work.lengths[low + at] = (f32)length
+        if cyclic and points.length > 1: length += points[0].vector().subtract(points[points.length - 1].vector()).length()
+        work.totals[curve] = (f32)length
+
+## Tangents from the normalized sum of the directions to the neighbours
+## (Blender's poly tangents, including its sharp-corner cross product).
+func curve_tangents(points: const Float3[], cyclic: bool, out: Float3[]):
+    let count = points.length
+    if count == 0: return
+    if count == 1:
+        out[0] = Float3(0.0, 0.0, 1.0)
+        return
+    var first_valid: usize = count
+    for at in 0..<count - 1:
+        let delta = points[at + 1].vector().subtract(points[at].vector())
+        if delta.length() > 0.000000001:
+            first_valid = at
+            break
+    if first_valid == count:
+        for at in 0..<count: out[at] = Float3(0.0, 0.0, 1.0)
+        return
+    let first_direction = direction(points[first_valid].vector(), points[first_valid + 1].vector()) else trap("tangent")
+    for at in 0..=first_valid: out[at] = Float3.of(first_direction)
+    var previous = first_direction
+    var previous_equal = false
+    for at in first_valid + 1..<count - 1:
+        out[at] = Float3.of(bisect(points[at].vector(), points[at + 1].vector(), &previous, &previous_equal))
+    if cyclic:
+        out[count - 1] = Float3.of(bisect(points[count - 1].vector(), points[0].vector(), &previous, &previous_equal))
+        out[0] = Float3.of(bisect(points[0].vector(), points[1].vector(), &previous, &previous_equal))
+    else:
+        out[count - 1] = Float3.of(direction(points[count - 2].vector(), points[count - 1].vector()) else previous)
+
+func direction(start: Vector3, end: Vector3) -> Vector3?:
+    let delta = end.subtract(start)
+    let length = delta.length()
+    if length < 0.000000001: return none
+    return delta.multiply_scalar(1.0 / length)
+
+func bisect(here: Vector3, next: Vector3, other: Vector3*, equal: bool*) -> Vector3:
+    let was_equal = *equal
+    let delta = next.subtract(here)
+    let length = delta.length()
+    *equal = length < 0.000000001
+    if *equal: return *other
+    let previous = *other
+    *other = delta.multiply_scalar(1.0 / length)
+    if was_equal: return *other
+    let sum = previous.add(*other)
+    let norm = sum.length()
+    if norm < 0.6627619:
+        if norm < 0.0000002: return *other
+        let binormal = other.cross(previous)
+        let turn = other.subtract(previous)
+        return binormal.cross(turn).normalized() catch failure: recover *other
+    return sum.multiply_scalar(1.0 / norm)
+
+## Minimum-twist normals: the first perpendicular to the tangent in the XY
+## plane, each next one rotated as the tangent turns; a cyclic curve spreads
+## the mismatch at its seam over its length.
+func curve_normals(tangents: const Float3[], cyclic: bool, out: Float3[]):
+    let count = tangents.length
+    if count == 0: return
+    out[0] = Float3.of(first_normal(tangents[0].vector()))
+    for at in 1..<count:
+        out[at] = Float3.of(next_normal(out[at - 1].vector(), tangents[at - 1].vector(), tangents[at].vector()))
+    if not cyclic or count < 2: return
+    let wrapped = next_normal(out[count - 1].vector(), tangents[count - 1].vector(), tangents[0].vector())
+    var correction = signed_angle(out[0].vector(), wrapped, tangents[0].vector())
+    if correction > math.pi: correction -= 2.0 * math.pi
+    let step = correction / (f64)count
+    for at in 0..<count:
+        out[at] = Float3.of(rotated(out[at].vector(), tangents[at].vector(), step * (f64)at))
+
+func first_normal(tangent: Vector3) -> Vector3:
+    if math.abs(tangent.x) + math.abs(tangent.y) < 0.0001: return Vector3(1.0, 0.0, 0.0)
+    return Vector3(tangent.y, -tangent.x, 0.0).normalized() catch failure: recover Vector3(1.0, 0.0, 0.0)
+
+func next_normal(normal: Vector3, last: Vector3, current: Vector3) -> Vector3:
+    let cosine = math.clamp(last.dot(current), -1.0, 1.0)
+    let angle = math.acos(cosine)
+    if angle == 0.0: return normal
+    let axis = last.cross(current)
+    if axis.length() < 0.000000001: return normal
+    return rotated(normal, axis, angle)
+
+## `value` turned by `angle` about the unit `axis` (Rodrigues).
+func rotated(value: Vector3, axis: Vector3, angle: f64) -> Vector3:
+    if axis.length() < 0.000000001: return value
+    let pivot = axis.normalized() catch failure: recover axis
+    let c = math.cos(angle)
+    let s = math.sin(angle)
+    let result = value.multiply_scalar(c).add(pivot.cross(value).multiply_scalar(s)).add(pivot.multiply_scalar(pivot.dot(value) * (1.0 - c)))
+    return result.normalized() catch failure: recover value
+
+## The angle from `a` to `b` about `axis`, in 0..2π.
+func signed_angle(a: Vector3, b: Vector3, axis: Vector3) -> f64:
+    let angle = math.atan2(axis.dot(a.cross(b)), a.dot(b))
+    return angle if angle >= 0.0 else angle + 2.0 * math.pi

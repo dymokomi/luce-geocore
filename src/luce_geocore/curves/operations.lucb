@@ -1,0 +1,180 @@
+## Curve operations on the curves a group selects; the others pass through
+## unchanged. Resample and Trim sample the evaluated curve by arc length and
+## make poly curves; Fillet rounds the corners of the control polygon; Reverse
+## flips direction; Set Type changes how curves evaluate. New points carry
+## attributes by interpolating the control points they lie between.
+
+## Selected curves resampled by arc length: `count` points each (mode 0) or
+## points about `length` apart (mode 1), as poly curves.
+pub func resampled(curves: const Curves*, selected: Bits, mode: i64, count: i64, length: f64) -> Curves*!:
+    if mode == 0 and (count < 1 or count > 10000000): error(errors.invalid, "resample needs 1..10000000 points")
+    if mode == 1 and not (length > 0.0 and math.is_finite(length)): error(errors.invalid, "resample needs a positive length")
+    let offsets = try evaluated_offsets(curves)
+    let points = try evaluated_positions(curves)
+    let frames = try evaluated_frames(curves)
+    var builder = CurvesBuilder()
+    defer builder.close()
+    for curve in 0..<curves.curve_count():
+        if not selected.get(curve):
+            try builder.copy_curve(curves, curve)
+            continue
+        let low = (usize)offsets[curve]
+        let high = (usize)offsets[curve + 1]
+        let cyclic = curves.settings(curve).cyclic
+        let total = (f64)frames.totals[curve]
+        var samples = (usize)count
+        if mode == 1:
+            let segments = math.max(1.0, math.round(total / length))
+            samples = (usize)segments if cyclic else (usize)segments + 1
+            if samples > 10000000: error(errors.limit, "resample would make more than 10M points a curve")
+        if total <= 0.0: samples = 1
+        try builder.begin(CurveType.poly, cyclic and samples > 2, default_resolution, default_order, KnotMode.endpoint, (i32)curve)
+        let spacing = total / (f64)(samples if cyclic else (samples - 1 if samples > 1 else 1))
+        for at in 0..<samples:
+            let place = place_at(points[low..<high], frames.lengths[low..<high], total, cyclic, spacing * (f64)at)
+            let (a, b, t) = control_parents(curves, curve, high - low, place.index, place.fraction)
+            try builder.point_between(place.position.add(curves.origin), a, b, t)
+    return try builder.finish(curves)
+
+## Selected curves cut to the part between `start` and `end`: fractions of
+## their length (mode 0) or lengths from their start (mode 1). Cyclic curves
+## open; the result is poly.
+pub func trimmed(curves: const Curves*, selected: Bits, mode: i64, start: f64, end: f64) -> Curves*!:
+    if not math.is_finite(start) or not math.is_finite(end): error(errors.invalid, "trim needs finite bounds")
+    let offsets = try evaluated_offsets(curves)
+    let points = try evaluated_positions(curves)
+    let frames = try evaluated_frames(curves)
+    var builder = CurvesBuilder()
+    defer builder.close()
+    for curve in 0..<curves.curve_count():
+        if not selected.get(curve):
+            try builder.copy_curve(curves, curve)
+            continue
+        let low = (usize)offsets[curve]
+        let high = (usize)offsets[curve + 1]
+        let cyclic = curves.settings(curve).cyclic
+        let total = (f64)frames.totals[curve]
+        var first = start * total if mode == 0 else start
+        var last = end * total if mode == 0 else end
+        first = math.clamp(first, 0.0, total)
+        last = math.clamp(last, 0.0, total)
+        if last < first:
+            let swap = first
+            first = last
+            last = swap
+        let span = points[low..<high]
+        let lengths = frames.lengths[low..<high]
+        try builder.begin(CurveType.poly, false, default_resolution, default_order, KnotMode.endpoint, (i32)curve)
+        let head = place_at(span, lengths, total, cyclic, first)
+        let (a, b, t) = control_parents(curves, curve, high - low, head.index, head.fraction)
+        try builder.point_between(head.position.add(curves.origin), a, b, t)
+        if last > first:
+            for at in 0..<span.length:
+                let here = (f64)lengths[at]
+                if here <= first or here >= last: continue
+                let (pa, pb, pt) = control_parents(curves, curve, high - low, at, 0.0)
+                try builder.point_between(span[at].vector().add(curves.origin), pa, pb, pt)
+            let tail = place_at(span, lengths, total, cyclic, last)
+            let (ta, tb, tt) = control_parents(curves, curve, high - low, tail.index, tail.fraction)
+            try builder.point_between(tail.position.add(curves.origin), ta, tb, tt)
+    return try builder.finish(curves)
+
+## Selected curves' corners rounded with arcs of `radius` in `segments`
+## segments, as poly curves; with `limit`, a radius too large for its
+## neighbouring edges shrinks to fit half of the shorter.
+pub func filleted(curves: const Curves*, selected: Bits, radius: f64, segments: i64, limit: bool) -> Curves*!:
+    if not (radius >= 0.0 and math.is_finite(radius)) or segments < 1 or segments > 1024: error(errors.invalid, "fillet needs a radius of 0 or more and 1..1024 segments")
+    var builder = CurvesBuilder()
+    defer builder.close()
+    for curve in 0..<curves.curve_count():
+        if not selected.get(curve) or radius == 0.0:
+            try builder.copy_curve(curves, curve)
+            continue
+        let (first, count) = curves.range(curve)
+        let cyclic = curves.settings(curve).cyclic
+        try builder.begin(CurveType.poly, cyclic, default_resolution, default_order, KnotMode.endpoint, (i32)curve)
+        for at in 0..<count:
+            let here = curves.point(first + at)
+            let corner = cyclic or (at > 0 and at + 1 < count)
+            if not corner or count < 3:
+                try builder.point(here, (i32)(first + at))
+                continue
+            let before = curves.point(first + (at + count - 1) % count)
+            let after = curves.point(first + (at + 1) % count)
+            try fillet_corner(&builder, before, here, after, radius, segments, limit, (i32)(first + at))
+    return try builder.finish(curves)
+
+## The arc replacing corner `here` between `before` and `after`.
+func fillet_corner(builder: CurvesBuilder*, before: Vector3, here: Vector3, after: Vector3, radius: f64, segments: i64, limit: bool, parent: i32) -> !:
+    let to_before = before.subtract(here)
+    let to_after = after.subtract(here)
+    let a = to_before.length()
+    let b = to_after.length()
+    if a < 0.000000001 or b < 0.000000001:
+        try builder.point(here, parent)
+        return
+    let d1 = to_before.multiply_scalar(1.0 / a)
+    let d2 = to_after.multiply_scalar(1.0 / b)
+    let angle = math.acos(math.clamp(d1.dot(d2), -1.0, 1.0))
+    # Nearly straight or folded back: no corner to round.
+    if angle > math.pi - 0.0001 or angle < 0.0001:
+        try builder.point(here, parent)
+        return
+    let half = angle * 0.5
+    var reach = radius / math.tan(half)
+    if limit: reach = math.min(reach, math.min(a, b) * 0.5)
+    let fitted = reach * math.tan(half)
+    let start = here.add(d1.multiply_scalar(reach))
+    let end = here.add(d2.multiply_scalar(reach))
+    let bisector = d1.add(d2).normalized() catch failure:
+        try builder.point(here, parent)
+        return
+    let center = here.add(bisector.multiply_scalar(fitted / math.sin(half)))
+    let from_center = start.subtract(center)
+    let to_end = end.subtract(center)
+    let turn = math.pi - angle
+    let axis = from_center.cross(to_end)
+    for step in 0..=(usize)segments:
+        let t = (f64)step / (f64)segments
+        try builder.point(center.add(turned(from_center, axis, turn * t)), parent)
+
+## `value` turned by `angle` about `axis` (Rodrigues).
+func turned(value: Vector3, axis: Vector3, angle: f64) -> Vector3:
+    let pivot = axis.normalized() catch failure: return value
+    let c = math.cos(angle)
+    let s = math.sin(angle)
+    return value.multiply_scalar(c).add(pivot.cross(value).multiply_scalar(s)).add(pivot.multiply_scalar(pivot.dot(value) * (1.0 - c)))
+
+## Selected curves reversed: their points, handles and knots run backwards.
+pub func reversed(curves: const Curves*, selected: Bits) -> Curves*!:
+    let count = curves.curve_count()
+    let order = try alloc i32[count] in memory.heap
+    defer free(order) in memory.heap
+    let flags = try alloc bool[count] in memory.heap
+    defer free(flags) in memory.heap
+    for curve in 0..<count:
+        order[curve] = (i32)curve
+        flags[curve] = selected.get(curve)
+    return try curves_reordered(curves, order, flags)
+
+## Selected curves evaluated as `kind` (0 poly, 1 Bezier, 2 NURBS,
+## 3 Catmull-Rom). Points stay; Bezier curves without handles get automatic
+## ones. Only the curve_type column is written.
+pub func with_type(curves: const Curves*, selected: Bits, kind: i64) -> Curves*!:
+    if kind < 0 or kind > 3: error(errors.invalid, "curve type is 0 poly, 1 Bezier, 2 NURBS or 3 Catmull-Rom")
+    var attributes = try curves.attributes.shared()
+    errdefer attributes.close()
+    let found = attributes.find("curve_type", (i64)(u8)curve_domain)
+    if found < 0 or attributes.entry((usize)found).kind != DataType.int8 or attributes.entry((usize)found).storage != Storage.array:
+        var types = try Attribute.create("curve_type", curve_domain, DataType.int8, 1, curves.curve_count())
+        types.role = Role.index
+        let values = attribute_ops.typed_mut[i8](types.data.span())
+        for curve in 0..<values.length: values[curve] = (i8)(u8)curves.settings(curve).kind
+        try attributes.put(types)
+    let index = (usize)attributes.find("curve_type", (i64)(u8)curve_domain)
+    let values = attribute_ops.typed_mut[i8](try attributes.writable(index))
+    for curve in 0..<values.length:
+        if selected.get(curve): values[curve] = (i8)kind
+    let handed = attributes
+    attributes = AttributeStore()
+    return try curves_assembled(curves.positions.share(), curves.origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), handed, curves.cache)

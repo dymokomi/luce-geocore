@@ -1,0 +1,107 @@
+## The geometry-family benchmark: curves at scale (building, evaluating,
+## frames, the curve verbs). Prints one `name<TAB>milliseconds<TAB>count`
+## line per case, as verbs.lucb does; run.py makes the table. Each figure is
+## one run of a --native --opt 3 build.
+import time
+import math
+import interop
+import memory
+import geocore
+import geocore_kernel
+from geocore import Vector3, Mesh, MeshPrimitives, GeometrySet
+from geocore_kernel import Curves, CurvesBuilder, CurveType, evaluated_positions, evaluated_frames, curves_dispose, curves_type, set_curves, empty_set, set_put, dispose_set, adopt_set, run_set_verb, find_set_verb
+import geocore_parallel
+
+func row(name: str, started: u64, count: usize):
+    print(f"{name}\t{(f64)time.since(started) / 1000000.0}\t{count}\t")
+
+## `count` wavy curves of `points` points each, of `kind`.
+func wavy(count: usize, points: usize, kind: CurveType) -> Curves*!:
+    var builder = CurvesBuilder()
+    defer builder.close()
+    for curve in 0..<count:
+        try builder.begin(kind, false, 12, 4)
+        for at in 0..<points:
+            let x = (f64)at * 0.1
+            try builder.point(Vector3(x, math.sin(x + (f64)curve), (f64)curve * 0.05))
+    return try builder.finish()
+
+func set_of(curves: Curves*) -> interop.Reference[GeometrySet]!:
+    let storage = try empty_set()
+    try set_put(storage, curves_type(), (void*)curves)
+    return try adopt_set(storage)
+
+func verb(name: str, set: const GeometrySet*, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
+    let found = find_set_verb(name) else trap("no verb")
+    var output = try run_set_verb(&found, set, none, "", 0, numbers)
+    defer output.close()
+    let made = output.set else trap("no set")
+    output.set = none
+    return try adopt_set(made)
+
+## The n×n quad grid of the verb benchmark (837: 702,244 points, 700,569
+## faces).
+func quad_grid(n: usize) -> interop.Reference[Mesh]!:
+    let points = try alloc Vector3[(n + 1) * (n + 1)] in memory.heap
+    defer free(points) in memory.heap
+    let sizes = try alloc i64[n * n] in memory.heap
+    defer free(sizes) in memory.heap
+    let corners = try alloc i64[n * n * 4] in memory.heap
+    defer free(corners) in memory.heap
+    for z in 0..<n + 1:
+        for x in 0..<n + 1: points[z * (n + 1) + x] = Vector3((f64)x - (f64)n * 0.5, 0.0, (f64)z - (f64)n * 0.5)
+    for z in 0..<n:
+        for x in 0..<n:
+            let a = (i64)(z * (n + 1) + x)
+            let face = z * n + x
+            sizes[face] = 4
+            corners[face * 4] = a
+            corners[face * 4 + 1] = a + (i64)n + 1
+            corners[face * 4 + 2] = a + (i64)n + 2
+            corners[face * 4 + 3] = a + 1
+    return try interop.Reference[Mesh].adopt(try new Mesh(points, sizes, corners) in memory.heap, geocore.mesh_type, memory.heap)
+
+pub func main(arguments: str[]) -> i32!:
+    geocore_parallel.warm()
+    var started = time.now()
+    let bezier = try wavy(10000, 32, CurveType.bezier)
+    row("Curves: build 10k Bezier curves of 32 points", started, bezier.point_count())
+    let set = try set_of(bezier)
+    defer set.release()
+    started = time.now()
+    let points = try evaluated_positions(bezier)
+    row("Curves: evaluate 10k Bezier curves, resolution 12", started, points.length)
+    started = time.now()
+    let frames = try evaluated_frames(bezier)
+    row("Curves: tangents, normals and lengths of those", started, frames.tangents.length)
+    let nurbs = try wavy(10000, 32, CurveType.nurbs)
+    defer curves_dispose(nurbs)
+    started = time.now()
+    let spline = try evaluated_positions(nurbs)
+    row("Curves: evaluate 10k NURBS curves (order 4), resolution 12", started, spline.length)
+    started = time.now()
+    let resampled = try verb("Resample Curve", set.value(), [0.0, 64.0, 0.1])
+    row("Resample Curve: 10k curves to 64 points", started, (set_curves(resampled.value()) else trap("curves")).point_count())
+    resampled.release()
+    let few = try set_of(try wavy(1000, 32, CurveType.catmull_rom))
+    defer few.release()
+    started = time.now()
+    let tubes = try verb("Curve to Mesh", few.value(), [0.0, 0.02, 12.0, 1.0, 1.0, 0.0])
+    let tube_mesh = (try tubes.value().mesh()) else trap("mesh")
+    row("Curve to Mesh: 1k Catmull-Rom curves, 12-point circle", started, (usize)tube_mesh.value().face_count())
+    tube_mesh.release()
+    tubes.release()
+    let grid = try quad_grid(837)
+    defer grid.release()
+    let sheet = try GeometrySet.of_mesh(grid)
+    defer sheet.release()
+    discard(try grid.value().edge_count())
+    started = time.now()
+    let outline = try verb("Mesh to Curve", sheet.value(), [1.0])
+    row("Mesh to Curve: the 837x837 grid's boundary", started, (set_curves(outline.value()) else trap("curves")).point_count())
+    outline.release()
+    started = time.now()
+    let wires = try verb("Mesh to Curve", sheet.value(), [0.0])
+    row("Mesh to Curve: every edge of the 837x837 grid", started, (set_curves(wires.value()) else trap("curves")).curve_count())
+    wires.release()
+    return 0

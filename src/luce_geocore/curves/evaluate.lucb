@@ -1,0 +1,464 @@
+## Evaluated curves: the polyline each curve draws, with tangents,
+## minimum-twist normals and arc lengths. Everything here is derived, lazy and
+## never serialized. It is built in parallel over curves by whichever thread
+## asks first, under the cache's lock, and keyed by the ids of the columns it
+## read (Blender's CurvesGeometryRuntime, the design's SharedSlot pattern).
+##
+## The shape (evaluated offsets and the NURBS basis) depends on topology,
+## types and knots only; positions, handles and weights change the points.
+## A curves value made by moving points starts with its source's shape, so a
+## Move re-evaluates positions without rebuilding the basis.
+##
+## Bezier segments run from a point through its right handle and the next
+## point's left handle; missing handles are automatic, one sixth of the
+## neighbours' difference, which makes Bezier and Catmull-Rom curves agree.
+## NURBS basis functions follow The NURBS Book (A2.2), knots Blender's modes.
+
+pub struct CurveCache:
+    pub var users: @usize
+    var lock: sync.Mutex
+    var shape_ready: @u32
+    var shape_key: u64 = 0
+    var eval_offsets: Column[i32]
+    ## Per curve: its first NURBS evaluated slot, or -1.
+    var basis_first: Column[i32]
+    ## Per NURBS evaluated point: the first control point (unwrapped) and
+    ## `most_order` basis weights.
+    var basis_starts: Column[i32]
+    var basis_weights: Column[f32]
+    var points_ready: @u32
+    var points_key: u64 = 0
+    var evaluated: Column[Float3]
+    var frames_ready: @u32
+    var tangents: Column[Float3]
+    var normals: Column[Float3]
+    ## Per evaluated point: the arc length from its curve's start; per curve:
+    ## the whole length, the closing segment of a cyclic curve included.
+    var lengths: Column[f32]
+    var totals: Column[f32]
+
+    mutating func close():
+        self.eval_offsets.release()
+        self.basis_first.release()
+        self.basis_starts.release()
+        self.basis_weights.release()
+        self.evaluated.release()
+        self.tangents.release()
+        self.normals.release()
+        self.lengths.release()
+        self.totals.release()
+
+func new_cache(seed: const CurveCache*?) -> CurveCache*!:
+    let cache = try new CurveCache() in memory.heap
+    cache.users.store(1, .relaxed)
+    if let source = seed:
+        if source.shape_ready.load(.acquire) != 0:
+            cache.shape_key = source.shape_key
+            cache.eval_offsets = source.eval_offsets.share()
+            cache.basis_first = source.basis_first.share()
+            cache.basis_starts = source.basis_starts.share()
+            cache.basis_weights = source.basis_weights.share()
+            cache.shape_ready.store(1, .release)
+    return cache
+
+## Give up one owner of `cache`; the last frees it.
+pub func release_cache(cache: CurveCache*):
+    if cache.users.sub(1, .acq_rel) != 1: return
+    cache.close()
+    free(CurveCache[](cache, 1)) in memory.heap
+
+func mix_key(state: u64, value: u64) -> u64:
+    return (state ^ value) *% 0x100000001B3 +% 0x9E3779B97F4A7C15
+
+func attribute_id(curves: const Curves*, name: str, domain: Domain) -> u64:
+    let entry = curves.find(name, domain) else return 0
+    return entry.data.id()
+
+## The ids the evaluation shape reads.
+func shape_key_of(curves: const Curves*) -> u64:
+    var key = mix_key(0xCBF29CE484222325, curves.offsets.id())
+    key = mix_key(key, attribute_id(curves, "curve_type", curve_domain))
+    key = mix_key(key, attribute_id(curves, "cyclic", curve_domain))
+    key = mix_key(key, attribute_id(curves, "resolution", curve_domain))
+    key = mix_key(key, attribute_id(curves, "order", curve_domain))
+    key = mix_key(key, attribute_id(curves, "knot_mode", curve_domain))
+    key = mix_key(key, curves.knots.id())
+    return mix_key(key, curves.knot_offsets.id())
+
+func points_key_of(curves: const Curves*, shape: u64) -> u64:
+    var key = mix_key(shape, curves.positions.id())
+    key = mix_key(key, attribute_id(curves, "handle_l", Domain.point))
+    key = mix_key(key, attribute_id(curves, "handle_r", Domain.point))
+    return mix_key(key, attribute_id(curves, "w", Domain.point))
+
+# mark: Public views
+
+## Curve c's evaluated points are offsets[c]..<offsets[c + 1].
+pub func evaluated_offsets(curves: const Curves*) -> const i32[]!:
+    try ensure_shape(curves)
+    return curves.cache.eval_offsets.view()
+
+## Evaluated points, relative to the curves' origin.
+pub func evaluated_positions(curves: const Curves*) -> const Float3[]!:
+    try ensure_points(curves)
+    return curves.cache.evaluated.view()
+
+## The change id of the evaluated points (GPU copies key on it).
+pub func evaluated_id(curves: const Curves*) -> u64!:
+    try ensure_points(curves)
+    return curves.cache.evaluated.id()
+
+pub struct Frames:
+    pub let tangents: const Float3[]
+    pub let normals: const Float3[]
+    pub let lengths: const f32[]
+    pub let totals: const f32[]
+
+## Unit tangents, minimum-twist normals and arc lengths of the evaluated
+## points.
+pub func evaluated_frames(curves: const Curves*) -> Frames!:
+    try ensure_frames(curves)
+    let cache = curves.cache
+    return Frames(cache.tangents.view(), cache.normals.view(), cache.lengths.view(), cache.totals.view())
+
+# mark: Building
+
+func ensure_shape(curves: const Curves*) -> !:
+    let cache = curves.cache
+    let key = shape_key_of(curves)
+    if cache.shape_ready.load(.acquire) != 0 and cache.shape_key == key: return
+    cache.lock.lock()
+    defer cache.lock.unlock()
+    if cache.shape_ready.load(.acquire) != 0 and cache.shape_key == key: return
+    try build_shape(curves, cache)
+    cache.shape_key = key
+    cache.shape_ready.store(1, .release)
+
+func ensure_points(curves: const Curves*) -> !:
+    try ensure_shape(curves)
+    let cache = curves.cache
+    let key = points_key_of(curves, cache.shape_key)
+    if cache.points_ready.load(.acquire) != 0 and cache.points_key == key: return
+    cache.lock.lock()
+    defer cache.lock.unlock()
+    if cache.points_ready.load(.acquire) != 0 and cache.points_key == key: return
+    try build_points(curves, cache)
+    cache.points_key = key
+    cache.points_ready.store(1, .release)
+
+func ensure_frames(curves: const Curves*) -> !:
+    try ensure_points(curves)
+    let cache = curves.cache
+    if cache.frames_ready.load(.acquire) != 0: return
+    cache.lock.lock()
+    defer cache.lock.unlock()
+    if cache.frames_ready.load(.acquire) != 0: return
+    try build_frames(curves, cache)
+    cache.frames_ready.store(1, .release)
+
+## Evaluated points per curve, then the NURBS basis, both parallel over curves.
+func build_shape(curves: const Curves*, cache: CurveCache*) -> !:
+    let count = curves.curve_count()
+    var eval_offsets = try Column[i32].allocate(count + 1)
+    errdefer eval_offsets.release()
+    var basis_first = try Column[i32].allocate(count)
+    errdefer basis_first.release()
+    var work = ShapeWork(curves, eval_offsets.span(), basis_first.span())
+    parallel.parallel_for(count, 256, count_curves, (void*)&work)
+    if work.failed.load(.acquire) != 0: error(memory.exhausted, "curve evaluation ran out of memory")
+    # Counts to offsets: evaluated points, and NURBS slots.
+    let offsets = eval_offsets.span()
+    let firsts = basis_first.span()
+    var total: usize = 0
+    var slots: usize = 0
+    for curve in 0..<count:
+        let points = (usize)offsets[curve]
+        offsets[curve] = (i32)total
+        total += points
+        if firsts[curve] >= 0:
+            firsts[curve] = (i32)slots
+            slots += points
+        if total > 268435456: error(errors.limit, "curves evaluate to more than 256M points")
+    offsets[count] = (i32)total
+    var starts = try Column[i32].allocate(slots)
+    errdefer starts.release()
+    var weights = try Column[f32].allocate(slots * most_order)
+    errdefer weights.release()
+    if slots > 0:
+        var basis = BasisWork(curves, eval_offsets.view(), basis_first.view(), starts.span(), weights.span())
+        parallel.parallel_for(count, 64, fill_basis, (void*)&basis)
+        if basis.failed.load(.acquire) != 0: error(memory.exhausted, "curve evaluation ran out of memory")
+    cache.eval_offsets.release()
+    cache.basis_first.release()
+    cache.basis_starts.release()
+    cache.basis_weights.release()
+    cache.eval_offsets = eval_offsets.take()
+    cache.basis_first = basis_first.take()
+    cache.basis_starts = starts.take()
+    cache.basis_weights = weights.take()
+
+struct ShapeWork:
+    let curves: const Curves*
+    ## Counts first, offsets after the scan.
+    let counts: i32[]
+    ## 0 for NURBS curves, -1 for others (their slots after the scan).
+    let nurbs: i32[]
+    var failed: @u32
+
+func count_curves(context: void*?, first: usize, end: usize):
+    let work = (ShapeWork*)(context else return)
+    for curve in first..<end:
+        let (start, points) = work.curves.range(curve)
+        discard(start)
+        let settings = work.curves.settings(curve)
+        work.nurbs[curve] = -1
+        if points <= 1:
+            work.counts[curve] = (i32)points
+            continue
+        match settings.kind:
+            .poly: work.counts[curve] = (i32)points
+            .bezier, .catmull_rom:
+                let segments = points if settings.cyclic else points - 1
+                work.counts[curve] = (i32)(segments * settings.resolution + (0 if settings.cyclic else 1))
+            _:
+                let spans = nurbs_spans(work.curves, curve, &settings, points) catch failure:
+                    work.failed.store(1, .relaxed)
+                    recover 0
+                if spans == 0:
+                    work.counts[curve] = (i32)points
+                else:
+                    work.counts[curve] = (i32)(spans * settings.resolution + (0 if settings.cyclic else 1))
+                    work.nurbs[curve] = 0
+
+# mark: NURBS knots and basis
+
+## Knots of a curve of `points` control points: points + order, plus order - 1
+## repeated for a cyclic curve.
+pub func knot_count(points: usize, order: usize, cyclic: bool) -> usize:
+    return points + order + (order - 1 if cyclic else 0)
+
+## Control points the knots index, a cyclic curve's first order - 1 again.
+func control_count(points: usize, order: usize, cyclic: bool) -> usize:
+    return points + (order - 1 if cyclic else 0)
+
+## The knots of curve `curve` into `out` (knot_count long). Custom knots that
+## do not fit (wrong count, decreasing) fall back to endpoint knots.
+func fill_knots(curves: const Curves*, curve: usize, settings: const CurveSettings*, points: usize, out: f32[]):
+    let order = settings.order
+    if settings.knot_mode == KnotMode.custom:
+        let custom = curves.custom_knots(curve)
+        var valid = custom.length == points + order
+        for at in 1..<custom.length:
+            valid = valid and custom[at] >= custom[at - 1]
+        if valid:
+            memory.copy(out[..<custom.length], custom, custom.length)
+            if settings.cyclic:
+                let shift = custom[custom.length - 1] - out[order - 1]
+                let tail = out.length - (order - 1)
+                for at in 0..<order - 1: out[tail + at] = out[order + at] + shift
+            return
+    # Blender's calculate_knots for its normal and endpoint modes.
+    let endpoint = settings.knot_mode != KnotMode.uniform
+    let head = (order - (1 if settings.cyclic else 0)) if endpoint else 1
+    let tail = 2 * order - 1 if settings.cyclic else (order if endpoint else 0)
+    var repeat = head
+    var current: f32 = 0.0
+    var start: usize = 0
+    if endpoint and settings.cyclic:
+        out[0] = current
+        current += 1.0
+        start = 1
+    for at in start..<out.length - tail:
+        out[at] = current
+        repeat -= 1
+        if repeat == 0:
+            current += 1.0
+            repeat = 1
+    let tail_first = out.length - tail
+    for at in 0..<tail: out[tail_first + at] = current + (out[at] - out[0])
+
+## Knot spans of nonzero length a NURBS curve evaluates over.
+func nurbs_spans(curves: const Curves*, curve: usize, settings: const CurveSettings*, points: usize) -> usize!:
+    if settings.order < 2: return 0
+    var knots = try Knots.make(knot_count(points, settings.order, settings.cyclic))
+    defer knots.close()
+    let values = knots.values()
+    fill_knots(curves, curve, settings, points, values)
+    var spans: usize = 0
+    for span in settings.order - 1..<control_count(points, settings.order, settings.cyclic):
+        if values[span + 1] > values[span]: spans += 1
+    return spans
+
+## Knots on the stack when few, else on the heap.
+struct Knots:
+    var small: f32[128]
+    var large: f32[]
+    var count: usize = 0
+
+    static func make(count: usize) -> Knots!:
+        var knots = Knots()
+        knots.count = count
+        if count > 128:
+            knots.large = try alloc f32[count] in memory.heap
+        return knots
+
+    mutating func values() -> f32[]:
+        return self.large if self.large.length > 0 else self.small[..<self.count]
+
+    mutating func close():
+        if self.large.length > 0: free(self.large) in memory.heap
+
+struct BasisWork:
+    let curves: const Curves*
+    let offsets: const i32[]
+    let firsts: const i32[]
+    let starts: i32[]
+    let weights: f32[]
+    var failed: @u32
+
+func fill_basis(context: void*?, first: usize, end: usize):
+    let work = (BasisWork*)(context else return)
+    for curve in first..<end:
+        if work.firsts[curve] < 0: continue
+        curve_basis(work, curve) catch failure:
+            discard(failure)
+            work.failed.store(1, .relaxed)
+
+func curve_basis(work: BasisWork*, curve: usize) -> !:
+    let points = work.curves.range(curve).1
+    let settings = work.curves.settings(curve)
+    let order = settings.order
+    let degree = order - 1
+    var knots = try Knots.make(knot_count(points, order, settings.cyclic))
+    defer knots.close()
+    let values = knots.values()
+    fill_knots(work.curves, curve, &settings, points, values)
+    let controls = control_count(points, order, settings.cyclic)
+    var slot = (usize)work.firsts[curve]
+    var last_span = degree
+    for span in degree..<controls:
+        if values[span + 1] <= values[span]: continue
+        last_span = span
+        let low = (f64)values[span]
+        let step = ((f64)values[span + 1] - low) / (f64)settings.resolution
+        for sample in 0..<settings.resolution:
+            basis_at(values, degree, low + (f64)sample * step, span, work.weights[slot * most_order..<slot * most_order + most_order])
+            work.starts[slot] = (i32)(span - degree)
+            slot += 1
+    if not settings.cyclic:
+        basis_at(values, degree, (f64)values[controls], last_span, work.weights[slot * most_order..<slot * most_order + most_order])
+        work.starts[slot] = (i32)(last_span - degree)
+
+## The degree + 1 nonzero basis functions at `t` in knot span `span`
+## (The NURBS Book, A2.2).
+func basis_at(knots: const f32[], degree: usize, t: f64, span: usize, out: f32[]):
+    var left: f64[9] = ---
+    var right: f64[9] = ---
+    var values: f64[9] = ---
+    values[0] = 1.0
+    for j in 1..=degree:
+        left[j] = t - (f64)knots[span + 1 - j]
+        right[j] = (f64)knots[span + j] - t
+        var saved = 0.0
+        for r in 0..<j:
+            let denominator = right[r + 1] + left[j - r]
+            let temp = values[r] / denominator if denominator != 0.0 else 0.0
+            values[r] = saved + right[r + 1] * temp
+            saved = left[j - r] * temp
+        values[j] = saved
+    for at in 0..<most_order: out[at] = (f32)values[at] if at <= degree else 0.0
+
+# mark: Evaluated points
+
+func build_points(curves: const Curves*, cache: CurveCache*) -> !:
+    let offsets = cache.eval_offsets.view()
+    let total = (usize)offsets[offsets.length - 1]
+    var evaluated = try Column[Float3].allocate(total)
+    errdefer evaluated.release()
+    var work = PointWork(curves, offsets, cache.basis_first.view(), cache.basis_starts.view(), cache.basis_weights.view(),
+                         float3_span(curves, "handle_l"), float3_span(curves, "handle_r"), weight_span(curves), evaluated.span())
+    parallel.parallel_for(curves.curve_count(), 64, evaluate_curves, (void*)&work)
+    cache.evaluated.release()
+    cache.evaluated = evaluated.take()
+    # Frames follow the points.
+    cache.frames_ready.store(0, .release)
+
+struct PointWork:
+    let curves: const Curves*
+    let offsets: const i32[]
+    let firsts: const i32[]
+    let starts: const i32[]
+    let weights: const f32[]
+    let handle_l: const Float3[]?
+    let handle_r: const Float3[]?
+    let w: const f32[]?
+    let out: Float3[]
+
+func evaluate_curves(context: void*?, first: usize, end: usize):
+    let work = (PointWork*)(context else return)
+    for curve in first..<end: evaluate_curve(work, curve)
+
+func evaluate_curve(work: PointWork*, curve: usize):
+    let (start, points) = work.curves.range(curve)
+    let positions = work.curves.positions.view()
+    let out_first = (usize)work.offsets[curve]
+    let out_end = (usize)work.offsets[curve + 1]
+    let settings = work.curves.settings(curve)
+    if work.firsts[curve] >= 0:
+        let slot_first = (usize)work.firsts[curve]
+        for at in 0..<out_end - out_first:
+            let slot = slot_first + at
+            var sum = Vector3()
+            var total = 0.0
+            for j in 0..<settings.order:
+                let point = start + ((usize)work.starts[slot] + j) % points
+                var weight = (f64)work.weights[slot * most_order + j]
+                if let w = work.w: weight *= (f64)w[point]
+                sum = sum.add(positions[point].vector().multiply_scalar(weight))
+                total += weight
+            work.out[out_first + at] = Float3.of(sum.multiply_scalar(1.0 / total)) if total != 0.0 else positions[start + ((usize)work.starts[slot]) % points]
+        return
+    if settings.kind == CurveType.poly or points <= 1 or settings.kind == CurveType.nurbs:
+        for at in 0..<out_end - out_first: work.out[out_first + at] = positions[start + at]
+        return
+    # Bezier and Catmull-Rom: cubic segments between consecutive points.
+    let explicit = settings.kind == CurveType.bezier and work.handle_l != none and work.handle_r != none
+    let segments = points if settings.cyclic else points - 1
+    let resolution = settings.resolution
+    for segment in 0..<segments:
+        let a = segment
+        let b = (segment + 1) % points
+        let p0 = positions[start + a].vector()
+        let p3 = positions[start + b].vector()
+        var p1 = p0
+        var p2 = p3
+        if explicit:
+            let right = work.handle_r else trap("bezier handles")
+            let left = work.handle_l else trap("bezier handles")
+            p1 = right[start + a].vector()
+            p2 = left[start + b].vector()
+        else:
+            p1 = p0.add(auto_tangent(positions, start, points, a, settings.cyclic))
+            p2 = p3.subtract(auto_tangent(positions, start, points, b, settings.cyclic))
+        for sample in 0..<resolution:
+            let t = (f64)sample / (f64)resolution
+            work.out[out_first + segment * resolution + sample] = Float3.of(cubic(p0, p1, p2, p3, t))
+    if not settings.cyclic: work.out[out_end - 1] = positions[start + points - 1]
+
+## A third of the Catmull-Rom tangent at point `at`: (next - previous) / 6,
+## with open ends mirrored.
+pub func auto_tangent(positions: const Float3[], start: usize, points: usize, at: usize, cyclic: bool) -> Vector3:
+    let here = positions[start + at].vector()
+    var previous = here
+    var next = here
+    if cyclic:
+        previous = positions[start + (at + points - 1) % points].vector()
+        next = positions[start + (at + 1) % points].vector()
+    else:
+        next = positions[start + at + 1].vector() if at + 1 < points else here.multiply_scalar(2.0).subtract(positions[start + at - 1].vector())
+        previous = positions[start + at - 1].vector() if at > 0 else here.multiply_scalar(2.0).subtract(next)
+    return next.subtract(previous).multiply_scalar(1.0 / 6.0)
+
+pub func cubic(p0: Vector3, p1: Vector3, p2: Vector3, p3: Vector3, t: f64) -> Vector3:
+    let s = 1.0 - t
+    return p0.multiply_scalar(s * s * s).add(p1.multiply_scalar(3.0 * s * s * t)).add(p2.multiply_scalar(3.0 * s * t * t)).add(p3.multiply_scalar(t * t * t))

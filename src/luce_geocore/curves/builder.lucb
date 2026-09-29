@@ -1,0 +1,321 @@
+## Building curves: generators and curve verbs append curves point by point,
+## naming each new element's parents in the source, and `finish` makes the
+## columns, writes the builtin attributes and carries every other attribute
+## and group through the parents. A point between two parents mixes them:
+## floats interpolate, integers and text take the nearer parent, a group
+## keeps the point only when both parents are members.
+
+pub struct CurvesBuilder:
+    ## World positions.
+    var points: Growing[Vector3]
+    var offsets: Growing[i32]
+    var types: Growing[i8]
+    var cyclic: Growing[u8]
+    var resolutions: Growing[i32]
+    var orders: Growing[i8]
+    var modes: Growing[i8]
+    ## Per point: weight, and handles (world) where given.
+    var weights: Growing[f32]
+    var handles_l: Growing[Vector3]
+    var handles_r: Growing[Vector3]
+    var handle_given: Growing[u8]
+    var any_weight: bool = false
+    var any_handle: bool = false
+    ## Custom knots of each curve (knot_offsets has curves + 1 entries).
+    var knots: Growing[f32]
+    var knot_offsets: Growing[i32]
+    var any_knots: bool = false
+    ## Parents in the source: a point's first parent, its second and the
+    ## share of the second (0: the first alone); a curve's parent.
+    var point_parents: Growing[i32]
+    var point_others: Growing[i32]
+    var point_mix: Growing[f32]
+    var curve_parents: Growing[i32]
+
+    pub func init():
+        self.points = Growing[Vector3]()
+        self.offsets = Growing[i32]()
+        self.types = Growing[i8]()
+        self.cyclic = Growing[u8]()
+        self.resolutions = Growing[i32]()
+        self.orders = Growing[i8]()
+        self.modes = Growing[i8]()
+        self.weights = Growing[f32]()
+        self.handles_l = Growing[Vector3]()
+        self.handles_r = Growing[Vector3]()
+        self.handle_given = Growing[u8]()
+        self.knots = Growing[f32]()
+        self.knot_offsets = Growing[i32]()
+        self.point_parents = Growing[i32]()
+        self.point_others = Growing[i32]()
+        self.point_mix = Growing[f32]()
+        self.curve_parents = Growing[i32]()
+        self.any_weight = false
+        self.any_handle = false
+        self.any_knots = false
+
+    pub func curve_count() -> usize:
+        return self.types.count
+
+    pub func point_count() -> usize:
+        return self.points.count
+
+    ## Start a curve; points follow. `parent` is the source curve (-1: new).
+    pub mutating func begin(kind: CurveType, cyclic: bool = false, resolution: i64 = default_resolution, order: i64 = default_order, mode: KnotMode = KnotMode.endpoint, parent: i32 = -1) -> !:
+        if self.offsets.count == 0:
+            try self.offsets.push(0)
+            try self.knot_offsets.push(0)
+        else:
+            try self.close_curve()
+        try self.types.push((i8)(u8)kind)
+        try self.cyclic.push(1 if cyclic else 0)
+        try self.resolutions.push((i32)resolution)
+        try self.orders.push((i8)order)
+        try self.modes.push((i8)(u8)mode)
+        try self.curve_parents.push(parent)
+
+    ## Start a curve evaluated like `source`'s curve `curve`.
+    pub mutating func begin_like(source: const Curves*, curve: usize, parent: i32 = -1) -> !:
+        let settings = source.settings(curve)
+        try self.begin(settings.kind, settings.cyclic, (i64)settings.resolution, (i64)settings.order, settings.knot_mode, parent)
+
+    ## Change the current curve's type or closure.
+    pub mutating func set_type(kind: CurveType):
+        self.types.items[self.types.count - 1] = (i8)(u8)kind
+
+    pub mutating func set_cyclic(cyclic: bool):
+        self.cyclic.items[self.cyclic.count - 1] = 1 if cyclic else 0
+
+    ## A point at `position` (world) copying source point `parent` (-1: new).
+    pub mutating func point(position: Vector3, parent: i32 = -1) -> !:
+        try self.point_between(position, parent, -1, 0.0)
+
+    ## A point between source points `a` and `b`, `t` of the way to `b`.
+    pub mutating func point_between(position: Vector3, a: i32, b: i32, t: f64) -> !:
+        try self.points.push(position)
+        try self.point_parents.push(a)
+        try self.point_others.push(b)
+        try self.point_mix.push((f32)t if b >= 0 else 0.0)
+        try self.weights.push(1.0)
+        try self.handles_l.push(position)
+        try self.handles_r.push(position)
+        try self.handle_given.push(0)
+
+    ## The last point's NURBS weight.
+    pub mutating func weight(value: f64):
+        self.weights.items[self.weights.count - 1] = (f32)value
+        self.any_weight = self.any_weight or value != 1.0
+
+    ## The last point's Bezier handles (world).
+    pub mutating func handles(left: Vector3, right: Vector3):
+        let at = self.points.count - 1
+        self.handles_l.items[at] = left
+        self.handles_r.items[at] = right
+        self.handle_given.items[at] = 1
+        self.any_handle = true
+
+    ## The current curve's custom knots.
+    pub mutating func custom_knots(values: const f64[]) -> !:
+        for value in values: try self.knots.push((f32)value)
+        self.modes.items[self.modes.count - 1] = (i8)(u8)KnotMode.custom
+        self.any_knots = true
+
+    ## Copy curve `curve` of `source` as it is: settings, points, handles,
+    ## weights and custom knots, every point its own parent.
+    pub mutating func copy_curve(source: const Curves*, curve: usize) -> !:
+        try self.begin_like(source, curve, (i32)curve)
+        let (first, count) = source.range(curve)
+        let left = float3_span(source, "handle_l")
+        let right = float3_span(source, "handle_r")
+        let weights = weight_span(source)
+        for at in first..<first + count:
+            try self.point(source.point(at), (i32)at)
+            if let l = left:
+                if let r = right: self.handles(l[at].vector().add(source.origin), r[at].vector().add(source.origin))
+            if let w = weights: self.weight((f64)w[at])
+        let knots = source.custom_knots(curve)
+        if knots.length > 0:
+            for value in knots: try self.knots.push(value)
+            self.any_knots = true
+
+    mutating func close_curve() -> !:
+        try self.offsets.push((i32)self.points.count)
+        try self.knot_offsets.push((i32)self.knots.count)
+
+    pub mutating func close():
+        self.points.close()
+        self.offsets.close()
+        self.types.close()
+        self.cyclic.close()
+        self.resolutions.close()
+        self.orders.close()
+        self.modes.close()
+        self.weights.close()
+        self.handles_l.close()
+        self.handles_r.close()
+        self.handle_given.close()
+        self.knots.close()
+        self.knot_offsets.close()
+        self.point_parents.close()
+        self.point_others.close()
+        self.point_mix.close()
+        self.curve_parents.close()
+
+    ## The curves built, carrying `source`'s attributes and groups through
+    ## the parents. Curves without points are dropped.
+    pub mutating func finish(source: const Curves*? = none) -> Curves*!:
+        if self.offsets.count == 0:
+            try self.offsets.push(0)
+            try self.knot_offsets.push(0)
+        else:
+            try self.close_curve()
+        try self.drop_empty()
+        let curves = self.types.count
+        if self.points.count > 33554432 or curves > 16777216: error(errors.limit, "curves exceed 32M points or 16M curves")
+        let origin = origin_for(self.points.view())
+        var positions = try Column[Float3].allocate(self.points.count)
+        errdefer positions.release()
+        let out = positions.span()
+        for at in 0..<self.points.count: out[at] = Float3.of(self.points.items[at].subtract(origin))
+        var offsets = try Column[i32].copy_of(self.offsets.view())
+        errdefer offsets.release()
+        var knots: Column[f32]
+        errdefer knots.release()
+        var knot_offsets: Column[i32]
+        errdefer knot_offsets.release()
+        if self.any_knots:
+            knots = try Column[f32].copy_of(self.knots.view())
+            knot_offsets = try Column[i32].copy_of(self.knot_offsets.view())
+        var attributes = AttributeStore()
+        errdefer attributes.close()
+        try self.write_builtins(&attributes, origin)
+        if let given = source: try self.carry(given, &attributes)
+        # Assembly owns the store from here, even when it fails.
+        let handed = attributes
+        attributes = AttributeStore()
+        return try curves_assembled(positions.take(), origin, offsets.take(), knots.take(), knot_offsets.take(), handed)
+
+    ## Remove curves that got no points (their knots with them).
+    mutating func drop_empty() -> !:
+        var kept: usize = 0
+        for curve in 0..<self.types.count:
+            let first = self.offsets.items[curve]
+            let end = self.offsets.items[curve + 1]
+            if end == first: continue
+            self.offsets.items[kept] = first
+            self.knot_offsets.items[kept] = self.knot_offsets.items[curve]
+            self.types.items[kept] = self.types.items[curve]
+            self.cyclic.items[kept] = self.cyclic.items[curve]
+            self.resolutions.items[kept] = self.resolutions.items[curve]
+            self.orders.items[kept] = self.orders.items[curve]
+            self.modes.items[kept] = self.modes.items[curve]
+            self.curve_parents.items[kept] = self.curve_parents.items[curve]
+            kept += 1
+        if kept == self.types.count: return
+        self.offsets.items[kept] = (i32)self.points.count
+        self.knot_offsets.items[kept] = (i32)self.knots.count
+        self.offsets.count = kept + 1
+        self.knot_offsets.count = kept + 1
+        self.types.count = kept
+        self.cyclic.count = kept
+        self.resolutions.count = kept
+        self.orders.count = kept
+        self.modes.count = kept
+        self.curve_parents.count = kept
+
+    mutating func write_builtins(store: AttributeStore*, origin: Vector3) -> !:
+        let curves = self.types.count
+        var types = try Attribute.create("curve_type", curve_domain, DataType.int8, 1, curves)
+        memory.copy(attribute_ops.typed_mut[i8](types.data.span()), self.types.view(), curves)
+        types.role = Role.index
+        try store.put(types)
+        var closed = try Attribute.group("cyclic", curve_domain, curves)
+        closed.flags = 0
+        let bytes = closed.data.span()
+        for curve in 0..<curves:
+            if self.cyclic.items[curve] != 0: bytes[curve // 8] = bytes[curve // 8] | ((u8)1 << (u8)(curve % 8))
+        try store.put(closed)
+        var resolution = try Attribute.create("resolution", curve_domain, DataType.int32, 1, curves)
+        memory.copy(attribute_ops.typed_mut[i32](resolution.data.span()), self.resolutions.view(), curves)
+        try store.put(resolution)
+        var order = try Attribute.create("order", curve_domain, DataType.int8, 1, curves)
+        memory.copy(attribute_ops.typed_mut[i8](order.data.span()), self.orders.view(), curves)
+        try store.put(order)
+        var mode = try Attribute.create("knot_mode", curve_domain, DataType.int8, 1, curves)
+        memory.copy(attribute_ops.typed_mut[i8](mode.data.span()), self.modes.view(), curves)
+        try store.put(mode)
+        let points = self.points.count
+        if self.any_weight:
+            var weights = try Attribute.create("w", Domain.point, DataType.float32, 1, points)
+            memory.copy(attribute_ops.typed_mut[f32](weights.data.span()), self.weights.view(), points)
+            try store.put(weights)
+        if self.any_handle:
+            try self.fill_auto_handles()
+            for side in 0..<(usize)2:
+                var handles = try Attribute.create("handle_l" if side == 0 else "handle_r", Domain.point, DataType.float32, 3, points)
+                handles.role = Role.position
+                let out = attribute_ops.typed_mut[f32](handles.data.span())
+                let source = self.handles_l.view() if side == 0 else self.handles_r.view()
+                for at in 0..<points:
+                    let value = source[at].subtract(origin)
+                    out[at * 3] = (f32)value.x
+                    out[at * 3 + 1] = (f32)value.y
+                    out[at * 3 + 2] = (f32)value.z
+                try store.put(handles)
+
+    ## Points given no handles get automatic ones.
+    mutating func fill_auto_handles() -> !:
+        var relative = Growing[Float3]()
+        defer relative.close()
+        for curve in 0..<self.types.count:
+            let first = (usize)self.offsets.items[curve]
+            let count = (usize)self.offsets.items[curve + 1] - first
+            if count < 2: continue
+            try relative.fill(count, Float3(0.0, 0.0, 0.0))
+            for at in 0..<count: relative.items[at] = Float3.of(self.points.items[first + at].subtract(self.points.items[first]))
+            for at in 0..<count:
+                if self.handle_given.items[first + at] != 0: continue
+                let tangent = auto_tangent(relative.view(), 0, count, at, self.cyclic.items[curve] != 0)
+                self.handles_l.items[first + at] = self.points.items[first + at].subtract(tangent)
+                self.handles_r.items[first + at] = self.points.items[first + at].add(tangent)
+
+    ## Every non-builtin attribute of `source` through the parents.
+    mutating func carry(source: const Curves*, store: AttributeStore*) -> !:
+        for index in 0..<source.attributes.count():
+            let entry = source.attributes.entry(index)
+            if is_builtin(entry.name(), entry.domain): continue
+            match entry.domain:
+                .point: try store.put(try mixed_points(entry, self.point_parents.view(), self.point_others.view(), self.point_mix.view()))
+                .face: try store.put(try attribute_ops.remapped(entry, self.curve_parents.view(), self.curve_parents.count))
+                .detail: try store.put(entry.share())
+                _: continue
+
+## `source` over new points: point i takes parents[i], or mixes it with
+## others[i] by mix[i].
+pub func mixed_points(source: const Attribute*, parents: const i32[], others: const i32[], mix: const f32[]) -> Attribute!:
+    var result = try attribute_ops.remapped(source, parents, parents.length)
+    if source.storage == Storage.single: return result
+    errdefer result.release()
+    var any = false
+    for at in 0..<others.length:
+        any = any or (others[at] >= 0 and parents[at] >= 0 and mix[at] > 0.0)
+    if not any: return result
+    let bytes = try result.data.writable()
+    for element in 0..<parents.length:
+        let a = parents[element]
+        let b = others[element]
+        let t = (f64)mix[element]
+        if a < 0 or b < 0 or t <= 0.0: continue
+        match source.kind:
+            .float32, .float64:
+                for component in 0..<source.width:
+                    let value = source.number((usize)a, component) * (1.0 - t) + source.number((usize)b, component) * t
+                    attribute_ops.write_number(bytes, source.kind, element * source.width + component, value)
+            .boolean:
+                if source.number((usize)b, 0) == 0.0:
+                    bytes[element // 8] = bytes[element // 8] & ~((u8)1 << (u8)(element % 8))
+            _:
+                if t > 0.5:
+                    for component in 0..<source.width:
+                        attribute_ops.write_number(bytes, source.kind, element * source.width + component, source.number((usize)b, component))
+    return result

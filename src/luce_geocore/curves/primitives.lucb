@@ -1,0 +1,93 @@
+## Primitive curves: a line, a circle, an arc and a spiral, in any curve
+## type. A NURBS circle or arc is exact: rational quadratic arcs of at most
+## 120 degrees with custom knots (The NURBS Book, A7.1); a Bezier circle uses
+## the 4/3 tan(a/4) handle length. Circles and arcs lie in the XY, YZ or ZX
+## plane (ZX is the ground in this Y-up world), counterclockwise seen from
+## the plane's normal.
+
+## A point of plane `plane` (0 XY, 1 YZ, 2 ZX) at coordinates (u, v).
+pub func planar(u: f64, v: f64, plane: i64) -> Vector3:
+    if plane == 0: return Vector3(u, v, 0.0)
+    if plane == 1: return Vector3(0.0, u, v)
+    return Vector3(v, 0.0, u)
+
+func curve_kind(kind: i64) -> CurveType:
+    if kind == 1: return CurveType.bezier
+    if kind == 2: return CurveType.nurbs
+    if kind == 3: return CurveType.catmull_rom
+    return CurveType.poly
+
+## A line of `points` evenly spaced points from `start` to `end`.
+pub func line_curves(start: Vector3, end: Vector3, points: i64, kind: i64, resolution: i64) -> Curves*!:
+    if points < 2 or points > 1000000: error(errors.invalid, "a line needs 2..1000000 points")
+    var builder = CurvesBuilder()
+    defer builder.close()
+    let chosen = curve_kind(kind)
+    try builder.begin(chosen, false, resolution)
+    for at in 0..<(usize)points:
+        let t = (f64)at / (f64)(points - 1)
+        try builder.point(start.multiply_scalar(1.0 - t).add(end.multiply_scalar(t)))
+    return try builder.finish()
+
+## An arc of `radius` from `start` to `end` degrees (a full turn when they
+## span 360), in `divisions` segments (NURBS: exact arcs instead).
+pub func arc_curves(radius: f64, start: f64, end: f64, divisions: i64, kind: i64, plane: i64, resolution: i64) -> Curves*!:
+    if not (radius > 0.0 and radius < 1.0e9) or divisions < 1 or divisions > 1000000: error(errors.invalid, "an arc needs a positive radius and 1..1000000 divisions")
+    let sweep = (end - start) * math.pi / 180.0
+    if not (math.abs(sweep) > 0.000001): error(errors.invalid, "an arc needs different start and end angles")
+    let full = math.abs(sweep) >= 2.0 * math.pi - 0.0000001
+    let base = start * math.pi / 180.0
+    let chosen = curve_kind(kind)
+    var builder = CurvesBuilder()
+    defer builder.close()
+    if chosen == CurveType.nurbs:
+        # Rational quadratic arcs of at most 120 degrees, joined by knots.
+        let arcs = (usize)math.max(3.0 if full else 1.0, math.max((f64)divisions, math.ceil(math.abs(sweep) / (2.0 * math.pi / 3.0))))
+        let step = sweep / (f64)arcs
+        let middle = radius / math.cos(step * 0.5)
+        try builder.begin(chosen, false, resolution, 3)
+        for arc in 0..<arcs:
+            let angle = base + step * (f64)arc
+            try builder.point(planar(radius * math.cos(angle), radius * math.sin(angle), plane))
+            try builder.point(planar(middle * math.cos(angle + step * 0.5), middle * math.sin(angle + step * 0.5), plane))
+            builder.weight(math.cos(step * 0.5))
+        try builder.point(planar(radius * math.cos(base + sweep), radius * math.sin(base + sweep), plane))
+        var knots = Growing[f64]()
+        defer knots.close()
+        for at in 0..<(usize)3: try knots.push(0.0)
+        for arc in 1..<arcs:
+            try knots.push((f64)arc)
+            try knots.push((f64)arc)
+        for at in 0..<(usize)3: try knots.push((f64)arcs)
+        try builder.custom_knots(knots.view())
+        return try builder.finish()
+    let count = (usize)divisions if full else (usize)divisions + 1
+    let step = sweep / (f64)divisions
+    try builder.begin(chosen, full, resolution)
+    # Bezier handles along the tangent, 4/3 tan(step/4) of the radius long.
+    let reach = 4.0 / 3.0 * math.tan(step * 0.25) * radius
+    for at in 0..<count:
+        let angle = base + step * (f64)at
+        let here = planar(radius * math.cos(angle), radius * math.sin(angle), plane)
+        try builder.point(here)
+        if chosen == CurveType.bezier:
+            let tangent = planar(-math.sin(angle), math.cos(angle), plane).multiply_scalar(reach)
+            builder.handles(here.subtract(tangent), here.add(tangent))
+    return try builder.finish()
+
+## A spiral of `turns` turns around Y, `points` per turn, its radius going
+## from `inner` to `outer` while it rises `height`.
+pub func spiral_curves(turns: f64, points: i64, inner: f64, outer: f64, height: f64, kind: i64, clockwise: bool, resolution: i64) -> Curves*!:
+    if not (turns > 0.0 and turns <= 10000.0) or points < 3 or points > 100000: error(errors.invalid, "a spiral needs 0..10000 turns and 3..100000 points a turn")
+    let count = (usize)math.ceil(turns * (f64)points) + 1
+    if count > 4000000: error(errors.limit, "a spiral of more than 4M points")
+    var builder = CurvesBuilder()
+    defer builder.close()
+    try builder.begin(curve_kind(kind), false, resolution)
+    let sense = -1.0 if clockwise else 1.0
+    for at in 0..<count:
+        let t = (f64)at / (f64)(count - 1)
+        let angle = sense * 2.0 * math.pi * turns * t
+        let radius = inner + (outer - inner) * t
+        try builder.point(Vector3(radius * math.cos(angle), height * t, -radius * math.sin(angle)))
+    return try builder.finish()

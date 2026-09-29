@@ -1,0 +1,171 @@
+## The set verb registry, Luce's view of it (GeometryVerbs), and the one
+## catalog of every node verb (VerbCatalog): mesh verbs first, in their
+## registry's order, then set verbs. luced-3d generates its node catalog from
+## VerbCatalog alone, so both kinds get the same rows, Group handling,
+## categories and descriptions.
+
+let set_verb_total: usize = 11
+
+## Set verb `index` in menu order.
+pub func set_verb_at(index: usize) -> SetVerb:
+    match index:
+        0: return line_verb()
+        1: return circle_verb()
+        2: return arc_verb()
+        3: return spiral_verb()
+        4: return resample_verb()
+        5: return trim_verb()
+        6: return fillet_verb()
+        7: return reverse_curve_verb()
+        8: return set_type_verb()
+        9: return curve_to_mesh_verb()
+        10: return mesh_to_curve_verb()
+        _: return line_verb()
+
+pub func set_verb_count() -> usize:
+    return set_verb_total
+
+pub func find_set_verb(name: str) -> SetVerb?:
+    for index in 0..<set_verb_count():
+        let verb = set_verb_at(index)
+        if verb.name == name: return verb
+    return none
+
+## Luce's view of the set verbs: running one.
+pub struct GeometryVerbs:
+    let reserved: u8 = 0
+
+    pub static func index_of(name: str) -> i64:
+        for index in 0..<set_verb_count():
+            if set_verb_at(index).name == name: return (i64)index
+        return -1
+
+    ## Run set verb `name` on `input` (and `second`): `group` read on
+    ## `group_type`'s domain, the parameter values in order.
+    pub static func run(name: str, input: interop.Reference[GeometrySet], second: interop.Reference[GeometrySet]?, group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[SetVerbResult]!:
+        let verb = find_set_verb(name) else error(errors.invalid, "unknown operation")
+        var other: const GeometrySet*? = none
+        if let given = second: other = try given.get()
+        var output = try run_set_verb(&verb, try input.get(), other, group, group_type, numbers)
+        let made = output.set else trap("a set verb made no set")
+        output.set = none
+        let storage = alloc SetVerbResult[1] in memory.heap catch failure:
+            dispose_set(made)
+            error(failure.code, failure.message)
+        storage[0] = SetVerbResult(made, output.warning, output.misses)
+        return try interop.Reference[SetVerbResult].adopt(storage.data, set_verb_result_type, memory.heap)
+
+## What a set verb run made.
+pub struct SetVerbResult:
+    var set: GeometrySet*
+    var text: str
+    var missed: usize
+
+    pub func geometry() -> interop.Reference[GeometrySet]!:
+        return try adopt_set(try set_storage(self.set))
+
+    pub func warning() -> str:
+        return self.text
+
+    ## Numbers in the group that named no element.
+    pub func misses() -> i64:
+        return (i64)self.missed
+
+    pub mutating func close():
+        dispose_set(self.set)
+
+pub let set_verb_result_type: interop.Type[SetVerbResult] = interop.Type[SetVerbResult]("SetVerbResult", SetVerbResult.close, closeable = true)
+
+## Every verb a node can run, mesh verbs first: what the node catalog is
+## generated from. Indices past the mesh verbs name set verbs.
+pub struct VerbCatalog:
+    let reserved: u8 = 0
+
+    pub static func count() -> i64:
+        return (i64)(verb_count() + set_verb_count())
+
+    pub static func index_of(name: str) -> i64:
+        for index in 0..<(usize)VerbCatalog.count():
+            if entry(index).name == name: return (i64)index
+        return -1
+
+    ## Whether verb `index` runs on whole sets (else on the realized mesh).
+    pub static func is_set(index: i64) -> bool:
+        return checked(index) >= verb_count()
+
+    pub static func name(index: i64) -> str:
+        return entry(checked(index)).name
+
+    pub static func category(index: i64) -> str:
+        return entry(checked(index)).category
+
+    pub static func description(index: i64) -> str:
+        return entry(checked(index)).description
+
+    ## Inputs of its node: 0 for generators, 2 when it reads a second set.
+    pub static func inputs(index: i64) -> i64:
+        return (i64)entry(checked(index)).inputs
+
+    pub static func second_required(index: i64) -> bool:
+        return entry(checked(index)).second_required
+
+    ## Whether its node has the Group and Group Type rows.
+    pub static func grouped(index: i64) -> bool:
+        return entry(checked(index)).grouped
+
+    pub static func parm_count(index: i64) -> i64:
+        return (i64)entry(checked(index)).parms.length
+
+    pub static func parm_label(index: i64, parm: i64) -> str:
+        return parm_of(index, parm).label
+
+    ## 0 number, 1 integer, 2 toggle, 3 vector, 4 menu.
+    pub static func parm_kind(index: i64, parm: i64) -> i64:
+        return (i64)(u8)parm_of(index, parm).kind
+
+    pub static func parm_initial(index: i64, parm: i64) -> f64:
+        return parm_of(index, parm).initial
+
+    pub static func parm_minimum(index: i64, parm: i64) -> f64:
+        return parm_of(index, parm).minimum
+
+    pub static func parm_maximum(index: i64, parm: i64) -> f64:
+        return parm_of(index, parm).maximum
+
+    pub static func parm_soft(index: i64, parm: i64) -> f64:
+        return parm_of(index, parm).soft
+
+    pub static func parm_components(index: i64, parm: i64) -> i64:
+        return (i64)parm_of(index, parm).components
+
+    pub static func parm_choices(index: i64, parm: i64) -> str:
+        return parm_of(index, parm).choices
+
+    pub static func parm_doc(index: i64, parm: i64) -> str:
+        return parm_of(index, parm).doc
+
+## What the catalog needs of either kind of verb.
+struct Entry:
+    let name: str
+    let category: str
+    let description: str
+    let inputs: usize
+    let second_required: bool
+    let grouped: bool
+    let parms: const ParmSpec[]
+
+func entry(index: usize) -> Entry:
+    if index < verb_count():
+        let verb = verb_at(index)
+        return Entry(verb.name, verb.category, verb.description, 1, false, true, verb.parms)
+    let verb = set_verb_at(index - verb_count())
+    return Entry(verb.name, verb.category, verb.description, verb.inputs, verb.second_required, verb.grouped, verb.parms)
+
+func checked(index: i64) -> usize:
+    if index < 0 or index >= VerbCatalog.count(): trap("verb index out of range")
+    return (usize)index
+
+func parm_of(index: i64, parm: i64) -> ParmSpec:
+    let parms = entry(checked(index)).parms
+    if parm < 0 or (usize)parm >= parms.length: trap("verb parameter out of range")
+    return parms[(usize)parm]

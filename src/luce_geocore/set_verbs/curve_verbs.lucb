@@ -1,0 +1,192 @@
+## Curve nodes: primitive curves, Resample, Trim, Fillet, Reverse, Set Curve
+## Type, Curve to Mesh and Mesh to Curve. Kernels live in luce_geocore.curves;
+## these read the parameters, resolve the group and place the result.
+
+let type_choices: str = "Poly|Bezier|NURBS|Catmull-Rom"
+let plane_choices: str = "XY|YZ|ZX"
+let type_doc: str = "How the curve runs through its points: straight segments, Bezier handles, a NURBS (exact for circles) or a smooth Catmull-Rom spline."
+let resolution_doc: str = "Evaluated points per segment of a smooth curve."
+let no_parms: ParmSpec[1] = [ParmSpec("", ParmKind.number, 0.0, 0.0, 0.0)]
+
+# mark: Primitives
+
+let line_parms: ParmSpec[5] = [
+    ParmSpec("Origin", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "Where the line starts."),
+    ParmSpec("Axis", ParmKind.menu, 1.0, 0.0, 2.0, 1, "X|Y|Z", "The direction the line runs."),
+    ParmSpec("Length", ParmKind.number, 1.0, -100000.0, 100000.0, 1, "", "How far the line runs.", 10.0),
+    ParmSpec("Points", ParmKind.integer, 2.0, 2.0, 100000.0, 1, "", "Points along the line, both ends included.", 64.0),
+    ParmSpec("Type", ParmKind.menu, 0.0, 0.0, 3.0, 1, type_choices, type_doc)]
+
+pub func line_verb() -> SetVerb:
+    return SetVerb("Curve Line", "Curves", "A straight curve of evenly spaced points", 0, false, false, line_parms, cook_line)
+
+func cook_line(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let p = input.parms
+    let origin = Vector3(p.at(0), p.at(1), p.at(2))
+    let axis = (i64)p.at(3)
+    let length = p.at(4)
+    let end = origin.add(Vector3(length if axis == 0 else 0.0, length if axis == 1 else 0.0, length if axis == 2 else 0.0))
+    try only_curves(try curves.line_curves(origin, end, (i64)p.at(5), (i64)p.at(6), 12), output)
+
+let circle_parms: ParmSpec[5] = [
+    ParmSpec("Radius", ParmKind.number, 1.0, 0.000001, 100000.0, 1, "", "Distance from the center to the curve.", 10.0),
+    ParmSpec("Divisions", ParmKind.integer, 16.0, 3.0, 100000.0, 1, "", "Points around (NURBS: exact arcs).", 64.0),
+    ParmSpec("Type", ParmKind.menu, 0.0, 0.0, 3.0, 1, type_choices, type_doc),
+    ParmSpec("Plane", ParmKind.menu, 2.0, 0.0, 2.0, 1, plane_choices, "The plane the circle lies in; ZX is the ground."),
+    ParmSpec("Resolution", ParmKind.integer, 12.0, 1.0, 1024.0, 1, "", resolution_doc, 64.0)]
+
+pub func circle_verb() -> SetVerb:
+    return SetVerb("Curve Circle", "Curves", "A closed circle; the NURBS type is exact", 0, false, false, circle_parms, cook_circle)
+
+func cook_circle(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let p = input.parms
+    try only_curves(try curves.arc_curves(p.at(0), 0.0, 360.0, (i64)p.at(1), (i64)p.at(2), (i64)p.at(3), (i64)p.at(4)), output)
+
+let arc_parms: ParmSpec[7] = [
+    ParmSpec("Radius", ParmKind.number, 1.0, 0.000001, 100000.0, 1, "", "Distance from the center to the curve.", 10.0),
+    ParmSpec("Start angle", ParmKind.number, 0.0, -36000.0, 36000.0, 1, "", "Where the arc starts, in degrees.", 360.0),
+    ParmSpec("End angle", ParmKind.number, 90.0, -36000.0, 36000.0, 1, "", "Where the arc ends, in degrees.", 360.0),
+    ParmSpec("Divisions", ParmKind.integer, 8.0, 1.0, 100000.0, 1, "", "Segments along the arc (NURBS: exact arcs).", 64.0),
+    ParmSpec("Type", ParmKind.menu, 0.0, 0.0, 3.0, 1, type_choices, type_doc),
+    ParmSpec("Plane", ParmKind.menu, 2.0, 0.0, 2.0, 1, plane_choices, "The plane the arc lies in; ZX is the ground."),
+    ParmSpec("Resolution", ParmKind.integer, 12.0, 1.0, 1024.0, 1, "", resolution_doc, 64.0)]
+
+pub func arc_verb() -> SetVerb:
+    return SetVerb("Curve Arc", "Curves", "An open arc between two angles", 0, false, false, arc_parms, cook_arc)
+
+func cook_arc(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let p = input.parms
+    try only_curves(try curves.arc_curves(p.at(0), p.at(1), p.at(2), (i64)p.at(3), (i64)p.at(4), (i64)p.at(5), (i64)p.at(6)), output)
+
+let spiral_parms: ParmSpec[8] = [
+    ParmSpec("Turns", ParmKind.number, 3.0, 0.01, 10000.0, 1, "", "Full turns around Y.", 20.0),
+    ParmSpec("Points per turn", ParmKind.integer, 32.0, 3.0, 100000.0, 1, "", "Points on each turn.", 128.0),
+    ParmSpec("Start radius", ParmKind.number, 1.0, 0.0, 100000.0, 1, "", "Radius at the bottom.", 10.0),
+    ParmSpec("End radius", ParmKind.number, 1.0, 0.0, 100000.0, 1, "", "Radius at the top.", 10.0),
+    ParmSpec("Height", ParmKind.number, 2.0, -100000.0, 100000.0, 1, "", "How far the spiral rises.", 10.0),
+    ParmSpec("Clockwise", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Turn clockwise seen from above."),
+    ParmSpec("Type", ParmKind.menu, 0.0, 0.0, 3.0, 1, type_choices, type_doc),
+    ParmSpec("Resolution", ParmKind.integer, 12.0, 1.0, 1024.0, 1, "", resolution_doc, 64.0)]
+
+pub func spiral_verb() -> SetVerb:
+    return SetVerb("Curve Spiral", "Curves", "A helix or flat spiral around Y", 0, false, false, spiral_parms, cook_spiral)
+
+func cook_spiral(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let p = input.parms
+    try only_curves(try curves.spiral_curves(p.at(0), (i64)p.at(1), p.at(2), p.at(3), p.at(4), (i64)p.at(6), p.at(5) != 0.0, (i64)p.at(7)), output)
+
+# mark: Operations
+
+let resample_parms: ParmSpec[3] = [
+    ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Count|Length", "Points per curve, or a spacing along it."),
+    ParmSpec("Count", ParmKind.integer, 16.0, 1.0, 10000000.0, 1, "", "Points on each curve (Count mode).", 256.0),
+    ParmSpec("Length", ParmKind.number, 0.1, 0.000001, 100000.0, 1, "", "Spacing between points (Length mode).", 1.0)]
+
+pub func resample_verb() -> SetVerb:
+    return SetVerb("Resample Curve", "Curves", "Evenly spaced points along the group's curves, as poly curves", 1, false, true, resample_parms, cook_resample)
+
+func cook_resample(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let source = input_curves(input, output) else return
+    var chosen = try selected_curves(input, source, output)
+    defer chosen.close()
+    let p = input.parms
+    try replaced_curves(input, try curves.resampled(source, chosen.view(), (i64)p.at(0), (i64)p.at(1), p.at(2)), output)
+
+let trim_parms: ParmSpec[3] = [
+    ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Factor|Length", "Bounds as fractions of each curve's length, or as lengths from its start."),
+    ParmSpec("Start", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "Where the kept part begins.", 1.0),
+    ParmSpec("End", ParmKind.number, 1.0, -100000.0, 100000.0, 1, "", "Where the kept part ends.", 1.0)]
+
+pub func trim_verb() -> SetVerb:
+    return SetVerb("Trim Curve", "Curves", "Keep part of each of the group's curves, by length", 1, false, true, trim_parms, cook_trim)
+
+func cook_trim(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let source = input_curves(input, output) else return
+    var chosen = try selected_curves(input, source, output)
+    defer chosen.close()
+    let p = input.parms
+    try replaced_curves(input, try curves.trimmed(source, chosen.view(), (i64)p.at(0), p.at(1), p.at(2)), output)
+
+let fillet_parms: ParmSpec[3] = [
+    ParmSpec("Radius", ParmKind.number, 0.25, 0.0, 100000.0, 1, "", "Radius of the rounding arcs.", 2.0),
+    ParmSpec("Segments", ParmKind.integer, 4.0, 1.0, 1024.0, 1, "", "Segments per arc.", 32.0),
+    ParmSpec("Limit radius", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Shrink arcs that would not fit in half their edges.")]
+
+pub func fillet_verb() -> SetVerb:
+    return SetVerb("Fillet Curve", "Curves", "Round the corners of the group's curves with arcs", 1, false, true, fillet_parms, cook_fillet)
+
+func cook_fillet(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let source = input_curves(input, output) else return
+    var chosen = try selected_curves(input, source, output)
+    defer chosen.close()
+    let p = input.parms
+    try replaced_curves(input, try curves.filleted(source, chosen.view(), p.at(0), (i64)p.at(1), p.at(2) != 0.0), output)
+
+pub func reverse_curve_verb() -> SetVerb:
+    return SetVerb("Reverse Curve", "Curves", "Run the group's curves the other way", 1, false, true, no_parms[..<0], cook_reverse)
+
+func cook_reverse(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let source = input_curves(input, output) else return
+    var chosen = try selected_curves(input, source, output)
+    defer chosen.close()
+    try replaced_curves(input, try curves.reversed(source, chosen.view()), output)
+
+let type_parms: ParmSpec[1] = [ParmSpec("Type", ParmKind.menu, 1.0, 0.0, 3.0, 1, type_choices, type_doc)]
+
+pub func set_type_verb() -> SetVerb:
+    return SetVerb("Set Curve Type", "Curves", "Change how the group's curves run through their points", 1, false, true, type_parms, cook_set_type)
+
+func cook_set_type(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let source = input_curves(input, output) else return
+    var chosen = try selected_curves(input, source, output)
+    defer chosen.close()
+    try replaced_curves(input, try curves.with_type(source, chosen.view(), (i64)input.parms.at(0)), output)
+
+# mark: Conversions
+
+let sweep_parms: ParmSpec[6] = [
+    ParmSpec("Profile", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Circle|Second input", "Sweep a circle, or the first curve of the second input (its XY plane)."),
+    ParmSpec("Radius", ParmKind.number, 0.1, 0.000001, 100000.0, 1, "", "Radius of the circle profile.", 1.0),
+    ParmSpec("Segments", ParmKind.integer, 12.0, 3.0, 4096.0, 1, "", "Points around the circle profile.", 64.0),
+    ParmSpec("Profile scale", ParmKind.number, 1.0, 0.000001, 100000.0, 1, "", "Scale of the second input's profile.", 10.0),
+    ParmSpec("Fill caps", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Close the ends of open curves when the profile is closed."),
+    ParmSpec("Keep curves", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep the curves beside the new mesh.")]
+
+pub func curve_to_mesh_verb() -> SetVerb:
+    return SetVerb("Curve to Mesh", "Curves", "Sweep a profile along the group's curves into a mesh", 2, false, true, sweep_parms, cook_sweep)
+
+func cook_sweep(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let source = input_curves(input, output) else return
+    var chosen = try selected_curves(input, source, output)
+    defer chosen.close()
+    let p = input.parms
+    var profile = curves.Profile(Growing[Vector3](), false)
+    if p.at(0) == 1.0:
+        let second = input.second else error(errors.invalid, "connect a profile curve to the second input")
+        let shape = set_curves(second) else error(errors.invalid, "the second input has no curves")
+        profile = try curves.curve_profile(shape, p.at(3))
+    else:
+        profile = try curves.circle_profile(p.at(1), (i64)p.at(2))
+    defer profile.close()
+    let mesh = try curves.swept(source, chosen.view(), &profile, p.at(4) != 0.0)
+    output.set = try with_added_mesh(input.set, mesh, p.at(5) == 0.0)
+
+let mesh_curve_parms: ParmSpec[1] = [ParmSpec("Edges", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Group|Boundary of group", "Every edge of the group, or only its boundary edges.")]
+
+pub func mesh_to_curve_verb() -> SetVerb:
+    return SetVerb("Mesh to Curve", "Curves", "Chains of the group's mesh edges as poly curves, in place of the mesh", 1, false, true, mesh_curve_parms, cook_mesh_to_curve)
+
+func cook_mesh_to_curve(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let found = set_mesh(input.set)
+    if found == none: output.warning = "The input has no mesh; it passes through"
+    let mesh = found else return
+    if input.group_type != 0 and input.group_type != 2: error(errors.invalid, "Mesh to Curve takes an edge group")
+    let expression = input.group if input.group.length > 0 else "*"
+    var result = try group_bits(mesh, expression, Domain.edge)
+    defer result.bits.release()
+    output.misses += result.report.misses
+    let edges = (usize)(try mesh.edge_count())
+    let made = try curves.mesh_edge_curves(mesh, Bits(result.bits.view(), edges), input.parms.at(0) != 0.0)
+    let storage = try with_curves(input.set, made)
+    set_remove(storage, &mesh_component)
+    output.set = storage
