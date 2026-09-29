@@ -1,7 +1,7 @@
 ## Local edit workspace must match sequential immutable dissolves exactly.
 import interop
 import memory
-from geocore import Mesh, MeshBuilder, TopologyTools, DissolveWorkspace, Vector3, invalid
+from geocore import Mesh, MeshBuilder, DissolveWorkspace, Vector3, invalid, dissolve_edge
 
 func equal(a: const Mesh*, b: const Mesh*) -> !:
     assert(a.point_count() == b.point_count() and a.face_count() == b.face_count())
@@ -74,7 +74,7 @@ pub func single(bent: bool = false, reverse: bool = false) -> !:
         let b = try source.value().edge_point(edge,1)
         let id = try find(current.value(),a,b)
         if id < 0: continue
-        let next: interop.Reference[Mesh]? = TopologyTools.dissolve(current,id) catch failure:
+        let next: interop.Reference[Mesh]? = dissolve_edge(current.value(),id) catch failure:
             if failure.code != invalid: error(failure.code,failure.message)
             recover none
         if let result = next:
@@ -166,7 +166,7 @@ func retry() -> !:
     try work.dissolve(edge)
     let actual = try work.finish()
     defer actual.release()
-    let expected = try TopologyTools.dissolve(source,edge)
+    let expected = try dissolve_edge(source.value(),edge)
     defer expected.release()
     try equal(expected.value(),actual.value())
 

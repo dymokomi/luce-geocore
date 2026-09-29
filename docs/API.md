@@ -14,17 +14,16 @@ attribute domains, topology operators, primitive generators and BVH picking.
 | `Mesh(points,sizes,corners,display=none,precise=false)` | Immutable shared-point polygon topology (the geometry core's mesh; not a per-vertex `Geometry`: renderers draw its arrays, and luce-3d's `MeshGeometry` wraps it for the per-vertex path). `vertex`/`index` give per-corner vertices and display indices. Optional validated display triangles are independent of wire edges (see below). `cube(size=2)` builds a grounded cube; `empty()` builds an empty result. `point_count`, `point`, `face_count`, `face_size`, `face_point`, `face_normal`, `face_center`, `edge_count` (fallible: edges are a lazy cache), `edge_point`, `triangle_face` expose topology. `is_precise`, `without_precision` (see storage below). |
 | `Mesh.transformed(translation,rotation,scale)` | Returns a new mesh with transformed points and regenerated normals. Rotation is XYZ radians; scale must be nonsingular. Reflections reverse winding. |
 | `Mesh.moved_points(selection,delta)` / `merged(other)` | Return a new displaced or concatenated mesh without modifying either input. |
-| `Mesh.extruded_faces(selection,distance)` | Extrudes a face region along averaged selected-face normals. Shares new points across selected faces and adds walls only on boundary edges; cap face IDs remain stable. Requires a nonzero distance and a region boundary. |
 | `Mesh.ray_face(origin,direction)` / `ray_distance(origin,direction)` | Fallible nearest two-sided intersection, or `-1`. Normalize direction for world-space distances. |
 | `Mesh.surface_distance(point)` / `closest_face(point)` | BVH nearest surface distance / primitive ID; `-1` for empty geometry. Points must be finite. |
 | `Mesh.prepare_queries()` | Builds the shared spatial index before first use, e.g. on a worker before handing a final viewport mesh to the UI. Idempotent and fallible; no topology change. |
 | `MeshBuilder(precise=false)` | Bounded Base topology staging: `point`, `face`, `corner`, `finish`, `close`. Importers and operators share the same mesh limits. Copying a precise mesh's points makes the result precise. |
 | `PolygonTopology` | Borrowed read interface for points, polygon corners and edge endpoints. Numbering/lifetime are defined by the implementation. |
-| `DissolveWorkspace(source,edits=128)` | Base-only local edge-dissolve staging over a borrowed immutable `Mesh*`. `face_slots`, `active`, `neighbor`, `dissolve`, `finish`, `close`; see lifetime and ordering below. |
+| `DissolveWorkspace(source,edits=128)` | Base-only local edge-dissolve staging over a borrowed immutable `Mesh*`. `face_slots`, `active`, `neighbor`, `dissolve`, `finish`, `close`; see lifetime and ordering below. `dissolve_edge(source, edge)` is the one-edit form. |
 | `GeometrySet` | A node's result: typed components, at most one per family (`mesh`, `points`, `instances`, and families other packages register, such as luce-cad's `cad`). Immutable; copies share every column. `of_mesh`, `mesh`, `with_mesh`, `with_instance(set, translation, rotation, scale, visible)`, `instance*`, `with_cloud_of(mesh)`, `cloud_*`, `merged`, `transformed`, `realized` (every polygon, instances baked, in one pass), `blasted(paths, keep)`, `paths`, `bounds`, `footprint` (shared arrays once), `description`. |
 | Groups and text | `with_group(name, domain, members)`, `attribute_group`, `group_size`, `find_edge(a, b)`; text attributes (`with_text`, `with_text_values`, `attribute_text`, `attribute_string*`) store an i32 per element into a shared string table. |
-| `without_faces(faces, keep)` | A face subset gathered in parallel: kept faces keep corners, triangles, normals and attributes; unused points go. |
-| `MeshOps`, `TopologyTools`, `MeshNormals`, `MeshPrimitives` | Modeling kernels returning new meshes: point/face operators, subdivision, fuse; bevel, fill, dissolve; grouped corner normals; grid, sphere, cylinder, torus. |
+| `without_faces(faces, keep)` / `compacted()` | A face subset gathered in parallel: kept faces keep corners, triangles, normals and attributes; unused points go. `compacted` keeps every face and drops only unused points. |
+| `Verbs`, `MeshNormals`, `MeshPrimitives` | Every modeling operation is a verb (see Verbs below); grouped corner normals; grid, sphere, cylinder, torus. |
 
 ## Storage and precision
 
@@ -90,14 +89,14 @@ or a reversed polygon. `triangulate_last` computes a projected candidate without
 allocating a mesh or BVH. Builder rollback via `nf`/`nc` also rewinds display data;
 appending a replacement face clears its old display slots.
 
-`MeshOps.compact` only removes unused point records; it preserves authored `N`
-attributes, face/corner order and retained display indices. `MeshOps.faces`
-with operation 0 (face filtering) also retains each surviving corner's authored
-normal. Moving points or changing winding still invalidates stale normals.
+`compacted` only removes unused point records; it preserves authored `N`
+attributes, face/corner order and retained display indices, as `without_faces`
+does for the faces it keeps. Moving points or changing winding (verbs) drops
+stale normals.
 `MeshBuilder.finish(source=none, preserve_normals=false)` allows geometry-preserving
 operators to opt in explicitly; ordinary modeling edits retain the default.
 
-`TopologyTools.dissolve` retains the two source faces' display triangles while
+`dissolve_edge` retains the two source faces' display triangles while
 removing their shared polygon edge. The geometric surface is unchanged; the
 removed edge becomes a display diagonal. A union with repeated boundary vertices
 is rejected. This does not repair self-intersections already present in the input.
@@ -112,7 +111,7 @@ neighbor. Nonmanifold or inconsistently oriented input cannot be dissolved.
 A failed dissolve, including allocation failure during display validation, does
 not change active topology and can be retried. `finish` materializes an independent
 mesh in the same order, with the same display triangles and attribute provenance,
-as sequential `TopologyTools.dissolve` calls. This is native single-owner scratch,
+as sequential `dissolve_edge` calls. This is native single-owner scratch,
 not a concurrent mutable mesh or a CAD-specific merge policy.
 
 ## Groups, text and roles

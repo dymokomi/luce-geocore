@@ -4,6 +4,7 @@
 import math
 import geocore
 from geocore import Mesh, Vector3, AttributeKernels, MeshPrimitives
+from verb_run import verb_mesh
 
 func near(a: f64, b: f64):
     assert(math.abs(a - b) < 0.000000001)
@@ -48,7 +49,7 @@ pub func exercise() -> !:
     for at in 0..<(usize)12: edges[at] = (f64)at
     let creased = try mesh.with_attribute("crease", 4, 1, edges)
     defer creased.release()
-    let extruded = try creased.value().extruded_faces([0], 0.5)
+    let extruded = try verb_mesh("PolyExtrude", creased, "0", 3, [0.5])
     defer extruded.release()
     let crease = extruded.value().find_attribute("crease", 4)
     assert(crease >= 0 and (try extruded.value().domain_count(4)) == (try extruded.value().edge_count()))

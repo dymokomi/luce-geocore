@@ -7,12 +7,10 @@ import luce_geocore.core.geometry as geometry
 import luce_geocore.core.polygon_topology as polygon_topology
 import luce_geocore.geometries.polygon as polygon
 import luce_geocore.geometries.builder as builder
-import luce_geocore.geometries.operators as operators
 import luce_geocore.geometries.normals as normals
 import luce_geocore.geometries.distance as distance
 import luce_geocore.geometries.overlays as overlays
 import luce_geocore.geometries.primitives as primitives
-import luce_geocore.geometries.topology_tools as topology_tools
 import luce_geocore.geometries.dissolve_workspace as dissolve_workspace
 import luce_geocore.geometries.attribute_kernels as attribute_kernels
 import luce_geocore.geometry_set as geometry_set
@@ -30,14 +28,13 @@ pub type Mesh = polygon.Mesh
 pub let mesh_type = polygon.mesh_type
 pub let detached_mesh = polygon.detached_mesh
 pub type MeshBuilder = builder.MeshBuilder
-pub type MeshOps = operators.MeshOps
 pub type MeshNormals = normals.MeshNormals
 ## Squared Euclidean distance to a triangle, including degenerate triangles.
 pub let squared_triangle_distance = distance.triangle_distance
 pub let mesh_overlay_points = overlays.mesh_overlay_points
 pub type MeshPrimitives = primitives.MeshPrimitives
-pub type TopologyTools = topology_tools.TopologyTools
 pub type DissolveWorkspace = dissolve_workspace.DissolveWorkspace
+pub let dissolve_edge = dissolve_workspace.dissolve_edge
 pub type AttributeKernels = attribute_kernels.AttributeKernels
 pub type GeometrySet = geometry_set.GeometrySet
 pub let geometry_set_type = geometry_set.geometry_set_type

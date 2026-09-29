@@ -6,6 +6,7 @@ import interop
 import math
 import memory
 from geocore import Mesh, MeshPrimitives, Vector3, GeometrySet
+from verb_run import verb_mesh
 from geocore_kernel import Bits, BitsBuilder, MeshPart, Domain, popcount, trailing_zeros, edge_pairs, edge_bits_from_pairs, with_group_bits, concatenated
 from geocore_growing import Growing
 
@@ -67,7 +68,7 @@ func groups_and_text() -> !:
     # Edge groups follow extrusion: a wall's bottom continues its old edge.
     let edge_group = try with_group_bits(mesh, "seam", Domain.edge, chosen.view())
     defer edge_group.release()
-    let extruded = try edge_group.value().extruded_faces([0], 0.5)
+    let extruded = try verb_mesh("PolyExtrude", edge_group, "0", 3, [0.5])
     defer extruded.release()
     let seam = extruded.value().find_attribute("seam", 4)
     var members: i64 = 0

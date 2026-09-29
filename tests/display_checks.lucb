@@ -3,7 +3,8 @@ import interop
 import memory
 import math
 import geocore
-from geocore import Vector3, Matrix4, Mesh, MeshBuilder, MeshOps, TopologyTools, detached_mesh
+from geocore import Vector3, Matrix4, Mesh, MeshBuilder, detached_mesh, dissolve_edge
+from verb_run import verb_mesh
 
 func index(mesh: const Mesh*, at: i64) -> i64!:
     let value = mesh.index(at)
@@ -72,13 +73,11 @@ pub func exercise() -> !:
     var doubled: i64[18]
     for at in 0..<doubled.length: doubled[at] = display[at%9]+(5 if at >= 9 else 0)
     try indices(merged.value(),doubled)
-    let removed = try MeshOps.faces(merged,[0],0)
-    defer removed.release()
-    let compact = try MeshOps.compact(removed)
+    let compact = try merged.value().without_faces([0])
     defer compact.release()
     try indices(compact.value(),display)
     assert(compact.value().point_count() == 5 and (try compact.value().edge_count()) == 5)
-    let reversed = try MeshOps.faces(mesh,[0],1)
+    let reversed = try verb_mesh("Reverse",mesh,"0",3,[0.0])
     defer reversed.release()
     var reversed_indices: i64[9]
     for at in 0..<reversed_indices.length: reversed_indices[at] = 4-display[at//3*3+2-at%3]
@@ -136,7 +135,7 @@ func dissolved(scale: f64, width: f64, bend: f64) -> !:
     for edge in 0..<(try source.value().edge_count()):
         if (try source.value().edge_point(edge,0)) == 1 and (try source.value().edge_point(edge,1)) == 4: seam = edge
     assert(seam >= 0)
-    let result = try TopologyTools.dissolve(source,seam)
+    let result = try dissolve_edge(source.value(),seam)
     defer result.release()
     let mesh = result.value()
     assert(mesh.face_count() == 1 and (try mesh.edge_count()) == 6 and mesh.point_count() == 6 and mesh.index_count() == 12)
@@ -155,7 +154,7 @@ func pinched_dissolve() -> !:
         for id in corners: try builder.corner(id)
     let source = try builder.finish()
     defer source.release()
-    let result = TopologyTools.dissolve(source,0) catch failure:
+    let result = dissolve_edge(source.value(),0) catch failure:
         if failure.code != geocore.invalid: error(failure.code,failure.message)
         return
     defer result.release()
@@ -179,7 +178,7 @@ func tiny_face_union(scale: f64, offset: f64) -> !:
     for edge in 0..<(try source.value().edge_count()):
         if (try source.value().edge_point(edge,0)) == 1 and (try source.value().edge_point(edge,1)) == 4: seam = edge
     assert(seam >= 0)
-    let result = try TopologyTools.dissolve(source,seam)
+    let result = try dissolve_edge(source.value(),seam)
     defer result.release()
     assert(result.value().face_count() == 1 and (try result.value().edge_count()) == 5)
     assert(result.value().point_count() == 5 and result.value().index_count() == 9)

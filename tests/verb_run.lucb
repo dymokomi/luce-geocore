@@ -1,0 +1,13 @@
+## Checks run modeling operations through the verbs, as luced-3d does.
+import interop
+from geocore import Mesh, Verbs
+from geocore_kernel import clear_group_cache
+
+## The mesh verb `name` makes from `mesh` for group `group` of `group_type`
+## (0 guess, 1 points, 2 edges, 3 faces, 4 corners). The group cache is
+## cleared afterwards, so allocation checks see nothing left live.
+pub func verb_mesh(name: str, mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[Mesh]!:
+    defer clear_group_cache()
+    let result = try Verbs.run(name, mesh, group, group_type, numbers)
+    defer result.release()
+    return try result.value().mesh()

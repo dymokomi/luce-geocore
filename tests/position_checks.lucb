@@ -4,7 +4,8 @@ import interop
 import math
 import memory
 import geocore
-from geocore import Vector3, Matrix4, Mesh, MeshOps
+from geocore import Vector3, Matrix4, Mesh
+from verb_run import verb_mesh
 
 func index(mesh: const Mesh*, at: i64) -> i64!:
     let value = mesh.index(at)
@@ -73,7 +74,7 @@ pub func exercise() -> !:
     let placed = try moved.value().placed(Matrix4.compose(Vector3(1.0, 2.0, 3.0), Vector3(0.1, 0.2, 0.3), Vector3(2.0, 2.0, 2.0)))
     defer placed.release()
     try same_triangles(placed.value(), display)
-    let smoothed = try MeshOps.points(moved, [2], 1, 0.01)
+    let smoothed = try verb_mesh("Mountain", moved, "2", 1, [0.01, 0.0])
     defer smoothed.release()
     try same_triangles(smoothed.value(), display)
     try folding()

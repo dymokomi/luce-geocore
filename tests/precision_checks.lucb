@@ -1,7 +1,8 @@
 ## Precise meshes keep f64 points through construction, builders, derived
 ## meshes and position edits; ordinary meshes store f32 relative to an origin.
 import geocore
-from geocore import Vector3, Matrix4, MeshBuilder, MeshOps, Mesh
+from geocore import Vector3, Matrix4, MeshBuilder, Mesh
+from verb_run import verb_mesh
 
 pub func exercise() -> !:
     # A 1e-12 sliver 3 units from zero: below f32 spacing, exact in f64.
@@ -26,7 +27,7 @@ pub func exercise() -> !:
         copy.close()
     assert(rejected)
     # Derived meshes stay precise.
-    let reversed = try MeshOps.faces(mesh,[0],1)
+    let reversed = try verb_mesh("Reverse",mesh,"0",3,[0.0])
     defer reversed.release()
     assert(reversed.value().is_precise() and (try reversed.value().point(2)) == points[2])
     let moved = try mesh.value().moved_points([2,3],Vector3(0.0,1e-12,0.0))

@@ -10,6 +10,14 @@ extend Mesh:
         if keep.population() == faces: return try self.snapshot()
         return try adopt_storage(try self.subset_storage(keep))
 
+    ## Every face kept, the points no face uses dropped (the rest renumbered
+    ## in order).
+    pub func compacted() -> interop.Reference[Mesh]!:
+        var all = try BitsBuilder.zeros(self.offsets.count() - 1)
+        defer all.close()
+        all.invert()
+        return try adopt_storage(try self.subset_storage(all.view()))
+
     ## `faces` removed (or, with `keep`, only they kept); Luce's Blast/Delete.
     pub func without_faces(faces: const i64[], keep: bool = false) -> interop.Reference[Mesh]!:
         let count = self.offsets.count() - 1

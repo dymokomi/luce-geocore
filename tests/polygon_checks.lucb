@@ -4,6 +4,7 @@ import math
 import interop
 import memory
 from geocore import Mesh, Vector3
+from verb_run import verb_mesh
 
 pub func exercise() -> !:
     let source = try Mesh.cube()
@@ -15,7 +16,7 @@ pub func exercise() -> !:
     # The connectivity hash ignores positions and attributes, not topology.
     let moved = try source.value().moved_points([0, 1], Vector3(0.0, 0.25, 0.0))
     defer moved.release()
-    let extruded = try source.value().extruded_faces([2], 0.5)
+    let extruded = try verb_mesh("PolyExtrude", source, "2", 3, [0.5])
     defer extruded.release()
     assert(source.value().topology_hash() != 0)
     assert(tagged.value().topology_hash() == source.value().topology_hash())

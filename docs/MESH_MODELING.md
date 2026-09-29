@@ -50,19 +50,15 @@ Normals used for shading are currently derived face normals, not stored N.
 ## Operators
 
 - `MeshPrimitives`: grid, sphere, cylinder (including cone), torus.
-- `MeshOps.faces`: operation codes delete=0, reverse=1, triangulate=2,
-  individual fractional inset=3, normal-offset duplicate=4, split=5.
-- `MeshOps.points`: relaxation=0, deterministic noise=1, peak=2,
-  flatten Y=3, rotate XYZ radians=4, scale XYZ=5, grid snap=6.
-- `MeshOps.subdivide(mesh, smooth=false)`: linear quads or Catmull–Clark;
-  floating point/corner attributes interpolate, integral attributes inherit.
-- `MeshOps.fuse`: selected-point spatial-hash welding, first-parent ownership.
-- `MeshOps.delete_points` removes incident faces; `compact` removes unused points.
-- `TopologyTools.bevel`: all-edge fractional chamfer of closed oriented meshes.
-- `TopologyTools.fill`: one selected boundary loop.
-- `TopologyTools.dissolve`: one selected interior edge.
-- Existing mesh methods supply immutable TRS, merge, point movement and region
-  face extrusion with boundary walls and attribute provenance.
+- Every modeling operation is a verb run through `Verbs.run` (see API.md,
+  Verbs): point verbs (Transform Components, Smooth, Mountain, Peak, Flatten,
+  Snap), face verbs (Delete, Reverse, Triangulate, Duplicate, Split, Inset,
+  PolyExtrude, Subdivide) and topology verbs (PolyBevel, Loop Cut, Bridge,
+  Fill, Dissolve, Fuse, Merge Points, Clean).
+- `without_faces` / `compacted` give face subsets and drop unused points;
+  `dissolve_edge` and `DissolveWorkspace` join faces keeping their display
+  triangles (CAD trim cells).
+- Mesh methods supply immutable TRS, merge and point movement.
 
 No editor commands, node graph state or selection UI live in these modules.
 Limits are 8,388,608 points/faces, 33,554,432 corners and 256 corners per polygon.

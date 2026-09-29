@@ -1,5 +1,8 @@
 ## Bounded local edge dissolves on immutable input. Stable face/edge slots let
 ## meshing policies inspect neighbors without rebuilding a mesh after each edit.
+## `dissolve_edge` is the one-edit form. Both keep the two faces' display
+## triangles (the removed edge becomes a display diagonal), which CAD trim
+## cells rely on; the Dissolve verb re-triangulates instead.
 import memory
 import interop
 import math
@@ -217,3 +220,12 @@ pub struct DissolveWorkspace: PolygonTopology:
         free(self.triangles) in memory.heap
         free(self.first) in memory.heap
         free(self.second) in memory.heap
+
+## `source` with interior edge `edge` dissolved: its two faces joined, their
+## display triangles kept. Rejected (invalid) for a boundary, nonmanifold or
+## pinching edge.
+pub func dissolve_edge(source: const Mesh*, edge: i64) -> interop.Reference[Mesh]!:
+    var work = try DissolveWorkspace(source, 1)
+    defer work.close()
+    try work.dissolve(edge)
+    return try work.finish()
