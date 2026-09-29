@@ -1,0 +1,132 @@
+## PolyBevel's profiles, in parallel per bevel vertex (count, prefix sum,
+## fill, as for the corners). Each end of a beveled edge needs the profile
+## from one face's offset line to the other's at that vertex: a quadratic
+## curve whose control point is the vertex for the round 0.5. Two strips
+## whose ends meet the same two points share one profile, reversed, so a
+## loop of beveled edges through a vertex stays closed. At the end of a lone
+## beveled edge the vertex stays and the strip fans around it: the profile's
+## inner points are the vertex.
+
+## One profile of a vertex: its end points and where its points start.
+struct Known:
+    let start: i32
+    let end: i32
+    let first: usize
+
+## A profile pass over the vertices (see CornerPass).
+struct ProfilePass:
+    let work: Bevel*
+    let filling: bool
+    let corner_points: usize
+    var failed: @u32
+
+func place_profiles(work: Bevel*) -> !:
+    let slots = work.vertex_points.count
+    let edges = work.topology.edges()
+    try work.end_profile.fill(edges * 2, 0)
+    try work.end_reversed.fill(edges * 2, 0)
+    # Sizes per slot: new points and profile entries.
+    for slot in 0..<slots + 1:
+        work.slot_points.items[slot] = 0
+        work.slot_entries.items[slot] = 0
+    let corner_points = work.created.count
+    var counting = ProfilePass(work, false, corner_points, 0)
+    parallel.parallel_for(slots, 256, plan_profiles, (void*)&counting)
+    if counting.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory planning bevel profiles")
+    var points: u32 = 0
+    var entries: u32 = 0
+    for slot in 0..<slots + 1:
+        let point_count = work.slot_points.items[slot]
+        let entry_count = work.slot_entries.items[slot]
+        work.slot_points.items[slot] = points
+        work.slot_entries.items[slot] = entries
+        points += point_count
+        entries += entry_count
+    try work.created.extend(corner_points + (usize)points, NewPoint(Vector3(), -1, -1, 0.0, -1))
+    try work.point_source.extend(corner_points + (usize)points, -1)
+    try work.profile_points.fill((usize)entries, -1)
+    var filling = ProfilePass(work, true, corner_points, 0)
+    parallel.parallel_for(slots, 256, plan_profiles, (void*)&filling)
+    if filling.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory placing bevel profiles")
+
+func plan_profiles(context: void*?, first: usize, end: usize):
+    let pass = (ProfilePass*)(context else return)
+    var known = Growing[Known]()
+    defer known.close()
+    for slot in first..<end:
+        vertex_profiles(pass, &known, slot) catch failure:
+            discard(failure)
+            pass.failed.store(1, .relaxed)
+            return
+
+## The profiles at one vertex: one per distinct pair of end points among
+## its beveled edges' ends there.
+func vertex_profiles(pass: ProfilePass*, known: Growing[Known]*, slot: usize) -> !:
+    let work = pass.work
+    if work.fan_valid.items[slot] == 0: return
+    let topology = &work.topology
+    let vertex = work.vertex_points.items[slot]
+    let n = work.segments
+    let terminal_end = work.retained.items[slot] == 2
+    let inner = 0 if terminal_end else n - 1
+    let entry_base = (usize)work.slot_entries.items[slot]
+    let point_base = pass.corner_points + (usize)work.slot_points.items[slot]
+    known.clear()
+    for at in (usize)topology.point_edge_offsets[(usize)vertex]..<(usize)topology.point_edge_offsets[(usize)vertex + 1]:
+        let edge = (usize)topology.point_edges[at]
+        if not work.beveled.get(edge): continue
+        let first = (usize)topology.edge_corner_offsets[edge]
+        let c1 = (usize)topology.edge_corners[first]
+        let c2 = (usize)topology.edge_corners[first + 1]
+        # At the edge's start (face 1's corner): face 1's last new corner to
+        # face 2's first; at its end: face 1's first to face 2's last.
+        let at_start = topology.corners[c1] == vertex
+        let side: usize = 0 if at_start else 1
+        let start = last_point(work, c1) if at_start else first_point(work, topology.next(c1))
+        let end = first_point(work, topology.next(c2)) if at_start else last_point(work, c2)
+        var found: i64 = -1
+        var reversed = false
+        for index in 0..<known.count:
+            let other = known.items[index]
+            if (other.start == start and other.end == end) or (other.start == end and other.end == start):
+                found = (i64)index
+                reversed = other.start != start
+                break
+        if found < 0:
+            found = (i64)known.count
+            try known.push(Known(start, end, known.count * (n + 1)))
+            if pass.filling: fill_profile(work, slot, entry_base + known.count * (n + 1) - (n + 1), point_base + (known.count - 1) * inner, start, end, terminal_end)
+        if pass.filling:
+            work.end_profile.items[edge * 2 + side] = (u32)(entry_base + known.items[(usize)found].first)
+            work.end_reversed.items[edge * 2 + side] = 1 if reversed else 0
+    if not pass.filling:
+        work.slot_entries.items[slot] = (u32)(known.count * (n + 1))
+        work.slot_points.items[slot] = (u32)(known.count * inner)
+
+## Write one profile's points from entry `at`, its new inner points from
+## created index `made`.
+func fill_profile(work: Bevel*, slot: usize, at: usize, made: usize, start: i32, end: i32, terminal_end: bool):
+    let n = work.segments
+    let vertex = work.vertex_points.items[slot]
+    let a = point_at(work, start)
+    let b = point_at(work, end)
+    let middle = a.add(b).multiply_scalar(0.5)
+    let control = middle.add(point_at(work, vertex).subtract(middle).multiply_scalar(2.0 * work.profile))
+    work.profile_points.items[at] = start
+    work.profile_points.items[at + n] = end
+    for step in 1..<n:
+        if terminal_end:
+            work.profile_points.items[at + step] = vertex
+            continue
+        let t = (f64)step / (f64)n
+        let placed = a.multiply_scalar((1.0 - t) * (1.0 - t)).add(control.multiply_scalar(2.0 * t * (1.0 - t))).add(b.multiply_scalar(t * t))
+        let index = made + step - 1
+        work.created.items[index] = NewPoint(placed, vertex, -1, 0.0, (i32)slot)
+        work.profile_points.items[at + step] = (i32)(work.topology.points + index)
+
+## Point `step` (0..segments) of the profile at edge `edge`'s `side` end
+## (0 the start, where face 1's corner is), running from face 1's side.
+func profile_point(work: const Bevel*, edge: usize, side: usize, step: usize) -> i32:
+    let first = (usize)work.end_profile.items[edge * 2 + side]
+    let index = work.segments - step if work.end_reversed.items[edge * 2 + side] == 1 else step
+    return work.profile_points.items[first + index]

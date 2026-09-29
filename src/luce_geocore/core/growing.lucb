@@ -31,6 +31,12 @@ pub struct Growing[T]:
         for at in 0..<count: self.items[at] = value
         self.count = count
 
+    ## Grow to `count` items, the new ones `value` (the rest kept).
+    pub mutating func extend(count: usize, value: T) -> !:
+        try self.reserve(count)
+        for at in self.count..<count: self.items[at] = value
+        if count > self.count: self.count = count
+
     pub mutating func assign(values: const T[]) -> !:
         try self.reserve(values.length)
         if values.length > 0: memory.copy(self.items, values, values.length)

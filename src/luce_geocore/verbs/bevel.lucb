@@ -45,13 +45,6 @@ struct NewPoint:
     let t: f32
     let slot: i32
 
-## A profile at a vertex between two points, and the next at that vertex.
-struct Profile:
-    let start: i32
-    let end: i32
-    let first: u32
-    let next: i32
-
 struct Bevel:
     var topology: Topology
     var beveled: Bits
@@ -66,31 +59,36 @@ struct Bevel:
     var slot_of: Growing[i32]
     ## Per slot: the point, its fan (corners in `fans`), whether the fan
     ## closes, whether the point stays (0 goes, 1 stays, 2 stays at the end
-    ## of its one beveled edge) and its first profile.
+    ## of its one beveled edge).
     var vertex_points: Growing[i32]
     var fan_starts: Growing[u32]
     var fans: Growing[i32]
     var cyclic: Growing[u8]
+    var fan_valid: Growing[u8]
     var retained: Growing[u8]
-    var profile_head: Growing[i32]
+    ## Per slot: where its new points and corner entries start (sizes while
+    ## counting; see bevel_corners.lucb).
+    var slot_points: Growing[u32]
+    var slot_entries: Growing[u32]
     ## Per corner at a bevel vertex: its new corners (a run of `sequence`).
     var corner_first: Growing[u32]
     var corner_count: Growing[u8]
     var sequence: Growing[NewCorner]
     ## New points; their ids follow the input's points.
     var created: Growing[NewPoint]
-    var profiles: Growing[Profile]
+    ## Profiles (bevel_profiles.lucb): their points, and per edge end (edge * 2,
+    ## + 1 at its end) where its profile starts and whether it runs reversed.
     var profile_points: Growing[i32]
+    var end_profile: Growing[u32]
+    var end_reversed: Growing[u8]
     ## Per new point: the first face corner that uses it (corner << 32 |
     ## its entry in `sequence`), or -1; patches take its corner values.
     var point_source: Growing[i64]
-    ## Directed edges among each vertex's points (patch finding).
-    var pairs: Growing[i64]
-    ## One vertex's unanswered edges, which of them a loop used, the loop
-    ## (reused from vertex to vertex).
-    var open: Growing[i64]
-    var used: Growing[u8]
-    var loop: Growing[i32]
+    ## Patches (bevel_patches.lucb): each loop's size, their points, and the
+    ## loops each vertex could not close.
+    var patch_sizes: Growing[u16]
+    var patch_points: Growing[i32]
+    var patch_skipped: Growing[u8]
     var skipped: usize
 
     func init(mesh: const Mesh*, topology: Topology, offset: f64, segments: usize, profile: f64, clamp: bool):
@@ -108,33 +106,22 @@ struct Bevel:
         self.fan_starts = Growing[u32]()
         self.fans = Growing[i32]()
         self.cyclic = Growing[u8]()
+        self.fan_valid = Growing[u8]()
+        self.slot_points = Growing[u32]()
+        self.slot_entries = Growing[u32]()
         self.retained = Growing[u8]()
-        self.profile_head = Growing[i32]()
         self.corner_first = Growing[u32]()
         self.corner_count = Growing[u8]()
         self.sequence = Growing[NewCorner]()
         self.created = Growing[NewPoint]()
-        self.profiles = Growing[Profile]()
         self.profile_points = Growing[i32]()
+        self.end_profile = Growing[u32]()
+        self.end_reversed = Growing[u8]()
         self.point_source = Growing[i64]()
-        self.pairs = Growing[i64]()
-        self.open = Growing[i64]()
-        self.used = Growing[u8]()
-        self.loop = Growing[i32]()
+        self.patch_sizes = Growing[u16]()
+        self.patch_points = Growing[i32]()
+        self.patch_skipped = Growing[u8]()
         self.skipped = 0
-
-    mutating func new_point(position: Vector3, a: i32, b: i32, t: f64, slot: usize) -> i32!:
-        try self.created.push(NewPoint(position, a, b, (f32)t, (i32)slot))
-        try self.point_source.push(-1)
-        return (i32)(self.topology.points + self.created.count - 1)
-
-    ## Add a new corner of face corner `corner`, noting where a new point
-    ## first appears.
-    mutating func add_corner(corner: usize, made: NewCorner) -> !:
-        let at = (usize)made.point
-        if at >= self.topology.points and self.point_source.items[at - self.topology.points] < 0:
-            self.point_source.items[at - self.topology.points] = ((i64)corner << 32) | (i64)self.sequence.count
-        try self.sequence.push(made)
 
     mutating func close():
         self.slot_of.close()
@@ -142,19 +129,21 @@ struct Bevel:
         self.fan_starts.close()
         self.fans.close()
         self.cyclic.close()
+        self.fan_valid.close()
+        self.slot_points.close()
+        self.slot_entries.close()
         self.retained.close()
-        self.profile_head.close()
         self.corner_first.close()
         self.corner_count.close()
         self.sequence.close()
         self.created.close()
-        self.profiles.close()
         self.profile_points.close()
+        self.end_profile.close()
+        self.end_reversed.close()
         self.point_source.close()
-        self.pairs.close()
-        self.open.close()
-        self.used.close()
-        self.loop.close()
+        self.patch_sizes.close()
+        self.patch_points.close()
+        self.patch_skipped.close()
 
 ## Where point `point` is (input or new), in world space.
 func point_at(work: const Bevel*, point: i32) -> Vector3:
@@ -202,225 +191,13 @@ func cook_bevel(input: const VerbInput*, output: VerbOutput*) -> !:
     try build(&work, mesh, output)
     if work.skipped > 0: output.warning = "Some bevel corners could not be closed or edges beveled and were left as they were"
 
-## Each endpoint of a beveled edge and the faces around it in order. The
-## edges at a point whose faces do not form one fan stay unbeveled.
-func find_fans(work: Bevel*, mesh: const Mesh*, beveled: BitsBuilder*) -> !:
-    let topology = &work.topology
-    try work.slot_of.fill(topology.points, -1)
-    try work.fan_starts.push(0)
-    let around = try point_face_span(mesh)
-    for edge in 0..<topology.edges():
-        if not beveled.view().get(edge): continue
-        for side in 0..<(usize)2:
-            let point = topology.edge_points[edge * 2 + side]
-            if work.slot_of.items[(usize)point] != -1: continue
-            let corners_here = (usize)(around.0[(usize)point + 1] - around.0[(usize)point])
-            if not (try fan_of(work, point, corners_here)):
-                work.slot_of.items[(usize)point] = -2
-                continue
-            work.slot_of.items[(usize)point] = (i32)work.vertex_points.count
-            try work.vertex_points.push(point)
-    for edge in 0..<topology.edges():
-        if not beveled.view().get(edge): continue
-        if work.slot_of.items[(usize)topology.edge_points[edge * 2]] == -2 or work.slot_of.items[(usize)topology.edge_points[edge * 2 + 1]] == -2:
-            beveled.clear(edge)
-            work.skipped += 1
-    for point in 0..<topology.points:
-        if work.slot_of.items[point] == -2: work.slot_of.items[point] = -1
-    try work.profile_head.fill(work.vertex_points.count, -1)
-
-## The fan of `point`: its corners in rotation order (the next is across the
-## edge leaving the point), from the boundary for an open fan. False when
-## the fan misses some corner at the point or the winding disagrees.
-func fan_of(work: Bevel*, point: i32, corners_here: usize) -> bool!:
-    let topology = &work.topology
-    var start: i64 = -1
-    for slot in (usize)topology.point_edge_offsets[(usize)point]..<(usize)topology.point_edge_offsets[(usize)point + 1]:
-        let edge = (usize)topology.point_edges[slot]
-        for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
-            let corner = (usize)topology.edge_corners[at]
-            if topology.corners[corner] == point:
-                start = (i64)corner
-                break
-        if start >= 0: break
-    if start < 0: return false
-    # Back across each arriving edge to the start of an open fan.
-    var first = (usize)start
-    for _ in 0..<corners_here:
-        let back = topology.twin(topology.previous(first))
-        if back < 0: break
-        if topology.corners[(usize)back] != point: return false
-        if (usize)back == (usize)start: break
-        first = (usize)back
-    let begin = work.fans.count
-    var corner = first
-    var closed = false
-    for _ in 0..<corners_here:
-        try work.fans.push((i32)corner)
-        let across = topology.twin(corner)
-        if across < 0: break
-        let next = topology.next((usize)across)
-        if topology.corners[next] != point:
-            work.fans.count = begin
-            return false
-        if next == first:
-            closed = true
-            break
-        corner = next
-    if work.fans.count - begin != corners_here:
-        work.fans.count = begin
-        return false
-    try work.fan_starts.push((u32)work.fans.count)
-    try work.cyclic.push(1 if closed else 0)
-    return true
-
-## The new corners of every face around every bevel vertex (see the file
-## notes).
-func place_corners(work: Bevel*) -> !:
-    let topology = &work.topology
-    try work.corner_first.fill(topology.corners.length, 0)
-    try work.corner_count.fill(topology.corners.length, 0)
-    try work.retained.fill(work.vertex_points.count, 1)
-    var edges = Growing[i32]()
-    defer edges.close()
-    var slides = Growing[i32]()
-    defer slides.close()
-    var directions = Growing[Vector3]()
-    defer directions.close()
-    var lengths = Growing[f64]()
-    defer lengths.close()
-    for slot in 0..<work.vertex_points.count:
-        let point = work.vertex_points.items[slot]
-        let first = (usize)work.fan_starts.items[slot]
-        let count = (usize)work.fan_starts.items[slot + 1] - first
-        let closed = work.cyclic.items[slot] == 1
-        # Edge k arrives in face k; edge k + 1 leaves it (edge `count` is the
-        # last face's leaving edge, edge 0 again for a closed fan).
-        let edge_total = count if closed else count + 1
-        try edges.fill(count + 1, -1)
-        for k in 0..<count:
-            edges.items[k] = topology.corner_edges[topology.previous((usize)work.fans.items[first + k])]
-        edges.items[count] = topology.corner_edges[(usize)work.fans.items[first + count - 1]]
-        let here = point_at(work, point)
-        try directions.fill(count + 1, Vector3())
-        try lengths.fill(count + 1, 0.0)
-        for k in 0..<edge_total:
-            let delta = point_at(work, far_end(work, edges.items[k], point)).subtract(here)
-            let length = delta.length()
-            lengths.items[k] = length
-            if length > 0.0: directions.items[k] = delta.multiply_scalar(1.0 / length)
-        if closed:
-            directions.items[count] = directions.items[0]
-            lengths.items[count] = lengths.items[0]
-        # Slides on unbeveled edges beside a beveled one.
-        try slides.fill(count + 1, -1)
-        var keeps_point = false
-        var beveled_here: usize = 0
-        for k in 0..<edge_total:
-            let edge = edges.items[k]
-            if work.beveled.get((usize)edge):
-                beveled_here += 1
-                continue
-            let direction = directions.items[k]
-            let length = lengths.items[k]
-            var distance = 0.0
-            for side in 0..<(usize)2:
-                var index = (i64)k - 1 if side == 0 else (i64)k + 1
-                if closed: index = (index + (i64)count) % (i64)count
-                if index < 0 or index >= (i64)edge_total: continue
-                if not work.beveled.get((usize)edges.items[(usize)index]): continue
-                let sine = direction.cross(directions.items[(usize)index]).length()
-                distance = math.max(distance, work.offset / math.max(sine, 0.000001))
-            if distance == 0.0 or length == 0.0:
-                keeps_point = true
-                continue
-            if work.clamp: distance = math.min(distance, length * 0.5)
-            slides.items[k] = try work.new_point(here.add(direction.multiply_scalar(distance)), point, far_end(work, edge, point), distance / length, slot)
-        if not keeps_point: work.retained.items[slot] = 0
-        elif beveled_here == 1: work.retained.items[slot] = 2
-        for k in 0..<count:
-            let corner = (usize)work.fans.items[first + k]
-            let out = (k + 1) % count if closed else k + 1
-            let in_beveled = work.beveled.get((usize)edges.items[k])
-            let out_beveled = work.beveled.get((usize)edges.items[out])
-            work.corner_first.items[corner] = (u32)work.sequence.count
-            if in_beveled and out_beveled:
-                # Both offset lines meet at the sum of the two edge directions
-                # scaled by offset / sin(angle).
-                let a = directions.items[k]
-                let b = directions.items[out]
-                var reach = a.add(b).multiply_scalar(work.offset / math.max(a.cross(b).length(), 0.000001))
-                let limit = 0.5 * math.min(lengths.items[k], lengths.items[out])
-                if work.clamp and reach.length() > limit: reach = reach.multiply_scalar(limit / reach.length())
-                let meet = try work.new_point(here.add(reach), point, -1, 0.0, slot)
-                try work.add_corner(corner, NewCorner(meet, -1, 0.0))
-            else:
-                let slide_in = slides.items[k]
-                let slide_out = slides.items[out]
-                if slide_in >= 0:
-                    try work.add_corner(corner, NewCorner(slide_in, (i32)topology.previous(corner), work.created.items[(usize)slide_in - topology.points].t))
-                if (not in_beveled and not out_beveled and work.retained.items[slot] != 0) or (slide_in < 0 and slide_out < 0):
-                    try work.add_corner(corner, NewCorner(point, -1, 0.0))
-                if slide_out >= 0:
-                    try work.add_corner(corner, NewCorner(slide_out, (i32)topology.next(corner), work.created.items[(usize)slide_out - topology.points].t))
-            work.corner_count.items[corner] = (u8)(work.sequence.count - (usize)work.corner_first.items[corner])
-
-## The profile at bevel vertex `slot` from `start` to `end` (both included),
-## into `out`; made once per pair and shared, reversed, by the strip on the
-## pair's other side. At the end of a lone beveled edge the vertex stays and
-## the strip fans around it: the profile's inner points are the vertex.
-func profile_points(work: Bevel*, slot: usize, start: i32, end: i32, out: Growing[i32]*) -> !:
-    out.clear()
-    let n = work.segments
-    var at = work.profile_head.items[slot]
-    while at >= 0:
-        let known = work.profiles.items[(usize)at]
-        if (known.start == start and known.end == end) or (known.start == end and known.end == start):
-            for step in 0..<n + 1:
-                try out.push(work.profile_points.items[(usize)known.first + (step if known.start == start else n - step)])
-            return
-        at = known.next
-    try work.profiles.push(Profile(start, end, (u32)work.profile_points.count, work.profile_head.items[slot]))
-    work.profile_head.items[slot] = (i32)(work.profiles.count - 1)
-    let vertex = work.vertex_points.items[slot]
-    let a = point_at(work, start)
-    let b = point_at(work, end)
-    let middle = a.add(b).multiply_scalar(0.5)
-    let control = middle.add(point_at(work, vertex).subtract(middle).multiply_scalar(2.0 * work.profile))
-    for step in 0..<n + 1:
-        var point = start
-        if step == n:
-            point = end
-        elif step > 0 and work.retained.items[slot] == 2:
-            point = vertex
-        elif step > 0:
-            let t = (f64)step / (f64)n
-            let placed = a.multiply_scalar((1.0 - t) * (1.0 - t)).add(control.multiply_scalar(2.0 * t * (1.0 - t))).add(b.multiply_scalar(t * t))
-            point = try work.new_point(placed, vertex, -1, 0.0, slot)
-        try work.profile_points.push(point)
-        try out.push(point)
-
 ## Emit the mesh: the input's points and the new ones, the faces (untouched
 ## runs copied whole), strips, patches; then drop the vertices that went.
 func build(work: Bevel*, mesh: const Mesh*, output: VerbOutput*) -> !:
     let topology = &work.topology
     let n = work.segments
     # Profiles first, so every new point exists before any is emitted.
-    var strip_ends = Growing[i32]()
-    defer strip_ends.close()
-    var path = Growing[i32]()
-    defer path.close()
-    for edge in 0..<topology.edges():
-        if not work.beveled.get(edge): continue
-        let first = (usize)topology.edge_corner_offsets[edge]
-        let c1 = (usize)topology.edge_corners[first]
-        let c2 = (usize)topology.edge_corners[first + 1]
-        # At the edge's start: face 1's last new corner to face 2's first;
-        # at its end: face 1's first to face 2's last.
-        try profile_points(work, (usize)work.slot_of.items[(usize)topology.corners[c1]], last_point(work, c1), first_point(work, topology.next(c2)), &path)
-        for point in path.view(): try strip_ends.push(point)
-        try profile_points(work, (usize)work.slot_of.items[(usize)topology.corners[c2]], first_point(work, topology.next(c1)), last_point(work, c2), &path)
-        for point in path.view(): try strip_ends.push(point)
+    try place_profiles(work)
     var builder = &output.builder
     try builder.begin(mesh)
     try builder.copy_points(mesh)
@@ -460,7 +237,6 @@ func build(work: Bevel*, mesh: const Mesh*, output: VerbOutput*) -> !:
     let bevel_first = builder.face_count()
     # Strips: quads between the profiles at the edge's two ends, facing the
     # way face 1 does.
-    var at: usize = 0
     for edge in 0..<topology.edges():
         if not work.beveled.get(edge): continue
         let first = (usize)topology.edge_corner_offsets[edge]
@@ -469,9 +245,6 @@ func build(work: Bevel*, mesh: const Mesh*, output: VerbOutput*) -> !:
         let c1_end = topology.next(c1)
         let c2_end = topology.next(c2)
         let face = topology.corner_faces[c1]
-        let start_side = strip_ends.items[at..<at + n + 1]
-        let end_side = strip_ends.items[at + n + 1..<at + 2 * n + 2]
-        at += 2 * n + 2
         # Each side blends the corner values its faces gave its end points.
         let start_mix = CornerPair(c1, last_entry(work, c1), c2_end, first_entry(work, c2_end))
         let end_mix = CornerPair(c1_end, first_entry(work, c1_end), c2, last_entry(work, c2))
@@ -483,11 +256,11 @@ func build(work: Bevel*, mesh: const Mesh*, output: VerbOutput*) -> !:
             let t0 = (f32)step / (f32)n
             let t1 = (f32)(step + 1) / (f32)n
             var ring = Ring()
-            ring.add(end_side[step], 1, t0)
-            ring.add(start_side[step], 0, t0)
+            ring.add(profile_point(work, edge, 1, step), 1, t0)
+            ring.add(profile_point(work, edge, 0, step), 0, t0)
             if n == 1 and start_vertex >= 0: ring.add(start_vertex, 0, 0.5)
-            ring.add(start_side[step + 1], 0, t1)
-            ring.add(end_side[step + 1], 1, t1)
+            ring.add(profile_point(work, edge, 0, step + 1), 0, t1)
+            ring.add(profile_point(work, edge, 1, step + 1), 1, t1)
             if n == 1 and end_vertex >= 0: ring.add(end_vertex, 1, 0.5)
             if ring.count > 1 and ring.points[ring.count - 1] == ring.points[0]: ring.count -= 1
             # Both ends' inner points are the vertices: that segment is the
@@ -567,116 +340,3 @@ func strip_corner(work: const Bevel*, builder: TopologyBuilder*, point: i32, pai
 func mixed_or_single(builder: TopologyBuilder*, point: i32, parents: const i32[], weights: const f32[]) -> !:
     if parents.length == 1: return try builder.corner(point, parents[0])
     try builder.mixed_corner(point, parents, weights)
-
-## Close each vertex: the edges among its own points (the kept vertex and
-## the new points around it) that no face answers in reverse bound its
-## holes, and each loop of them becomes a patch face.
-func patches(work: Bevel*, builder: TopologyBuilder*) -> !:
-    let inputs = work.topology.points
-    let slots = work.vertex_points.count
-    let total = builder.point_count()
-    # Each emitted point's vertex slot, or -1.
-    let owner = try alloc i32[total] in memory.heap
-    defer free(owner) in memory.heap
-    for point in 0..<total:
-        if point >= inputs:
-            owner[point] = work.created.items[point - inputs].slot
-        else:
-            let slot = work.slot_of.items[point]
-            owner[point] = slot if slot >= 0 and work.retained.items[(usize)slot] != 0 else -1
-    # Directed edges within one vertex, bucketed by vertex (counting sort:
-    # count, then place).
-    let starts = try alloc u32[slots + 1] in memory.heap
-    defer free(starts) in memory.heap
-    for at in 0..<slots + 1: starts[at] = 0
-    let faces = builder.face_count()
-    for pass in 0..<(usize)2:
-        for face in 0..<faces:
-            if builder.copied.items[face] == 1: continue
-            let start = (usize)builder.offsets.items[face]
-            let end = (usize)builder.offsets.items[face + 1]
-            for corner in start..<end:
-                let u = builder.corners.items[corner]
-                let w = builder.corners.items[corner + 1 if corner + 1 < end else start]
-                let slot = owner[(usize)u]
-                if slot < 0 or slot != owner[(usize)w]: continue
-                if pass == 0:
-                    starts[(usize)slot + 1] += 1
-                else:
-                    work.pairs.items[(usize)starts[(usize)slot]] = ((i64)u << 32) | (i64)w
-                    starts[(usize)slot] += 1
-        if pass == 0:
-            for slot in 0..<slots: starts[slot + 1] += starts[slot]
-            try work.pairs.fill((usize)starts[slots], 0)
-    # Placing moved each bucket's start to its end (the next one's start).
-    var begin: usize = 0
-    for slot in 0..<slots:
-        let end = (usize)starts[slot]
-        if end - begin >= 3: try close_vertex(work, builder, begin, end, slot)
-        begin = end
-
-## The patch faces at vertex `slot` from its directed edges (pairs
-## begin..<end).
-func close_vertex(work: Bevel*, builder: TopologyBuilder*, begin: usize, end: usize, slot: usize) -> !:
-    let mask: i64 = 0xFFFFFFFF
-    var open = &work.open
-    open.clear()
-    for at in begin..<end:
-        let pair = work.pairs.items[at]
-        let reverse = ((pair & mask) << 32) | (pair >> 32)
-        var answered = false
-        for other in begin..<end:
-            if work.pairs.items[other] == reverse:
-                answered = true
-                break
-        if not answered: try open.push(pair)
-    if open.count < 3: return
-    var used = &work.used
-    try used.fill(open.count, 0)
-    var loop = &work.loop
-    let corner = work.fans.items[(usize)work.fan_starts.items[slot]]
-    let face = work.topology.corner_faces[(usize)corner]
-    for start in 0..<open.count:
-        if used.items[start] != 0: continue
-        loop.clear()
-        var at = start
-        var closed = false
-        for _ in 0..<open.count:
-            used.items[at] = 1
-            try loop.push((i32)(open.items[at] >> 32))
-            let target = open.items[at] & mask
-            if target == open.items[start] >> 32:
-                closed = true
-                break
-            var next: i64 = -1
-            for candidate in 0..<open.count:
-                if used.items[candidate] != 0 or open.items[candidate] >> 32 != target: continue
-                next = (i64)candidate if next == -1 else -2
-            if next < 0: break
-            at = (usize)next
-        # At a point on the mesh's boundary the strips' ends are boundary
-        # too: an open run there is no hole.
-        if not closed and work.cyclic.items[slot] == 0: continue
-        if not closed or loop.count < 3 or loop.count > 256:
-            work.skipped += 1
-            continue
-        # The hole's edges run the way no face does: the patch reverses them.
-        # Its corners take the values a face gave each point.
-        try builder.face(face)
-        var index = loop.count
-        while index > 0:
-            index -= 1
-            let point = loop.items[index]
-            var source: i64 = -1
-            if (usize)point >= work.topology.points: source = work.point_source.items[(usize)point - work.topology.points]
-            if source < 0:
-                try builder.corner(point, corner)
-                continue
-            let made = work.sequence.items[(usize)(source & mask)]
-            if made.other < 0:
-                try builder.corner(point, (i32)(source >> 32))
-                continue
-            let parents: i32[2] = [(i32)(source >> 32), made.other]
-            let weights: f32[2] = [1.0 - made.weight, made.weight]
-            try builder.mixed_corner(point, parents[..<2], weights[..<2])
-        try builder.end_face()

@@ -1,0 +1,268 @@
+## PolyBevel's per-vertex work, in parallel. Each bevel vertex (an endpoint
+## of a beveled edge) walks its fan of faces into room reserved for it (its
+## corner count), then plans its new corners twice: a counting pass sizes
+## every vertex's new points and corner entries, a prefix sum places them,
+## and a filling pass writes them. Vertices touch only their own fan's
+## corners, their own points and entries, so the passes need no locks.
+
+## Each endpoint of a beveled edge and the faces around it in order. The
+## edges at a point whose faces do not form one fan stay unbeveled.
+func find_fans(work: Bevel*, mesh: const Mesh*, beveled: BitsBuilder*) -> !:
+    let topology = &work.topology
+    try work.slot_of.fill(topology.points, -1)
+    let around = try point_face_span(mesh)
+    # Slots in edge order; each fan's room is its point's corner count.
+    try work.fan_starts.push(0)
+    for edge in 0..<topology.edges():
+        if not beveled.view().get(edge): continue
+        for side in 0..<(usize)2:
+            let point = (usize)topology.edge_points[edge * 2 + side]
+            if work.slot_of.items[point] != -1: continue
+            work.slot_of.items[point] = (i32)work.vertex_points.count
+            try work.vertex_points.push((i32)point)
+            let room = (u32)(around.0[point + 1] - around.0[point])
+            try work.fan_starts.push(work.fan_starts.items[work.fan_starts.count - 1] + room)
+    let slots = work.vertex_points.count
+    try work.fans.fill((usize)work.fan_starts.items[slots], -1)
+    try work.cyclic.fill(slots, 0)
+    try work.fan_valid.fill(slots, 0)
+    parallel.parallel_for(slots, 512, walk_fans, (void*)work)
+    # Edges at a point without one fan stay as they are.
+    for edge in 0..<topology.edges():
+        if not beveled.view().get(edge): continue
+        let a = work.slot_of.items[(usize)topology.edge_points[edge * 2]]
+        let b = work.slot_of.items[(usize)topology.edge_points[edge * 2 + 1]]
+        if work.fan_valid.items[(usize)a] == 0 or work.fan_valid.items[(usize)b] == 0:
+            beveled.clear(edge)
+            work.skipped += 1
+    for slot in 0..<slots:
+        if work.fan_valid.items[slot] == 0: work.slot_of.items[(usize)work.vertex_points.items[slot]] = -1
+
+func walk_fans(context: void*?, first: usize, end: usize):
+    let work = (Bevel*)(context else return)
+    for slot in first..<end:
+        let start = (usize)work.fan_starts.items[slot]
+        let room = (usize)work.fan_starts.items[slot + 1] - start
+        let fan = work.fans.items[start..<start + room]
+        let (valid, closed) = fan_of(&work.topology, work.vertex_points.items[slot], fan)
+        work.fan_valid.items[slot] = 1 if valid else 0
+        work.cyclic.items[slot] = 1 if closed else 0
+
+## The fan of `point` into `fan`: its corners in rotation order (the next is
+## across the edge leaving the point), from the boundary for an open fan.
+## Whether it fills `fan` exactly (a single fan, consistently wound) and
+## whether it closes.
+func fan_of(topology: const Topology*, point: i32, fan: i32[]) -> (bool, bool):
+    var start: i64 = -1
+    for slot in (usize)topology.point_edge_offsets[(usize)point]..<(usize)topology.point_edge_offsets[(usize)point + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+            let corner = (usize)topology.edge_corners[at]
+            if topology.corners[corner] == point:
+                start = (i64)corner
+                break
+        if start >= 0: break
+    if start < 0: return (false, false)
+    # Back across each arriving edge to the start of an open fan.
+    var first = (usize)start
+    for _ in 0..<fan.length:
+        let back = topology.twin(topology.previous(first))
+        if back < 0: break
+        if topology.corners[(usize)back] != point: return (false, false)
+        if (usize)back == (usize)start: break
+        first = (usize)back
+    var count: usize = 0
+    var corner = first
+    for _ in 0..<fan.length:
+        fan[count] = (i32)corner
+        count += 1
+        let across = topology.twin(corner)
+        if across < 0: return (count == fan.length, false)
+        let next = topology.next((usize)across)
+        if topology.corners[next] != point: return (false, false)
+        if next == first: return (count == fan.length, true)
+        corner = next
+    return (false, false)
+
+## Scratch for one vertex's plan: its fan's edges (edge k arrives in face k,
+## edge k + 1 leaves it), their directions and lengths, and each edge's
+## slide (a point index within the vertex, or -1).
+struct Scratch:
+    var edges: Growing[i32]
+    var directions: Growing[Vector3]
+    var lengths: Growing[f64]
+    var slides: Growing[i32]
+
+    func init():
+        self.edges = Growing[i32]()
+        self.directions = Growing[Vector3]()
+        self.lengths = Growing[f64]()
+        self.slides = Growing[i32]()
+
+    mutating func close():
+        self.edges.close()
+        self.directions.close()
+        self.lengths.close()
+        self.slides.close()
+
+## A pass over the vertices: counting (sizes per slot) or filling (from the
+## prefix-summed starts). An allocation failure stops it.
+struct CornerPass:
+    let work: Bevel*
+    let filling: bool
+    var failed: @u32
+
+## The new corners of every face around every bevel vertex (see the file
+## notes and bevel.lucb).
+func place_corners(work: Bevel*) -> !:
+    let topology = &work.topology
+    let slots = work.vertex_points.count
+    try work.corner_first.fill(topology.corners.length, 0)
+    try work.corner_count.fill(topology.corners.length, 0)
+    try work.retained.fill(slots, 1)
+    try work.slot_points.fill(slots + 1, 0)
+    try work.slot_entries.fill(slots + 1, 0)
+    var counting = CornerPass(work, false, 0)
+    parallel.parallel_for(slots, 256, plan_corners, (void*)&counting)
+    if counting.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory planning bevel corners")
+    # Starts: an exclusive prefix sum (the last entry is the total).
+    var points: u32 = 0
+    var entries: u32 = 0
+    for slot in 0..<slots + 1:
+        let point_count = work.slot_points.items[slot]
+        let entry_count = work.slot_entries.items[slot]
+        work.slot_points.items[slot] = points
+        work.slot_entries.items[slot] = entries
+        points += point_count
+        entries += entry_count
+    try work.created.fill((usize)points, NewPoint(Vector3(), -1, -1, 0.0, -1))
+    try work.point_source.fill((usize)points, -1)
+    try work.sequence.fill((usize)entries, NewCorner(-1, -1, 0.0))
+    var filling = CornerPass(work, true, 0)
+    parallel.parallel_for(slots, 256, plan_corners, (void*)&filling)
+    if filling.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory placing bevel corners")
+
+func plan_corners(context: void*?, first: usize, end: usize):
+    let pass = (CornerPass*)(context else return)
+    var scratch = Scratch()
+    defer scratch.close()
+    for slot in first..<end:
+        plan_vertex(pass.work, &scratch, slot, pass.filling) catch failure:
+            discard(failure)
+            pass.failed.store(1, .relaxed)
+            return
+
+## One vertex: slides on its unbeveled edges beside a beveled one, then each
+## face's new corners there. Counting records how many points and entries it
+## makes; filling writes them from its starts.
+func plan_vertex(work: Bevel*, scratch: Scratch*, slot: usize, filling: bool) -> !:
+    if work.fan_valid.items[slot] == 0: return
+    let topology = &work.topology
+    let point = work.vertex_points.items[slot]
+    let first = (usize)work.fan_starts.items[slot]
+    let count = (usize)work.fan_starts.items[slot + 1] - first
+    let closed = work.cyclic.items[slot] == 1
+    let edge_total = count if closed else count + 1
+    let here = point_at(work, point)
+    try scratch.edges.fill(count + 1, -1)
+    try scratch.directions.fill(count + 1, Vector3())
+    try scratch.lengths.fill(count + 1, 0.0)
+    try scratch.slides.fill(count + 1, -1)
+    let edges = scratch.edges.items
+    let directions = scratch.directions.items
+    let lengths = scratch.lengths.items
+    let slides = scratch.slides.items
+    for k in 0..<count:
+        edges[k] = topology.corner_edges[topology.previous((usize)work.fans.items[first + k])]
+    edges[count] = topology.corner_edges[(usize)work.fans.items[first + count - 1]]
+    for k in 0..<edge_total:
+        let delta = point_at(work, far_end(work, edges[k], point)).subtract(here)
+        let length = delta.length()
+        lengths[k] = length
+        if length > 0.0: directions[k] = delta.multiply_scalar(1.0 / length)
+    if closed:
+        directions[count] = directions[0]
+        lengths[count] = lengths[0]
+    # New points of this vertex: local indices from 0, placed from its start.
+    let point_base = (usize)work.slot_points.items[slot]
+    var made: usize = 0
+    var keeps_point = false
+    var beveled_here: usize = 0
+    for k in 0..<edge_total:
+        if work.beveled.get((usize)edges[k]):
+            beveled_here += 1
+            continue
+        var distance = 0.0
+        for side in 0..<(usize)2:
+            var index = (i64)k - 1 if side == 0 else (i64)k + 1
+            if closed: index = (index + (i64)count) % (i64)count
+            if index < 0 or index >= (i64)edge_total: continue
+            if not work.beveled.get((usize)edges[(usize)index]): continue
+            let sine = directions[k].cross(directions[(usize)index]).length()
+            distance = math.max(distance, work.offset / math.max(sine, 0.000001))
+        if distance == 0.0 or lengths[k] == 0.0:
+            keeps_point = true
+            continue
+        if work.clamp: distance = math.min(distance, lengths[k] * 0.5)
+        slides[k] = (i32)made
+        if filling:
+            work.created.items[point_base + made] = NewPoint(here.add(directions[k].multiply_scalar(distance)), point, far_end(work, edges[k], point), (f32)(distance / lengths[k]), (i32)slot)
+        made += 1
+    work.retained.items[slot] = 0 if not keeps_point else (2 if beveled_here == 1 else 1)
+    let entry_base = (usize)work.slot_entries.items[slot]
+    var entries: usize = 0
+    for k in 0..<count:
+        let corner = (usize)work.fans.items[first + k]
+        let out = (k + 1) % count if closed else k + 1
+        let in_beveled = work.beveled.get((usize)edges[k])
+        let out_beveled = work.beveled.get((usize)edges[out])
+        let begin = entries
+        if in_beveled and out_beveled:
+            # Both offset lines meet at the sum of the two edge directions
+            # scaled by offset / sin(angle).
+            let a = directions[k]
+            let b = directions[out]
+            var reach = a.add(b).multiply_scalar(work.offset / math.max(a.cross(b).length(), 0.000001))
+            let limit = 0.5 * math.min(lengths[k], lengths[out])
+            if work.clamp and reach.length() > limit: reach = reach.multiply_scalar(limit / reach.length())
+            if filling:
+                work.created.items[point_base + made] = NewPoint(here.add(reach), point, -1, 0.0, (i32)slot)
+                add_entry(work, corner, entry_base + entries, NewCorner(global(work, point_base + made), -1, 0.0))
+            made += 1
+            entries += 1
+        else:
+            let slide_in = slides[k]
+            let slide_out = slides[out]
+            if slide_in >= 0:
+                if filling: add_entry(work, corner, entry_base + entries, slide_entry(work, point_base, slide_in, topology.previous(corner)))
+                entries += 1
+            if (not in_beveled and not out_beveled and keeps_point) or (slide_in < 0 and slide_out < 0):
+                if filling: add_entry(work, corner, entry_base + entries, NewCorner(point, -1, 0.0))
+                entries += 1
+            if slide_out >= 0:
+                if filling: add_entry(work, corner, entry_base + entries, slide_entry(work, point_base, slide_out, topology.next(corner)))
+                entries += 1
+        work.corner_first.items[corner] = (u32)(entry_base + begin)
+        work.corner_count.items[corner] = (u8)(entries - begin)
+    if not filling:
+        work.slot_points.items[slot] = (u32)made
+        work.slot_entries.items[slot] = (u32)entries
+
+## The id of new point `index` (points follow the input's).
+func global(work: const Bevel*, index: usize) -> i32:
+    return (i32)(work.topology.points + index)
+
+## A corner on a slide: the slid point, blended with the face's corner at
+## the far end of the edge by how far it slid.
+func slide_entry(work: const Bevel*, point_base: usize, slide: i32, other: usize) -> NewCorner:
+    let index = point_base + (usize)slide
+    return NewCorner(global(work, index), (i32)other, work.created.items[index].t)
+
+## Write entry `at` of face corner `corner`, noting where a new point first
+## appears (its corner and entry; patches take its values).
+func add_entry(work: Bevel*, corner: usize, at: usize, made: NewCorner):
+    work.sequence.items[at] = made
+    let point = (usize)made.point
+    if point < work.topology.points: return
+    let index = point - work.topology.points
+    if work.point_source.items[index] < 0: work.point_source.items[index] = ((i64)corner << 32) | (i64)at

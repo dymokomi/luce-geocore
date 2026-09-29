@@ -1,0 +1,183 @@
+## PolyBevel's corner patches: where strips leave a hole around a vertex (the
+## triangle where three beveled edges meet, the n-gon a profile leaves beside
+## a straight cut), the directed edges among the vertex's own points that no
+## face answers in reverse form loops, and each loop becomes a face. Those
+## edges come from the vertex's rebuilt face corners and its strips' profile
+## sides, so each vertex finds its loops on its own, in parallel (count,
+## prefix sum, fill); the faces are then emitted in vertex order.
+
+## Scratch for one vertex's loops.
+struct Loops:
+    var pairs: Growing[i64]
+    var open: Growing[i64]
+    var used: Growing[u8]
+    var loop: Growing[i32]
+
+    func init():
+        self.pairs = Growing[i64]()
+        self.open = Growing[i64]()
+        self.used = Growing[u8]()
+        self.loop = Growing[i32]()
+
+    mutating func close():
+        self.pairs.close()
+        self.open.close()
+        self.used.close()
+        self.loop.close()
+
+## A patch pass over the vertices (see CornerPass). Sizes per slot: loops in
+## `slot_points`, their points in `slot_entries`.
+struct PatchPass:
+    let work: Bevel*
+    let filling: bool
+    var failed: @u32
+
+func patches(work: Bevel*, builder: TopologyBuilder*) -> !:
+    let slots = work.vertex_points.count
+    for slot in 0..<slots + 1:
+        work.slot_points.items[slot] = 0
+        work.slot_entries.items[slot] = 0
+    try work.patch_skipped.fill(slots, 0)
+    var counting = PatchPass(work, false, 0)
+    parallel.parallel_for(slots, 256, plan_patches, (void*)&counting)
+    if counting.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory finding bevel patches")
+    var loops: u32 = 0
+    var points: u32 = 0
+    for slot in 0..<slots + 1:
+        let loop_count = work.slot_points.items[slot]
+        let point_count = work.slot_entries.items[slot]
+        work.slot_points.items[slot] = loops
+        work.slot_entries.items[slot] = points
+        loops += loop_count
+        points += point_count
+    try work.patch_sizes.fill((usize)loops, 0)
+    try work.patch_points.fill((usize)points, -1)
+    var filling = PatchPass(work, true, 0)
+    parallel.parallel_for(slots, 256, plan_patches, (void*)&filling)
+    if filling.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory finding bevel patches")
+    for slot in 0..<slots: work.skipped += (usize)work.patch_skipped.items[slot]
+    # Emit in vertex order; corners take the values a face gave each point.
+    let mask: i64 = 0xFFFFFFFF
+    var at: usize = 0
+    for slot in 0..<slots:
+        let corner = work.fans.items[(usize)work.fan_starts.items[slot]]
+        let face = work.topology.corner_faces[(usize)corner]
+        for index in (usize)work.slot_points.items[slot]..<(usize)work.slot_points.items[slot + 1]:
+            let size = (usize)work.patch_sizes.items[index]
+            try builder.face(face)
+            for point in work.patch_points.items[at..<at + size]:
+                var source: i64 = -1
+                if (usize)point >= work.topology.points: source = work.point_source.items[(usize)point - work.topology.points]
+                if source < 0:
+                    try builder.corner(point, corner)
+                    continue
+                let made = work.sequence.items[(usize)(source & mask)]
+                if made.other < 0:
+                    try builder.corner(point, (i32)(source >> 32))
+                    continue
+                let parents: i32[2] = [(i32)(source >> 32), made.other]
+                let weights: f32[2] = [1.0 - made.weight, made.weight]
+                try builder.mixed_corner(point, parents[..<2], weights[..<2])
+            try builder.end_face()
+            at += size
+
+func plan_patches(context: void*?, first: usize, end: usize):
+    let pass = (PatchPass*)(context else return)
+    var scratch = Loops()
+    defer scratch.close()
+    for slot in first..<end:
+        vertex_patches(pass, &scratch, slot) catch failure:
+            discard(failure)
+            pass.failed.store(1, .relaxed)
+            return
+
+## The directed edges among one vertex's points: along each face's run of
+## new corners there, and along each strip's profile side there.
+func vertex_pairs(work: const Bevel*, slot: usize, pairs: Growing[i64]*) -> !:
+    let topology = &work.topology
+    let vertex = work.vertex_points.items[slot]
+    let first = (usize)work.fan_starts.items[slot]
+    for k in first..<(usize)work.fan_starts.items[slot + 1]:
+        let corner = (usize)work.fans.items[k]
+        let start = (usize)work.corner_first.items[corner]
+        for at in start..<start + (usize)work.corner_count.items[corner] - 1:
+            try pairs.push(directed(work.sequence.items[at].point, work.sequence.items[at + 1].point))
+    let n = work.segments
+    for at in (usize)topology.point_edge_offsets[(usize)vertex]..<(usize)topology.point_edge_offsets[(usize)vertex + 1]:
+        let edge = (usize)topology.point_edges[at]
+        if not work.beveled.get(edge): continue
+        let c1 = (usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge]]
+        # Strip quads run along the start side's profile forwards and along
+        # the end side's backwards.
+        let side: usize = 0 if topology.corners[c1] == vertex else 1
+        for step in 0..<n:
+            let a = profile_point(work, edge, side, step)
+            let b = profile_point(work, edge, side, step + 1)
+            try pairs.push(directed(a, b) if side == 0 else directed(b, a))
+
+func directed(from_point: i32, to_point: i32) -> i64:
+    return ((i64)from_point << 32) | (i64)to_point
+
+## One vertex's patch loops: counted, or written from its starts. A vertex
+## that stays at a lone edge's end, or on the mesh's boundary with an open
+## run, has no hole to close.
+func vertex_patches(pass: PatchPass*, scratch: Loops*, slot: usize) -> !:
+    let work = pass.work
+    if work.fan_valid.items[slot] == 0 or work.retained.items[slot] == 2: return
+    let mask: i64 = 0xFFFFFFFF
+    scratch.pairs.clear()
+    try vertex_pairs(work, slot, &scratch.pairs)
+    let pairs = scratch.pairs.view()
+    scratch.open.clear()
+    for edge in pairs:
+        let reverse = ((edge & mask) << 32) | (edge >> 32)
+        var answered = false
+        for other in pairs:
+            if other == reverse:
+                answered = true
+                break
+        if not answered: try scratch.open.push(edge)
+    let open = scratch.open.view()
+    if open.length < 3: return
+    try scratch.used.fill(open.length, 0)
+    let used = scratch.used.items
+    var loops: usize = 0
+    var points: usize = 0
+    var skipped: usize = 0
+    let loop_base = (usize)work.slot_points.items[slot]
+    let point_base = (usize)work.slot_entries.items[slot]
+    for start in 0..<open.length:
+        if used[start] != 0: continue
+        scratch.loop.clear()
+        var at = start
+        var closed = false
+        for _ in 0..<open.length:
+            used[at] = 1
+            try scratch.loop.push((i32)(open[at] >> 32))
+            let target = open[at] & mask
+            if target == open[start] >> 32:
+                closed = true
+                break
+            var next: i64 = -1
+            for candidate in 0..<open.length:
+                if used[candidate] != 0 or open[candidate] >> 32 != target: continue
+                next = (i64)candidate if next == -1 else -2
+            if next < 0: break
+            at = (usize)next
+        # At a point on the mesh's boundary the strips' ends are boundary
+        # too: an open run there is no hole.
+        if not closed and work.cyclic.items[slot] == 0: continue
+        let size = scratch.loop.count
+        if not closed or size < 3 or size > 256:
+            skipped += 1
+            continue
+        if pass.filling:
+            # The hole's edges run the way no face does: the patch reverses them.
+            work.patch_sizes.items[loop_base + loops] = (u16)size
+            for index in 0..<size: work.patch_points.items[point_base + points + index] = scratch.loop.items[size - 1 - index]
+        loops += 1
+        points += size
+    if not pass.filling:
+        work.slot_points.items[slot] = (u32)loops
+        work.slot_entries.items[slot] = (u32)points
+        work.patch_skipped.items[slot] = (u8)math.min(255.0, (f64)skipped)
