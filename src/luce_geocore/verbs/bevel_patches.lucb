@@ -168,12 +168,12 @@ func vertex_patches(pass: PatchPass*, scratch: Loops*, slot: usize) -> !:
         # too: an open run there is no hole.
         if not closed and work.cyclic.items[slot] == 0: continue
         let size = scratch.loop.count
-        if not closed or size < 3 or size > 256:
+        if not closed or size < 3:
             skipped += 1
             continue
         if pass.filling:
             # The hole's edges run the way no face does: the patch reverses them.
-            work.patch_sizes.items[loop_base + loops] = (u16)size
+            work.patch_sizes.items[loop_base + loops] = (u32)size
             for index in 0..<size: work.patch_points.items[point_base + points + index] = scratch.loop.items[size - 1 - index]
         loops += 1
         points += size

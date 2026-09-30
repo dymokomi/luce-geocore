@@ -111,9 +111,12 @@ func cook_duplicate(input: const VerbInput*, output: VerbOutput*) -> !:
         if not input.group.get(face): continue
         let offset = normals[face].vector().multiply_scalar(distance)
         output.selection.set(output.builder.face_count())
-        var points: i32[256]
         let start = (usize)offsets[face]
         let size = (usize)offsets[face + 1] - start
+        # Small faces on the stack, larger ones in heap scratch.
+        var stack: i32[256]
+        let points = try face_scratch.take[i32](stack, size, size)
+        defer face_scratch.release[i32](stack, points)
         for at in 0..<size:
             let point = corners[start + at]
             points[at] = try output.builder.point(output.builder.position(point).add(offset), point)
@@ -131,7 +134,10 @@ func split_face(input: const VerbInput*, builder: TopologyBuilder*, face: usize,
     let corners = corner_span(input.mesh)
     let start = (usize)offsets[face]
     let size = (usize)offsets[face + 1] - start
-    var points: i32[256]
+    # Small faces on the stack, larger ones in heap scratch.
+    var stack: i32[256]
+    let points = try face_scratch.take[i32](stack, size, size)
+    defer face_scratch.release[i32](stack, points)
     for at in 0..<size:
         let point = corners[start + at]
         points[at] = try builder.point(builder.position(point), point)

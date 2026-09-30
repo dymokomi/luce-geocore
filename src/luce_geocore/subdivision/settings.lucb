@@ -29,6 +29,7 @@ from luce_geocore.math.vector import Vector3
 from luce_geocore.geometries.polygon import Mesh, mesh_share, mesh_dispose, mesh_adopt, mesh_origin, point_span, precise_span, attribute_entry, moved_storage, displayed, put_attribute, remove_attribute, face_normal_span, offset_span, corner_span, topology_extension
 from luce_geocore.groups import Topology
 from luce_geocore.verbs import TopologyBuilder
+import luce_geocore.geometries.face_scratch as face_scratch
 
 pub enum Scheme as u8:
     off = 0

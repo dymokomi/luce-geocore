@@ -1,0 +1,38 @@
+## Per-face scratch. Faces have any number of corners (three or more); the
+## common small face works in fixed stack buffers, and a larger face takes
+## heap scratch sized by the face, so running out of memory is the only way
+## a large face can fail.
+##
+## `small_faces()` is where the two paths meet: at most `stack_corners`, and
+## lowered only by tests (`set_small_faces(4)` sends nearly every face down
+## the heap path, so the whole suite checks that both give the same result).
+## The triangulator's own switch to its linear-time ring algorithm is
+## `ring_corners` in polygon_triangulation, which does not move with it.
+import memory
+
+## Corners the per-face stack buffers hold.
+pub let stack_corners: usize = 256
+## Display indices of a face of `stack_corners` corners: 3 * (256 - 2).
+pub let stack_indices: usize = 762
+
+var small_limit: usize = 256
+
+## Faces of up to this many corners use the stack buffers.
+pub func small_faces() -> usize:
+    return small_limit
+
+## For tests: send faces of more than `limit` corners (at least 3, at most
+## `stack_corners`) through the heap path. Set it before any work starts.
+pub func set_small_faces(limit: usize):
+    small_limit = stack_corners if limit > stack_corners else (3 if limit < 3 else limit)
+
+## `length` elements of scratch for a face of `corners` corners: the front
+## of `stack` when the face is small and fits it, else a heap block. Pair
+## it with `release(stack, block)`.
+pub func take[T](stack: T[], corners: usize, length: usize) -> T[]!:
+    if length == 0 or (corners <= small_limit and length <= stack.length): return stack[..<length]
+    return try alloc T[length] in memory.heap
+
+## Free `block` from `take` when it is not `stack`'s own storage.
+pub func release[T](stack: T[], block: T[]):
+    if block.length > 0 and block.data != stack.data: free(block) in memory.heap

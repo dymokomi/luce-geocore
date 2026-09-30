@@ -3,6 +3,14 @@ import math
 import memory
 from luce_geocore.math.vector import Vector3
 from luce_geocore.geometries.polygon_partition import partition
+from luce_geocore.geometries.ring_triangulation import triangulate_ring
+import luce_geocore.geometries.face_scratch as face_scratch
+
+## Faces of more corners than this triangulate on a linked ring in about
+## linear time (ring_triangulation); smaller ones keep the scanning ear
+## clipper below, whose cubic worst case and partition fallback are bounded
+## by this. Unlike face_scratch's small-face limit, tests never move it.
+pub let ring_corners: usize = 256
 
 ## Polygon area has squared-distance units. Normalize relative to its own
 ## extent, not Vector3's world-space direction cutoff, exactly as ear tests do.
@@ -28,10 +36,15 @@ pub func is_degenerate(normal: Vector3) -> bool:
 ## concave polygons created by point editing; what ear clipping and the
 ## partition cannot finish (a self-intersecting or folded polygon, or one
 ## without an area, whose normal is zero) is finished as a fan. The face
-## itself is never rejected: only its display is approximate.
+## itself is never rejected: only its display is approximate. Faces of any
+## size; those over `ring_corners` go to triangulate_ring. `output` holds
+## 3 * (count - 2) corner indices. Only running out of memory fails.
 pub func triangulate(points: const Vector3[], corners: const i64[], start: usize, count: usize, normal: Vector3, output: i64[]) -> !:
     if is_degenerate(normal):
         fan(start, count, output)
+        return
+    if count > ring_corners:
+        try triangulate_ring(points, corners, start, count, normal, output)
         return
     let origin = points[(usize)corners[start]]
     var extent2: f64 = 0.0
@@ -54,7 +67,9 @@ pub func triangulate(points: const Vector3[], corners: const i64[], start: usize
             let quad: usize[6] = [3, 0, 1, 1, 2, 3]
             for at in 0..<(usize)6: output[at] = (i64)(start + quad[at])
             return
-    var remaining: usize[256] = ---
+    var stack: usize[256] = ---
+    let remaining = try face_scratch.take[usize](stack, count, count)
+    defer face_scratch.release[usize](stack, remaining)
     for index in 0..<count:
         remaining[index] = start + index
     var length = count

@@ -224,7 +224,7 @@ func check_topology(offsets: const i32[], corners: const i32[], points: usize) -
     if offsets.length == 0 or offsets[0] != 0 or (usize)offsets[offsets.length - 1] != corners.length: error(errors.invalid, "a saved mesh has inconsistent face offsets")
     for at in 1..<offsets.length:
         let size = offsets[at] - offsets[at - 1]
-        if size < 3 or size > 256: error(errors.invalid, "a saved mesh has a face of fewer than 3 or more than 256 corners")
+        if size < 3: error(errors.invalid, "a saved mesh has a face of fewer than 3 corners")
     for corner in corners:
         if corner < 0 or (usize)corner >= points: error(errors.invalid, "a saved mesh names a missing point")
 

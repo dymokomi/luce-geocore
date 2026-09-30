@@ -244,3 +244,16 @@ pub let sdf_preview = fields.sdf_preview
 pub let volume_preview = fields.volume_preview
 pub let leaf_key = fields.leaf_key
 pub let key_leaf = fields.key_leaf
+
+## Display triangulation of one polygon of any size: `output` gets the
+## 3 * (count - 2) corner indices of corners start..<start + count, wound
+## about the unit `normal` (zero: a fan). Only running out of memory fails.
+import luce_geocore.geometries.polygon_triangulation as polygon_triangulation
+import luce_geocore.geometries.display_triangulation as display_triangulation
+import luce_geocore.geometries.face_scratch as face_scratch
+pub let triangulate_polygon = polygon_triangulation.triangulate
+## Check display triangles of one polygon as Mesh construction does.
+pub let validate_polygon_display = display_triangulation.validate
+## For tests: faces of more than `limit` corners take the heap path (see
+## face_scratch); set it before any work starts.
+pub let set_small_faces = face_scratch.set_small_faces

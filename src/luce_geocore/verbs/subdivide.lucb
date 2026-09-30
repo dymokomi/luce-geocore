@@ -73,10 +73,15 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
     for face in 0..<faces:
         let start = (usize)offsets[face]
         let size = (usize)offsets[face + 1] - start
+        # Small faces mix on the stack, larger ones in heap scratch.
+        let face_parents = try face_scratch.take[i32](parents, size, size)
+        defer face_scratch.release[i32](parents, face_parents)
+        let face_weights = try face_scratch.take[f32](weights, size, size)
+        defer face_scratch.release[f32](weights, face_weights)
         for at in 0..<size:
-            parents[at] = corners[start + at]
-            weights[at] = (f32)(1.0 / (f64)size)
-        discard(try builder.mixed_point(centers[face], parents[..<size], weights[..<size]))
+            face_parents[at] = corners[start + at]
+            face_weights[at] = (f32)(1.0 / (f64)size)
+        discard(try builder.mixed_point(centers[face], face_parents, face_weights))
     if smooth: try catmull_clark_points(&topology, builder, centers)
     # n quads per face.
     let edge_base = (i32)points
@@ -86,9 +91,15 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
     for face in 0..<faces:
         let start = (usize)offsets[face]
         let size = (usize)offsets[face + 1] - start
+        let center_parents = try face_scratch.take[i32](mixed_parents, size, size)
+        defer face_scratch.release[i32](mixed_parents, center_parents)
+        let center_weights = try face_scratch.take[f32](mixed_weights, size, size)
+        defer face_scratch.release[f32](mixed_weights, center_weights)
         for at in 0..<size:
-            mixed_parents[at] = (i32)(start + at)
-            mixed_weights[at] = (f32)(1.0 / (f64)size)
+            center_parents[at] = (i32)(start + at)
+            center_weights[at] = (f32)(1.0 / (f64)size)
+        # Every quad's center corner shares one mix of the face's corners.
+        let center = try builder.shared_mix(center_parents, center_weights)
         for at in 0..<size:
             let corner = start + at
             let next = start + (at + 1) % size
@@ -98,7 +109,7 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
             let pair: i32[2] = [(i32)corner, (i32)next]
             let half: f32[2] = [0.5, 0.5]
             try builder.mixed_corner(edge_base + topology.corner_edges[corner], pair, half)
-            try builder.mixed_corner(face_base + (i32)face, mixed_parents[..<size], mixed_weights[..<size])
+            try builder.shared_corner(face_base + (i32)face, center)
             let back: i32[2] = [(i32)previous, (i32)corner]
             try builder.mixed_corner(edge_base + topology.corner_edges[previous], back, half)
             try builder.end_face()

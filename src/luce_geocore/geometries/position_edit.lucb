@@ -16,6 +16,7 @@ from luce_geocore.core.attribute_ops import typed_mut
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
 from luce_geocore.geometries.polygon_triangulation import triangulate, area_normal, is_degenerate
+import luce_geocore.geometries.face_scratch as face_scratch
 
 ## Owned columns for the new mesh. `triangles` is empty when the previous
 ## triangles remain valid and are shared.
@@ -182,24 +183,29 @@ func folded(shape: const Shape*, face: usize) -> bool:
             return true
     return false
 
-## Re-triangulate a folded face in place; keep its old triangles when the
-## moved polygon cannot be ear clipped (a display artifact is better than
-## refusing the whole edit).
+## Re-triangulate a folded face in place (triangulation never refuses a
+## face: a folded one is finished as a fan). Only running out of memory fails.
 func retriangulate(shape: const Shape*, face: usize, normal: Vector3, triangles: i32[]) -> !:
     if not folded(shape, face): return
     let start = (usize)shape.offsets[face]
     let count = (usize)shape.offsets[face + 1] - start
-    var points: Vector3[256] = ---
-    var indices: i64[256] = ---
+    let size = (count - 2) * 3
+    # Small faces work on the stack, larger ones in heap scratch.
+    var point_stack: Vector3[256] = ---
+    var index_stack: i64[256] = ---
+    var output_stack: i64[762] = ---
+    let points = try face_scratch.take[Vector3](point_stack, count, count)
+    defer face_scratch.release[Vector3](point_stack, points)
+    let indices = try face_scratch.take[i64](index_stack, count, count)
+    defer face_scratch.release[i64](index_stack, indices)
+    let output = try face_scratch.take[i64](output_stack, count, size)
+    defer face_scratch.release[i64](output_stack, output)
     for at in 0..<count:
         points[at] = shape.positions[(usize)shape.corners[start + at]].vector()
         indices[at] = (i64)at
-    var scratch: i64[762] = ---
-    let size = (count - 2) * 3
-    triangulate(points[..<count], indices[..<count], 0, count, normal, scratch[..<size]) catch failure:
-        return
+    try triangulate(points, indices, 0, count, normal, output)
     let first = (start - face * 2) * 3
-    for at in 0..<size: triangles[first + at] = (i32)((i64)start + scratch[at])
+    for at in 0..<size: triangles[first + at] = (i32)((i64)start + output[at])
 
 ## Shading normals follow an affine placement by the inverse transpose. The
 ## N columns are written copy-on-write, so snapshots sharing them keep theirs.

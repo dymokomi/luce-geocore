@@ -45,37 +45,54 @@ func mixed(source: const Attribute*, parents: const i32[], mix: const Mix*) -> A
     if not any or source.storage == Storage.single: return result
     errdefer result.release()
     let bytes = try result.data.writable()
+    # Corners sharing one large mix (a subdivided n-gon's centers) name the
+    # same entry again and again: its value is worked out once.
+    var cached: i64 = -1
+    var cached_values: f64[4]
+    var cached_write = false
     for element in 0..<parents.length:
         let code = parents[element]
         if code >= -1: continue
         let entry = (usize)(-2 - code)
         let first = (usize)mix.offsets.items[entry]
         let end = (usize)mix.offsets.items[entry + 1]
-        match source.kind:
-            .float32, .float64:
-                var values: f64[4]
-                for component in 0..<source.width:
-                    var sum = 0.0
+        var values: f64[4]
+        var write = true
+        if (i64)entry == cached:
+            values = cached_values
+            write = cached_write
+        else:
+            match source.kind:
+                .float32, .float64:
+                    for component in 0..<source.width:
+                        var sum = 0.0
+                        for at in first..<end:
+                            sum += source.number((usize)mix.parents.items[at], component) * (f64)mix.weights.items[at]
+                        values[component] = sum
+                    if source.role == Role.normal and source.width == 3:
+                        let length = math.sqrt(values[0] * values[0] + values[1] * values[1] + values[2] * values[2])
+                        if length > 0.000000001:
+                            for component in 0..<(usize)3: values[component] = values[component] / length
+                .boolean:
+                    var member = end > first
                     for at in first..<end:
-                        sum += source.number((usize)mix.parents.items[at], component) * (f64)mix.weights.items[at]
-                    values[component] = sum
-                if source.role == Role.normal and source.width == 3:
-                    let length = math.sqrt(values[0] * values[0] + values[1] * values[1] + values[2] * values[2])
-                    if length > 0.000000001:
-                        for component in 0..<(usize)3: values[component] = values[component] / length
-                for component in 0..<source.width:
-                    attribute_ops.write_number(bytes, source.kind, element * source.width + component, values[component])
-            .boolean:
-                var member = end > first
-                for at in first..<end:
-                    if mix.weights.items[at] > 0.0 and source.number((usize)mix.parents.items[at], 0) == 0.0: member = false
-                if member: attribute_ops.write_number(bytes, source.kind, element, 1.0)
-            _:
-                # Integers and text: the heaviest parent (the first on ties).
-                var best = first
-                for at in first..<end:
-                    if mix.weights.items[at] > mix.weights.items[best]: best = at
-                let parent = (usize)mix.parents.items[best]
-                for component in 0..<source.width:
-                    attribute_ops.write_number(bytes, source.kind, element * source.width + component, source.number(parent, component))
+                        if mix.weights.items[at] > 0.0 and source.number((usize)mix.parents.items[at], 0) == 0.0: member = false
+                    write = member
+                _:
+                    # Integers and text: the heaviest parent (the first on ties).
+                    var best = first
+                    for at in first..<end:
+                        if mix.weights.items[at] > mix.weights.items[best]: best = at
+                    let parent = (usize)mix.parents.items[best]
+                    for component in 0..<source.width: values[component] = source.number(parent, component)
+            if end - first > 4:
+                cached = (i64)entry
+                cached_values = values
+                cached_write = write
+        if not write: continue
+        if source.kind == DataType.boolean:
+            attribute_ops.write_number(bytes, source.kind, element, 1.0)
+            continue
+        for component in 0..<source.width:
+            attribute_ops.write_number(bytes, source.kind, element * source.width + component, values[component])
     return result

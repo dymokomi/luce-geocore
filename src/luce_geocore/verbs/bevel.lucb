@@ -86,7 +86,7 @@ struct Bevel:
     var point_source: Growing[i64]
     ## Patches (bevel_patches.lucb): each loop's size, their points, and the
     ## loops each vertex could not close.
-    var patch_sizes: Growing[u16]
+    var patch_sizes: Growing[u32]
     var patch_points: Growing[i32]
     var patch_skipped: Growing[u8]
     var skipped: usize
@@ -118,7 +118,7 @@ struct Bevel:
         self.end_profile = Growing[u32]()
         self.end_reversed = Growing[u8]()
         self.point_source = Growing[i64]()
-        self.patch_sizes = Growing[u16]()
+        self.patch_sizes = Growing[u32]()
         self.patch_points = Growing[i32]()
         self.patch_skipped = Growing[u8]()
         self.skipped = 0

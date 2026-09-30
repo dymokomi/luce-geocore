@@ -103,10 +103,22 @@ pub struct TopologyBuilder:
         try self.corners.push(point)
         try self.corner_parents.push(try mix_entry(&self.corner_mix, parents, weights))
 
-    ## Close the face begun last; faces need 3..256 corners.
+    ## A corner mix that several corners share (see `shared_corner`): a
+    ## face's center in every one of its subdivided quads stores its parents
+    ## once, not once a quad, which for an n-gon is n rather than n * n.
+    pub mutating func shared_mix(parents: const i32[], weights: const f32[]) -> i32!:
+        return try mix_entry(&self.corner_mix, parents, weights)
+
+    ## A corner at `point` whose parent is `mix` from `shared_mix`.
+    pub mutating func shared_corner(point: i32, mix: i32) -> !:
+        try self.corners.push(point)
+        try self.corner_parents.push(mix)
+
+    ## Close the face begun last; faces need at least 3 corners (the corner
+    ## budget is checked in finish).
     pub mutating func end_face() -> !:
         let size = (i64)self.corners.count - (i64)self.offsets.items[self.offsets.count - 1]
-        if size < 3 or size > 256: error(errors.invalid, "an operation made a face with fewer than 3 or more than 256 corners")
+        if size < 3: error(errors.invalid, "an operation made a face with fewer than 3 corners")
         try self.offsets.push((i32)self.corners.count)
 
     ## Faces first..<end of `source` unchanged (points numbered as in the

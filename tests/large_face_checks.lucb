@@ -1,0 +1,412 @@
+## Faces of any size: n-gons of hundreds to tens of thousands of corners go
+## through construction, assembly, the builders, position edits, the verbs
+## and the codec as they are, with valid display triangles made in about
+## linear time. `exercise` (run under allocation failure) keeps to faces of
+## a few hundred corners; `run` adds the large and timed ones.
+import interop
+import math
+import memory
+import time
+import geocore
+import geocore_kernel
+from io import path
+from geocore import Vector3, Mesh, MeshBuilder, Subdivision, GeometrySet, DissolveWorkspace, dissolve_edge
+from geocore_kernel import point_span, offset_span, corner_span, triangle_span, triangulate_polygon, validate_polygon_display, save_geometry, load_geometry, adopt_set, set_mesh
+from geocore_growing import Growing
+from verb_run import verb_mesh
+
+pub func exercise() -> !:
+    try polygon_checks(300)
+    try mesh_checks(300)
+    try builder_checks(300)
+    try edit_checks(300)
+    try verb_checks(300)
+    try dissolve_checks()
+    try codec_checks()
+
+pub func run() -> !:
+    try exercise()
+    # Large faces, timed: linear-ish, where the small-face ear scan is cubic.
+    let circle_ms = try timed(circle, 20000)
+    let comb_ms = try timed(comb, 5003)
+    let spiral_ms = try timed(spiral, 5000)
+    let star_ms = try timed(star, 1000)
+    # Loose bounds, for debug builds on slow machines: the small-face ear
+    # scan (cubic) would take minutes here.
+    assert(circle_ms < 5000.0 and comb_ms < 5000.0 and spiral_ms < 5000.0 and star_ms < 5000.0)
+    try mesh_checks(1000)
+    try verb_checks(1000)
+    let big = try polygon_mesh(circle, 20000)
+    defer big.release()
+    assert(big.value().index_count() == 3 * 19998)
+    try valid(big.value())
+    print(f"PASS large faces: construction, assembly, builders, edits, verbs, dissolves and the codec; triangulated a 20,000-corner circle in {circle_ms} ms, a 5,003-corner comb in {comb_ms} ms, a 5,000-corner spiral in {spiral_ms} ms, a 1,000-corner star in {star_ms} ms")
+
+## A polygon's corners given in its own plane, placed in a tilted one.
+func placed(x: f64, y: f64) -> Vector3:
+    return Vector3(3.0 + 0.8 * x - 0.36 * y, -2.0 + 0.6 * x + 0.48 * y, 1.0 + 0.8 * y)
+
+## The normal of the tilted plane: (0.8, 0.6, 0) x (-0.36, 0.48, 0.8).
+func plane_normal() -> Vector3:
+    return Vector3(0.48, -0.64, 0.6)
+
+## Polygon makers: `count` corners (as near as the shape allows),
+## counterclockwise, into `out`.
+type Shape = func(usize, Growing[Vector3]*) -> unit!
+
+## A regular polygon: convex, no reflex corners.
+pub func circle(count: usize, out: Growing[Vector3]*) -> !:
+    for at in 0..<count:
+        let angle = (f64)at * 6.283185307179586 / (f64)count
+        try out.push(placed(math.cos(angle), math.sin(angle)))
+
+## A star: points at radius 1 and 0.45 in turn, half its corners reflex.
+pub func star(count: usize, out: Growing[Vector3]*) -> !:
+    for at in 0..<count:
+        let angle = (f64)at * 6.283185307179586 / (f64)count
+        let radius = 1.0 if at % 2 == 0 else 0.45
+        try out.push(placed(radius * math.cos(angle), radius * math.sin(angle)))
+
+## A comb: a bar with (count - 3) / 4 tall thin teeth, their bases'
+## corners reflex (3 + 4 * teeth corners).
+pub func comb(count: usize, out: Growing[Vector3]*) -> !:
+    let teeth = (count - 3) // 4
+    let width = (f64)teeth
+    try out.push(placed(0.0, 0.0))
+    try out.push(placed(width, 0.0))
+    try out.push(placed(width, 1.0))
+    var tooth = teeth
+    while tooth > 0:
+        tooth -= 1
+        let x = (f64)tooth
+        try out.push(placed(x + 0.5, 1.0))
+        try out.push(placed(x + 0.5, 11.0))
+        try out.push(placed(x, 11.0))
+        try out.push(placed(x, 1.0))
+
+## A spiral band of three turns (a maze of one corridor): out along its
+## outer wall, back along its inner one, whose corners are all reflex.
+pub func spiral(count: usize, out: Growing[Vector3]*) -> !:
+    let side = count // 2
+    let sweep = 3.0 * 6.283185307179586
+    for at in 0..<side:
+        let angle = sweep * (f64)at / (f64)(side - 1)
+        let radius = 1.0 + 0.5 * angle / 6.283185307179586 + 0.2
+        try out.push(placed(radius * math.cos(angle), radius * math.sin(angle)))
+    var at = side
+    while at > 0:
+        at -= 1
+        let angle = sweep * (f64)at / (f64)(side - 1)
+        let radius = 1.0 + 0.5 * angle / 6.283185307179586
+        try out.push(placed(radius * math.cos(angle), radius * math.sin(angle)))
+
+## Triangulate `shape` directly and check its triangles; the milliseconds.
+func timed(shape: Shape, count: usize) -> f64!:
+    var points = Growing[Vector3]()
+    defer points.close()
+    try shape(count, &points)
+    let corners = try alloc i64[points.count] in memory.heap
+    defer free(corners) in memory.heap
+    for at in 0..<points.count: corners[at] = (i64)at
+    let output = try alloc i64[(points.count - 2) * 3] in memory.heap
+    defer free(output) in memory.heap
+    let started = time.now()
+    try triangulate_polygon(points.view(), corners, 0, points.count, plane_normal(), output)
+    let spent = (f64)time.since(started) / 1000000.0
+    try validate_polygon_display(points.view(), corners, 0, points.count, output)
+    return spent
+
+## Every face's display triangles pass Mesh construction's validation.
+func valid(mesh: const Mesh*) -> !:
+    let positions = point_span(mesh)
+    let offsets = offset_span(mesh)
+    let corners = corner_span(mesh)
+    let triangles = triangle_span(mesh)
+    let points = try alloc Vector3[positions.length] in memory.heap
+    defer free(points) in memory.heap
+    for at in 0..<positions.length: points[at] = positions[at].vector()
+    let wide = try alloc i64[corners.length] in memory.heap
+    defer free(wide) in memory.heap
+    for at in 0..<corners.length: wide[at] = (i64)corners[at]
+    let indices = try alloc i64[triangles.length] in memory.heap
+    defer free(indices) in memory.heap
+    for at in 0..<triangles.length: indices[at] = (i64)triangles[at]
+    for face in 0..<offsets.length - 1:
+        let start = (usize)offsets[face]
+        let count = (usize)offsets[face + 1] - start
+        let first = (start - face * 2) * 3
+        try validate_polygon_display(points, wide, start, count, indices[first..<first + (count - 2) * 3])
+
+## One face through the points of `shape`.
+func polygon_mesh(shape: Shape, count: usize) -> interop.Reference[Mesh]!:
+    var points = Growing[Vector3]()
+    defer points.close()
+    try shape(count, &points)
+    var builder = try MeshBuilder()
+    defer builder.close()
+    for point in points.view(): discard(try builder.point(point))
+    try builder.face((i64)points.count)
+    for at in 0..<points.count: try builder.corner((i64)at)
+    return try builder.finish()
+
+## Direct triangulation of every shape a little over the small-face size.
+func polygon_checks(count: usize) -> !:
+    let shapes: Shape[4] = [circle, star, comb, spiral]
+    for shape in shapes: discard(try timed(shape, count))
+
+## Mesh construction: the face whole, its triangles valid, its normal the
+## plane's; supplied triangles are validated; a flat copy agrees.
+func mesh_checks(count: usize) -> !:
+    let shapes: Shape[3] = [star, comb, spiral]
+    for shape in shapes:
+        let mesh = try polygon_mesh(shape, count)
+        defer mesh.release()
+        let geometry = mesh.value()
+        let size = try geometry.face_size(0)
+        assert(geometry.face_count() == 1 and geometry.index_count() == 3 * (size - 2))
+        try valid(geometry)
+        let normal = try geometry.face_normal(0)
+        assert(normal.subtract(plane_normal()).length() < 0.00001)
+        # The same polygon given its own triangles back.
+        let points = try alloc Vector3[(usize)size] in memory.heap
+        defer free(points) in memory.heap
+        let corners = try alloc i64[(usize)size] in memory.heap
+        defer free(corners) in memory.heap
+        let display = try alloc i64[(usize)(size - 2) * 3] in memory.heap
+        defer free(display) in memory.heap
+        for at in 0..<(usize)size:
+            points[at] = try geometry.point((i64)at)
+            corners[at] = (i64)at
+        for at in 0..<display.length: display[at] = (i64)triangle_span(geometry)[at]
+        var again = try Mesh(points, [size], corners, display)
+        defer again.close()
+        assert(again.index_count() == geometry.index_count())
+
+## MeshBuilder: a face's triangulation before it is built, its triangles
+## copied onto the same corners, and onto the corners reversed.
+func builder_checks(count: usize) -> !:
+    let mesh = try polygon_mesh(star, count)
+    defer mesh.release()
+    let source = mesh.value()
+    var builder = try MeshBuilder()
+    defer builder.close()
+    try builder.copy_points(source)
+    try builder.copy_face(source, 0)
+    let projected = try alloc i64[(count - 2) * 3] in memory.heap
+    defer free(projected) in memory.heap
+    try builder.triangulate_last(projected)
+    for at in 0..<projected.length: assert(projected[at] == (i64)triangle_span(source)[at])
+    let copied = try builder.finish()
+    defer copied.release()
+    for at in 0..<projected.length: assert(triangle_span(copied.value())[at] == triangle_span(source)[at])
+    var reversed = try MeshBuilder()
+    defer reversed.close()
+    try reversed.copy_points(source)
+    try reversed.face((i64)count)
+    var at = count
+    while at > 0:
+        at -= 1
+        try reversed.corner((i64)at)
+    try reversed.copy_last_display(source, 0, true)
+    let flipped = try reversed.finish()
+    defer flipped.release()
+    try valid(flipped.value())
+    let normal = try flipped.value().face_normal(0)
+    assert(normal.add(plane_normal()).length() < 0.00001)
+
+## A position edit that folds a large face's triangles: the regular polygon
+## with a corner pulled across to the far side, triangulated again.
+func edit_checks(count: usize) -> !:
+    let mesh = try polygon_mesh(circle, count)
+    defer mesh.release()
+    let moved = try mesh.value().moved_points([0], placed(-0.9, 0.0).subtract(placed(1.0, 0.0)))
+    defer moved.release()
+    assert(moved.value().face_count() == 1 and moved.value().index_count() == mesh.value().index_count())
+    try valid(moved.value())
+    var same = true
+    for at in 0..<triangle_span(mesh.value()).length: same = same and triangle_span(mesh.value())[at] == triangle_span(moved.value())[at]
+    assert(not same)
+
+## Whether `mesh`'s largest faces have `size` corners and there are `faces`
+## of them.
+func largest(mesh: const Mesh*, size: i64, faces: i64) -> bool!:
+    var most: i64 = 0
+    var found: i64 = 0
+    for face in 0..<mesh.face_count():
+        let here = try mesh.face_size(face)
+        if here > most:
+            most = here
+            found = 0
+        if here == most: found += 1
+    return most == size and found == faces
+
+## The modeling verbs on a large face.
+func verb_checks(count: usize) -> !:
+    let mesh = try polygon_mesh(star, count)
+    defer mesh.release()
+    let n = (i64)count
+    # Subdivide (Catmull-Clark and linear): n quads.
+    for method in [1.0, 0.0]:
+        let quads = try verb_mesh("Subdivide", mesh, "*", 0, [1.0, method])
+        defer quads.release()
+        assert(quads.value().face_count() == n and (try largest(quads.value(), 4, n)))
+        try valid(quads.value())
+    # The subdivision display (Catmull-Clark plan and limit surface).
+    let marked = try verb_mesh("Subdivision", mesh, "", 0, [1.0, 1.0, 3.0, 1.0])
+    defer marked.release()
+    let shown = try Subdivision.display(marked)
+    defer shown.release()
+    assert(shown.value().face_count() == n)
+    # Extrude and Inset: n walls or border quads and the face again.
+    for name in ["PolyExtrude", "Inset"]:
+        let made = try verb_mesh(name, mesh, "0", 3, [0.05])
+        defer made.release()
+        assert(made.value().face_count() == n + 1 and (try largest(made.value(), n, 1)))
+        try valid(made.value())
+    # Triangulate, Duplicate, Split, Reverse.
+    let triangles = try verb_mesh("Triangulate", mesh, "0", 3, [0.0])
+    defer triangles.release()
+    assert(triangles.value().face_count() == n - 2)
+    let doubled = try verb_mesh("Duplicate", mesh, "0", 3, [1.0])
+    defer doubled.release()
+    assert((try largest(doubled.value(), n, 2)))
+    try valid(doubled.value())
+    let split = try verb_mesh("Split", mesh, "0", 3, [0.0])
+    defer split.release()
+    assert((try largest(split.value(), n, 1)))
+    # Merge Points rebuilds the face one corner shorter.
+    let merged = try verb_mesh("Merge Points", mesh, "0-1", 1, [0.0, 0.001])
+    defer merged.release()
+    assert((try largest(merged.value(), n - 1, 1)))
+    try valid(merged.value())
+    # PolyDraw through every point (ordered by angle, a merge sort), and
+    # through as many drawn positions.
+    let redrawn = try verb_mesh("PolyDraw", mesh, "*", 1, [0.0, 0.0])
+    defer redrawn.release()
+    assert(redrawn.value().face_count() == 2 and (try largest(redrawn.value(), n, 2)))
+    try valid(redrawn.value())
+    var numbers = Growing[f64]()
+    defer numbers.close()
+    try numbers.push(0.0)
+    try numbers.push((f64)count)
+    for at in 0..<count:
+        let angle = (f64)at * 6.283185307179586 / (f64)count
+        try numbers.push(math.cos(angle))
+        try numbers.push(math.sin(angle))
+        try numbers.push(5.0)
+    let drawn = try verb_mesh("PolyDraw", mesh, "", 0, numbers.view())
+    defer drawn.release()
+    assert(drawn.value().face_count() == 2 and (try largest(drawn.value(), n, 2)))
+    try valid(drawn.value())
+    # Fill caps an open tube's two loops, as one face or a fan each.
+    let tube = try open_tube(count)
+    defer tube.release()
+    let capped = try verb_mesh("Fill", tube, "*", 2, [0.0])
+    defer capped.release()
+    assert(capped.value().face_count() == n + 2 and (try largest(capped.value(), n, 2)))
+    try valid(capped.value())
+    let fanned = try verb_mesh("Fill", tube, "*", 2, [1.0])
+    defer fanned.release()
+    assert(fanned.value().face_count() == 3 * n)
+    # Dissolve a strip of quads into one face of more than 256 corners.
+    let strip = try quad_strip(count // 2)
+    defer strip.release()
+    let joined = try verb_mesh("Dissolve", strip, "*", 2, [0.0])
+    defer joined.release()
+    assert(joined.value().face_count() == 1 and (try joined.value().face_size(0)) == 2 * (i64)(count // 2 + 1))
+    try valid(joined.value())
+
+## `count` quads around an open tube (two boundary loops of `count` edges).
+func open_tube(count: usize) -> interop.Reference[Mesh]!:
+    var builder = try MeshBuilder()
+    defer builder.close()
+    for row in 0..<(usize)2:
+        for at in 0..<count:
+            let angle = (f64)at * 6.283185307179586 / (f64)count
+            discard(try builder.point(Vector3(math.cos(angle), math.sin(angle), (f64)row)))
+    for at in 0..<count:
+        let next = (at + 1) % count
+        try builder.face(4)
+        for point in [at, next, count + next, count + at]: try builder.corner((i64)point)
+    return try builder.finish()
+
+## `count` quads in a row: point 2i + row at (i, row).
+func quad_strip(count: usize) -> interop.Reference[Mesh]!:
+    var builder = try MeshBuilder()
+    defer builder.close()
+    for at in 0..<count + 1:
+        for row in 0..<(usize)2: discard(try builder.point(Vector3((f64)at, (f64)row, 0.0)))
+    for at in 0..<count:
+        try builder.face(4)
+        for point in [2 * at, 2 * at + 2, 2 * at + 3, 2 * at + 1]: try builder.corner((i64)point)
+    return try builder.finish()
+
+## The edge between points a and b, or -1.
+func edge_between(mesh: const Mesh*, a: i64, b: i64) -> i64!:
+    for edge in 0..<(try mesh.edge_count()):
+        let p = try mesh.edge_point(edge, 0)
+        let q = try mesh.edge_point(edge, 1)
+        if (p == a and q == b) or (p == b and q == a): return edge
+    return -1
+
+## The dissolve workspace: two half discs of 401 corners joined across their
+## diameter into one face of 800 (more than its up-front room); a strip of
+## 129 quads joined edge by edge into one face of 260.
+func dissolve_checks() -> !:
+    let half: usize = 400
+    var builder = try MeshBuilder()
+    defer builder.close()
+    for at in 0..<half + 1:
+        let angle = (f64)at * 3.141592653589793 / (f64)half
+        discard(try builder.point(placed(math.cos(angle), math.sin(angle))))
+    for at in 1..<half:
+        let angle = 3.141592653589793 + (f64)at * 3.141592653589793 / (f64)half
+        discard(try builder.point(placed(math.cos(angle), math.sin(angle))))
+    try builder.face((i64)half + 1)
+    for at in 0..<half + 1: try builder.corner((i64)at)
+    try builder.face((i64)half + 1)
+    try builder.corner((i64)half)
+    for at in 1..<half: try builder.corner((i64)(half + at))
+    try builder.corner(0)
+    let discs = try builder.finish()
+    defer discs.release()
+    let diameter = try edge_between(discs.value(), 0, (i64)half)
+    assert(diameter >= 0)
+    let disc = try dissolve_edge(discs.value(), diameter)
+    defer disc.release()
+    assert(disc.value().face_count() == 1 and (try disc.value().face_size(0)) == 2 * (i64)half)
+    try valid(disc.value())
+    let strip = try quad_strip(129)
+    defer strip.release()
+    var work = try DissolveWorkspace(strip.value())
+    defer work.close()
+    for at in 1..<(i64)129:
+        let edge = try edge_between(strip.value(), 2 * at, 2 * at + 1)
+        assert(edge >= 0)
+        try work.dissolve(edge)
+    let joined = try work.finish()
+    defer joined.release()
+    assert(joined.value().face_count() == 1 and (try joined.value().face_size(0)) == 260)
+    try valid(joined.value())
+
+## A large face saves and loads back as it was.
+func codec_checks() -> !:
+    let mesh = try polygon_mesh(spiral, 600)
+    defer mesh.release()
+    let set = try GeometrySet.of_mesh(mesh)
+    defer set.release()
+    var file = Growing[u8]()
+    defer file.close()
+    try file.assign(path.temp().bytes)
+    try file.push(47)
+    for byte in "luce-geocore-large-face.prism".bytes: try file.push(byte)
+    discard(try save_geometry(set.value(), (str)file.view(), 11, 268435456))
+    let loaded = try adopt_set(try load_geometry((str)file.view()))
+    defer loaded.release()
+    let a = set_mesh(set.value()) else trap("no mesh saved")
+    let b = set_mesh(loaded.value()) else trap("no mesh loaded")
+    assert(offset_span(a).length == offset_span(b).length and corner_span(a).length == corner_span(b).length and triangle_span(a).length == triangle_span(b).length)
+    for at in 0..<offset_span(a).length: assert(offset_span(a)[at] == offset_span(b)[at])
+    for at in 0..<corner_span(a).length: assert(corner_span(a)[at] == corner_span(b)[at])
+    for at in 0..<triangle_span(a).length: assert(triangle_span(a)[at] == triangle_span(b)[at])
+    for at in 0..<point_span(a).length: assert(point_span(a)[at].vector() == point_span(b)[at].vector())

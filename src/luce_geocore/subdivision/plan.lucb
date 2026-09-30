@@ -177,21 +177,32 @@ func refine_topology(mesh: const Mesh*, scheme: Scheme) -> Mesh*!:
     for face in 0..<faces:
         let start = (usize)topology.offsets[face]
         let size = (usize)topology.offsets[face + 1] - start
+        # Small faces mix on the stack, larger ones in heap scratch.
+        let face_parents = try face_scratch.take[i32](parents, size, size)
+        defer face_scratch.release[i32](parents, face_parents)
+        let face_weights = try face_scratch.take[f32](weights, size, size)
+        defer face_scratch.release[f32](weights, face_weights)
         var center = Vector3()
         for at in 0..<size:
-            parents[at] = topology.corners[start + at]
-            weights[at] = (f32)(1.0 / (f64)size)
+            face_parents[at] = topology.corners[start + at]
+            face_weights[at] = (f32)(1.0 / (f64)size)
             center = center.add(builder.position(topology.corners[start + at]))
-        discard(try builder.mixed_point(center.multiply_scalar(1.0 / (f64)size), parents[..<size], weights[..<size]))
+        discard(try builder.mixed_point(center.multiply_scalar(1.0 / (f64)size), face_parents, face_weights))
     let face_base = (i32)(points + edges)
     var mixed_parents: i32[256]
     var mixed_weights: f32[256]
     for face in 0..<faces:
         let start = (usize)topology.offsets[face]
         let size = (usize)topology.offsets[face + 1] - start
+        let center_parents = try face_scratch.take[i32](mixed_parents, size, size)
+        defer face_scratch.release[i32](mixed_parents, center_parents)
+        let center_weights = try face_scratch.take[f32](mixed_weights, size, size)
+        defer face_scratch.release[f32](mixed_weights, center_weights)
         for at in 0..<size:
-            mixed_parents[at] = (i32)(start + at)
-            mixed_weights[at] = (f32)(1.0 / (f64)size)
+            center_parents[at] = (i32)(start + at)
+            center_weights[at] = (f32)(1.0 / (f64)size)
+        # Every quad's center corner shares one mix of the face's corners.
+        let center = try builder.shared_mix(center_parents, center_weights)
         for at in 0..<size:
             let corner = start + at
             let next = start + (at + 1) % size
@@ -200,7 +211,7 @@ func refine_topology(mesh: const Mesh*, scheme: Scheme) -> Mesh*!:
             try builder.corner(topology.corners[corner], (i32)corner)
             let forward: i32[2] = [(i32)corner, (i32)next]
             try builder.mixed_corner(edge_base + topology.corner_edges[corner], forward[..<2], half[..<2])
-            try builder.mixed_corner(face_base + (i32)face, mixed_parents[..<size], mixed_weights[..<size])
+            try builder.shared_corner(face_base + (i32)face, center)
             let back: i32[2] = [(i32)previous, (i32)corner]
             try builder.mixed_corner(edge_base + topology.corner_edges[previous], back[..<2], half[..<2])
             try builder.end_face()

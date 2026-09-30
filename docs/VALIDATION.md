@@ -2,7 +2,21 @@
 
 `./test.sh` builds `tests/main.lucb` at native optimization levels 0–3 and in
 both C modes. Every mesh check also runs with allocation failure injected at each
-stage, and must leave no allocation live.
+stage, and must leave no allocation live. The opt 2 build runs twice more with
+pools of one and two workers, and once with `--small-faces 4`, which sends every
+face of more than four corners through the large-face (heap scratch) path, so
+every check covers both paths and they must agree.
+
+- Large faces (tests/large_face_checks.lucb): a regular polygon, a concave
+  star, a comb of thin teeth and a spiral corridor of 300 to 20,000 corners,
+  in a tilted plane, get valid display triangles directly, through Mesh
+  construction (supplied back and validated), MeshBuilder faces with copied and
+  reversed display, a folding position edit, Subdivide (both methods), the
+  Catmull-Clark display, PolyExtrude, Inset, Triangulate, Duplicate, Split,
+  Merge Points, PolyDraw (drawn and through a group), Fill (face and fan),
+  Dissolve, the dissolve workspace (a union of 800 corners, and 128 edits
+  growing one face to 260) and a codec round trip. Triangulation timings are
+  printed and loosely bounded; tests/bench/geometry.lucb has rows for them.
 
 - Curved-polygon display triangulations: exact index retention through detached
   copies, attributes, affine/reflected placement, merging, deletion/compaction

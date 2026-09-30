@@ -6,6 +6,7 @@ import luce_geocore.errors as errors
 from luce_geocore.math.vector import Vector3
 from luce_geocore.geometries.polygon import Mesh, mesh_type
 from luce_geocore.geometries.polygon_triangulation import triangulate, unit_or_zero
+import luce_geocore.geometries.face_scratch as face_scratch
 
 pub struct MeshBuilder:
     pub var points: Vector3[]
@@ -61,9 +62,11 @@ pub struct MeshBuilder:
         self.np += 1
         return (i64)id
 
+    ## Begin a face of `count` corners (at least 3, any number more within
+    ## the corner budget); its corners follow.
     pub mutating func face(count: i64, parent: i64 = -1) -> !:
-        if count < 3 or count > 256:
-            error(errors.limit, "operation exceeds face/corner limits")
+        if count < 3: error(errors.invalid, "a polygon needs at least 3 corners")
+        if count > 33554432: error(errors.limit, "mesh exceeds the 8M point/face or 32M corner safety budget")
         if self.display.length > 0:
             let start = (self.nc-self.nf*2)*3
             let end = start+((usize)count-2)*3
@@ -148,14 +151,18 @@ pub struct MeshBuilder:
         if self.nf == 0 or self.sizes[self.nf-1] != count: error(errors.invalid,"display copy requires matching polygon sizes")
         let offset = try mesh.face_offset(face)
         let first = (offset-face*2)*3
-        var indices: i64[762]
+        let size = (usize)(count-2)*3
+        # Small faces work on the stack, larger ones in heap scratch.
+        var stack: i64[762] = ---
+        let indices = try face_scratch.take[i64](stack,(usize)count,size)
+        defer face_scratch.release[i64](stack,indices)
         for at in 0..<(count-2)*3:
             let input = at//3*3+(2-at%3 if reversed else at%3)
             let index = mesh.index(first+input)
             defer index.release()
             let corner = (try index.get())-offset
             indices[(usize)at] = count-1-corner if reversed else corner
-        try self.set_last_display(indices[..<(usize)(count-2)*3])
+        try self.set_last_display(indices)
 
     mutating func reserve_display(required: usize) -> !:
         if required <= self.display.length: return

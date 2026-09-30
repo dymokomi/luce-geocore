@@ -5,6 +5,12 @@ import memory
 import math
 from luce_geocore.math.vector import Vector3
 from luce_geocore.errors import invalid
+import luce_geocore.geometries.face_scratch as face_scratch
+
+## Added to an interior edge's key once both of its sides are seen. Keys are
+## below count * count, and faces have at most 2^25 corners (the 32M-corner
+## budget), so keys stay below it.
+let paired: i64 = 1 << 50
 
 pub func validate(points: const Vector3[], corners: const i64[], start: usize, count: usize, indices: const i64[]) -> !:
     if indices.length != (count-2)*3: error(invalid,"display triangulation has the wrong triangle count")
@@ -27,17 +33,24 @@ pub func validate(points: const Vector3[], corners: const i64[], start: usize, c
     # Triangles and quads need no heap allocation on the construction hot path.
     if count <= 4:
         var table: i64[16]
-        try boundary(indices,start,count,table)
+        var perimeter: bool[4]
+        try boundary(indices,start,count,table,perimeter)
     else:
         var capacity: usize = 16
         while capacity < indices.length*2: capacity *= 2
         let table = try alloc i64[capacity] in memory.heap
         defer free(table) in memory.heap
         for at in 0..<table.length: table[at] = 0
-        try boundary(indices,start,count,table)
+        var stack: bool[256]
+        let perimeter = try face_scratch.take[bool](stack,count,count)
+        defer face_scratch.release[bool](stack,perimeter)
+        for at in 0..<count: perimeter[at] = false
+        try boundary(indices,start,count,table,perimeter)
 
-func boundary(indices: const i64[], start: usize, count: usize, table: i64[]) -> !:
-    var perimeter: bool[256]
+## Each boundary edge once and forward, each interior edge once each way:
+## `perimeter` (count entries, all false) marks boundary edges, `table` (a
+## zeroed hash of at least twice the edges) keys interior ones.
+func boundary(indices: const i64[], start: usize, count: usize, table: i64[], perimeter: bool[]) -> !:
     for triangle in 0..<indices.length//3:
         for edge in 0..<(usize)3:
             let a = (usize)indices[triangle*3+edge]-start
@@ -49,18 +62,18 @@ func boundary(indices: const i64[], start: usize, count: usize, table: i64[]) ->
             if a == (b+1)%count: error(invalid,"display triangulation reverses a boundary edge")
             let low = a if a < b else b
             let high = b if a < b else a
-            let key = (i64)(low*256+high+1)
+            let key = (i64)(low*count+high+1)
             var slot = (low*73856093+high*19349663)%table.length
             while table[slot] != 0:
                 let value = table[slot]
                 let magnitude = value if value > 0 else -value
-                if (magnitude-65536 if magnitude > 65536 else magnitude) == key: break
+                if (magnitude-paired if magnitude > paired else magnitude) == key: break
                 slot = (slot+1)%table.length
             let signed = key if a < b else -key
             if table[slot] == 0: table[slot] = signed
-            elif table[slot] == -signed: table[slot] = key+65536
+            elif table[slot] == -signed: table[slot] = key+paired
             else: error(invalid,"display triangulation has inconsistent interior edges")
     for at in 0..<count:
         if not perimeter[at]: error(invalid,"display triangulation omits a boundary edge")
     for value in table:
-        if value != 0 and value <= 65536: error(invalid,"display triangulation has an open interior edge")
+        if value != 0 and value <= paired: error(invalid,"display triangulation has an open interior edge")

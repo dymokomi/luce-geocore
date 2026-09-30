@@ -401,6 +401,10 @@ save and reads the values back.
 | Mesh to SDF: a 64-segment sphere, voxel 0.01 (active voxels) | 57.4 ms (750.3 ms per-voxel BVH) | 751,940 |
 | Mesh to SDF: the 837×837 grid, 256 voxels across (active voxels) | 369.1 ms (511 ms before) | 340,573 |
 | Volume from Points: 100k points, radius 0.02, voxel 0.01 (active voxels) | 105.2 ms | 3,044,352 |
+| Triangulate: a regular 20,000-gon (triangles) | 1.4 ms | 19,998 |
+| Mesh: one 20,000-corner face, validated and triangulated (triangles) | 8.5 ms | 19,998 |
+| Triangulate: a 5,003-corner comb of thin teeth (triangles) | 22.7 ms | 5,001 |
+| Triangulate: a 5,000-corner spiral corridor (triangles) | 3.1 ms | 4,998 |
 
 luced-3d's headless benchmark (`tests/bench/run.py`, `--native --opt 2`)
 saves and loads cooked results:

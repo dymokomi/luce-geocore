@@ -1,5 +1,6 @@
 ## The geometry-family benchmark: curves at scale (building, evaluating,
-## frames, the curve verbs). Prints one `name<TAB>milliseconds<TAB>count`
+## frames, the curve verbs), fields, and large n-gons' display
+## triangulation. Prints one `name<TAB>milliseconds<TAB>count`
 ## line per case, as verbs.lucb does; run.py makes the table. Each figure is
 ## one run of a --native --opt 3 build.
 import time
@@ -124,7 +125,56 @@ pub func main(arguments: str[]) -> i32!:
     row("Mesh to Curve: every edge of the 837x837 grid", started, (set_curves(wires.value()) else trap("curves")).curve_count())
     wires.release()
     try fields()
+    try large_faces()
     return 0
+
+## Display triangulation of single large faces (ear clipping on a ring):
+## a regular 20,000-gon, a 5,003-corner comb of thin teeth over a bar, a
+## 5,000-corner spiral corridor, and a Mesh of one 20,000-corner face.
+func large_faces() -> !:
+    let names: str[3] = ["Triangulate: a regular 20,000-gon", "Triangulate: a 5,003-corner comb", "Triangulate: a 5,000-corner spiral"]
+    for shape in 0..<(usize)3:
+        let count: usize = 20000 if shape == 0 else (5003 if shape == 1 else 5000)
+        var points = Growing[Vector3]()
+        defer points.close()
+        if shape == 0:
+            for at in 0..<count:
+                let angle = (f64)at * 6.283185307179586 / (f64)count
+                try points.push(Vector3(math.cos(angle), math.sin(angle), 0.0))
+        elif shape == 1:
+            let teeth = (count - 3) // 4
+            try points.push(Vector3(0.0, 0.0, 0.0))
+            try points.push(Vector3((f64)teeth, 0.0, 0.0))
+            try points.push(Vector3((f64)teeth, 1.0, 0.0))
+            var tooth = teeth
+            while tooth > 0:
+                tooth -= 1
+                let x = (f64)tooth
+                try points.push(Vector3(x + 0.5, 1.0, 0.0))
+                try points.push(Vector3(x + 0.5, 11.0, 0.0))
+                try points.push(Vector3(x, 11.0, 0.0))
+                try points.push(Vector3(x, 1.0, 0.0))
+        else:
+            let side = count // 2
+            for wall in [(usize)0, 1]:
+                for step in 0..<side:
+                    let at = step if wall == 0 else side - 1 - step
+                    let angle = 6.0 * 3.141592653589793 * (f64)at / (f64)(side - 1)
+                    let radius = 1.0 + 0.25 * angle / 3.141592653589793 + (0.2 if wall == 0 else 0.0)
+                    try points.push(Vector3(radius * math.cos(angle), radius * math.sin(angle), 0.0))
+        let corners = try alloc i64[points.count] in memory.heap
+        defer free(corners) in memory.heap
+        for at in 0..<points.count: corners[at] = (i64)at
+        let output = try alloc i64[(points.count - 2) * 3] in memory.heap
+        defer free(output) in memory.heap
+        let started = time.now()
+        try geocore_kernel.triangulate_polygon(points.view(), corners, 0, points.count, Vector3(0.0, 0.0, 1.0), output)
+        row(names[shape], started, output.length // 3)
+        if shape == 0:
+            let built = time.now()
+            var face = try Mesh(points.view(), [(i64)count], corners)
+            defer face.close()
+            row("Mesh: one 20,000-corner face (validated, triangulated)", built, (usize)face.index_count() // 3)
 
 ## Volumes and SDFs: sampling, surface nets, a mesh's and points' level sets.
 func fields() -> !:

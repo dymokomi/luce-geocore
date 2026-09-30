@@ -78,8 +78,13 @@ func finish_face(work: FinishWork*, face: usize) -> !:
     let first = (start - face * 2) * 3
     let missing = work.triangles[first] < 0
     if not missing and not work.all_normals: return
-    var points: Vector3[256] = ---
-    var indices: i64[256] = ---
+    # Small faces work on the stack, larger ones in heap scratch.
+    var point_stack: Vector3[256] = ---
+    var index_stack: i64[256] = ---
+    let points = try face_scratch.take[Vector3](point_stack, count, count)
+    defer face_scratch.release[Vector3](point_stack, points)
+    let indices = try face_scratch.take[i64](index_stack, count, count)
+    defer face_scratch.release[i64](index_stack, indices)
     for at in 0..<count:
         let point = (usize)work.corners[start + at]
         points[at] = work.exact[point] if work.exact.length > 0 else work.positions[point].vector()
@@ -95,9 +100,11 @@ func finish_face(work: FinishWork*, face: usize) -> !:
     let facing = unit_or_zero(normal, extent2)
     if work.all_normals: work.normals[face] = Float3.of(facing)
     if missing:
-        var output: i64[762] = ---
         let size = (count - 2) * 3
-        try triangulate(points[..<count], indices[..<count], 0, count, facing, output[..<size])
+        var output_stack: i64[762] = ---
+        let output = try face_scratch.take[i64](output_stack, count, size)
+        defer face_scratch.release[i64](output_stack, output)
+        try triangulate(points, indices, 0, count, facing, output)
         for at in 0..<size: work.triangles[first + at] = (i32)((i64)start + output[at])
 
 ## The bounds of positions measured from `origin`, in f64.

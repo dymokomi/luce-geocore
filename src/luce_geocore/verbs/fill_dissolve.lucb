@@ -4,8 +4,8 @@
 ## one face per connected region. A point group dissolves every edge at its
 ## points and then the points themselves where two edges are left (Blender's
 ## Dissolve Vertices); points no face uses any more go. A region or
-## loop they cannot make a simple face of (a hole, a pinch, more than 256
-## corners) is left as it was and counted in the warning; when nothing
+## loop they cannot make a simple face of (a hole, a pinch) is left as it
+## was and counted in the warning; faces of any size are made. When nothing
 ## applies, the input passes through with a warning rather than an error, so
 ## a node dropped in with its defaults never fails.
 
@@ -58,7 +58,7 @@ func cook_fill(input: const VerbInput*, output: VerbOutput*) -> !:
                 break
             corner = next
         let size = loops.count - begin
-        if not closed or size < 3 or size > 256:
+        if not closed or size < 3:
             skipped += 1
             loops.count = begin
             continue
@@ -74,11 +74,18 @@ func cook_fill(input: const VerbInput*, output: VerbOutput*) -> !:
     try builder.copy_faces(mesh, 0, faces)
     let fan = input.parms.at(0) == 1.0
     var begin: usize = 0
+    var cap_stack: i32[256]
+    var parent_stack: i32[256]
+    var weight_stack: f32[256]
     for end in loop_ends.view():
         # The cap winds against the boundary: its corners in reverse, each
-        # taking the adjacent face's corner at that point.
-        var cap: i32[256]
-        var parents: i32[256]
+        # taking the adjacent face's corner at that point. Small loops on
+        # the stack, larger ones in heap scratch.
+        let length = (usize)end - begin
+        let cap = try face_scratch.take[i32](cap_stack, length, length)
+        defer face_scratch.release[i32](cap_stack, cap)
+        let parents = try face_scratch.take[i32](parent_stack, length, length)
+        defer face_scratch.release[i32](parent_stack, parents)
         var size: usize = 0
         var at = (usize)end
         while at > begin:
@@ -95,15 +102,18 @@ func cook_fill(input: const VerbInput*, output: VerbOutput*) -> !:
             continue
         # A fan: a point at the loop's center, its values the loop's mean.
         var center = Vector3()
-        var weights: f32[256]
+        let weights = try face_scratch.take[f32](weight_stack, size, size)
+        defer face_scratch.release[f32](weight_stack, weights)
         for index in 0..<size:
             center = center.add(builder.position(cap[index]))
             weights[index] = 1.0 / (f32)size
-        let middle = try builder.mixed_point(center.multiply_scalar(1.0 / (f64)size), cap[..<size], weights[..<size])
+        let middle = try builder.mixed_point(center.multiply_scalar(1.0 / (f64)size), cap, weights)
+        # Every triangle's center corner shares one mix of the loop's corners.
+        let mix = try builder.shared_mix(parents, weights)
         for index in 0..<size:
             let next = (index + 1) % size
             try builder.face(-1)
-            try builder.mixed_corner(middle, parents[..<size], weights[..<size])
+            try builder.shared_corner(middle, mix)
             try builder.corner(cap[index], parents[index])
             try builder.corner(cap[next], parents[next])
             try builder.end_face()
@@ -178,7 +188,7 @@ func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
             current = next
         let size = loops.count - begin
         # One loop must use every boundary corner: otherwise the region has a hole.
-        if not closed or size != (usize)boundary_count[region] or size < 3 or size > 256:
+        if not closed or size != (usize)boundary_count[region] or size < 3:
             skipped += 1
             loops.count = begin
             continue
@@ -214,7 +224,7 @@ func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
     output.selection = try BitsBuilder.zeros(face_total)
     output.selection_domain = Domain.face
     var run: usize = 0
-    var ring: i32[256]
+    var ring_stack: i32[256]
     for face in 0..<faces:
         let region = (usize)parent[face]
         let joined = members[region] >= 2 and loop_of[region] >= 0
@@ -223,7 +233,16 @@ func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
         run = face + 1
         if joined and region != face: continue
         # The region's face at its lowest face's place, from its loop (or
-        # an unjoined face's own corners), without removable points.
+        # an unjoined face's own corners), without removable points. Small
+        # faces on the stack, larger ones in heap scratch.
+        var corners_in: usize = 0
+        if joined:
+            let index = (usize)loop_of[region]
+            corners_in = (usize)(loop_starts.items[index + 1] - loop_starts.items[index])
+        else:
+            corners_in = (usize)(topology.offsets[face + 1] - topology.offsets[face])
+        let ring = try face_scratch.take[i32](ring_stack, corners_in, corners_in)
+        defer face_scratch.release[i32](ring_stack, ring)
         var size: usize = 0
         if joined:
             let index = (usize)loop_of[region]
@@ -246,7 +265,7 @@ func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
         try builder.end_face()
     try builder.copy_faces(mesh, run, faces)
     try builder.drop_unused_points()
-    if skipped > 0: output.warning = "Regions with holes, pinches or more than 256 corners were left as they were"
+    if skipped > 0: output.warning = "Regions with holes or pinches were left as they were"
 
 ## Whether face `face` has a corner at a removable point.
 func touches(topology: const Topology*, removable: const u8[], face: usize) -> bool:

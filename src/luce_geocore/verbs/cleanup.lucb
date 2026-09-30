@@ -175,8 +175,8 @@ func rebuild(input: const VerbInput*, output: VerbOutput*, target: const i32[], 
         if places.length > 0: builder.move_point(target[point], places[(usize)target[point]])
     # Faces whose points all stay copy in runs; the rest are rebuilt over
     # their targets, dropping repeated corners (and the face below three).
-    var ids: i32[256]
-    var parents: i32[256]
+    var id_stack: i32[256]
+    var parent_stack: i32[256]
     var run: usize = 0
     let faces = offsets.length - 1
     for face in 0..<faces:
@@ -188,6 +188,11 @@ func rebuild(input: const VerbInput*, output: VerbOutput*, target: const i32[], 
         if not moved: continue
         try builder.copy_faces(mesh, run, face)
         run = face + 1
+        # Small faces on the stack, larger ones in heap scratch.
+        let ids = try face_scratch.take[i32](id_stack, end - start, end - start)
+        defer face_scratch.release[i32](id_stack, ids)
+        let parents = try face_scratch.take[i32](parent_stack, end - start, end - start)
+        defer face_scratch.release[i32](parent_stack, parents)
         var count: usize = 0
         for corner in start..<end:
             let point = target[(usize)corners[corner]]

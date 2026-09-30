@@ -30,6 +30,8 @@ import detail_checks
 import polydraw_checks
 import instance_checks
 import g6_checks
+import large_face_checks
+from geocore_kernel import set_small_faces
 
 ## Counts live blocks and fails the allocation after `remaining` more.
 ## Kernels allocate on pool workers too, so it takes a lock.
@@ -83,7 +85,22 @@ func inject(tracker: Tracker*, stages: usize, check: func() -> unit!):
             assert(failure.code == memory.exhausted)
         settle(tracker)
 
+## `--small-faces N`: faces of more than N corners take the heap path (see
+## face_scratch), so every check runs it too.
+func small_faces_argument(arguments: const str[]) -> usize?:
+    for at in 0..<arguments.length:
+        if arguments[at] != "--small-faces" or at + 1 >= arguments.length: continue
+        var value: usize = 0
+        for byte in arguments[at + 1].bytes:
+            assert(byte >= 48 and byte <= 57, "--small-faces takes a number")
+            value = value * 10 + (usize)(byte - 48)
+        return value
+    return none
+
 pub func main(arguments: str[]) -> i32!:
+    if let limit = small_faces_argument(arguments):
+        set_small_faces(limit)
+        print(f"small faces: at most {limit} corners")
     # Start the pool first: its starting threads free blocks in the current heap.
     geocore_parallel.warm()
     try query_checks.exercise()
@@ -158,6 +175,9 @@ pub func main(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 400, sketch_checks.exercise)
     try sketch_checks.run()
+    settle(&tracker)
+    inject(&tracker, 300, large_face_checks.exercise)
+    try large_face_checks.run()
     settle(&tracker)
     print("ok polygon meshes, operators, queries and allocation failures")
     return 0

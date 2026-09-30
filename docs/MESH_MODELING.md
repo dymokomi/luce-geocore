@@ -63,7 +63,10 @@ cusps) computed on first use.
 - Mesh methods supply immutable TRS, merge and point movement.
 
 No editor commands, node graph state or selection UI live in these modules.
-Limits are 8,388,608 points/faces, 33,554,432 corners and 256 corners per polygon.
+Limits are 8,388,608 points/faces and 33,554,432 corners; a polygon has three or
+more corners and no other size limit (large faces are never triangulated
+away: their display triangles come from ear clipping on a linked ring in
+about linear time, see API.md's Limits).
 An attribute holds at most 33,554,432 tuples (budgets count tuples, not scalar
 components). Attribute-only changes share immutable topology and BVH. Invalid
 topology, cardinality and capacity violations return checked errors.

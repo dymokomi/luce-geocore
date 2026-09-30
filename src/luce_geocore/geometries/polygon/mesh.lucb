@@ -42,6 +42,7 @@ from luce_geocore.geometries.topology_cache import TopologyCache
 from luce_geocore.geometries.polygon_triangulation import triangulate, unit_or_zero, is_degenerate
 import luce_geocore.geometries.display_triangulation as display_triangles
 import luce_geocore.geometries.position_edit as position_edit
+import luce_geocore.geometries.face_scratch as face_scratch
 
 ## Coordinates beyond this, or beyond `origin_ratio` times the model's
 ## size, keep an origin at the bounds center, so f32 positions stay precise
@@ -79,8 +80,8 @@ pub struct Mesh: PolygonTopology:
         var used: usize = 0
         var triangle_count: usize = 0
         for size in sizes:
-            if size < 3 or size > 256:
-                error(errors.invalid, "a polygon needs 3..256 corners")
+            if size < 3:
+                error(errors.invalid, "a polygon needs at least 3 corners")
             used += (usize)size
             triangle_count += (usize)(size - 2)
         if used != corners.length or triangle_count > 33554432:
@@ -295,8 +296,13 @@ func build_faces(context: void*?, first: usize, end: usize):
 func build_face(work: BuildWork*, face: usize) -> !:
     let start = (usize)work.offsets[face]
     let count = (usize)work.offsets[face + 1] - start
-    var points: Vector3[256] = ---
-    var indices: i64[256] = ---
+    # Small faces work on the stack, larger ones in heap scratch.
+    var point_stack: Vector3[256] = ---
+    var index_stack: i64[256] = ---
+    let points = try face_scratch.take[Vector3](point_stack, count, count)
+    defer face_scratch.release[Vector3](point_stack, points)
+    let indices = try face_scratch.take[i64](index_stack, count, count)
+    defer face_scratch.release[i64](index_stack, indices)
     for at in 0..<count:
         let a = work.corners[start + at]
         if a == work.corners[start + (at + 1) % count]:
@@ -315,7 +321,9 @@ func build_face(work: BuildWork*, face: usize) -> !:
     work.normals[face] = Float3.of(face_unit)
     let first = (start - face * 2) * 3
     let size = (count - 2) * 3
-    var output: i64[762] = ---
+    var output_stack: i64[762] = ---
+    let output = try face_scratch.take[i64](output_stack, count, size)
+    defer face_scratch.release[i64](output_stack, output)
     var provided = false
     if work.has_display:
         let part = work.display[first..<first + size]
@@ -324,10 +332,10 @@ func build_face(work: BuildWork*, face: usize) -> !:
                 if part[at] < (i64)start or part[at] >= (i64)(start + count): error(errors.invalid, "display triangle leaves its polygon")
                 output[at] = part[at] - (i64)start
             # A face without an area has no triangles with one to check.
-            if not is_degenerate(face_unit): try display_triangles.validate(points[..<count], indices[..<count], 0, count, output[..<size])
+            if not is_degenerate(face_unit): try display_triangles.validate(points, indices, 0, count, output)
             provided = true
         else:
             for index in part:
                 if index != -1: error(errors.invalid, "partial display triangulation is not valid")
-    if not provided: try triangulate(points[..<count], indices[..<count], 0, count, face_unit, output[..<size])
+    if not provided: try triangulate(points, indices, 0, count, face_unit, output)
     for at in 0..<size: work.triangles[first + at] = (i32)((i64)start + output[at])

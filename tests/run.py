@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """luce-geocore's gate: module tests, then the Base mesh checks at native
-optimization levels 0-3 and through the C backend in debug and release."""
+optimization levels 0-3 and through the C backend in debug and release; the
+opt 2 build runs again with faces over 4 corners on the large-face path
+(--small-faces 4) and with one and two pool workers."""
 import argparse
 import os
 from pathlib import Path
@@ -31,4 +33,12 @@ with tempfile.TemporaryDirectory(prefix="luce-geocore-tests-") as temporary:
         subprocess.run([str(args.base.resolve()), "build", str(ROOT / "tests/main.lucb"), *flags, "-o", str(binary)],
                        check=True, env=env, timeout=600)
         subprocess.run([str(binary)], check=True, timeout=120)
+        # One build also runs with nearly every face on the large-face (heap)
+        # path, and with pools of one and two workers.
+        if flags == modes[min(2, len(modes) - 1)]:
+            print("TEST", " ".join(flags), "--small-faces 4", flush=True)
+            subprocess.run([str(binary), "--small-faces", "4"], check=True, timeout=120)
+            for workers in ["1", "2"]:
+                print("TEST", " ".join(flags), f"LUCE_POOL_WORKERS={workers}", flush=True)
+                subprocess.run([str(binary)], check=True, timeout=300, env=dict(os.environ, LUCE_POOL_WORKERS=workers))
 print("PASS luce-geocore", flush=True)

@@ -51,9 +51,21 @@ mesh rebuild it.
 
 ## Limits
 
-Polygon meshes allow 8,388,608 points/faces, 33,554,432 corners, and 3–256 corners per
-face. Their topology and triangulation are copied/owned; concave faces use ear
-clipping. A face is never rejected for its shape: a self-intersecting or folded
+Polygon meshes allow 8,388,608 points/faces and 33,554,432 corners. A face has
+three or more corners and no other size limit: an n-gon of thousands of
+corners (an imported cap, a dissolved region, a filled hole) stays one face
+through construction, the builders, position edits, the verbs and the codec;
+nothing triangulates it away. Their topology and triangulation are
+copied/owned; concave faces use ear clipping. Faces of up to 256 corners are
+clipped by scanning for ears in the face's plane (with an exact partition
+when greedy ears strand a trim chain); larger faces are clipped on a linked
+ring in about linear time: only reflex corners are tested, through a grid
+over the face, and clipping goes on from the last ear instead of starting
+over (a 20,000-corner circle takes about 1.5 ms, a 5,000-corner comb of thin
+teeth about 25 ms). Per-face scratch lives on the stack for faces of up to
+256 corners and on the heap for larger ones, so running out of memory is the
+only way a large face can fail. A face is never rejected for its shape: a
+self-intersecting or folded
 face that ear clipping cannot finish gets a fan as its display, and a face
 without an area (coincident or collinear points) is kept with a zero normal and
 zero-area display triangles. Repeated consecutive corners (a collapsed edge)
@@ -109,7 +121,8 @@ removed edge becomes a display diagonal. A union with repeated boundary vertices
 is rejected. This does not repair self-intersections already present in the input.
 
 `DissolveWorkspace` batches up to 128 such edits without rebuilding the entire
-mesh after each dissolve. Keep its source alive and immutable until `close`;
+mesh after each dissolve; joined faces may have any number of corners (its
+storage grows past the room made up front for faces of up to 256). Keep its source alive and immutable until `close`;
 the scratch holds no managed owner and must not outlive that borrowed source.
 Original edge IDs remain stable; face slots include inactive tombstones, with
 each new union appended. Iterate `face_slots` in order and skip `!active(face)`.
@@ -259,9 +272,11 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
 - **Bridge** (edges): boundary loops or runs, paired by nearness, joined by rows
   of quads (same edge counts) or zipped with triangles.
 - **Merge Points**: at the center, first, last, per island or by distance.
-- **Fill**: one face per boundary loop, or a fan around a center point.
-- **Dissolve** (edges, points, faces strictly): one face per joined region;
-  points left between two edges go.
+- **Fill**: one face per boundary loop, or a fan around a center point;
+  loops of any length.
+- **Dissolve** (edges, points, faces strictly): one face per joined region,
+  of any size; points left between two edges go. A region with a hole or a
+  pinch is left as it was, with a warning.
 - **Clip** (faces): cut by an axis-aligned plane (optionally through the
   group's centroid) or any plane given by a point and a normal (the editor's
   knife stroke), and keep the side above, below, or both (a knife cut);
@@ -277,7 +292,8 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
   original.
 - **Spin** (edges): the group's chains swept round an axis in steps into a
   surface of revolution (a full turn closes; points on the axis stay single).
-- **PolyDraw** (points): one new polygon. With Corners > 0, that many drawn
+- **PolyDraw** (points): one new polygon, of any number of corners. With
+  Corners > 0, that many drawn
   positions follow the parameters (x, y, z each); a corner within Snap
   distance of an existing point uses it. With Corners 0, the face goes
   through the group's points, ordered by angle around their centroid in

@@ -17,7 +17,7 @@
 
 let polydraw_parms: ParmSpec[2] = [
     ParmSpec("Snap distance", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "Drawn corners this close to an existing point use it (0: only where they coincide).", 1.0),
-    ParmSpec("Corners", ParmKind.integer, 0.0, 0.0, 256.0, 1, "", "How many drawn positions follow (x, y, z each); 0 makes the face through the group's points.")]
+    ParmSpec("Corners", ParmKind.integer, 0.0, 0.0, 8388608.0, 1, "", "How many drawn positions follow (x, y, z each); 0 makes the face through the group's points.")]
 
 pub func polydraw_verb() -> Verb:
     return Verb("PolyDraw", "Modeling", "Add a polygon through drawn positions, or through the group's points", Domain.point, true, polydraw_parms, true, cook_polydraw)
@@ -35,14 +35,14 @@ func cook_polydraw(input: const VerbInput*, output: VerbOutput*) -> !:
     var ring = Growing[i32]()
     defer ring.close()
     let drawn = input.parms.at(1)
-    if not (drawn >= 0.0 and drawn <= 256.0) or (drawn > 0.0 and 2 + (usize)drawn * 3 > input.parms.numbers.length):
-        error(errors.invalid, "PolyDraw needs 0..256 corners, and three numbers after its parameters for each")
+    # Any number of corners, up to the point budget.
+    if not (drawn >= 0.0 and drawn <= 8388608.0) or (drawn > 0.0 and 2 + (usize)drawn * 3 > input.parms.numbers.length):
+        error(errors.invalid, "PolyDraw needs 0 or more corners, and three numbers after its parameters for each")
     if drawn > 0.0:
         try drawn_corners(input, builder, snap, (usize)drawn, &ring)
     else:
         try group_corners(input, &topology, builder, &ring)
     if ring.count < 3: error(errors.invalid, "PolyDraw needs at least three distinct corners: draw them, or select three or more points")
-    if ring.count > 256: error(errors.invalid, "PolyDraw makes faces of at most 256 corners")
     if try winds_backwards(&topology, builder, ring.view()):
         var low: usize = 0
         var high = ring.count - 1
@@ -98,8 +98,8 @@ func group_corners(input: const VerbInput*, topology: const Topology*, builder: 
     if ring.count < 3: return
     let center = sum.multiply_scalar(1.0 / (f64)ring.count)
     let normal = least_spread(builder, ring.view(), center)
-    # In-plane axes, then each point's angle; a stable insertion sort (rims
-    # are small).
+    # In-plane axes, then each point's angle, sorted stably: an insertion
+    # sort for small rims, a merge sort (the same order) for larger ones.
     var u = Vector3(1.0, 0.0, 0.0)
     if math.abs(normal.x) > 0.9: u = Vector3(0.0, 1.0, 0.0)
     u = u.subtract(normal.multiply_scalar(u.dot(normal))).normalized() catch failure: recover Vector3(0.0, 0.0, 1.0)
@@ -109,6 +109,9 @@ func group_corners(input: const VerbInput*, topology: const Topology*, builder: 
     for point in ring.view():
         let offset = builder.position(point).subtract(center)
         try angles.push(math.atan2(offset.dot(v), offset.dot(u)))
+    if ring.count > face_scratch.small_faces():
+        try merge_sort(angles.items[..<ring.count], ring.items[..<ring.count])
+        return
     for at in 1..<ring.count:
         var place = at
         while place > 0 and angles.items[place - 1] > angles.items[place]:
@@ -119,6 +122,48 @@ func group_corners(input: const VerbInput*, topology: const Topology*, builder: 
             ring.items[place - 1] = ring.items[place]
             ring.items[place] = point
             place -= 1
+
+## Sort `points` by `angles` (each point's angle beside it), stably and
+## bottom up, in heap scratch of the same size.
+func merge_sort(angles: f64[], points: i32[]) -> !:
+    let count = angles.length
+    let spare_angles = try alloc f64[count] in memory.heap
+    defer free(spare_angles) in memory.heap
+    let spare_points = try alloc i32[count] in memory.heap
+    defer free(spare_points) in memory.heap
+    var from_angles = angles
+    var from_points = points
+    var to_angles = spare_angles
+    var to_points = spare_points
+    var width: usize = 1
+    while width < count:
+        var low: usize = 0
+        while low < count:
+            let middle = low + width if count - low > width else count
+            let high = low + 2 * width if count - low > 2 * width else count
+            var left = low
+            var right = middle
+            for out in low..<high:
+                # Ties keep the left run's point first.
+                if left < middle and (right >= high or not (from_angles[left] > from_angles[right])):
+                    to_angles[out] = from_angles[left]
+                    to_points[out] = from_points[left]
+                    left += 1
+                else:
+                    to_angles[out] = from_angles[right]
+                    to_points[out] = from_points[right]
+                    right += 1
+            low = high
+        let angles_before = from_angles
+        let points_before = from_points
+        from_angles = to_angles
+        from_points = to_points
+        to_angles = angles_before
+        to_points = points_before
+        width *= 2
+    if from_angles.data != angles.data:
+        memory.copy(angles, from_angles, count)
+        memory.copy(points, from_points, count)
 
 ## The unit normal of the plane that fits `points` best: the covariance's
 ## eigenvector of least eigenvalue (Jacobi rotations), its largest
