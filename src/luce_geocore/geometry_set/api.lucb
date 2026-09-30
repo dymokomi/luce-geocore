@@ -99,6 +99,13 @@ extend GeometrySet:
     pub func instance_visible(index: i64) -> bool!:
         return (try self.instance_item(index)).visible
 
+    ## Instance `index`'s `path` row attribute: its place in the scene it
+    ## came from ("" without one).
+    pub func instance_path(index: i64) -> str!:
+        discard(try self.instance_item(index))
+        let data = self.find(&instances_component) else return ""
+        return ((const Instances*)data).row_text("path", (usize)index)
+
     func instance_item(index: i64) -> Instance!:
         let data = self.find(&instances_component) else error(errors.invalid, "the geometry has no instances")
         let instances = (const Instances*)data

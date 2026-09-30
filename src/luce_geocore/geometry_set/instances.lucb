@@ -9,6 +9,11 @@
 ## shares that column (O(1), the same ids) and makes its own share of every
 ## prototype (O(prototypes)): each owner then traces exactly the prototypes'
 ## Luce objects it owns (see ComponentType.share).
+##
+## Rows may carry attributes, as Houdini's packed primitives' points do: an
+## AttributeStore on the point domain, one element per row (`path`, the
+## instance's own place in a scene, is the common one). Shares, joins,
+## filters and the codec keep them; rows added after them take zero or "".
 
 ## One instance, as `item` reads it: its prototype set and placement.
 pub struct Instance:
@@ -36,6 +41,8 @@ pub struct Instances:
     ## builder appends.
     var rows: Column[InstanceRow]
     var size: usize
+    ## Per-row attributes on the point domain, `size` elements each.
+    var attributes: AttributeStore
 
     pub func count() -> usize:
         return self.size
@@ -52,6 +59,25 @@ pub struct Instances:
     ## The change id of the instance rows (a share keeps it).
     pub func rows_id() -> u64:
         return self.rows.id()
+
+    ## The rows' attributes (point domain, one element per row).
+    pub func store() -> const AttributeStore*:
+        return &self.attributes
+
+    ## Row `index`'s text attribute `name` ("" without one).
+    pub func row_text(name: str, index: usize) -> str:
+        let found = self.attributes.find(name, (i64)(u8)Domain.point)
+        if found < 0 or index >= self.size: return ""
+        return self.attributes.entry((usize)found).text_at(index)
+
+    ## Add a row attribute (taken, even on failure): on the point domain, one
+    ## element per row; it replaces one of the same name.
+    pub mutating func put_attribute(attribute: Attribute) -> !:
+        var owned = attribute
+        if owned.domain != Domain.point or owned.elements != self.size:
+            owned.release()
+            error(errors.invalid, "an instance attribute needs one point-domain element per row")
+        try self.attributes.put(owned)
 
     pub func item(index: usize) -> Instance:
         let row = self.rows.view()[index]
@@ -75,6 +101,11 @@ pub struct Instances:
             self.rows = grown.take()
         let out = try self.rows.writable()
         out[self.size] = InstanceRow((i32)prototype, visible, placement.translation, placement.rotation, placement.scale)
+        # Row attributes grow with the rows: zero or "" for the new one.
+        if self.attributes.count() > 0:
+            var grown = try joined_store(&self.attributes, self.size, none, 1)
+            self.attributes.close()
+            self.attributes = grown
         self.size += 1
 
     ## Add an instance of its own prototype `set` (taken, even on failure).
@@ -91,17 +122,55 @@ pub struct Instances:
             self.rows.release()
             self.rows = other.rows.share()
             self.size = other.size
+            var shared = try other.attributes.shared()
+            self.attributes.close()
+            self.attributes = shared
             return
+        # The rows' attributes joined once, not grown row by row.
+        let before = self.size
+        var joined = AttributeStore()
+        if self.attributes.count() > 0 or other.attributes.count() > 0:
+            joined = try joined_store(&self.attributes, before, &other.attributes, other.size)
+        errdefer joined.close()
+        var held = self.attributes
+        self.attributes = AttributeStore()
+        defer held.close()
         for at in 0..<other.size:
             let row = other.rows.view()[at]
             let placement = Placement(row.translation, row.rotation, row.scale, Matrix4.compose(row.translation, row.rotation, row.scale))
             try self.add_instance(base + (usize)row.prototype, &placement, row.visible)
+        self.attributes.close()
+        self.attributes = joined
 
 ## A new, empty instances component.
 pub func new_instances() -> Instances*!:
     let storage = try alloc Instances[1] in memory.heap
-    storage[0] = Instances(Growing[GeometrySet*](), Column[InstanceRow](), 0)
+    storage[0] = Instances(Growing[GeometrySet*](), Column[InstanceRow](), 0, AttributeStore())
     return storage.data
+
+## The row attributes of `first` (`first_rows` rows) followed by those of
+## `second` (`second_rows`; none: rows without attributes): every name of
+## either, zero or "" where one lacks it.
+func joined_store(first: const AttributeStore*, first_rows: usize, second: const AttributeStore*?, second_rows: usize) -> AttributeStore!:
+    var result = AttributeStore()
+    errdefer result.close()
+    let point = (i64)(u8)Domain.point
+    for pass in 0..<(usize)2:
+        var from_store: const AttributeStore*? = none
+        if pass == 0: from_store = first
+        else: from_store = second
+        let store = from_store else continue
+        for index in 0..<store.count():
+            let name = store.entry(index).name()
+            if result.find(name, point) >= 0: continue
+            let a = first.find(name, point)
+            var b: i64 = -1
+            if let other = second: b = other.find(name, point)
+            var pieces: attribute_ops.Piece[2] = [attribute_ops.Piece(first.entry((usize)a) if a >= 0 else none, first_rows), attribute_ops.Piece(none, second_rows)]
+            if let other = second:
+                if b >= 0: pieces[1] = attribute_ops.Piece(other.entry((usize)b), second_rows)
+            try result.put(try attribute_ops.concatenated(pieces))
+    return result
 
 pub let instances_component: ComponentType = ComponentType("instances", share_instances, close_instances, instances_size, instances_bytes, instances_bounds, place_instances, join_instances, instance_paths, filter_instances, describe_instances, "", trace_instances)
 
@@ -118,6 +187,7 @@ func close_instances(data: void*):
     for set in instances.prototypes.view(): dispose_set(set)
     instances.prototypes.close()
     instances.rows.release()
+    instances.attributes.close()
     free(Instances[](instances, 1)) in memory.heap
 
 func instances_size(data: const void*) -> usize:
@@ -126,7 +196,7 @@ func instances_size(data: const void*) -> usize:
 func instances_bytes(data: const void*, ids: IdSet*) -> usize!:
     let instances = (const Instances*)data
     # The rows in use, not a builder's spare capacity.
-    var total: usize = 64 + (try ids.charge(instances.rows.id(), instances.size * sizeof(InstanceRow)))
+    var total: usize = 64 + (try ids.charge(instances.rows.id(), instances.size * sizeof(InstanceRow))) + instances.attributes.bytes()
     for set in instances.prototypes.view(): total += try set_bytes(set, ids)
     return total
 
@@ -176,6 +246,9 @@ func filter_instances(data: const void*, filter: const PathFilter*, keep: bool) 
     result.rows.release()
     result.rows = source.rows.share()
     result.size = source.size
+    var shared = try source.attributes.shared()
+    result.attributes.close()
+    result.attributes = shared
     return (void*)result
 
 func describe_instances(data: const void*, out: Growing[u8]*) -> !:

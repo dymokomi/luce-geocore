@@ -185,7 +185,11 @@ placed, joined, paths, filtered, describe), so the container never
 downcasts and a package adds a family without touching geocore. Putting a
 component registers its type. Instances hold other sets under a
 translation, rotation and scale; placing instances wraps them in one
-instance, so any composition stays exact. `realized` concatenates every
+instance, so any composition stays exact. Rows may carry attributes on the
+point domain, as Houdini's packed points do (`Instances.store`,
+`put_attribute`, `row_text`; `instance_path` in Luce reads a row's `path`,
+its place in the scene it came from); shares, joins, filters and the codec
+keep them, and rows added later take zero or "". `realized` concatenates every
 mesh placed by its instance matrices in one parallel pass (`concatenated`);
 a family without polygons (CAD) makes it fail with what to do instead.
 

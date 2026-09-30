@@ -318,6 +318,7 @@ The document is a tree of elements:
   /geometry/curves     curves      origin, P, offsets, [knots, knot_offsets]
   /geometry/instances  instances   int64 count, prototypes; int32 prototype;
                                    float64[n*9] placement; uint8 visible
+    .../a0             attribute   (a row attribute, as above; point domain)
     .../p0             geometry    (a prototype set, written once)
   /geometry/volume     volume      int64 count
     .../g0             grid        str name; int64 class; float64 background, transform[12];

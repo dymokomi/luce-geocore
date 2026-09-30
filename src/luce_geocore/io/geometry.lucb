@@ -273,8 +273,9 @@ func encode_curves(data: const void*, writer: GeometryWriter*, path: str) -> !:
         try writer.column_borrowed("knot_offsets", dtype_int32, starts.length, 1, bytes_view(starts))
     try writer.attributes(path, curves.store())
 
-## Instances: each prototype once (children p0, p1, …), then the instances'
-## prototypes, placements and visibility as columns.
+## Instances: the instances' prototypes, placements and visibility as
+## columns, their row attributes (children a0, a1, …), then each prototype
+## once (children p0, p1, …).
 func encode_instances(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let instances = (const Instances*)data
     try writer.crate.element(path, "instances")
@@ -296,6 +297,7 @@ func encode_instances(data: const void*, writer: GeometryWriter*, path: str) -> 
     try writer.crate.copied_array("prototype", dtype_int32, count, u8[]((u8*)prototypes.items.data, count * 4))
     try writer.crate.copied_array("placement", dtype_float64, count * 9, u8[]((u8*)placements.items.data, count * 72))
     try writer.crate.copied_array("visible", dtype_uint8, count, visible.view())
+    try writer.attributes(path, instances.store())
     let base = try copied_text(path)
     defer free(base) in memory.heap
     for index in 0..<instances.prototype_count():
