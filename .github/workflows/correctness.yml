@@ -36,3 +36,6 @@ jobs:
       - name: Native and C tests
         working-directory: luce-geocore
         run: ./test.sh
+      - name: Memory safety instrumentation
+        working-directory: luce-geocore
+        run: python3 tests/sanitize.py
