@@ -8,7 +8,7 @@ import luce_geocore.errors as errors
 from luce_geocore.math.vector import Vector3
 from luce_geocore.core.attributes import Attribute, Domain, DataType, Storage
 from luce_geocore.core.attribute_ops import typed_mut
-from luce_geocore.geometries.polygon import Mesh, with_attribute_entry, point_span, corner_span, offset_span, corner_face_span, face_normal_span, triangle_span, mesh_origin
+from luce_geocore.geometries.polygon import Mesh
 
 pub struct AttributeKernels:
     let reserved: u8 = 0
@@ -17,23 +17,23 @@ pub struct AttributeKernels:
     pub static func uv_project(source: interop.Reference[Mesh], scale: f64) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         if not math.is_finite(scale): error(errors.invalid, "UV scale must be finite")
-        let corners = corner_span(mesh)
-        let points = point_span(mesh)
-        let origin = mesh_origin(mesh)
+        let corners = mesh.corner_span()
+        let points = mesh.point_span()
+        let origin = mesh.position_origin()
         var attribute = try Attribute.create("uv", Domain.corner, DataType.float64, 2, corners.length)
         let values = typed_mut[f64](attribute.data.span())
         for corner in 0..<corners.length:
             let p = points[(usize)corners[corner]].vector().add(origin)
             values[corner * 2] = p.x * scale
             values[corner * 2 + 1] = p.z * scale
-        return try with_attribute_entry(mesh, attribute)
+        return try mesh.with_attribute_entry(attribute)
 
     ## N on faces (the face normals) or points (the normalized sum of the
     ## incident face normals; zero for isolated points).
     pub static func normals(source: interop.Reference[Mesh], domain: i64) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let face_domain = domain == 2
-        let normals = face_normal_span(mesh)
+        let normals = mesh.face_normal_span()
         let count = normals.length if face_domain else (usize)mesh.point_count()
         var attribute = try Attribute.create("N", Domain.face if face_domain else Domain.point, DataType.float64, 3, count)
         let values = typed_mut[f64](attribute.data.span())
@@ -42,14 +42,14 @@ pub struct AttributeKernels:
                 values[face * 3] = (f64)normals[face].x
                 values[face * 3 + 1] = (f64)normals[face].y
                 values[face * 3 + 2] = (f64)normals[face].z
-            return try with_attribute_entry(mesh, attribute)
+            return try mesh.with_attribute_entry(attribute)
         let sums = alloc Vector3[count] in memory.heap catch failure:
             attribute.release()
             error(failure.code, failure.message)
         defer free(sums) in memory.heap
         for at in 0..<count: sums[at] = Vector3()
-        let offsets = offset_span(mesh)
-        let corners = corner_span(mesh)
+        let offsets = mesh.offset_span()
+        let corners = mesh.corner_span()
         for face in 0..<normals.length:
             for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
                 let point = (usize)corners[corner]
@@ -60,15 +60,15 @@ pub struct AttributeKernels:
             values[at * 3] = n.x
             values[at * 3 + 1] = n.y
             values[at * 3 + 2] = n.z
-        return try with_attribute_entry(mesh, attribute)
+        return try mesh.with_attribute_entry(attribute)
 
     ## Face "area": the summed area of each face's display triangles.
     pub static func face_areas(source: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
-        let points = point_span(mesh)
-        let corners = corner_span(mesh)
-        let faces = try corner_face_span(mesh)
-        let triangles = triangle_span(mesh)
+        let points = mesh.point_span()
+        let corners = mesh.corner_span()
+        let faces = try mesh.corner_face_span()
+        let triangles = mesh.triangle_span()
         var attribute = try Attribute.create("area", Domain.face, DataType.float64, 1, (usize)mesh.face_count())
         let values = typed_mut[f64](attribute.data.span())
         for at in 0..<values.length: values[at] = 0.0
@@ -77,7 +77,7 @@ pub struct AttributeKernels:
             let b = points[(usize)corners[(usize)triangles[triangle * 3 + 1]]].vector()
             let c = points[(usize)corners[(usize)triangles[triangle * 3 + 2]]].vector()
             values[(usize)faces[(usize)triangles[triangle * 3]]] += b.subtract(a).cross(c.subtract(a)).length() * 0.5
-        return try with_attribute_entry(mesh, attribute)
+        return try mesh.with_attribute_entry(attribute)
 
     ## `name` = `values` (1..4 components) on every element, optionally scaled
     ## per element and component by a deterministic hash of the element id and
@@ -110,4 +110,4 @@ pub struct AttributeKernels:
         for at in 0..<count: values[at] = 0
         for id in members:
             if id >= 0 and (usize)id < count: values[(usize)id] = 1
-        return try with_attribute_entry(mesh, attribute)
+        return try mesh.with_attribute_entry(attribute)

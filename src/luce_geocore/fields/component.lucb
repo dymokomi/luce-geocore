@@ -58,11 +58,11 @@ pub func sdf_type() -> const ComponentType*:
     return &sdf_component
 
 pub func set_volume(set: const GeometrySet*) -> const Volume*?:
-    let data = set_find(set, &volume_component) else return none
+    let data = set.find(&volume_component) else return none
     return (const Volume*)data
 
 pub func set_sdf(set: const GeometrySet*) -> const Sdf*?:
-    let data = set_find(set, &sdf_component) else return none
+    let data = set.find(&sdf_component) else return none
     return (const Sdf*)data
 
 func share_volume(data: const void*) -> void*!:

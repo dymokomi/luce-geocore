@@ -103,8 +103,8 @@ pub struct SdfEdits:
         var rewrite = try SdfRewrite.of(sdf)
         defer rewrite.close()
         if not (try rewrite.remove(&tree, chosen.marks.view())):
-            let storage = try set_storage(source)
-            set_remove(storage, sdf_type())
+            let storage = try source.storage()
+            storage.remove(sdf_type())
             return try adopt_set(storage)
         return try with_program(source, try rewrite.finish())
 
@@ -114,10 +114,10 @@ func size_at(sizes: const f64[], at: usize) -> f64:
 
 ## A heap copy of `source` with `sdf` (taken) as its SDF.
 func with_program(source: const GeometrySet*, sdf: Sdf*) -> interop.Reference[GeometrySet]!:
-    let storage = set_storage(source) catch failure:
+    let storage = source.storage() catch failure:
         release_sdf(sdf)
         error(failure.code, failure.message)
-    set_put(storage, sdf_type(), (void*)sdf) catch failure:
+    storage.put(sdf_type(), (void*)sdf) catch failure:
         dispose_set(storage)
         error(failure.code, failure.message)
     return try adopt_set(storage)

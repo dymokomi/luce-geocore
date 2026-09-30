@@ -26,10 +26,12 @@ def dependency "luce-geocore" {
 Import `geocore` (`from geocore import Mesh, MeshBuilder, Vector3`). Base
 code in other packages also has `geocore_kernel` (bit sets, groups and
 selections, mesh assembly, the geometry set's component protocol, the codec
-registry, curves), `geocore_native` (spans, and packing into GPU layouts,
-which Luce cannot call), `geocore_parallel` (the shared worker pool),
+registry, curves), `geocore_parallel` (the shared worker pool),
 `geocore_shared` (shared columns) and `geocore_growing` (`Growing`, a heap
-array that keeps its capacity).
+array that keeps its capacity). A mesh's arrays as spans (`point_span()`,
+`corner_span()`, …) and their packing into GPU layouts (`pack_positions`, …)
+are methods of `Mesh` that only Base sees: Luce leaves out the methods whose
+signatures it cannot take.
 
 Use the compiler revisions in `bootstrap/PACKAGES`, checked out beside this
 repository, and run `./test.sh`: the Base checks at native optimization levels

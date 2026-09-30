@@ -91,7 +91,7 @@ func bounds_region(topology: const Topology*, group: Bits, corner: usize, indivi
 func point_of(mesh: const Mesh*, point: i32) -> Vector3:
     let exact = precise_span(mesh)
     if exact.length > 0: return exact[(usize)point]
-    return point_span(mesh)[(usize)point].vector().add(mesh_origin(mesh))
+    return mesh.point_span()[(usize)point].vector().add(mesh.position_origin())
 
 ## The unit vector from `a` to `b` turned a quarter inward in a face with
 ## normal `normal` (to the left of a counterclockwise edge).
@@ -106,7 +106,7 @@ func extrude_faces(input: const VerbInput*, output: VerbOutput*, settings: Extru
         output.warning = "No faces in the group to extrude; the input passes through"
         return
     let topology = try Topology.of(mesh)
-    let normals = face_normal_span(mesh)
+    let normals = mesh.face_normal_span()
     var fronts = Fronts()
     defer fronts.close()
     try fronts.of_corner.fill(topology.corners.length, -1)
@@ -287,7 +287,7 @@ func extrude_edges(input: const VerbInput*, output: VerbOutput*, settings: Extru
         output.warning = "No edges in the group to extrude (or a zero distance); the input passes through"
         return
     let topology = try Topology.of(mesh)
-    let normals = face_normal_span(mesh)
+    let normals = mesh.face_normal_span()
     let sums = try alloc Vector3[topology.points] in memory.heap
     defer free(sums) in memory.heap
     let front = try alloc i32[topology.points] in memory.heap

@@ -58,10 +58,10 @@ pub func cloud_of_mesh(mesh: const Mesh*) -> PointCloud*!:
     var attributes = AttributeStore()
     errdefer attributes.close()
     for index in 0..<(usize)mesh.attribute_count():
-        let entry = try attribute_entry(mesh, (i64)index)
+        let entry = try mesh.attribute_entry((i64)index)
         if entry.domain == Domain.point: try attributes.put(entry.share())
     let storage = try alloc PointCloud[1] in memory.heap
-    storage[0] = PointCloud(mesh_positions(mesh), mesh_origin(mesh), attributes)
+    storage[0] = PointCloud(mesh_positions(mesh), mesh.position_origin(), attributes)
     return storage.data
 
 pub let points_component: ComponentType = ComponentType("points", share_cloud, close_cloud, cloud_size, cloud_bytes, cloud_bounds, place_cloud, join_clouds, no_paths, keep_cloud, describe_cloud, "", no_trace)

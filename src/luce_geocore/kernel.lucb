@@ -44,7 +44,6 @@ pub let mesh_adopt = polygon.mesh_adopt
 pub let moved_storage = polygon.moved_storage
 pub let precise_span = polygon.precise_span
 pub let mesh_unique_bytes = polygon.mesh_unique_bytes
-pub let with_attribute_entry = polygon.with_attribute_entry
 pub let kept_faces = polygon.kept_faces
 
 ## A text attribute of `elements` whose element i is string `values[i]` of
@@ -69,10 +68,6 @@ pub let adopt_set = geometry_set.adopt_set
 pub let dispose_set = geometry_set.dispose_set
 pub let empty_set = geometry_set.empty_storage
 pub let set_mesh = geometry_set.set_mesh
-pub let set_find = geometry_set.set_find
-pub let set_put = geometry_set.set_put
-pub let set_remove = geometry_set.set_remove
-pub let set_storage = geometry_set.set_storage
 pub let set_realized = geometry_set.set_realized
 pub let append_text = geometry_set.append_text
 pub let append_number = geometry_set.append_number
@@ -179,23 +174,12 @@ pub let encode_set = io.encode_set
 pub let save_geometry = io.save_geometry
 pub let load_geometry = io.load_geometry
 pub let geometry_key = io.geometry_key
-pub let set_component_count = geometry_set.set_component_count
-pub let set_component = geometry_set.set_component
 pub let cloud_positions = geometry_set.cloud_positions
 pub let cloud_origin = geometry_set.cloud_origin
 pub let cloud_store = geometry_set.cloud_store
 pub let cloud_assembled = geometry_set.cloud_assembled
 pub let curves_knots = curves.curves_knots
 pub let curves_knot_offsets = curves.curves_knot_offsets
-pub let point_span = polygon.point_span
-pub let offset_span = polygon.offset_span
-pub let corner_span = polygon.corner_span
-pub let triangle_span = polygon.triangle_span
-pub let face_normal_span = polygon.face_normal_span
-pub let edge_span = polygon.edge_span
-pub let corner_edge_span = polygon.corner_edge_span
-pub let mesh_origin = polygon.mesh_origin
-pub let attribute_entry = polygon.attribute_entry
 ## Assembly from columns an importer filled (luce-usd): a mesh taking its
 ## columns, attributes put on it, curves and detail attributes likewise.
 pub let assembled = polygon.assembled

@@ -48,7 +48,7 @@ func plan_key(mesh: const Mesh*, settings: Settings) -> u64:
     key = (key ^ (u64)settings.level) *% 0x100000001B3
     key = (key ^ (1 if settings.corners else 0)) *% 0x100000001B3
     for index in 0..<mesh.attribute_count():
-        let entry = attribute_entry(mesh, index) catch failure: continue
+        let entry = mesh.attribute_entry(index) catch failure: continue
         if entry.role == Role.normal or entry.name().bytes[0] == 46: continue
         key = (key ^ entry.data.id()) *% 0x100000001B3
     return key
@@ -60,7 +60,7 @@ pub func subdivided_display(mesh: const Mesh*) -> Mesh*?!:
     if settings.scheme == Scheme.off or settings.level == 0: return none
     let key = plan_key(mesh, settings)
     let positions = mesh.points_id()
-    let context = try topology_extension(mesh, dispose_cache, make_cache)
+    let context = try mesh.topology_extension(dispose_cache, make_cache)
     let cache = (DisplayCache*)context
     cache.lock.lock()
     defer cache.lock.unlock()
@@ -108,9 +108,9 @@ func keep_plan(cache: DisplayCache*, plan: Plan*) -> Plan*!:
 
 ## The cage's points in f64 (world space).
 func cage_points(mesh: const Mesh*, out: Vector3[]):
-    let origin = mesh_origin(mesh)
+    let origin = mesh.position_origin()
     let exact = precise_span(mesh)
-    let points = point_span(mesh)
+    let points = mesh.point_span()
     for at in 0..<points.length: out[at] = exact[at] if exact.length > 0 else points[at].vector().add(origin)
 
 ## Every level's points of `mesh` under `plan`, into `state`: level l's are
@@ -164,20 +164,20 @@ func evaluate(mesh: const Mesh*, plan: const Plan*, state: LevelState*) -> Mesh*
 ## `limit` and normals `normals` (both indexed like `moved`), every other
 ## point and normal as `base` has them (`previous` gives the old normals).
 func placed_display(base: const Mesh*, limit: const Vector3[], normals: const Vector3[], moved: const u32[], previous: const Mesh*?) -> Mesh*!:
-    let origin = mesh_origin(base)
-    var placed = try Column[Float3].copy_of(point_span(base))
+    let origin = base.position_origin()
+    var placed = try Column[Float3].copy_of(base.point_span())
     defer placed.release()
     let out = placed.span()
     for at in 0..<moved.length: out[(usize)moved[at]] = Float3.of(limit[at].subtract(origin))
     let made = try displayed(base, placed, moved)
     errdefer mesh_dispose(made)
-    let count = point_span(base).length
+    let count = base.point_span().length
     var attribute = try Attribute.create("N", Domain.point, DataType.float32, 3, count)
     let values = typed_mut[f32](attribute.data.span())
     if let old = previous:
         let index = old.find_attribute("N", (i64)(u8)Domain.point)
         if index >= 0:
-            let entry = attribute_entry(old, index) catch failure:
+            let entry = old.attribute_entry(index) catch failure:
                 attribute.release()
                 error(failure.code, failure.message)
             let source = typed[f32](entry.data.view())

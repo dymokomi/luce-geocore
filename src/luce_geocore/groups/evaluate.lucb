@@ -120,7 +120,7 @@ struct Evaluation:
             var bits = try BitsBuilder.zeros(try self.size(domain))
             var found = false
             for index in 0..<(usize)self.mesh.attribute_count():
-                let entry = try attribute_entry(self.mesh, (i64)index)
+                let entry = try self.mesh.attribute_entry((i64)index)
                 if not entry.is_group() or entry.domain != domain or not glob(pattern, entry.name()): continue
                 bits.unite(Bits.of_bytes(entry.data.view(), entry.elements))
                 found = true
@@ -146,7 +146,7 @@ struct Evaluation:
         else:
             let found = self.find_attribute(name, target)
             if found >= 0:
-                let entry = try attribute_entry(self.mesh, found)
+                let entry = try self.mesh.attribute_entry(found)
                 source = Source(kind = 3, domain = entry.domain, entry = entry)
             elif name == "N":
                 source = Source(kind = 4, domain = Domain.face)
@@ -184,7 +184,7 @@ struct Evaluation:
         elif source.kind == 2 or source.kind == 4:
             if component >= 3: error(errors.invalid, "group syntax: the attribute has fewer components")
         var work = TestWork(self.program.numbers.view()[(usize)term.first..<(usize)term.first + (usize)term.count * 2], term.compare, source.kind, component,
-                            point_span(self.mesh), mesh_origin(self.mesh), face_normal_span(self.mesh), source.entry, is_detail(source), bits.words(), size)
+                            self.mesh.point_span(), self.mesh.position_origin(), self.mesh.face_normal_span(), source.entry, is_detail(source), bits.words(), size)
         parallel.parallel_for(work.words.length, 256, test_words, (void*)&work)
         return bits
 
@@ -274,12 +274,12 @@ struct Evaluation:
             let term = &self.program.terms.items[(usize)index]
             if term.kind == AtomKind.name:
                 for at in 0..<(usize)self.mesh.attribute_count():
-                    let entry = attribute_entry(self.mesh, (i64)at) catch failure: return fallback
+                    let entry = self.mesh.attribute_entry((i64)at) catch failure: return fallback
                     if entry.is_group() and glob(self.program.text(term), entry.name()): return entry.domain
             elif term.kind == AtomKind.attribute:
                 let found = self.find_attribute(self.program.text(term), fallback)
                 if found >= 0:
-                    let entry = attribute_entry(self.mesh, found) catch failure: return fallback
+                    let entry = self.mesh.attribute_entry(found) catch failure: return fallback
                     return entry.domain
             elif term.kind == AtomKind.point_edges or term.kind == AtomKind.face_edge:
                 return Domain.edge

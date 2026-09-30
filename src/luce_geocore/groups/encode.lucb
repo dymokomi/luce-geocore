@@ -21,7 +21,7 @@ pub func encode(mesh: const Mesh*, bits: Bits, domain: Domain, out: Growing[u8]*
 ## The name of a group with exactly these members, if one exists.
 func named_group(mesh: const Mesh*, bits: Bits, domain: Domain, out: Growing[u8]*) -> bool!:
     for index in 0..<(usize)mesh.attribute_count():
-        let entry = try attribute_entry(mesh, (i64)index)
+        let entry = try mesh.attribute_entry((i64)index)
         if not entry.is_group() or entry.domain != domain or entry.elements != bits.count: continue
         let group = Bits.of_bytes(entry.data.view(), entry.elements)
         var same = true
@@ -74,8 +74,8 @@ func append_range(out: Growing[u8]*, first: i64, last: i64, step: i64) -> !:
 ## Chains of selected edges as `pA-B-C`: from each unvisited edge, extend
 ## while exactly one other selected, unvisited edge continues the chain.
 func encode_edges(mesh: const Mesh*, bits: Bits, out: Growing[u8]*) -> !:
-    let edges = try edge_span(mesh)
-    let around = try point_edge_span(mesh)
+    let edges = try mesh.edge_span()
+    let around = try mesh.point_edge_span()
     var visited = try BitsBuilder.zeros(bits.count)
     defer visited.close()
     var chain = Growing[i32]()

@@ -37,7 +37,7 @@ extend Mesh:
         for member in members:
             try checked(member, (usize)count)
             bits.set((usize)member)
-        return try self.with_entry(try Attribute.group_of(name, Domain((u8)domain), (usize)count, bits.view().words))
+        return try self.with_attribute_entry(try Attribute.group_of(name, Domain((u8)domain), (usize)count, bits.view().words))
 
     ## One text value for a whole domain (single storage, O(1)).
     pub func with_text(name: str, domain: i64, value: str) -> interop.Reference[Mesh]!:
@@ -47,7 +47,7 @@ extend Mesh:
         let index: i32[1] = [try table.intern(value)]
         var column = try table.finish()
         defer column.release()
-        return try self.with_entry(try Attribute.text(name, Domain((u8)domain), (usize)count, column, index, Storage.single))
+        return try self.with_attribute_entry(try Attribute.text(name, Domain((u8)domain), (usize)count, column, index, Storage.single))
 
     ## A text attribute: element i is line `values[i]` of `lines` (strings
     ## separated by newlines), or "" for -1.
@@ -70,7 +70,7 @@ extend Mesh:
             indices[at] = (i32)value
         var column = try table.finish()
         defer column.release()
-        return try self.with_entry(try Attribute.text(name, Domain((u8)domain), count, column, indices))
+        return try self.with_attribute_entry(try Attribute.text(name, Domain((u8)domain), count, column, indices))
 
     ## Members of group `name` on `domain`, or -1 when there is no such group.
     pub func group_size(name: str, domain: i64) -> i64:
@@ -89,7 +89,7 @@ extend Mesh:
 
 ## The bits of group attribute `index`, for Base kernels.
 pub func group_bits(mesh: const Mesh*, index: i64) -> Bits!:
-    let entry = try attribute_entry(mesh, index)
+    let entry = try mesh.attribute_entry(index)
     if entry.kind != DataType.boolean: error(errors.invalid, "a group is a boolean attribute")
     return Bits.of_bytes(entry.data.view(), entry.elements)
 
@@ -97,7 +97,7 @@ pub func group_bits(mesh: const Mesh*, index: i64) -> Bits!:
 pub func with_group_bits(mesh: const Mesh*, name: str, domain: Domain, bits: Bits) -> interop.Reference[Mesh]!:
     let count = try mesh.domain_size(domain)
     if bits.count != count: error(errors.invalid, "group bits must cover their domain")
-    return try mesh.with_entry(try Attribute.group_of(name, domain, count, bits.words))
+    return try mesh.with_attribute_entry(try Attribute.group_of(name, domain, count, bits.words))
 
 ## The edge of points a and b: a corner at `a` whose next or previous corner
 ## is at `b` names it. -1 when they share no edge.

@@ -214,8 +214,8 @@ pub func encode_set(writer: GeometryWriter*, set: const GeometrySet*, path: str,
     let base = try copied_text(path)
     defer free(base) in memory.heap
     try writer.attributes((str)base, set_detail(set))
-    for index in 0..<set_component_count(set):
-        let component = set_component(set, index)
+    for index in 0..<set.component_count():
+        let component = set.component(index)
         let codec = codec_of(component.kind.name) else error(errors.invalid, "this geometry family cannot be saved yet (no codec)")
         let child = try copied_text(try writer.child((str)base, component.kind.name))
         defer free(child) in memory.heap
@@ -231,21 +231,21 @@ func copied_text(text: str) -> u8[]!:
 func encode_mesh(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let mesh = (const Mesh*)data
     try writer.crate.element(path, "mesh")
-    let origin = mesh_origin(mesh)
+    let origin = mesh.position_origin()
     try writer.crate.triple("origin", origin.x, origin.y, origin.z)
-    let points = point_span(mesh)
+    let points = mesh.point_span()
     try writer.column_borrowed("P", dtype_float32, points.length, 3, bytes_view(points))
-    let offsets = offset_span(mesh)
+    let offsets = mesh.offset_span()
     try writer.column_borrowed("face_offsets", dtype_int32, offsets.length, 1, bytes_view(offsets))
-    let corners = corner_span(mesh)
+    let corners = mesh.corner_span()
     try writer.column_borrowed("corner_points", dtype_int32, corners.length, 1, bytes_view(corners))
-    let triangles = triangle_span(mesh)
+    let triangles = mesh.triangle_span()
     try writer.column_borrowed("triangles", dtype_int32, triangles.length, 1, bytes_view(triangles))
     let precise = precise_span(mesh)
     if precise.length > 0: try writer.column_borrowed("precise", dtype_float64, precise.length, 3, bytes_view(precise))
     var entries = Growing[const Attribute*]()
     defer entries.close()
-    for index in 0..<(usize)mesh.attribute_count(): try entries.push(try attribute_entry(mesh, (i64)index))
+    for index in 0..<(usize)mesh.attribute_count(): try entries.push(try mesh.attribute_entry((i64)index))
     try writer.attribute_list(path, entries.view())
 
 func encode_points(data: const void*, writer: GeometryWriter*, path: str) -> !:

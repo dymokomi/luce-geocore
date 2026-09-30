@@ -26,7 +26,7 @@ from luce_geocore.core.float3 import Float3
 from luce_geocore.core.attributes import Attribute, Domain, DataType, Role
 from luce_geocore.core.attribute_ops import typed, typed_mut
 from luce_geocore.math.vector import Vector3
-from luce_geocore.geometries.polygon import Mesh, mesh_share, mesh_dispose, mesh_adopt, mesh_origin, point_span, precise_span, attribute_entry, moved_storage, displayed, put_attribute, remove_attribute, face_normal_span, offset_span, corner_span, topology_extension
+from luce_geocore.geometries.polygon import Mesh, mesh_share, mesh_dispose, mesh_adopt, precise_span, moved_storage, displayed, put_attribute, remove_attribute
 from luce_geocore.groups import Topology
 from luce_geocore.verbs import TopologyBuilder
 import luce_geocore.geometries.face_scratch as face_scratch
@@ -59,7 +59,7 @@ pub func settings_of(mesh: const Mesh*) -> Settings:
     let wanted = (usize)math.max(0.0, math.min(6.0, detail(mesh, "subd.level", 1.0)))
     let pinned = detail(mesh, "subd.boundary", 1.0) != 0.0
     if scheme == Scheme.off or wanted == 0 or mesh.face_count() == 0: return Settings(Scheme.off, 0, pinned)
-    let offsets = offset_span(mesh)
+    let offsets = mesh.offset_span()
     if scheme == Scheme.loop:
         for face in 0..<offsets.length - 1:
             if offsets[face + 1] - offsets[face] != 3:
@@ -67,7 +67,7 @@ pub func settings_of(mesh: const Mesh*) -> Settings:
                 break
     # Level 1 makes a face per corner (Loop: four per triangle), then four
     # per face each level; points grow alike.
-    let corners = (f64)corner_span(mesh).length
+    let corners = (f64)mesh.corner_span().length
     var faces = corners if scheme != Scheme.loop else (f64)mesh.face_count() * 4.0
     var points = (f64)mesh.point_count() + corners + (f64)mesh.face_count()
     var level: usize = 0

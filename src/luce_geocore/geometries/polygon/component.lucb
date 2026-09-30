@@ -61,6 +61,6 @@ pub func mesh_filtered(mesh: const Mesh*, filter: const PathFilter*, keep: bool)
     if selected.view().population() == faces: return try mesh.snapshot_storage()
     return try mesh.subset_storage(selected.view())
 
-## Another owner of `mesh`'s positions (relative to `mesh_origin(mesh)`).
+## Another owner of `mesh`'s positions (relative to `mesh.position_origin()`).
 pub func mesh_positions(mesh: const Mesh*) -> Column[Float3]:
     return mesh.positions.share()

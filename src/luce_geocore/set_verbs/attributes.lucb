@@ -11,7 +11,7 @@ pub struct SetAttributes:
     ## Whether the set has curves or a point cloud of its own.
     pub static func present(geometry: interop.Reference[GeometrySet]) -> bool!:
         let set = try geometry.get()
-        return set_curves(set) != none or set_find(set, &points_component) != none
+        return set_curves(set) != none or set.find(&points_component) != none
 
     ## Whether the set's curves (or else point cloud) have attribute `name`
     ## on `domain` (0 points, 2 curves, 3 detail).
@@ -19,7 +19,7 @@ pub struct SetAttributes:
         let set = try geometry.get()
         let wanted = Domain.point if domain == 0 or domain == 1 else (curve_domain if domain == 2 else Domain.detail)
         if let lines = set_curves(set): return lines.find(name, wanted) != none
-        if let data = set_find(set, &points_component): return cloud_store((const PointCloud*)data).find(name, (i64)(u8)wanted) >= 0
+        if let data = set.find(&points_component): return cloud_store((const PointCloud*)data).find(name, (i64)(u8)wanted) >= 0
         return false
 
     ## `name` = `values` (1..4 components) on `domain`, optionally scaled per
@@ -61,7 +61,7 @@ struct AttributeEdit:
 
 ## A copy of `set` with the edit applied to its curves and point cloud.
 func edited(set: const GeometrySet*, edit: const AttributeEdit*) -> GeometrySet*!:
-    let storage = try set_storage(set)
+    let storage = try set.storage()
     errdefer dispose_set(storage)
     if let found_curves = set_curves(set):
         let lines = found_curves
@@ -80,8 +80,8 @@ func edited(set: const GeometrySet*, edit: const AttributeEdit*) -> GeometrySet*
             try apply_edit(&store, edit, domain, size)
         let handed = store
         store = AttributeStore()
-        try set_put(storage, curves_type(), (void*)(try curves_with_store(lines, handed)))
-    if let data = set_find(set, &points_component):
+        try storage.put(curves_type(), (void*)(try curves_with_store(lines, handed)))
+    if let data = set.find(&points_component):
         let cloud = (const PointCloud*)data
         if edit.kind != 3 and (edit.domain == 0 or edit.domain == 3):
             let domain = Domain.point if edit.domain == 0 else Domain.detail
@@ -90,7 +90,7 @@ func edited(set: const GeometrySet*, edit: const AttributeEdit*) -> GeometrySet*
             try apply_edit(&store, edit, domain, cloud_positions(cloud).length if domain == Domain.point else 1)
             let handed = store
             store = AttributeStore()
-            try set_put(storage, &points_component, (void*)(try cloud_with_store(cloud, handed)))
+            try storage.put(&points_component, (void*)(try cloud_with_store(cloud, handed)))
     return storage
 
 func apply_edit(store: AttributeStore*, edit: const AttributeEdit*, domain: Domain, size: usize) -> !:

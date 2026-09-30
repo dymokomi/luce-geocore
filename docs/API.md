@@ -195,10 +195,10 @@ a family without polygons (CAD) makes it fail with what to do instead.
 
 Base code in other packages uses `geocore_kernel`: bit sets, string tables,
 path filters, `MeshPart`/`concatenated`, `kept_faces`, groups' edge pairs,
-and the component protocol (`set_find`, `set_put`, `set_remove`,
-`set_storage`, the built-in families). Import its names with
-`from geocore_kernel import …`: a qualified call of a re-exported function
-value does not compile (reported to the compiler owners).
+and the built-in families; the component protocol itself is `GeometrySet`'s
+`find`, `put`, `remove`, `storage` and `component`, which Luce does not see.
+Import its names with `from geocore_kernel import …`, or the module itself
+(`import geocore_kernel as kernel`, `kernel.set_mesh(&set)`).
 
 ## Group expressions and selections
 

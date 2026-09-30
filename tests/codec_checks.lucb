@@ -12,7 +12,7 @@ import files
 import c
 from io import path
 from geocore import Vector3, Mesh, MeshPrimitives, GeometrySet, AttributeKernels
-from geocore_kernel import Curves, CurvesBuilder, CurveType, Attribute, AttributeStore, Domain, DataType, set_curves, curves_type, set_put, empty_set, dispose_set, adopt_set, save_geometry, load_geometry, geometry_key, arc_curves, set_mesh, set_find, points_component, instances_component, Instances, PointCloud, cloud_positions, cloud_store, set_component_count, set_component, curves_knots, evaluated_positions, curves_dispose, point_span, offset_span, corner_span, triangle_span, face_normal_span, mesh_origin, attribute_entry
+from geocore_kernel import Curves, CurvesBuilder, CurveType, Attribute, AttributeStore, Domain, DataType, set_curves, curves_type, empty_set, dispose_set, adopt_set, save_geometry, load_geometry, geometry_key, arc_curves, set_mesh, points_component, instances_component, Instances, PointCloud, cloud_positions, cloud_store, curves_knots, evaluated_positions, curves_dispose
 from geocore_growing import Growing
 from geocore_kernel import GeometryWriter, CrateReader, dtype_int32
 
@@ -136,7 +136,7 @@ func set_of(curves: Curves*) -> interop.Reference[GeometrySet]!:
     let storage = empty_set() catch failure:
         curves_dispose(curves)
         error(failure.code, failure.message)
-    set_put(storage, curves_type(), (void*)curves) catch failure:
+    storage.put(curves_type(), (void*)curves) catch failure:
         dispose_set(storage)
         error(failure.code, failure.message)
     return try adopt_set(storage)
@@ -161,18 +161,18 @@ func same_store(a: const AttributeStore*, b: const AttributeStore*):
     for index in 0..<a.count(): same_attribute(a.entry(index), b.entry(index))
 
 func same_sets(a: const GeometrySet*, b: const GeometrySet*) -> !:
-    assert(set_component_count(a) == set_component_count(b))
-    for index in 0..<set_component_count(a):
-        assert(set_component(a, index).kind.name == set_component(b, index).kind.name)
+    assert(a.component_count() == b.component_count())
+    for index in 0..<a.component_count():
+        assert(a.component(index).kind.name == b.component(index).kind.name)
     if let x = set_mesh(a):
         let y = set_mesh(b) else trap("mesh")
-        same_bytes(bytes_of(point_span(x)), bytes_of(point_span(y)))
-        same_bytes(bytes_of(offset_span(x)), bytes_of(offset_span(y)))
-        same_bytes(bytes_of(corner_span(x)), bytes_of(corner_span(y)))
-        same_bytes(bytes_of(triangle_span(x)), bytes_of(triangle_span(y)))
-        same_bytes(bytes_of(face_normal_span(x)), bytes_of(face_normal_span(y)))
-        assert(mesh_origin(x) == mesh_origin(y) and x.attribute_count() == y.attribute_count())
-        for index in 0..<x.attribute_count(): same_attribute(try attribute_entry(x, index), try attribute_entry(y, index))
+        same_bytes(bytes_of(x.point_span()), bytes_of(y.point_span()))
+        same_bytes(bytes_of(x.offset_span()), bytes_of(y.offset_span()))
+        same_bytes(bytes_of(x.corner_span()), bytes_of(y.corner_span()))
+        same_bytes(bytes_of(x.triangle_span()), bytes_of(y.triangle_span()))
+        same_bytes(bytes_of(x.face_normal_span()), bytes_of(y.face_normal_span()))
+        assert(x.position_origin() == y.position_origin() and x.attribute_count() == y.attribute_count())
+        for index in 0..<x.attribute_count(): same_attribute(try x.attribute_entry(index), try y.attribute_entry(index))
     if let x = set_curves(a):
         let y = set_curves(b) else trap("curves")
         same_bytes(bytes_of(x.position_span()), bytes_of(y.position_span()))
@@ -180,13 +180,13 @@ func same_sets(a: const GeometrySet*, b: const GeometrySet*) -> !:
         same_bytes(bytes_of(curves_knots(x)), bytes_of(curves_knots(y)))
         same_store(x.store(), y.store())
         same_bytes(bytes_of(try evaluated_positions(x)), bytes_of(try evaluated_positions(y)))
-    if let found = set_find(a, points_component()):
-        let other = set_find(b, points_component()) else trap("points")
+    if let found = a.find(points_component()):
+        let other = b.find(points_component()) else trap("points")
         same_bytes(bytes_of(cloud_positions((const PointCloud*)found)), bytes_of(cloud_positions((const PointCloud*)other)))
         same_store(cloud_store((const PointCloud*)found), cloud_store((const PointCloud*)other))
-    if let found = set_find(a, instances_component()):
+    if let found = a.find(instances_component()):
         let x = (const Instances*)found
-        let y = (const Instances*)(set_find(b, instances_component()) else trap("instances"))
+        let y = (const Instances*)(b.find(instances_component()) else trap("instances"))
         assert(x.count() == y.count())
         for index in 0..<x.count():
             let p = x.item(index)

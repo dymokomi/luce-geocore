@@ -126,7 +126,7 @@ func cook_transform(input: const VerbInput*, output: VerbOutput*) -> !:
     if not translation.is_finite() or not rotation.is_finite() or not scale.is_finite() or not math.is_finite(radius):
         error(errors.invalid, "transform values must be finite")
     let positions = output.positions.span()
-    let origin = mesh_origin(input.mesh)
+    let origin = input.mesh.position_origin()
     let axis = input.symmetry
     let tolerance = mirror_tolerance(input.mesh) if axis > 0 else 0.0
     # The pivot: the group's centroid (its positive half under symmetry, so
@@ -177,7 +177,7 @@ func mirror_points(mesh: const Mesh*, positions: Float3[], affected: const u32[]
     var mirrors = Growing[i32]()
     defer mirrors.close()
     try mirror_map(mesh, Domain.point, axis, &mirrors)
-    let before = point_span(mesh)
+    let before = mesh.point_span()
     for point in affected:
         let original = before[(usize)point].vector().add(origin)
         let coordinate = axis_coordinate(original, axis)
@@ -203,8 +203,8 @@ func cook_smooth(input: const VerbInput*, output: VerbOutput*) -> !:
     let amount = input.parms.at(0)
     let rounds = (usize)math.max(1.0, math.min(100.0, input.parms.at(1)))
     if not (amount >= 0.0 and amount <= 1.0): error(errors.invalid, "Smooth amount must be in 0..1")
-    let edges = try edge_span(input.mesh)
-    let around = try point_edge_span(input.mesh)
+    let edges = try input.mesh.edge_span()
+    let around = try input.mesh.point_edge_span()
     let positions = output.positions.span()
     let next = try alloc Float3[moved.length] in memory.heap
     defer free(next) in memory.heap
@@ -255,8 +255,8 @@ func cook_mountain(input: const VerbInput*, output: VerbOutput*) -> !:
 func cook_peak(input: const VerbInput*, output: VerbOutput*) -> !:
     let moved = try begin_points(input, output)
     let distance = input.parms.at(0)
-    let around = try point_face_span(input.mesh)
-    let normals = face_normal_span(input.mesh)
+    let around = try input.mesh.point_face_span()
+    let normals = input.mesh.face_normal_span()
     let positions = output.positions.span()
     for point in moved:
         var sum = Vector3()
@@ -279,7 +279,7 @@ func cook_snap(input: const VerbInput*, output: VerbOutput*) -> !:
     let moved = try begin_points(input, output)
     let spacing = input.parms.at(0)
     if not (spacing > 0.000001): error(errors.invalid, "Snap spacing must be positive")
-    let origin = mesh_origin(input.mesh)
+    let origin = input.mesh.position_origin()
     let positions = output.positions.span()
     for point in moved:
         let p = positions[(usize)point].vector().add(origin)

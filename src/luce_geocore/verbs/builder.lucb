@@ -42,7 +42,7 @@ pub struct TopologyBuilder:
 
     ## Start from `source`'s frame (its origin).
     pub mutating func begin(source: const Mesh*) -> !:
-        self.origin = mesh_origin(source)
+        self.origin = source.position_origin()
         try self.offsets.push(0)
         try self.point_mix.offsets.push(0)
         try self.corner_mix.offsets.push(0)
@@ -70,7 +70,7 @@ pub struct TopologyBuilder:
 
     ## Every point of `source`, each its own parent, in one pass.
     pub mutating func copy_points(source: const Mesh*) -> !:
-        let positions = point_span(source)
+        let positions = source.point_span()
         let exact = precise_span(source)
         let first = self.positions.count
         try self.positions.reserve(first + positions.length)
@@ -125,8 +125,8 @@ pub struct TopologyBuilder:
     ## input: after `copy_points`), in one tight pass.
     pub mutating func copy_faces(source: const Mesh*, first: usize, end: usize) -> !:
         if end <= first: return
-        let offsets = offset_span(source)
-        let corners = corner_span(source)
+        let offsets = source.offset_span()
+        let corners = source.corner_span()
         let from_corner = (usize)offsets[first]
         let to_corner = (usize)offsets[end]
         let count = to_corner - from_corner
@@ -152,8 +152,8 @@ pub struct TopologyBuilder:
     ## Face `face` of `source` unchanged: its corners (with this builder's
     ## point numbers `points`, or its own when empty) and its triangles.
     pub mutating func copy_face(source: const Mesh*, face: usize, points: const i32[]) -> !:
-        let offsets = offset_span(source)
-        let corners = corner_span(source)
+        let offsets = source.offset_span()
+        let corners = source.corner_span()
         try self.face((i32)face, true)
         for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
             let point = corners[corner]
@@ -216,7 +216,7 @@ pub struct TopologyBuilder:
         defer corners.release()
         var triangles = try Column[i32].allocate((corner_total - faces * 2) * 3)
         defer triangles.release()
-        var work = TriangleWork(offset_span(source), triangle_span(source), self.offsets.view(), self.face_parents.view(), self.copied.view(), triangles.span(), self.fans)
+        var work = TriangleWork(source.offset_span(), source.triangle_span(), self.offsets.view(), self.face_parents.view(), self.copied.view(), triangles.span(), self.fans)
         parallel.parallel_for(faces, 4096, copy_triangles, (void*)&work)
         var normals: Column[Float3]
         defer normals.release()

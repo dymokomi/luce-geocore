@@ -42,7 +42,7 @@ extend Mesh:
         let count = try self.domain_count(domain)
         if width < 1 or width > 4 or values.length != (usize)(count * width):
             error(errors.invalid, "attribute length must match its geometry domain")
-        return try self.with_entry(try Attribute.from_numbers(name, Domain((u8)domain), (usize)width, values, integer, Storage.array, float32))
+        return try self.with_attribute_entry(try Attribute.from_numbers(name, Domain((u8)domain), (usize)width, values, integer, Storage.array, float32))
 
     ## One value for the whole domain: O(1) whatever the domain's size.
     pub func with_single_attribute(name: str, domain: i64, values: const f64[], integer: bool = false) -> interop.Reference[Mesh]!:
@@ -51,11 +51,11 @@ extend Mesh:
             error(errors.invalid, "a single attribute value has 1..4 components")
         var attribute = try Attribute.from_numbers(name, Domain((u8)domain), values.length, values, integer, Storage.single)
         attribute.elements = (usize)count
-        return try self.with_entry(attribute)
+        return try self.with_attribute_entry(attribute)
 
-    ## A snapshot with `attribute` added or replacing its (name, domain).
-    ## Takes the attribute's share.
-    func with_entry(attribute: Attribute) -> interop.Reference[Mesh]!:
+    ## A snapshot with `attribute` added or replacing its (name, domain), for
+    ## Base kernels. Takes the attribute's share.
+    pub func with_attribute_entry(attribute: Attribute) -> interop.Reference[Mesh]!:
         var owned = attribute
         let result = self.snapshot() catch failure:
             owned.release()
@@ -75,7 +75,7 @@ extend Mesh:
         if index < 0:
             error(errors.invalid, "attribute to rename does not exist")
         let renamed = try self.attributes.entry((usize)index).renamed(replacement)
-        let result = try self.with_entry(renamed)
+        let result = try self.with_attribute_entry(renamed)
         if replacement != name:
             let old = result.value().attributes.find(name, domain)
             result.value().attributes.remove((usize)old)
@@ -134,8 +134,3 @@ extend Mesh:
     pub func column_bytes() -> i64:
         let columns = self.positions.bytes() + self.offsets.bytes() + self.corners.bytes() + self.normals.bytes() + self.triangles.bytes() + self.precise.bytes()
         return (i64)(columns + self.attributes.bytes())
-
-## A snapshot of `mesh` with `attribute` added (taking its share), for Base
-## kernels; Attribute cannot cross into Luce, so this is not a method.
-pub func with_attribute_entry(mesh: const Mesh*, attribute: Attribute) -> interop.Reference[Mesh]!:
-    return try mesh.with_entry(attribute)

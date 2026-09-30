@@ -10,7 +10,7 @@ import math
 import memory
 from geocore import Vector3, Matrix4, Mesh, MeshPrimitives, GeometrySet
 from geocore_kernel import Curves, CurvesBuilder, CurveType, KnotMode, BitsBuilder, Bits, Attribute, Domain, DataType, GroupReport, SetVerbOutput
-from geocore_kernel import evaluated_offsets, evaluated_positions, evaluated_frames, evaluated_id, curves_dispose, curves_share, curves_subset, curve_group_bits, set_curves, curves_type, set_find, set_put, empty_set, dispose_set, adopt_set, run_set_verb, find_set_verb, arc_curves, line_curves, spiral_curves, clear_group_cache
+from geocore_kernel import evaluated_offsets, evaluated_positions, evaluated_frames, evaluated_id, curves_dispose, curves_share, curves_subset, curve_group_bits, set_curves, curves_type, empty_set, dispose_set, adopt_set, run_set_verb, find_set_verb, arc_curves, line_curves, spiral_curves, clear_group_cache
 
 func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
     return math.abs(a - b) < tolerance
@@ -206,7 +206,7 @@ func set_of(curves: Curves*) -> interop.Reference[GeometrySet]!:
     let storage = empty_set() catch failure:
         curves_dispose(curves)
         error(failure.code, failure.message)
-    set_put(storage, curves_type(), (void*)curves) catch failure:
+    storage.put(curves_type(), (void*)curves) catch failure:
         dispose_set(storage)
         error(failure.code, failure.message)
     return try adopt_set(storage)

@@ -40,11 +40,11 @@ from luce_geocore.core.attributes import Attribute, AttributeStore, Domain, Data
 from luce_geocore.core.geometry import Bounds
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
-from luce_geocore.geometries.polygon import Mesh, positions_bounds, assembled, put_attribute, mesh_dispose, edge_span, edge_corner_span, point_edge_span, point_span, mesh_origin, attribute_entry
+from luce_geocore.geometries.polygon import Mesh, positions_bounds, assembled, put_attribute, mesh_dispose
 from luce_geocore.groups import GroupProgram, Term, AtomKind, Compare, Function, Combine, GroupReport, group_bits
 from luce_geocore.geometries.builder import MeshBuilder
 from luce_geocore.verbs import ComponentTransform
-from luce_geocore.geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, set_find, set_put, set_storage, empty_storage, dispose_set, adopt_set, set_detail
+from luce_geocore.geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, empty_storage, dispose_set, adopt_set, set_detail
 
 pub enum CurveType as u8:
     poly = 0

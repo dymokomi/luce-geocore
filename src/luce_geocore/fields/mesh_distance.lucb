@@ -38,7 +38,7 @@ let dense_triangles: f64 = 2.0
 pub func mesh_level_set(mesh: const Mesh*, voxel: f64, band: f64, name: str) -> SparseGrid*!:
     try check_voxel(voxel, band)
     if mesh.face_count() == 0: error(errors.invalid, "the mesh has no faces")
-    let dense = (f64)(offset_span(mesh)[mesh.face_count()] - (i32)(mesh.face_count() * 2)) > dense_triangles * (try band_voxels(mesh, voxel, band))
+    let dense = (f64)(mesh.offset_span()[mesh.face_count()] - (i32)(mesh.face_count() * 2)) > dense_triangles * (try band_voxels(mesh, voxel, band))
     # A dense mesh is answered by BVH queries: its index is built first, in
     # parallel (built inside a pool item it would build serially).
     if dense: try mesh.prepare_queries()
@@ -86,7 +86,7 @@ func band_voxels(mesh: const Mesh*, voxel: f64, band: f64) -> f64!:
     let faces = (usize)mesh.face_count()
     var parts: f64[64] = ---
     for at in 0..<(usize)64: parts[at] = 0.0
-    var work = AreaWork(face_normal_span(mesh), offset_span(mesh), corner_span(mesh), point_span(mesh), (faces + 63) // 64, parts)
+    var work = AreaWork(mesh.face_normal_span(), mesh.offset_span(), mesh.corner_span(), mesh.point_span(), (faces + 63) // 64, parts)
     parallel.run(64, sum_areas, (void*)&work)
     var area = 0.0
     for part in work.parts: area += part
@@ -175,8 +175,8 @@ struct MeshShape:
     static func of(mesh: const Mesh*) -> MeshShape!:
         var shape = MeshShape(Growing[Vector3](), Growing[i32](), Growing[i32](), Growing[Vector3](), Growing[Vector3](), Growing[Vector3]())
         errdefer shape.close()
-        let positions = point_span(mesh)
-        let offsets = offset_span(mesh)
+        let positions = mesh.point_span()
+        let offsets = mesh.offset_span()
         let faces = offsets.length - 1
         let triangles = (usize)offsets[faces] - faces * 2
         try shape.points.fill(positions.length, Vector3())
@@ -185,12 +185,12 @@ struct MeshShape:
         try shape.corners.fill(triangles * 3, 0)
         try shape.faces.fill(triangles, 0)
         try shape.edge_normals.fill(triangles * 3, Vector3())
-        let (point_offsets, point_faces) = try point_face_span(mesh)
-        let (edge_offsets, edge_corners) = try edge_corner_span(mesh)
+        let (point_offsets, point_faces) = try mesh.point_face_span()
+        let (edge_offsets, edge_corners) = try mesh.edge_corner_span()
         var edge_sums = Growing[Vector3]()
         defer edge_sums.close()
         try edge_sums.fill(edge_offsets.length - 1, Vector3())
-        var work = ShapeWork(&shape, positions, mesh_origin(mesh), offsets, corner_span(mesh), triangle_span(mesh), try corner_face_span(mesh), try corner_edge_span(mesh),
+        var work = ShapeWork(&shape, positions, mesh.position_origin(), offsets, mesh.corner_span(), mesh.triangle_span(), try mesh.corner_face_span(), try mesh.corner_edge_span(),
                              point_offsets, point_faces, edge_offsets, edge_corners, edge_sums.items[..<edge_sums.count])
         parallel.parallel_for(positions.length, 65536, shape_points, (void*)&work)
         parallel.parallel_for(faces, 4096, shape_faces, (void*)&work)
@@ -487,7 +487,7 @@ func exact_inside(work: const RasterWork*, p: Vector3) -> bool:
 ## BVH, the nearest point over its triangles, the side of that point's
 ## feature's pseudo-normal.
 func exact_signed(work: const RasterWork*, p: Vector3) -> f64:
-    let face = nearest_face_within(work.mesh, p, 1.0e150) catch failure: return 1.0e30
+    let face = work.mesh.nearest_face_within(p, 1.0e150) catch failure: return 1.0e30
     if face < 0: return 1.0e30
     return face_signed(work, (usize)face, p)
 
@@ -495,7 +495,7 @@ func exact_signed(work: const RasterWork*, p: Vector3) -> f64:
 ## side of the nearest point's feature's pseudo-normal.
 func face_signed(work: const RasterWork*, face: usize, p: Vector3) -> f64:
     # Face f's triangles follow those of the faces before it.
-    let offsets = offset_span(work.mesh)
+    let offsets = work.mesh.offset_span()
     var best = 1.0e300
     var inside = false
     for triangle in (usize)offsets[face] - face * 2..<(usize)offsets[face + 1] - (face + 1) * 2:

@@ -10,7 +10,7 @@ pub func propagate(source: const Mesh*, output: Mesh*, point_parents: const i32[
     defer:
         if edge_map.length > 0: free(edge_map) in memory.heap
     for index in 0..<(usize)source.attribute_count():
-        let entry = try attribute_entry(source, (i64)index)
+        let entry = try source.attribute_entry((i64)index)
         # Authored normals are stale where topology changed; the derived ones
         # take over.
         if entry.role == Role.normal and entry.domain != Domain.detail: continue

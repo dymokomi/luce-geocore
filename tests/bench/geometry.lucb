@@ -10,7 +10,7 @@ import memory
 import geocore
 import geocore_kernel
 from geocore import Vector3, Mesh, MeshPrimitives, GeometrySet
-from geocore_kernel import Curves, CurvesBuilder, CurveType, evaluated_positions, evaluated_frames, curves_dispose, curves_type, set_curves, empty_set, set_put, dispose_set, adopt_set, run_set_verb, find_set_verb, save_geometry, load_geometry
+from geocore_kernel import Curves, CurvesBuilder, CurveType, evaluated_positions, evaluated_frames, curves_dispose, curves_type, set_curves, empty_set, dispose_set, adopt_set, run_set_verb, find_set_verb, save_geometry, load_geometry
 from geocore_growing import Growing
 from geocore_kernel import SdfOp, primitive_sdf, combined_sdf, release_sdf, sampled_sdf, surface_mesh, release_grid, mesh_level_set, points_level_set, mesh_dispose
 from io import path
@@ -32,7 +32,7 @@ func wavy(count: usize, points: usize, kind: CurveType) -> Curves*!:
 
 func set_of(curves: Curves*) -> interop.Reference[GeometrySet]!:
     let storage = try empty_set()
-    try set_put(storage, curves_type(), (void*)curves)
+    try storage.put(curves_type(), (void*)curves)
     return try adopt_set(storage)
 
 func verb(name: str, set: const GeometrySet*, numbers: const f64[]) -> interop.Reference[GeometrySet]!:

@@ -98,8 +98,8 @@ struct Bevel:
         self.segments = segments
         self.profile = profile
         self.clamp = clamp
-        self.origin = mesh_origin(mesh)
-        self.points = point_span(mesh)
+        self.origin = mesh.position_origin()
+        self.points = mesh.point_span()
         self.exact = precise_span(mesh)
         self.slot_of = Growing[i32]()
         self.vertex_points = Growing[i32]()

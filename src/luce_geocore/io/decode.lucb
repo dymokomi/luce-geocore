@@ -185,7 +185,7 @@ func decode_set(reader: GeometryReader*, path: str) -> GeometrySet*!:
         let codec = codec_of(found.1) else error(errors.invalid, "the file holds a geometry family with no codec here")
         let decode = codec.decode
         let data = try decode(reader, child)
-        try set_put(storage, codec.kind, data)
+        try storage.put(codec.kind, data)
     return storage
 
 func decode_mesh(reader: GeometryReader*, path: str) -> void*!:

@@ -10,7 +10,7 @@ import math
 import memory
 from io import path
 from geocore import Vector3, Matrix4, Mesh, MeshPrimitives, GeometrySet
-from geocore_kernel import Sdf, SdfOp, SparseGrid, GridClass, GridSampler, Volume, Domain, primitive_sdf, combined_sdf, modified_sdf, placed_sdf, release_sdf, sampled_sdf, mesh_level_set, points_level_set, surface_mesh, release_grid, new_volume, add_grid, release_volume, volume_type, sdf_type, set_volume, set_sdf, set_put, empty_set, dispose_set, adopt_set, set_mesh, save_geometry, load_geometry, run_set_verb, find_set_verb, leaf_key, key_leaf, sdf_preview, mesh_adopt, point_span, face_normal_span, offset_span, corner_span, mesh_origin, attribute_entry
+from geocore_kernel import Sdf, SdfOp, SparseGrid, GridClass, GridSampler, Volume, Domain, primitive_sdf, combined_sdf, modified_sdf, placed_sdf, release_sdf, sampled_sdf, mesh_level_set, points_level_set, surface_mesh, release_grid, new_volume, add_grid, release_volume, volume_type, sdf_type, set_volume, set_sdf, empty_set, dispose_set, adopt_set, set_mesh, save_geometry, load_geometry, run_set_verb, find_set_verb, leaf_key, key_leaf, sdf_preview, mesh_adopt
 from geocore_growing import Growing
 
 func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
@@ -226,20 +226,20 @@ pub func surfaces() -> !:
     let unprojected = try mesh_adopt(try surface_mesh(grid, 0.0, none))
     defer unprojected.release()
     try closed_and_outward(unprojected, Vector3(0.5, 0.0, 0.0))
-    for point in point_span(mesh.value()):
-        assert(near(point.vector().add(mesh_origin(mesh.value())).subtract(Vector3(0.5, 0.0, 0.0)).length(), 1.0, 0.001))
+    for point in mesh.value().point_span():
+        assert(near(point.vector().add(mesh.value().position_origin()).subtract(Vector3(0.5, 0.0, 0.0)).length(), 1.0, 0.001))
     try closed_and_outward(mesh, Vector3(0.5, 0.0, 0.0))
     # The same grid gives the same bytes.
     let again = try mesh_adopt(try surface_mesh(grid, 0.0, sphere))
     defer again.release()
-    let a = point_span(mesh.value())
-    let b = point_span(again.value())
+    let a = mesh.value().point_span()
+    let b = again.value().point_span()
     assert(a.length == b.length)
     for at in 0..<a.length: assert(a[at] == b[at])
     # Without projection the vertices stay within a voxel of the surface.
     let rough = try mesh_adopt(try surface_mesh(grid, 0.0, none))
     defer rough.release()
-    for point in point_span(rough.value()):
+    for point in rough.value().point_span():
         assert(near(point.vector().subtract(Vector3(0.5, 0.0, 0.0)).length(), 1.0, 0.05))
     # A drag's quick preview is coarser and kept apart; the full preview is
     # built once, and then serves quick requests too.
@@ -255,7 +255,7 @@ func sdf_set(sdf: Sdf*) -> interop.Reference[GeometrySet]!:
     let storage = empty_set() catch failure:
         release_sdf(sdf)
         error(failure.code, failure.message)
-    set_put(storage, sdf_type(), (void*)sdf) catch failure:
+    storage.put(sdf_type(), (void*)sdf) catch failure:
         dispose_set(storage)
         error(failure.code, failure.message)
     return try adopt_set(storage)
@@ -342,8 +342,8 @@ pub func verbs() -> !:
     defer twice.release()
     let other = (try twice.value().mesh()) else trap("mesh")
     defer other.release()
-    let a = point_span(mesh.value())
-    let b = point_span(other.value())
+    let a = mesh.value().point_span()
+    let b = other.value().point_span()
     assert(a.length == b.length)
     for at in 0..<a.length: assert(a[at] == b[at])
     # Mesh to SDF, back to a mesh: the cube's surface, closed.

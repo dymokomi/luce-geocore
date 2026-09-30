@@ -60,8 +60,8 @@ func cook_reverse(input: const VerbInput*, output: VerbOutput*) -> !:
     try each_face(input, output, reverse_face)
 
 func reverse_face(input: const VerbInput*, builder: TopologyBuilder*, face: usize, selection: BitsBuilder*) -> !:
-    let offsets = offset_span(input.mesh)
-    let corners = corner_span(input.mesh)
+    let offsets = input.mesh.offset_span()
+    let corners = input.mesh.corner_span()
     let start = (usize)offsets[face]
     let end = (usize)offsets[face + 1]
     selection.set(builder.face_count())
@@ -74,7 +74,7 @@ func reverse_face(input: const VerbInput*, builder: TopologyBuilder*, face: usiz
 ## Each group face becomes its display triangles (faces in order, so the
 ## selection counts them as they come).
 func cook_triangulate(input: const VerbInput*, output: VerbOutput*) -> !:
-    let offsets = offset_span(input.mesh)
+    let offsets = input.mesh.offset_span()
     var extra: usize = 0
     for face in 0..<(usize)input.mesh.face_count():
         if input.group.get(face): extra += (usize)(offsets[face + 1] - offsets[face]) - 3
@@ -82,9 +82,9 @@ func cook_triangulate(input: const VerbInput*, output: VerbOutput*) -> !:
     try each_face(input, output, triangulate_face)
 
 func triangulate_face(input: const VerbInput*, builder: TopologyBuilder*, face: usize, selection: BitsBuilder*) -> !:
-    let offsets = offset_span(input.mesh)
-    let corners = corner_span(input.mesh)
-    let triangles = triangle_span(input.mesh)
+    let offsets = input.mesh.offset_span()
+    let corners = input.mesh.corner_span()
+    let triangles = input.mesh.triangle_span()
     let start = (usize)offsets[face]
     let size = (usize)offsets[face + 1] - start
     let first = (start - face * 2) * 3
@@ -103,9 +103,9 @@ func cook_duplicate(input: const VerbInput*, output: VerbOutput*) -> !:
     output.built = true
     let faces = (usize)input.mesh.face_count()
     try output.builder.copy_faces(input.mesh, 0, faces)
-    let offsets = offset_span(input.mesh)
-    let corners = corner_span(input.mesh)
-    let normals = face_normal_span(input.mesh)
+    let offsets = input.mesh.offset_span()
+    let corners = input.mesh.corner_span()
+    let normals = input.mesh.face_normal_span()
     let distance = input.parms.at(0)
     for face in 0..<faces:
         if not input.group.get(face): continue
@@ -130,8 +130,8 @@ func cook_split(input: const VerbInput*, output: VerbOutput*) -> !:
     try each_face(input, output, split_face)
 
 func split_face(input: const VerbInput*, builder: TopologyBuilder*, face: usize, selection: BitsBuilder*) -> !:
-    let offsets = offset_span(input.mesh)
-    let corners = corner_span(input.mesh)
+    let offsets = input.mesh.offset_span()
+    let corners = input.mesh.corner_span()
     let start = (usize)offsets[face]
     let size = (usize)offsets[face + 1] - start
     # Small faces on the stack, larger ones in heap scratch.

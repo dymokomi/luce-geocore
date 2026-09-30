@@ -11,15 +11,15 @@ pub func curves_type() -> const ComponentType*:
 
 ## The set's curves, if it has any (borrowed while the set lives).
 pub func set_curves(set: const GeometrySet*) -> const Curves*?:
-    let data = set_find(set, &curves_component) else return none
+    let data = set.find(&curves_component) else return none
     return (const Curves*)data
 
 ## A heap copy of `set` with `curves` (taken) as its curves.
 pub func with_curves(set: const GeometrySet*, curves: Curves*) -> GeometrySet*!:
-    let storage = set_storage(set) catch failure:
+    let storage = set.storage() catch failure:
         curves_dispose(curves)
         error(failure.code, failure.message)
-    set_put(storage, &curves_component, (void*)curves) catch failure:
+    storage.put(&curves_component, (void*)curves) catch failure:
         dispose_set(storage)
         error(failure.code, failure.message)
     return storage

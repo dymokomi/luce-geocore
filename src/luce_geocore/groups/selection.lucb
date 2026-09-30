@@ -176,7 +176,7 @@ pub struct Selection:
         let topology = try Topology.of(geometry)
         var points = try converted(&topology, self.view(), self.domain_value, Domain.point, false)
         defer points.close()
-        let positions = point_span(geometry)
+        let positions = geometry.point_span()
         var sum = Vector3()
         var count: usize = 0
         let words = points.view().words
@@ -190,7 +190,7 @@ pub struct Selection:
         if count == 0:
             let box = geometry.bounds()
             return box.minimum.add(box.maximum).multiply_scalar(0.5)
-        return sum.multiply_scalar(1.0 / (f64)count).add(mesh_origin(geometry))
+        return sum.multiply_scalar(1.0 / (f64)count).add(geometry.position_origin())
 
     ## The box around the selected components' points; `none` selected: the
     ## mesh's bounds (framing a selection).
@@ -199,7 +199,7 @@ pub struct Selection:
         let topology = try Topology.of(geometry)
         var points = try converted(&topology, self.view(), self.domain_value, Domain.point, false)
         defer points.close()
-        let positions = point_span(geometry)
+        let positions = geometry.point_span()
         var low = Float3(0.0, 0.0, 0.0)
         var high = low
         var any = false
@@ -217,7 +217,7 @@ pub struct Selection:
                 low = Float3(p.x if p.x < low.x else low.x, p.y if p.y < low.y else low.y, p.z if p.z < low.z else low.z)
                 high = Float3(p.x if p.x > high.x else high.x, p.y if p.y > high.y else high.y, p.z if p.z > high.z else high.z)
         if not any: return geometry.bounds()
-        let origin = mesh_origin(geometry)
+        let origin = geometry.position_origin()
         return Bounds(low.vector().add(origin), high.vector().add(origin))
 
     func view() -> Bits:

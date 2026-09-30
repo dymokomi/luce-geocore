@@ -8,10 +8,10 @@ let band_doc: str = "Voxels of distance kept on each side of the surface."
 
 ## The input set with `sdf` (taken) in place of its SDF.
 func with_sdf(input: const SetVerbInput*, sdf: Sdf*, output: SetVerbOutput*, keep_input: bool) -> !:
-    let storage = (set_storage(input.set) if keep_input else empty_storage()) catch failure:
+    let storage = (input.set.storage() if keep_input else empty_storage()) catch failure:
         release_sdf(sdf)
         error(failure.code, failure.message)
-    set_put(storage, sdf_type(), (void*)sdf) catch failure:
+    storage.put(sdf_type(), (void*)sdf) catch failure:
         dispose_set(storage)
         error(failure.code, failure.message)
     output.set = storage
@@ -25,13 +25,13 @@ func with_grid(input: const SetVerbInput*, grid: SparseGrid*, output: SetVerbOut
     add_grid(volume, grid) catch failure:
         release_volume(volume)
         error(failure.code, failure.message)
-    let storage = set_storage(input.set) catch failure:
+    let storage = input.set.storage() catch failure:
         release_volume(volume)
         error(failure.code, failure.message)
-    set_put(storage, volume_type(), (void*)volume) catch failure:
+    storage.put(volume_type(), (void*)volume) catch failure:
         dispose_set(storage)
         error(failure.code, failure.message)
-    if let kind = drop: set_remove(storage, kind)
+    if let kind = drop: storage.remove(kind)
     output.set = storage
 
 # mark: Primitives
@@ -176,9 +176,9 @@ func cook_volume_from_points(input: const SetVerbInput*, output: SetVerbOutput*)
     var points = Growing[Vector3]()
     defer points.close()
     if let mesh = set_mesh(input.set):
-        let origin = mesh_origin(mesh)
-        for p in point_span(mesh): try points.push(p.vector().add(origin))
-    if let data = set_find(input.set, &points_component):
+        let origin = mesh.position_origin()
+        for p in mesh.point_span(): try points.push(p.vector().add(origin))
+    if let data = input.set.find(&points_component):
         let cloud = (const PointCloud*)data
         let origin = cloud_origin(cloud)
         for p in cloud_positions(cloud): try points.push(p.vector().add(origin))
@@ -189,7 +189,7 @@ func cook_volume_from_points(input: const SetVerbInput*, output: SetVerbOutput*)
         return
     let p = input.parms
     let grid = try points_level_set(points.view(), p.at(0), p.at(1), p.at(2), "surface")
-    let storage = (set_storage(input.set) if p.at(3) != 0.0 else empty_storage()) catch failure:
+    let storage = (input.set.storage() if p.at(3) != 0.0 else empty_storage()) catch failure:
         release_grid(grid)
         error(failure.code, failure.message)
     errdefer dispose_set(storage)
@@ -199,7 +199,7 @@ func cook_volume_from_points(input: const SetVerbInput*, output: SetVerbOutput*)
     add_grid(volume, grid) catch failure:
         release_volume(volume)
         error(failure.code, failure.message)
-    try set_put(storage, volume_type(), (void*)volume)
+    try storage.put(volume_type(), (void*)volume)
     output.set = storage
 
 # mark: Meshes and slices
@@ -239,11 +239,11 @@ func cook_convert(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     for part in parts.view(): try pieces.push(MeshPart(part, Matrix4()))
     let joined = try concatenated(pieces.view())
     defer joined.release()
-    let storage = try set_storage(input.set)
+    let storage = try input.set.storage()
     errdefer dispose_set(storage)
     if p.at(3) == 0.0:
-        set_remove(storage, sdf_type())
-        set_remove(storage, volume_type())
+        storage.remove(sdf_type())
+        storage.remove(volume_type())
     output.set = try with_added_mesh(storage, try mesh_share(joined.value()), false)
     dispose_set(storage)
 
@@ -268,7 +268,7 @@ func cook_slice(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     let storage = empty_storage() catch failure:
         mesh_dispose(mesh)
         error(failure.code, failure.message)
-    set_put(storage, &mesh_component, (void*)mesh) catch failure:
+    storage.put(&mesh_component, (void*)mesh) catch failure:
         dispose_set(storage)
         error(failure.code, failure.message)
     output.set = storage

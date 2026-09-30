@@ -14,8 +14,8 @@ from luce_geocore.core.bits import Bits, BitsBuilder
 from luce_geocore.core.attributes import Domain, Attribute, AttributeStore, Storage
 from luce_geocore.math.vector import Vector3
 from luce_geocore.math.matrix import Matrix4
-from luce_geocore.geometries.polygon import Mesh, MeshPart, concatenated, mesh_share, mesh_dispose, point_span, mesh_origin
-from luce_geocore.geometry_set import GeometrySet, ComponentType, PointCloud, points_component, cloud_origin, cloud_positions, cloud_store, cloud_with_store, set_find, set_put, set_remove, set_storage, set_mesh, empty_storage, dispose_set, adopt_set, geometry_set_type, mesh_component
+from luce_geocore.geometries.polygon import Mesh, MeshPart, concatenated, mesh_share, mesh_dispose
+from luce_geocore.geometry_set import GeometrySet, ComponentType, PointCloud, points_component, cloud_origin, cloud_positions, cloud_store, cloud_with_store, set_mesh, empty_storage, dispose_set, adopt_set, geometry_set_type, mesh_component
 from luce_geocore.groups import GroupReport, group_bits, guess_domain
 from luce_geocore.verbs import ParmSpec, ParmKind, Parms, Verbs, group_domain, verb_at, verb_count
 import luce_geocore.curves as curves
@@ -65,7 +65,7 @@ pub func run_set_verb(verb: const SetVerb*, set: const GeometrySet*, second: con
     let input = SetVerbInput(set, second, group, group_type, Parms(numbers))
     let cook = verb.cook
     try cook(&input, &output)
-    if output.set == none: output.set = try set_storage(set)
+    if output.set == none: output.set = try set.storage()
     return output
 
 # mark: Helpers for verbs
@@ -79,7 +79,7 @@ pub func only_curves(made: Curves*, output: SetVerbOutput*) -> !:
     let storage = empty_storage() catch failure:
         curves_dispose(made)
         error(failure.code, failure.message)
-    set_put(storage, curves_type(), (void*)made) catch failure:
+    storage.put(curves_type(), (void*)made) catch failure:
         dispose_set(storage)
         error(failure.code, failure.message)
     output.set = storage
@@ -110,7 +110,7 @@ pub func input_curves(input: const SetVerbInput*, output: SetVerbOutput*) -> con
 ## The set with `mesh` (taken) joined to its mesh, and without its curves
 ## when `drop_curves`.
 pub func with_added_mesh(set: const GeometrySet*, mesh: Mesh*, drop_curves: bool) -> GeometrySet*!:
-    let storage = set_storage(set) catch failure:
+    let storage = set.storage() catch failure:
         mesh_dispose(mesh)
         error(failure.code, failure.message)
     errdefer dispose_set(storage)
@@ -123,6 +123,6 @@ pub func with_added_mesh(set: const GeometrySet*, mesh: Mesh*, drop_curves: bool
         defer joined.release()
         mesh_dispose(mesh)
         made = try mesh_share(joined.value())
-    try set_put(storage, &mesh_component, (void*)made)
-    if drop_curves: set_remove(storage, curves_type())
+    try storage.put(&mesh_component, (void*)made)
+    if drop_curves: storage.remove(curves_type())
     return storage

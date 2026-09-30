@@ -25,8 +25,8 @@ func cook_edge_slide(input: const VerbInput*, output: VerbOutput*) -> !:
     defer chains.close()
     try edge_chains(&topology, input.group, &chains)
     # Reads see the input's positions; writes go to the output's.
-    let original = point_span(mesh)
-    let normals = face_normal_span(mesh)
+    let original = mesh.point_span()
+    let normals = mesh.face_normal_span()
     for index in 0..<chains.count():
         let chain = chains.chain(index)
         let closed = chains.closed.items[index] != 0

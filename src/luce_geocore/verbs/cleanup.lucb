@@ -38,7 +38,7 @@ func cook_fuse(input: const VerbInput*, output: VerbOutput*) -> !:
 func fuse_targets(input: const VerbInput*, distance: f64, target: i32[]) -> !:
     let mesh = input.mesh
     let points = target.length
-    let positions = point_span(mesh)
+    let positions = mesh.point_span()
     let buckets: usize = 65536
     let heads = try alloc i32[buckets] in memory.heap
     defer free(heads) in memory.heap
@@ -125,7 +125,7 @@ func cook_merge(input: const VerbInput*, output: VerbOutput*) -> !:
 ## ends in it) merges into its lowest numbered point.
 func islands(input: const VerbInput*, target: i32[]) -> !:
     let mesh = input.mesh
-    let edges = try edge_span(mesh)
+    let edges = try mesh.edge_span()
     for edge in 0..<edges.length // 2:
         let a = (usize)edges[edge * 2]
         let b = (usize)edges[edge * 2 + 1]
@@ -160,8 +160,8 @@ func cook_clean(input: const VerbInput*, output: VerbOutput*) -> !:
 ## face uses. Merged-into points are selected.
 func rebuild(input: const VerbInput*, output: VerbOutput*, target: const i32[], places: const Vector3[]) -> !:
     let mesh = input.mesh
-    let offsets = offset_span(mesh)
-    let corners = corner_span(mesh)
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
     let points = target.length
     var builder = &output.builder
     try builder.begin(mesh)
@@ -211,4 +211,4 @@ func rebuild(input: const VerbInput*, output: VerbOutput*, target: const i32[], 
 func builder_position(mesh: const Mesh*, point: usize) -> Vector3:
     let exact = precise_span(mesh)
     if exact.length > 0: return exact[point]
-    return point_span(mesh)[point].vector().add(mesh_origin(mesh))
+    return mesh.point_span()[point].vector().add(mesh.position_origin())

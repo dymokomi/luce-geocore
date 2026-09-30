@@ -11,7 +11,7 @@ import geocore
 import geocore_kernel
 from io import path
 from geocore import Vector3, Mesh, MeshBuilder, Subdivision, GeometrySet, DissolveWorkspace, dissolve_edge
-from geocore_kernel import point_span, offset_span, corner_span, triangle_span, triangulate_polygon, validate_polygon_display, save_geometry, load_geometry, adopt_set, set_mesh
+from geocore_kernel import triangulate_polygon, validate_polygon_display, save_geometry, load_geometry, adopt_set, set_mesh
 from geocore_growing import Growing
 from verb_run import verb_mesh
 
@@ -118,10 +118,10 @@ func timed(shape: Shape, count: usize) -> f64!:
 
 ## Every face's display triangles pass Mesh construction's validation.
 func valid(mesh: const Mesh*) -> !:
-    let positions = point_span(mesh)
-    let offsets = offset_span(mesh)
-    let corners = corner_span(mesh)
-    let triangles = triangle_span(mesh)
+    let positions = mesh.point_span()
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
+    let triangles = mesh.triangle_span()
     let points = try alloc Vector3[positions.length] in memory.heap
     defer free(points) in memory.heap
     for at in 0..<positions.length: points[at] = positions[at].vector()
@@ -177,7 +177,7 @@ func mesh_checks(count: usize) -> !:
         for at in 0..<(usize)size:
             points[at] = try geometry.point((i64)at)
             corners[at] = (i64)at
-        for at in 0..<display.length: display[at] = (i64)triangle_span(geometry)[at]
+        for at in 0..<display.length: display[at] = (i64)geometry.triangle_span()[at]
         var again = try Mesh(points, [size], corners, display)
         defer again.close()
         assert(again.index_count() == geometry.index_count())
@@ -195,10 +195,10 @@ func builder_checks(count: usize) -> !:
     let projected = try alloc i64[(count - 2) * 3] in memory.heap
     defer free(projected) in memory.heap
     try builder.triangulate_last(projected)
-    for at in 0..<projected.length: assert(projected[at] == (i64)triangle_span(source)[at])
+    for at in 0..<projected.length: assert(projected[at] == (i64)source.triangle_span()[at])
     let copied = try builder.finish()
     defer copied.release()
-    for at in 0..<projected.length: assert(triangle_span(copied.value())[at] == triangle_span(source)[at])
+    for at in 0..<projected.length: assert(copied.value().triangle_span()[at] == source.triangle_span()[at])
     var reversed = try MeshBuilder()
     defer reversed.close()
     try reversed.copy_points(source)
@@ -224,7 +224,7 @@ func edit_checks(count: usize) -> !:
     assert(moved.value().face_count() == 1 and moved.value().index_count() == mesh.value().index_count())
     try valid(moved.value())
     var same = true
-    for at in 0..<triangle_span(mesh.value()).length: same = same and triangle_span(mesh.value())[at] == triangle_span(moved.value())[at]
+    for at in 0..<mesh.value().triangle_span().length: same = same and mesh.value().triangle_span()[at] == moved.value().triangle_span()[at]
     assert(not same)
 
 ## Whether `mesh`'s largest faces have `size` corners and there are `faces`
@@ -405,8 +405,8 @@ func codec_checks() -> !:
     defer loaded.release()
     let a = set_mesh(set.value()) else trap("no mesh saved")
     let b = set_mesh(loaded.value()) else trap("no mesh loaded")
-    assert(offset_span(a).length == offset_span(b).length and corner_span(a).length == corner_span(b).length and triangle_span(a).length == triangle_span(b).length)
-    for at in 0..<offset_span(a).length: assert(offset_span(a)[at] == offset_span(b)[at])
-    for at in 0..<corner_span(a).length: assert(corner_span(a)[at] == corner_span(b)[at])
-    for at in 0..<triangle_span(a).length: assert(triangle_span(a)[at] == triangle_span(b)[at])
-    for at in 0..<point_span(a).length: assert(point_span(a)[at].vector() == point_span(b)[at].vector())
+    assert(a.offset_span().length == b.offset_span().length and a.corner_span().length == b.corner_span().length and a.triangle_span().length == b.triangle_span().length)
+    for at in 0..<a.offset_span().length: assert(a.offset_span()[at] == b.offset_span()[at])
+    for at in 0..<a.corner_span().length: assert(a.corner_span()[at] == b.corner_span()[at])
+    for at in 0..<a.triangle_span().length: assert(a.triangle_span()[at] == b.triangle_span()[at])
+    for at in 0..<a.point_span().length: assert(a.point_span()[at].vector() == b.point_span()[at].vector())

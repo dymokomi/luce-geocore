@@ -9,7 +9,7 @@ import math
 import memory
 from io import path
 from geocore import Vector3, Mesh, GeometrySet
-from geocore_kernel import Instances, Placement, Attribute, Domain, TableBuilder, set_find, set_put, set_storage, empty_set, dispose_set, adopt_set, instances_component, new_instances, save_geometry, load_geometry
+from geocore_kernel import Instances, Placement, Attribute, Domain, TableBuilder, empty_set, dispose_set, adopt_set, instances_component, new_instances, save_geometry, load_geometry
 from geocore_growing import Growing
 
 pub func exercise() -> !:
@@ -30,16 +30,16 @@ pub func exercise() -> !:
         let close = instances_component().close
         close((void*)instances)
         error(failure.code, failure.message)
-    set_put(storage, instances_component(), (void*)instances) catch failure:
+    storage.put(instances_component(), (void*)instances) catch failure:
         dispose_set(storage)
         error(failure.code, failure.message)
     let set = try adopt_set(storage)
     defer set.release()
     assert(instances.count() == 10000 and instances.prototype_count() == 2)
     # A share: the same rows, prototypes shared anew.
-    let copy = try adopt_set(try set_storage(set.value()))
+    let copy = try adopt_set(try set.value().storage())
     defer copy.release()
-    let shared = (const Instances*)(set_find(copy.value(), instances_component()) else trap("instances"))
+    let shared = (const Instances*)(copy.value().find(instances_component()) else trap("instances"))
     assert(shared.rows_id() == instances.rows_id() and shared.count() == 10000 and shared.prototype_count() == 2)
     assert(shared.prototype(0) != instances.prototype(0))
     assert(copy.value().instance_count() == 10000 and not (try copy.value().instance_visible(3)) and (try copy.value().instance_translation(7)).x == 7.0)
@@ -47,7 +47,7 @@ pub func exercise() -> !:
     # Filters keep the rows too; the realized mesh has every instance.
     let kept = try copy.value().blasted("*", true)
     defer kept.release()
-    let filtered = (const Instances*)(set_find(kept.value(), instances_component()) else trap("instances"))
+    let filtered = (const Instances*)(kept.value().find(instances_component()) else trap("instances"))
     assert(filtered.rows_id() == instances.rows_id() and filtered.row_text("path", 42) == "/row42")
     let realized = try copy.value().realized()
     defer realized.release()
@@ -60,7 +60,7 @@ pub func exercise() -> !:
     discard(try save_geometry(set.value(), (str)file.view(), 1, 268435456))
     let loaded = try adopt_set(try load_geometry((str)file.view()))
     defer loaded.release()
-    let back = (const Instances*)(set_find(loaded.value(), instances_component()) else trap("instances"))
+    let back = (const Instances*)(loaded.value().find(instances_component()) else trap("instances"))
     assert(back.count() == 10000 and back.prototype_count() == 2)
     for at in 0..<(usize)10000:
         let a = instances.row(at)
@@ -76,8 +76,8 @@ pub func exercise() -> !:
     assert(joined.value().instance_count() == 20001 and (try joined.value().instance_path(10006)) == "/row5")
 
 func fill(instances: Instances*, a: const GeometrySet*, b: const GeometrySet*) -> !:
-    let first = try instances.add_prototype(try set_storage(a))
-    let second = try instances.add_prototype(try set_storage(b))
+    let first = try instances.add_prototype(try a.storage())
+    let second = try instances.add_prototype(try b.storage())
     for at in 0..<(usize)10000:
         let placement = Placement.compose(Vector3((f64)at, 0.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
         try instances.add_instance(first if at % 2 == 0 else second, &placement, at % 3 != 0)

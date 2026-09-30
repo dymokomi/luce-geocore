@@ -74,7 +74,7 @@ pub struct SetVerbResult:
     var missed: usize
 
     pub func geometry() -> interop.Reference[GeometrySet]!:
-        return try adopt_set(try set_storage(self.set))
+        return try adopt_set(try self.set.storage())
 
     pub func warning() -> str:
         return self.text

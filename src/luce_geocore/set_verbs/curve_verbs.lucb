@@ -188,5 +188,5 @@ func cook_mesh_to_curve(input: const SetVerbInput*, output: SetVerbOutput*) -> !
     let edges = (usize)(try mesh.edge_count())
     let made = try curves.mesh_edge_curves(mesh, Bits(result.bits.view(), edges), input.parms.at(0) != 0.0)
     let storage = try with_curves(input.set, made)
-    set_remove(storage, &mesh_component)
+    storage.remove(&mesh_component)
     output.set = storage

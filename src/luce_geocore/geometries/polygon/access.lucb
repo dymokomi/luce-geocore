@@ -264,90 +264,89 @@ extend Mesh:
         let faces = try self.corner_faces()
         return try self.queries.get(self.positions.view(), self.corners.view(), self.triangles.view(), faces)
 
-## Whole arrays for Base kernels, valid while `mesh` is. Free functions, not
-## methods: spans cannot cross into Luce. Positions are relative to
-## `mesh_origin(mesh)`.
-pub func point_span(mesh: const Mesh*) -> const Float3[]:
-    return mesh.positions.view()
-pub func mesh_origin(mesh: const Mesh*) -> Vector3:
-    return mesh.origin
-pub func offset_span(mesh: const Mesh*) -> const i32[]:
-    return mesh.offsets.view()
-pub func corner_span(mesh: const Mesh*) -> const i32[]:
-    return mesh.corners.view()
-pub func corner_face_span(mesh: const Mesh*) -> const i32[]!:
-    return try mesh.corner_faces()
-pub func face_normal_span(mesh: const Mesh*) -> const Float3[]:
-    return mesh.normals.view()
-pub func triangle_span(mesh: const Mesh*) -> const i32[]:
-    return mesh.triangles.view()
-pub func edge_span(mesh: const Mesh*) -> const i32[]!:
-    return (try mesh.edge_arrays()).0
-pub func corner_edge_span(mesh: const Mesh*) -> const i32[]!:
-    return (try mesh.edge_arrays()).1
+    ## Whole arrays for Base kernels, valid while the mesh is (Luce sees none
+    ## of them). Positions are relative to position_origin().
+    pub func point_span() -> const Float3[]:
+        return self.positions.view()
+    pub func position_origin() -> Vector3:
+        return self.origin
+    pub func offset_span() -> const i32[]:
+        return self.offsets.view()
+    pub func corner_span() -> const i32[]:
+        return self.corners.view()
+    pub func corner_face_span() -> const i32[]!:
+        return try self.corner_faces()
+    pub func face_normal_span() -> const Float3[]:
+        return self.normals.view()
+    pub func triangle_span() -> const i32[]:
+        return self.triangles.view()
+    pub func edge_span() -> const i32[]!:
+        return (try self.edge_arrays()).0
+    pub func corner_edge_span() -> const i32[]!:
+        return (try self.edge_arrays()).1
 
-## The face of `mesh` nearest `point` if it is closer than `bound`, else
-## -1 (the spatial index is built on first use).
-pub func nearest_face_within(mesh: const Mesh*, point: Vector3, bound: f64) -> i64!:
-    return (try mesh.query_index()).nearest_within(point.subtract(mesh.origin), bound).face
+    ## The face nearest `point` if it is closer than `bound`, else
+    ## -1 (the spatial index is built on first use).
+    pub func nearest_face_within(point: Vector3, bound: f64) -> i64!:
+        return (try self.query_index()).nearest_within(point.subtract(self.origin), bound).face
 
-## Attribute `index` of `mesh`, for Base readers.
-pub func attribute_entry(mesh: const Mesh*, index: i64) -> const Attribute*!:
-    try checked(index, mesh.attributes.count())
-    return mesh.attributes.entry((usize)index)
+    ## Attribute `index`, for Base readers.
+    pub func attribute_entry(index: i64) -> const Attribute*!:
+        try checked(index, self.attributes.count())
+        return self.attributes.entry((usize)index)
 
-## The arrays a position edit derived positions and face normals from, or 0.
-pub func points_parent(mesh: const Mesh*) -> u64:
-    return mesh.positions.parent()
-pub func normals_parent(mesh: const Mesh*) -> u64:
-    return mesh.normals.parent()
+    ## The arrays a position edit derived positions and face normals from, or 0.
+    pub func points_parent() -> u64:
+        return self.positions.parent()
+    pub func normals_parent() -> u64:
+        return self.normals.parent()
 
-## Smooth normals (the shading of a mesh without N), per point or per corner
-## (`smooth_normals_corner_domain`), computed on first use; and the id of
-## their column and the one it was updated from.
-pub func smooth_normal_span(mesh: const Mesh*) -> const Float3[]!:
-    return try mesh.smooth_normals()
+    ## Smooth normals (the shading of a mesh without N), per point or per corner
+    ## (`smooth_normals_corner_domain`), computed on first use; and the id of
+    ## their column and the one it was updated from.
+    pub func smooth_normal_span() -> const Float3[]!:
+        return try self.smooth_normals()
 
-pub func smooth_normals_corner_domain(mesh: const Mesh*) -> bool!:
-    discard(try mesh.smooth_normals())
-    return mesh.shading.corner_domain()
+    pub func smooth_normals_corner_domain() -> bool!:
+        discard(try self.smooth_normals())
+        return self.shading.corner_domain()
 
-pub func smooth_normals_ids(mesh: const Mesh*) -> (u64, u64)!:
-    discard(try mesh.smooth_normals())
-    return (mesh.shading.id(), mesh.shading.parent())
+    pub func smooth_normals_ids() -> (u64, u64)!:
+        discard(try self.smooth_normals())
+        return (self.shading.id(), self.shading.parent())
 
-## k1 and k2 of every point (discrete principal curvatures), computed on first
-## use; and the id of their column.
-pub func curvature_span(mesh: const Mesh*) -> const f32[]!:
-    return try mesh.curvatures()
+    ## k1 and k2 of every point (discrete principal curvatures), computed on first
+    ## use; and the id of their column.
+    pub func curvature_span() -> const f32[]!:
+        return try self.curvatures()
 
-pub func curvature_id(mesh: const Mesh*) -> u64!:
-    discard(try mesh.curvatures())
-    return mesh.shading.curvature_id()
+    pub func curvature_id() -> u64!:
+        discard(try self.curvatures())
+        return self.shading.curvature_id()
 
-## The positions' and smooth normals' changed elements (see Column.changed).
-pub func points_changed(mesh: const Mesh*) -> (usize, usize):
-    return mesh.positions.changed()
+    ## The positions' and smooth normals' changed elements (see Column.changed).
+    pub func points_changed() -> (usize, usize):
+        return self.positions.changed()
 
-pub func smooth_changed(mesh: const Mesh*) -> (usize, usize)!:
-    discard(try mesh.smooth_normals())
-    return mesh.shading.changed()
+    pub func smooth_changed() -> (usize, usize)!:
+        discard(try self.smooth_normals())
+        return self.shading.changed()
 
-## Faces around each point (one per corner there), as offsets into a list.
-pub func point_face_span(mesh: const Mesh*) -> (const i32[], const i32[])!:
-    return try mesh.incidence()
+    ## Faces around each point (one per corner there), as offsets into a list.
+    pub func point_face_span() -> (const i32[], const i32[])!:
+        return try self.incidence()
 
-## What another module derives from `mesh`'s connectivity, shared by every
-## mesh with it (see TopologyCache.extension_of).
-pub func topology_extension(mesh: const Mesh*, dispose: func(void*) -> unit, make: func() -> void*!) -> void*!:
-    return try mesh.topology.extension_of(dispose, make)
+    ## What another module derives from the connectivity, shared by every
+    ## mesh with it (see TopologyCache.extension_of).
+    pub func topology_extension(dispose: func(void*) -> unit, make: func() -> void*!) -> void*!:
+        return try self.topology.extension_of(dispose, make)
 
-## Each edge's corners (those whose outgoing edge it is).
-pub func edge_corner_span(mesh: const Mesh*) -> (const i32[], const i32[])!:
-    let edges = try mesh.edge_arrays()
-    return try mesh.topology.edge_corners(edges.1, edges.0.length // 2)
+    ## Each edge's corners (those whose outgoing edge it is).
+    pub func edge_corner_span() -> (const i32[], const i32[])!:
+        let edges = try self.edge_arrays()
+        return try self.topology.edge_corners(edges.1, edges.0.length // 2)
 
-## Each point's edges.
-pub func point_edge_span(mesh: const Mesh*) -> (const i32[], const i32[])!:
-    let edges = try mesh.edge_arrays()
-    return try mesh.topology.point_edges(edges.0, mesh.positions.count())
+    ## Each point's edges.
+    pub func point_edge_span() -> (const i32[], const i32[])!:
+        let edges = try self.edge_arrays()
+        return try self.topology.point_edges(edges.0, self.positions.count())
