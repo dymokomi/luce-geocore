@@ -5,7 +5,7 @@
 ## bends away from its normals (a sphere with outward normals: 1/r). Boundary
 ## points, where neither estimate holds, read zero. Computed in parallel over
 ## points; each triangle is visited by its three points, so nothing is shared.
-import luce_std.math
+from luce_std import math
 import core.parallel
 from core.float3 import Float3
 from math.vector import Vector3

@@ -3,10 +3,9 @@
 ## points, surface nets (closed, outward, on the surface), slices, the
 ## volume and SDF families in sets, their previews, the codec round trip,
 ## and every field verb's counts and determinism.
-import luce_geocore.geocore
-import luce_geocore.kernel as geocore_kernel
+from luce_geocore import geocore, kernel as geocore_kernel
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 from io import path
 from luce_geocore.geocore import Vector3, Matrix4, Mesh, MeshPrimitives, GeometrySet

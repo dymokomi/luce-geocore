@@ -2,10 +2,9 @@
 ## share keeps the rows (the same column id) and shares each prototype; so
 ## do path filters; saving writes each prototype once. Row attributes (a
 ## `path` per row) survive shares, filters, saves, appends and joins.
-import luce_geocore.geocore
-import luce_geocore.kernel as geocore_kernel
+from luce_geocore import geocore, kernel as geocore_kernel
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 from io import path
 from luce_geocore.geocore import Vector3, Mesh, GeometrySet

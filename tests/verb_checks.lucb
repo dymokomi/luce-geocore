@@ -3,7 +3,7 @@
 ## element counts, output selections, attribute and group propagation, and
 ## determinism (the same run gives the same topology and points).
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 from luce_geocore.geocore import Mesh, MeshPrimitives, AttributeKernels, Verbs, VerbResult, Vector3, Selection
 from luce_geocore.kernel import clear_group_cache, selection_weights

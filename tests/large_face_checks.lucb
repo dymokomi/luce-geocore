@@ -4,11 +4,10 @@
 ## linear time. `exercise` (run under allocation failure) keeps to faces of
 ## a few hundred corners; `run` adds the large and timed ones.
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 import time
-import luce_geocore.geocore
-import luce_geocore.kernel as geocore_kernel
+from luce_geocore import geocore, kernel as geocore_kernel
 from io import path
 from luce_geocore.geocore import Vector3, Mesh, MeshBuilder, Subdivision, GeometrySet, DissolveWorkspace, dissolve_edge
 from luce_geocore.kernel import triangulate_polygon, validate_polygon_display, save_geometry, load_geometry, adopt_set, set_mesh

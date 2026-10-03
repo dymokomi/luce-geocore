@@ -3,10 +3,9 @@
 ## cache, the set family (bounds, merge, placement, paths), the group
 ## language on curves, and every curve verb: counts, attribute and group
 ## propagation and determinism.
-import luce_geocore.geocore
-import luce_geocore.kernel as geocore_kernel
+from luce_geocore import geocore, kernel as geocore_kernel
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 from luce_geocore.geocore import Vector3, Matrix4, Mesh, MeshPrimitives, GeometrySet
 from luce_geocore.kernel import Curves, CurvesBuilder, CurveType, KnotMode, BitsBuilder, Bits, Attribute, Domain, DataType, GroupReport, SetVerbOutput

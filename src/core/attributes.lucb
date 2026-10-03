@@ -9,7 +9,7 @@
 ## element into a string table (strings.lucb) shared like any column. A role
 ## says how geometric operations treat the values (Houdini's type info):
 ## transforms move positions and vectors, turn normals, and leave the rest.
-import luce_std.math
+from luce_std import math
 import memory
 import errors
 from core.shared import Column

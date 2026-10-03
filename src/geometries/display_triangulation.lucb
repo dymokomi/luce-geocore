@@ -2,7 +2,7 @@
 ## Indices address face corners, not shared points. Geometry producers may use
 ## a support chart instead of projecting a curved polygon onto an average plane.
 import memory
-import luce_std.math
+from luce_std import math
 from math.vector import Vector3
 from errors import invalid
 import geometries.face_scratch

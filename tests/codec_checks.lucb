@@ -2,13 +2,12 @@
 ## text, single storage, corner uv), a point cloud, curves (handles, custom
 ## knots) and nested instances saves and loads back byte for byte, also
 ## with every column chunked; the root key reads alone; bad files fail.
-import luce_geocore.geocore
-import luce_geocore.kernel as geocore_kernel
+from luce_geocore import geocore, kernel as geocore_kernel
 import interop
-import luce_std.math
+from luce_std import math
 import memory
 import strings
-import luce_std.files
+from luce_std import files
 import c
 from io import path
 from luce_geocore.geocore import Vector3, Mesh, MeshPrimitives, GeometrySet, AttributeKernels

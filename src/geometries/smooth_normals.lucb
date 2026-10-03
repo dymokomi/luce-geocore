@@ -4,7 +4,7 @@
 ## Houdini's default), so hard edges stay hard. Where no two faces at a point
 ## lie past the cusp of each other, all its corners agree and one normal per
 ## point serves them. All passes run in parallel and share nothing.
-import luce_std.math
+from luce_std import math
 import memory
 import core.parallel
 from core.float3 import Float3

@@ -4,7 +4,7 @@
 ## subtrees build in parallel; a mesh whose positions moved over the same
 ## triangles refits the tree (new bounds, same structure) instead of
 ## rebuilding it. The index borrows the mesh arrays it was built over.
-import luce_std.math
+from luce_std import math
 import memory
 import core.parallel
 from core.float3 import Float3
