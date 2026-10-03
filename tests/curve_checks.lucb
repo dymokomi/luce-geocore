@@ -3,14 +3,14 @@
 ## cache, the set family (bounds, merge, placement, paths), the group
 ## language on curves, and every curve verb: counts, attribute and group
 ## propagation and determinism.
-import geocore
-import geocore_kernel
+import luce_geocore.geocore
+import luce_geocore.kernel as geocore_kernel
 import interop
-import math
+import luce_std.math
 import memory
-from geocore import Vector3, Matrix4, Mesh, MeshPrimitives, GeometrySet
-from geocore_kernel import Curves, CurvesBuilder, CurveType, KnotMode, BitsBuilder, Bits, Attribute, Domain, DataType, GroupReport, SetVerbOutput
-from geocore_kernel import evaluated_offsets, evaluated_positions, evaluated_frames, evaluated_id, curves_dispose, curves_share, curves_subset, curve_group_bits, set_curves, curves_type, empty_set, dispose_set, adopt_set, run_set_verb, find_set_verb, arc_curves, line_curves, spiral_curves, clear_group_cache
+from luce_geocore.geocore import Vector3, Matrix4, Mesh, MeshPrimitives, GeometrySet
+from luce_geocore.kernel import Curves, CurvesBuilder, CurveType, KnotMode, BitsBuilder, Bits, Attribute, Domain, DataType, GroupReport, SetVerbOutput
+from luce_geocore.kernel import evaluated_offsets, evaluated_positions, evaluated_frames, evaluated_id, curves_dispose, curves_share, curves_subset, curve_group_bits, set_curves, curves_type, empty_set, dispose_set, adopt_set, run_set_verb, find_set_verb, arc_curves, line_curves, spiral_curves, clear_group_cache
 
 func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
     return math.abs(a - b) < tolerance

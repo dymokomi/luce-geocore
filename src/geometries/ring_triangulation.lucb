@@ -1,0 +1,345 @@
+## Ear clipping for large faces, in about linear time (after Mapbox's
+## earcut). The face is projected into the plane of its normal and its
+## corners kept as a doubly linked ring. An ear is a strictly convex corner
+## whose triangle holds no reflex corner: only reflex corners can lie in an
+## ear of a simple polygon, so only they are tested, found through a
+## uniform grid over the face, and the reflex set shrinks as ears go (the
+## two corners beside a clipped ear are classified again).
+##
+## Clipping goes on from the ear just cut, not from the start: candidates
+## wait in a queue, first every convex corner (every other one first, so
+## the first triangles do not all fan from one corner), then the two corners
+## beside each ear clipped, whose triangles changed. A corner found blocked
+## leaves the queue until a neighbor changes, so long runs of reflex corners
+## (a comb's teeth, a spiral's inner wall) are not walked over lap after
+## lap. When the queue runs dry, every convex corner is looked at once more.
+##
+## When such a look finds no ear, the corners without an area (collinear
+## runs, doubled points) are clipped as ears; when there are none of those
+## either (a self-intersecting or folded face), the rest of the ring is
+## finished as a fan. So the face always gets its count - 2 triangles, and
+## only running out of memory fails.
+import luce_std.math
+import memory
+from math.vector import Vector3
+
+## Corner kinds in Ring.kinds.
+let convex: u8 = 0
+## Reflex, or without an area.
+let reflex: u8 = 1
+## Out of the ring.
+let clipped: u8 = 2
+
+## The ring and what the ear test reads, all indexed by local corner.
+struct Ring:
+    ## Corners projected into the face's plane, measured from its first.
+    let x: f64[]
+    let y: f64[]
+    let next: u32[]
+    let previous: u32[]
+    let kinds: u8[]
+    var reflex_count: usize
+    ## Areas at most this are no area (the extent-relative cutoff of the
+    ## small-face ear clipper).
+    let epsilon: f64
+    ## Every corner bucketed into `columns` x `rows` cells over the face's
+    ## bounds, shaped like them: cell k's corners are
+    ## members[cells[k]..<cells[k + 1]].
+    let cells: u32[]
+    let members: u32[]
+    let columns: usize
+    let rows: usize
+    let low_x: f64
+    let low_y: f64
+    let scale_x: f64
+    let scale_y: f64
+
+    ## Twice the signed area of corners a, b, c (positive counterclockwise
+    ## about the normal).
+    func area(a: usize, b: usize, c: usize) -> f64:
+        return (self.x[b] - self.x[a]) * (self.y[c] - self.y[a]) - (self.y[b] - self.y[a]) * (self.x[c] - self.x[a])
+
+    ## The area of corner `at` with its current neighbors.
+    func turn(at: usize) -> f64:
+        return self.area((usize)self.previous[at], at, (usize)self.next[at])
+
+    ## Grid column (or row, of `size`) of coordinate `value`.
+    func cell(value: f64, low: f64, scale: f64, size: usize) -> usize:
+        let place = (value - low) * scale
+        if not (place > 0.0): return 0
+        let index = (usize)place
+        return index if index < size else size - 1
+
+    ## The grid cell of corner `at`.
+    func cell_of(at: usize) -> usize:
+        return self.cell(self.y[at], self.low_y, self.scale_y, self.rows) * self.columns + self.cell(self.x[at], self.low_x, self.scale_x, self.columns)
+
+    ## Whether corner `point` lies in triangle a, b, c or on its edges, with
+    ## the same tolerance as the small-face ear test.
+    func inside(point: usize, a: usize, b: usize, c: usize) -> bool:
+        return self.area(a, b, point) >= -self.epsilon and self.area(b, c, point) >= -self.epsilon and self.area(c, a, point) >= -self.epsilon
+
+    ## The x range of triangle a, b, c within grid row `row`, widened a
+    ## little against rounding; empty (low > high) when it misses the row.
+    func row_span(a: usize, b: usize, c: usize, row: usize) -> (f64, f64):
+        let height = 1.0 / self.scale_y
+        let bottom = self.low_y + (f64)row * height - height * 0.000001
+        let top = bottom + height * 1.000002
+        var low = 1.0e308
+        var high = -1.0e308
+        let ends: usize[3] = [a, b, c]
+        for side in 0..<(usize)3:
+            let p = ends[side]
+            let q = ends[(side + 1) % 3]
+            # Edge p-q's part in the band, by where it starts or crosses.
+            if self.y[p] >= bottom and self.y[p] <= top:
+                low = math.min(low, self.x[p])
+                high = math.max(high, self.x[p])
+            for bound in [bottom, top]:
+                if (self.y[p] - bound) * (self.y[q] - bound) < 0.0:
+                    let along = self.x[p] + (bound - self.y[p]) / (self.y[q] - self.y[p]) * (self.x[q] - self.x[p])
+                    low = math.min(low, along)
+                    high = math.max(high, along)
+        let slack = 0.000001 / self.scale_x if self.scale_x > 0.0 else 0.0
+        return (low - slack, high + slack)
+
+    ## Whether convex corner `ear` may be clipped: no reflex corner of the
+    ## ring in its triangle. The grid cells looked at are those the triangle
+    ## covers row by row, so a long thin triangle at a slant stays cheap. A
+    ## reflex corner at the very place of the ear's first corner does not
+    ## block it (a face touching itself there, as earcut allows).
+    func clear(ear: usize) -> bool:
+        if self.reflex_count == 0: return true
+        let a = (usize)self.previous[ear]
+        let c = (usize)self.next[ear]
+        let low_x = math.min(self.x[a], math.min(self.x[ear], self.x[c]))
+        let high_x = math.max(self.x[a], math.max(self.x[ear], self.x[c]))
+        let low_y = math.min(self.y[a], math.min(self.y[ear], self.y[c]))
+        let high_y = math.max(self.y[a], math.max(self.y[ear], self.y[c]))
+        let first_column = self.cell(low_x, self.low_x, self.scale_x, self.columns)
+        let last_column = self.cell(high_x, self.low_x, self.scale_x, self.columns)
+        let first_row = self.cell(low_y, self.low_y, self.scale_y, self.rows)
+        let last_row = self.cell(high_y, self.low_y, self.scale_y, self.rows)
+        for row in first_row..=last_row:
+            var from_column = first_column
+            var to_column = last_column
+            if first_row != last_row:
+                let (low, high) = self.row_span(a, ear, c, row)
+                if low > high: continue
+                let left = self.cell(low, self.low_x, self.scale_x, self.columns)
+                let right = self.cell(high, self.low_x, self.scale_x, self.columns)
+                if left > from_column: from_column = left
+                if right < to_column: to_column = right
+            for column in from_column..=to_column:
+                let k = row * self.columns + column
+                for slot in (usize)self.cells[k]..<(usize)self.cells[k + 1]:
+                    let point = (usize)self.members[slot]
+                    if self.kinds[point] != reflex or point == a or point == ear or point == c: continue
+                    if self.x[point] == self.x[a] and self.y[point] == self.y[a]: continue
+                    if self.inside(point, a, ear, c): return false
+        return true
+
+    ## Classify corner `at` again after a neighbor of it was clipped.
+    mutating func classify(at: usize):
+        let kind = convex if self.turn(at) > self.epsilon else reflex
+        if kind == self.kinds[at]: return
+        if kind == reflex: self.reflex_count += 1
+        else: self.reflex_count -= 1
+        self.kinds[at] = kind
+
+    ## Take corner `ear` out of the ring (its triangle already written).
+    mutating func unlink(ear: usize):
+        let a = self.previous[ear]
+        let c = self.next[ear]
+        self.next[(usize)a] = c
+        self.previous[(usize)c] = a
+        if self.kinds[ear] == reflex: self.reflex_count -= 1
+        self.kinds[ear] = clipped
+        self.classify((usize)a)
+        self.classify((usize)c)
+
+## Corners waiting for an ear test: a circular queue holding each corner at
+## most once.
+struct Candidates:
+    let queue: u32[]
+    let queued: u8[]
+    var head: usize
+    var size: usize
+
+    mutating func push(at: usize):
+        if self.queued[at] != 0: return
+        self.queue[(self.head + self.size) % self.queue.length] = (u32)at
+        self.queued[at] = 1
+        self.size += 1
+
+    mutating func pop() -> usize:
+        let at = (usize)self.queue[self.head]
+        self.head = (self.head + 1) % self.queue.length
+        self.size -= 1
+        self.queued[at] = 0
+        return at
+
+    ## Every convex corner of the ring from `first` on (`remaining` corners),
+    ## every other one first.
+    mutating func seed(ring: const Ring*, first: usize, remaining: usize):
+        for parity in 0..<(usize)2:
+            var at = first
+            for step in 0..<remaining:
+                if step % 2 == parity and ring.kinds[at] == convex: self.push(at)
+                at = (usize)ring.next[at]
+
+## Write the count - 2 triangles of face corners start..<start + count
+## (corner indices into `corners`, which index `points`) to `output`, wound
+## counterclockwise about the unit `normal`.
+pub func triangulate_ring(points: const Vector3[], corners: const i64[], start: usize, count: usize, normal: Vector3, output: i64[]) -> !:
+    assert(count >= 3 and count < 4294967296 and output.length == (count - 2) * 3)
+    # In-plane axes: x across the normal, y = normal x x (so 2D areas are
+    # 3D areas measured along the normal).
+    let axis = Vector3(1.0, 0.0, 0.0) if math.abs(normal.x) < 0.9 else Vector3(0.0, 1.0, 0.0)
+    let across = axis.subtract(normal.multiply_scalar(axis.dot(normal)))
+    let u = across.multiply_scalar(1.0 / across.length())
+    let v = normal.cross(u)
+    let origin = points[(usize)corners[start]]
+    # Turned to the face's principal axes, so the grid's bounds fit a long
+    # face at a slant closely (its corners spread over the cells).
+    var extent2: f64 = 0.0
+    var sum_u = 0.0
+    var sum_v = 0.0
+    var sum_uu = 0.0
+    var sum_vv = 0.0
+    var sum_uv = 0.0
+    for at in 0..<count:
+        let delta = points[(usize)corners[start + at]].subtract(origin)
+        extent2 = math.max(extent2, delta.dot(delta))
+        let du = delta.dot(u)
+        let dv = delta.dot(v)
+        sum_u += du
+        sum_v += dv
+        sum_uu += du * du
+        sum_vv += dv * dv
+        sum_uv += du * dv
+    let n = (f64)count
+    let turn = 0.5 * math.atan2(2.0 * (sum_uv / n - sum_u * sum_v / (n * n)), (sum_uu - sum_u * sum_u / n) / n - (sum_vv - sum_v * sum_v / n) / n)
+    let along = u.multiply_scalar(math.cos(turn)).add(v.multiply_scalar(math.sin(turn)))
+    let up = v.multiply_scalar(math.cos(turn)).subtract(u.multiply_scalar(math.sin(turn)))
+    let x = try alloc f64[count] in memory.heap
+    defer free(x) in memory.heap
+    let y = try alloc f64[count] in memory.heap
+    defer free(y) in memory.heap
+    var low_x = 0.0
+    var high_x = 0.0
+    var low_y = 0.0
+    var high_y = 0.0
+    for at in 0..<count:
+        let delta = points[(usize)corners[start + at]].subtract(origin)
+        x[at] = delta.dot(along)
+        y[at] = delta.dot(up)
+        low_x = math.min(low_x, x[at])
+        high_x = math.max(high_x, x[at])
+        low_y = math.min(low_y, y[at])
+        high_y = math.max(high_y, y[at])
+    let next = try alloc u32[count] in memory.heap
+    defer free(next) in memory.heap
+    let previous = try alloc u32[count] in memory.heap
+    defer free(previous) in memory.heap
+    let kinds = try alloc u8[count] in memory.heap
+    defer free(kinds) in memory.heap
+    for at in 0..<count:
+        next[at] = (u32)((at + 1) % count)
+        previous[at] = (u32)((at + count - 1) % count)
+    # About one corner a cell, the cells about square: a long thin face
+    # gets many columns and few rows.
+    let width = high_x - low_x
+    let height = high_y - low_y
+    let aspect = width / height if width > 0.0 and height > 0.0 else 1.0
+    let columns = grid_size(math.sqrt((f64)count * aspect), count)
+    let rows = grid_size(math.sqrt((f64)count / aspect), count)
+    let cells = try alloc u32[columns * rows + 1] in memory.heap
+    defer free(cells) in memory.heap
+    let members = try alloc u32[count] in memory.heap
+    defer free(members) in memory.heap
+    let queue = try alloc u32[count] in memory.heap
+    defer free(queue) in memory.heap
+    let queued = try alloc u8[count] in memory.heap
+    defer free(queued) in memory.heap
+    var ring = Ring(x, y, next, previous, kinds, 0, math.max(1e-30, extent2 * 1e-14), cells, members, columns, rows, low_x, low_y,
+                    (f64)columns / width if width > 0.0 else 0.0, (f64)rows / height if height > 0.0 else 0.0)
+    for at in 0..<count:
+        kinds[at] = convex if ring.turn(at) > ring.epsilon else reflex
+        if kinds[at] == reflex: ring.reflex_count += 1
+    fill_grid(&ring, count)
+    memory.set(queued, 0)
+    var candidates = Candidates(queue, queued, 0, 0)
+    var written: usize = 0
+    var remaining = count
+    # A corner still in the ring.
+    var cursor: usize = 0
+    candidates.seed(&ring, cursor, remaining)
+    # Whether the queue has held every convex corner since the last clip.
+    var fresh = true
+    while remaining > 3:
+        if candidates.size == 0:
+            if fresh:
+                # No strict ear anywhere: clip the corners without an area.
+                var removed: usize = 0
+                for _ in 0..<remaining:
+                    if remaining <= 3: break
+                    let after = (usize)ring.next[cursor]
+                    if math.abs(ring.turn(cursor)) <= ring.epsilon:
+                        written = emit(output, written, start, (usize)ring.previous[cursor], cursor, after)
+                        ring.unlink(cursor)
+                        remaining -= 1
+                        removed += 1
+                    cursor = after
+                if removed == 0:
+                    # Self-intersecting or folded: the rest as a fan.
+                    for _ in 0..<remaining - 2:
+                        let second = (usize)ring.next[cursor]
+                        written = emit(output, written, start, cursor, second, (usize)ring.next[second])
+                        ring.unlink(second)
+                    return
+            candidates.seed(&ring, cursor, remaining)
+            fresh = true
+            continue
+        let ear = candidates.pop()
+        if ring.kinds[ear] != convex or not ring.clear(ear): continue
+        let a = (usize)ring.previous[ear]
+        let c = (usize)ring.next[ear]
+        written = emit(output, written, start, a, ear, c)
+        ring.unlink(ear)
+        remaining -= 1
+        candidates.push(a)
+        candidates.push(c)
+        cursor = a
+        fresh = false
+    discard(emit(output, written, start, (usize)ring.previous[cursor], cursor, (usize)ring.next[cursor]))
+
+## Cells along one side of the grid: `wanted` rounded down, 1..count.
+func grid_size(wanted: f64, count: usize) -> usize:
+    if not (wanted >= 1.0): return 1
+    if wanted >= (f64)count: return count
+    return (usize)wanted
+
+## Bucket every corner into the ring's grid (a counting sort by cell).
+func fill_grid(ring: Ring*, count: usize):
+    let total = ring.columns * ring.rows
+    for at in 0..<ring.cells.length: ring.cells[at] = 0
+    for at in 0..<count: ring.cells[ring.cell_of(at) + 1] += 1
+    for k in 0..<total: ring.cells[k + 1] += ring.cells[k]
+    for at in 0..<count:
+        let k = ring.cell_of(at)
+        # cells[k] runs ahead while filling; shifted back below.
+        ring.members[(usize)ring.cells[k]] = (u32)at
+        ring.cells[k] += 1
+    var k = total
+    while k > 0:
+        ring.cells[k] = ring.cells[k - 1]
+        k -= 1
+    ring.cells[0] = 0
+
+## Triangle a, b, c (local corners) as corner indices; the next free slot.
+func emit(output: i64[], written: usize, start: usize, a: usize, b: usize, c: usize) -> usize:
+    output[written] = (i64)(start + a)
+    output[written + 1] = (i64)(start + b)
+    output[written + 2] = (i64)(start + c)
+    return written + 3

@@ -1,0 +1,317 @@
+## Sparse voxel grids, NanoVDB-like (design D9): a flat, read-only layout of
+## 8×8×8 leaves, published once and shared by count. A grid is its leaves'
+## sorted keys (Morton codes of leaf coordinates), 512 f32 values a leaf (x
+## fastest, then y, then z) and 8 active-mask words a leaf, an index-to-world
+## affine transform and a background value for everything outside the
+## leaves. Builders fill leaves in parallel and publish a new grid; nothing
+## writes a published one.
+##
+## A level set (class level_set) stores signed distances in a narrow band
+## around the surface, negative inside; a fog volume (class fog) stores
+## densities. Voxel (i, j, k) sits at transform (i, j, k).
+import interop
+import luce_std.math
+import memory
+import sync
+import errors
+import core.parallel
+import core.attribute_ops
+from core.growing import Growing
+from core.shared import Column
+from core.float3 import Float3
+from core.bits import popcount, trailing_zeros, BitsBuilder
+from core.idset import IdSet
+from core.strings import TableBuilder
+from core.paths import PathFilter
+from core.attributes import Attribute, AttributeStore, Domain, DataType, Storage, Role
+from core.geometry import Bounds
+from math.vector import Vector3
+from math.matrix import Matrix4
+from geometries.polygon import Mesh, MeshPart, concatenated, assembled, put_attribute, mesh_dispose, mesh_share, mesh_adopt
+from geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, union_box, set_mesh, empty_storage, dispose_set, adopt_set
+from geometries.builder import MeshBuilder
+from groups import group_bits
+from verbs import ComponentTransform
+from geometries.distance import bounds_distance
+
+pub let leaf_size: i64 = 8
+pub let leaf_voxels: usize = 512
+pub let mask_words: usize = 8
+
+pub enum GridClass as u8:
+    fog = 0
+    level_set = 1
+
+## Leaf coordinates are biased into 21 unsigned bits each.
+let key_bias: i64 = 1048576
+
+## The Morton code of leaf (x, y, z): bits interleaved x, y, z from the low end.
+pub func leaf_key(x: i64, y: i64, z: i64) -> u64:
+    return spread((u64)(x + key_bias)) | (spread((u64)(y + key_bias)) << 1) | (spread((u64)(z + key_bias)) << 2)
+
+## The leaf coordinates of a key.
+pub func key_leaf(key: u64) -> (i64, i64, i64):
+    return ((i64)compact(key) - key_bias, (i64)compact(key >> 1) - key_bias, (i64)compact(key >> 2) - key_bias)
+
+func spread(value: u64) -> u64:
+    var v = value & 0x1FFFFF
+    v = (v | (v << 32)) & 0x1F00000000FFFF
+    v = (v | (v << 16)) & 0x1F0000FF0000FF
+    v = (v | (v << 8)) & 0x100F00F00F00F00F
+    v = (v | (v << 4)) & 0x10C30C30C30C30C3
+    v = (v | (v << 2)) & 0x1249249249249249
+    return v
+
+func compact(value: u64) -> u64:
+    var v = value & 0x1249249249249249
+    v = (v | (v >> 2)) & 0x10C30C30C30C30C3
+    v = (v | (v >> 4)) & 0x100F00F00F00F00F
+    v = (v | (v >> 8)) & 0x1F0000FF0000FF
+    v = (v | (v >> 16)) & 0x1F00000000FFFF
+    v = (v | (v >> 32)) & 0x1FFFFF
+    return v
+
+## Floor division by 8 (arithmetic shift) and the remainder, for negatives.
+pub func leaf_of(index: i64) -> i64:
+    return index >> 3
+
+pub struct SparseGrid:
+    pub var users: @usize
+    var label: u8[64]
+    var label_length: usize
+    pub let class: GridClass
+    pub let background: f32
+    ## Index space to world, and back.
+    pub let transform: Matrix4
+    pub let inverse: Matrix4
+    pub var keys: Column[u64]
+    pub var values: Column[f32]
+    pub var masks: Column[u64]
+
+    pub func name() -> str:
+        return (str)self.label[..<self.label_length]
+
+    pub func leaf_count() -> usize:
+        return self.keys.count()
+
+    ## The leaf with `key`, or -1.
+    pub func find(key: u64) -> i64:
+        let keys = self.keys.view()
+        var low: usize = 0
+        var high = keys.length
+        while low < high:
+            let middle = (low + high) // 2
+            if keys[middle] < key: low = middle + 1
+            else: high = middle
+        return (i64)low if low < keys.length and keys[low] == key else -1
+
+    ## The value at voxel (i, j, k) (the background outside the leaves).
+    pub func value(i: i64, j: i64, k: i64) -> f32:
+        let leaf = self.find(leaf_key(leaf_of(i), leaf_of(j), leaf_of(k)))
+        if leaf < 0: return self.background
+        return self.values.view()[(usize)leaf * leaf_voxels + local_index(i, j, k)]
+
+    ## Voxels whose active bit is set.
+    pub func active_count() -> usize:
+        var total: usize = 0
+        for word in self.masks.view(): total += (usize)popcount(word)
+        return total
+
+    ## The world box of the leaves.
+    pub func bounds() -> Bounds?:
+        let keys = self.keys.view()
+        if keys.length == 0: return none
+        var low = Vector3(1.0e300, 1.0e300, 1.0e300)
+        var high = Vector3(-1.0e300, -1.0e300, -1.0e300)
+        for key in keys:
+            let (x, y, z) = key_leaf(key)
+            low = Vector3(math.min(low.x, (f64)(x * 8)), math.min(low.y, (f64)(y * 8)), math.min(low.z, (f64)(z * 8)))
+            high = Vector3(math.max(high.x, (f64)(x * 8 + 7)), math.max(high.y, (f64)(y * 8 + 7)), math.max(high.z, (f64)(z * 8 + 7)))
+        return placed_box(Bounds(low, high), self.transform)
+
+    ## The same leaves under another transform (placement), sharing columns.
+    pub func placed(matrix: Matrix4) -> SparseGrid*!:
+        let transform = matrix.multiply(self.transform)
+        return try new_grid(self.name(), self.class, self.background, transform, self.keys.share(), self.values.share(), self.masks.share())
+
+    pub mutating func close():
+        self.keys.release()
+        self.values.release()
+        self.masks.release()
+
+## The index of voxel (i, j, k) inside its leaf.
+pub func local_index(i: i64, j: i64, k: i64) -> usize:
+    return (usize)(i & 7) + (usize)(j & 7) * 8 + (usize)(k & 7) * 64
+
+## A heap grid owning these columns (taken, even on failure).
+pub func new_grid(name: str, class: GridClass, background: f32, transform: Matrix4, keys: Column[u64], values: Column[f32], masks: Column[u64]) -> SparseGrid*!:
+    var owned_keys = keys
+    errdefer owned_keys.release()
+    var owned_values = values
+    errdefer owned_values.release()
+    var owned_masks = masks
+    errdefer owned_masks.release()
+    if name.length > 64: error(errors.invalid, "grid names are at most 64 bytes")
+    let inverse = try affine_inverse(transform)
+    var label: u8[64]
+    if name.length > 0: memory.copy(label[..<name.length], name.bytes, name.length)
+    let storage = try alloc SparseGrid[1] in memory.heap
+    storage[0] = SparseGrid(label = label, label_length = name.length, class = class, background = background, transform = transform, inverse = inverse,
+                            keys = owned_keys, values = owned_values, masks = owned_masks)
+    storage[0].users.store(1, .relaxed)
+    return storage.data
+
+pub func share_grid(grid: SparseGrid*) -> SparseGrid*:
+    discard(grid.users.add(1, .relaxed))
+    return grid
+
+pub func release_grid(grid: SparseGrid*):
+    if grid.users.sub(1, .acq_rel) != 1: return
+    grid.close()
+    free(SparseGrid[](grid, 1)) in memory.heap
+
+## The inverse of an affine matrix (Matrix4.inverse), failing as a grid
+## transform when it is singular.
+pub func affine_inverse(matrix: Matrix4) -> Matrix4!:
+    return matrix.inverse() catch failure:
+        error(errors.invalid, "a grid transform must be invertible")
+
+# mark: Sampling
+
+## Trilinear samples of a grid at world points, with a one-leaf cache: for
+## one thread (make one per parallel item).
+pub struct GridSampler:
+    let grid: const SparseGrid*
+    var cached_key: u64 = 0xFFFFFFFFFFFFFFFF
+    var cached_leaf: i64 = -1
+
+    pub static func of(grid: const SparseGrid*) -> GridSampler:
+        return GridSampler(grid, 0xFFFFFFFFFFFFFFFF, -1)
+
+    pub mutating func voxel(i: i64, j: i64, k: i64) -> f32:
+        let key = leaf_key(leaf_of(i), leaf_of(j), leaf_of(k))
+        if key != self.cached_key:
+            self.cached_key = key
+            self.cached_leaf = self.grid.find(key)
+        if self.cached_leaf < 0: return self.grid.background
+        return self.grid.values.view()[(usize)self.cached_leaf * leaf_voxels + local_index(i, j, k)]
+
+    ## Whether voxel (i, j, k) lies in a leaf (after `voxel` for it).
+    pub func stored() -> bool:
+        return self.cached_leaf >= 0
+
+    ## The trilinear value at world point `point`.
+    pub mutating func sample(point: Vector3) -> f64:
+        let p = self.grid.inverse.transform_point(point)
+        let fx = math.floor(p.x)
+        let fy = math.floor(p.y)
+        let fz = math.floor(p.z)
+        let i = (i64)fx
+        let j = (i64)fy
+        let k = (i64)fz
+        let tx = p.x - fx
+        let ty = p.y - fy
+        let tz = p.z - fz
+        let c000 = (f64)self.voxel(i, j, k)
+        let c100 = (f64)self.voxel(i + 1, j, k)
+        let c010 = (f64)self.voxel(i, j + 1, k)
+        let c110 = (f64)self.voxel(i + 1, j + 1, k)
+        let c001 = (f64)self.voxel(i, j, k + 1)
+        let c101 = (f64)self.voxel(i + 1, j, k + 1)
+        let c011 = (f64)self.voxel(i, j + 1, k + 1)
+        let c111 = (f64)self.voxel(i + 1, j + 1, k + 1)
+        let x00 = c000 + (c100 - c000) * tx
+        let x10 = c010 + (c110 - c010) * tx
+        let x01 = c001 + (c101 - c001) * tx
+        let x11 = c011 + (c111 - c011) * tx
+        let y0 = x00 + (x10 - x00) * ty
+        let y1 = x01 + (x11 - x01) * ty
+        return y0 + (y1 - y0) * tz
+
+# mark: Building
+
+## A grid built from a list of leaves filled in parallel: `fill(context,
+## leaf, key, values, mask)` writes one leaf's 512 values and 8 mask words.
+## Leaves are sorted by key when published.
+pub func grid_of_leaves(name: str, class: GridClass, background: f32, transform: Matrix4, keys: const u64[],
+                        fill: func(void*?, usize, u64, f32[], u64[]) -> unit, context: void*?) -> SparseGrid*!:
+    let count = keys.length
+    var sorted = try Column[u64].copy_of(keys)
+    errdefer sorted.release()
+    try sort_keys(sorted.span())
+    # Duplicates would make two leaves of one key.
+    let unique = unique_keys(sorted.span())
+    var packed = try Column[u64].copy_of(sorted.view()[..<unique])
+    sorted.release()
+    errdefer packed.release()
+    var values = try Column[f32].allocate(unique * leaf_voxels)
+    errdefer values.release()
+    var masks = try Column[u64].allocate(unique * mask_words)
+    errdefer masks.release()
+    var work = LeafWork(packed.view(), values.span(), masks.span(), fill, context)
+    parallel.parallel_for(unique, 16, fill_leaves, (void*)&work)
+    discard(count)
+    return try new_grid(name, class, background, transform, packed.take(), values.take(), masks.take())
+
+struct LeafWork:
+    let keys: const u64[]
+    let values: f32[]
+    let masks: u64[]
+    let fill: func(void*?, usize, u64, f32[], u64[]) -> unit
+    let context: void*?
+
+func fill_leaves(context: void*?, first: usize, end: usize):
+    let work = (LeafWork*)(context else return)
+    let fill = work.fill
+    for leaf in first..<end:
+        fill(work.context, leaf, work.keys[leaf], work.values[leaf * leaf_voxels..<(leaf + 1) * leaf_voxels], work.masks[leaf * mask_words..<(leaf + 1) * mask_words])
+
+## Sort keys ascending (a radix sort over the key bytes that differ).
+pub func sort_keys(keys: u64[]) -> !:
+    var none_values: u64[]
+    try sort_pairs(keys, none_values)
+
+## Sort `keys` ascending, moving `values` with them when there are any (a
+## radix sort over the key bytes that differ: nearby leaves' Morton codes
+## share their high bytes).
+pub func sort_pairs(keys: u64[], values: u64[]) -> !:
+    if keys.length < 2: return
+    var differ: u64 = 0
+    for key in keys: differ = differ | (key ^ keys[0])
+    var passes: usize = 0
+    while passes < 8 and (differ >> (u64)(passes * 8)) != 0: passes += 1
+    let paired = values.length > 0
+    let key_scratch = try alloc u64[keys.length] in memory.heap
+    defer free(key_scratch) in memory.heap
+    let value_scratch = try alloc u64[keys.length if paired else 0] in memory.heap
+    defer free(value_scratch) in memory.heap
+    var in_place = true
+    for pass in 0..<passes:
+        let from_keys = keys if in_place else key_scratch
+        let from_values = values if in_place else value_scratch
+        let to_keys = key_scratch if in_place else keys
+        let to_values = value_scratch if in_place else values
+        var counts: usize[257]
+        for at in 0..<(usize)257: counts[at] = 0
+        let shift = (u64)(pass * 8)
+        for key in from_keys: counts[(usize)((key >> shift) & 255) + 1] += 1
+        for at in 1..<(usize)257: counts[at] += counts[at - 1]
+        for at in 0..<from_keys.length:
+            let bucket = (usize)((from_keys[at] >> shift) & 255)
+            to_keys[counts[bucket]] = from_keys[at]
+            if paired: to_values[counts[bucket]] = from_values[at]
+            counts[bucket] += 1
+        in_place = not in_place
+    if not in_place:
+        memory.copy(keys, key_scratch, keys.length)
+        if paired: memory.copy(values, value_scratch, values.length)
+
+## Keys left after dropping repeats of a sorted list (in place); how many.
+pub func unique_keys(keys: u64[]) -> usize:
+    if keys.length == 0: return 0
+    var kept: usize = 1
+    for at in 1..<keys.length:
+        if keys[at] != keys[kept - 1]:
+            keys[kept] = keys[at]
+            kept += 1
+    return kept

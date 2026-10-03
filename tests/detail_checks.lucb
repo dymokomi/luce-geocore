@@ -2,11 +2,11 @@
 ## component changes, moved by a Transform by role, first-wins on merge,
 ## and saved and loaded by the codec.
 import interop
-import math
+import luce_std.math
 from io import path
-from geocore import Vector3, Mesh, GeometrySet
-from geocore_kernel import empty_set, adopt_set, save_geometry, load_geometry
-from geocore_growing import Growing
+from luce_geocore.geocore import Vector3, Mesh, GeometrySet
+from luce_geocore.kernel import empty_set, adopt_set, save_geometry, load_geometry
+from luce_geocore.core.growing import Growing
 
 func near(a: f64, b: f64) -> bool:
     return math.abs(a - b) < 0.00001

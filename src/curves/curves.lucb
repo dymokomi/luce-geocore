@@ -1,0 +1,267 @@
+## The curves family: many curves in one structure of arrays, after Blender's
+## CurvesGeometry and Houdini's curve primitives. Control points are f32
+## positions over an f64 origin, like a mesh's points; `offsets` splits them
+## into curves (curve c owns points offsets[c]..<offsets[c + 1]).
+##
+## Domains follow Houdini: the control points are the `point` domain and each
+## curve is a primitive, the `face` domain, so group expressions, Group Type
+## "Primitives" and attribute nodes address curves unchanged. How a curve is
+## evaluated lives in builtin attributes, absent ones taking their default:
+##
+##   face   curve_type  int8     0 poly, 1 bezier, 2 NURBS, 3 Catmull-Rom (0)
+##   face   cyclic      boolean  closed (false)
+##   face   resolution  int32    evaluated points per segment or span (12)
+##   face   order       int8     NURBS order, degree + 1, 2..8 (4)
+##   face   knot_mode   int8     NURBS knots: 0 uniform, 1 endpoint, 2 custom (1)
+##   point  w           float32  NURBS weight (1)
+##   point  handle_l    float32x3 Bezier handles, in the positions' frame
+##   point  handle_r    float32x3 (absent: automatic, Catmull-Rom tangents)
+##
+## Custom knots are one f32 column for every curve, split by `knot_offsets`.
+## Evaluated positions, tangents, normals and lengths are a lazy cache
+## (evaluate.lucb) keyed by the ids of the columns they read. A Curves is
+## immutable once built; every operation makes a new one sharing what it
+## did not change.
+import interop
+import luce_std.math
+import memory
+import sync
+import errors
+import core.parallel
+import core.attribute_ops
+from core.growing import Growing
+from core.shared import Column
+from core.float3 import Float3
+from core.bits import Bits, BitsBuilder
+from core.idset import IdSet
+from core.strings import TableBuilder, table_count, table_text
+from core.paths import PathFilter, glob
+from core.attributes import Attribute, AttributeStore, Domain, DataType, Storage, Role
+from core.geometry import Bounds
+from math.vector import Vector3
+from math.matrix import Matrix4
+from geometries.polygon import Mesh, positions_bounds, assembled, put_attribute, mesh_dispose
+from groups import GroupProgram, Term, AtomKind, Compare, Function, Combine, GroupReport, group_bits
+from geometries.builder import MeshBuilder
+from verbs import ComponentTransform
+from geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, empty_storage, dispose_set, adopt_set, set_detail
+
+pub enum CurveType as u8:
+    poly = 0
+    bezier = 1
+    nurbs = 2
+    catmull_rom = 3
+
+pub enum KnotMode as u8:
+    ## Evenly spaced knots: a B-spline that does not reach its end points.
+    uniform = 0
+    ## Knots repeated at the ends (clamped): the curve starts and ends on its
+    ## end points.
+    endpoint = 1
+    ## The curve's own knots, from the knots column.
+    custom = 2
+
+## The primitive domain of curves.
+pub let curve_domain: Domain = Domain.face
+
+pub let default_resolution: i64 = 12
+pub let default_order: i64 = 4
+pub let most_order: usize = 8
+let most_resolution: i64 = 1024
+
+## Coordinates beyond this, or beyond 8 times the curves' size, keep an
+## origin at the bounds center (as meshes do).
+let origin_limit: f64 = 4096.0
+
+pub struct Curves:
+    var positions: Column[Float3]
+    var origin: Vector3
+    ## curves + 1 entries.
+    var offsets: Column[i32]
+    ## Custom knots of every curve with knot_mode custom, and where each
+    ## curve's start (curves + 1 entries; empty when none has custom knots).
+    var knots: Column[f32]
+    var knot_offsets: Column[i32]
+    var attributes: AttributeStore
+    var cache: CurveCache*
+
+    pub func point_count() -> usize:
+        return self.positions.count()
+
+    pub func curve_count() -> usize:
+        let count = self.offsets.count()
+        return count - 1 if count > 0 else 0
+
+    ## Curve c's first point and its point count.
+    pub func range(curve: usize) -> (usize, usize):
+        let offsets = self.offsets.view()
+        let first = (usize)offsets[curve]
+        return (first, (usize)offsets[curve + 1] - first)
+
+    ## Point `index` in world coordinates.
+    pub func point(index: usize) -> Vector3:
+        return self.positions.view()[index].vector().add(self.origin)
+
+    pub func offset_span() -> const i32[]:
+        return self.offsets.view()
+
+    pub func position_span() -> const Float3[]:
+        return self.positions.view()
+
+    pub func store() -> const AttributeStore*:
+        return &self.attributes
+
+    ## Another owner of every column, attribute and cache: O(columns).
+    pub func shared_storage() -> Curves*!:
+        var attributes = try self.attributes.shared()
+        errdefer attributes.close()
+        let storage = try alloc Curves[1] in memory.heap
+        storage[0] = Curves(self.positions.share(), self.origin, self.offsets.share(), self.knots.share(), self.knot_offsets.share(), attributes, self.cache)
+        discard(self.cache.users.add(1, .relaxed))
+        return storage.data
+
+    pub mutating func close():
+        self.positions.release()
+        self.offsets.release()
+        self.knots.release()
+        self.knot_offsets.release()
+        self.attributes.close()
+        release_cache(self.cache)
+
+    ## Add or replace an attribute (taking its share) of curves this caller
+    ## alone owns: just built, or a fresh share it is about to publish.
+    pub mutating func put_attribute(attribute: Attribute) -> !:
+        try self.attributes.put(attribute)
+
+    ## The attribute `name` on `domain`, if present.
+    pub func find(name: str, domain: Domain) -> const Attribute*?:
+        let index = self.attributes.find(name, (i64)(u8)domain)
+        if index < 0: return none
+        return self.attributes.entry((usize)index)
+
+    ## How curve `curve` evaluates, from the builtin attributes.
+    pub func settings(curve: usize) -> CurveSettings:
+        return read_settings(&self.attributes, curve, self.range(curve).1)
+
+    ## Curve `curve`'s custom knots (empty unless it has them).
+    pub func custom_knots(curve: usize) -> const f32[]:
+        let offsets = self.knot_offsets.view()
+        if offsets.length == 0: return self.knots.view()[..<0]
+        return self.knots.view()[(usize)offsets[curve]..<(usize)offsets[curve + 1]]
+
+## How one curve evaluates. Values out of range are clamped where they are
+## read, so any integer attribute a user writes is safe.
+pub struct CurveSettings:
+    pub let kind: CurveType
+    pub let cyclic: bool
+    pub let resolution: usize
+    ## NURBS order, at most the point count.
+    pub let order: usize
+    pub let knot_mode: KnotMode
+
+func read_settings(store: const AttributeStore*, curve: usize, points: usize) -> CurveSettings:
+    let kind = (i64)integer_of(store, "curve_type", curve, 0)
+    let cyclic = integer_of(store, "cyclic", curve, 0) != 0 and points > 1
+    let resolution = clamp_integer(integer_of(store, "resolution", curve, default_resolution), 1, most_resolution)
+    var order = clamp_integer(integer_of(store, "order", curve, default_order), 2, (i64)most_order)
+    if order > (i64)points: order = (i64)points
+    let mode = integer_of(store, "knot_mode", curve, 1)
+    var chosen = CurveType.poly
+    if kind == 1: chosen = CurveType.bezier
+    elif kind == 2: chosen = CurveType.nurbs
+    elif kind == 3: chosen = CurveType.catmull_rom
+    var knots = KnotMode.endpoint
+    if mode == 0: knots = KnotMode.uniform
+    elif mode == 2: knots = KnotMode.custom
+    return CurveSettings(chosen, cyclic, (usize)resolution, (usize)(order if order > 0 else 1), knots)
+
+func integer_of(store: const AttributeStore*, name: str, curve: usize, fallback: i64) -> i64:
+    let index = store.find(name, (i64)(u8)curve_domain)
+    if index < 0: return fallback
+    let value = store.entry((usize)index).number(curve, 0)
+    return (i64)value if math.is_finite(value) else fallback
+
+func clamp_integer(value: i64, low: i64, high: i64) -> i64:
+    return low if value < low else (high if value > high else value)
+
+## Every curve's custom knots, and where each curve's start (empty when
+## no curve has custom knots): the codec writes them as they are.
+pub func curves_knots(curves: const Curves*) -> const f32[]:
+    return curves.knots.view()
+
+pub func curves_knot_offsets(curves: const Curves*) -> const i32[]:
+    return curves.knot_offsets.view()
+
+## `curves` with `attributes` (taken, even on failure) in place of its own:
+## every column shared, the evaluation cache seeded.
+pub func curves_with_store(curves: const Curves*, attributes: AttributeStore) -> Curves*!:
+    return try curves_assembled(curves.positions.share(), curves.origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), attributes, curves.cache)
+
+## The origin positions (and handles) are measured from.
+pub func curves_origin(curves: const Curves*) -> Vector3:
+    return curves.origin
+
+## An f32 x3 point attribute (handles) as Float3s, when it is one.
+pub func float3_span(curves: const Curves*, name: str) -> const Float3[]?:
+    let entry = curves.find(name, Domain.point) else return none
+    if entry.kind != DataType.float32 or entry.width != 3 or entry.storage != Storage.array: return none
+    let bytes = entry.data.view()
+    return Float3[]((Float3*)bytes.data, bytes.length // 12)
+
+## The point weights `w`, when they are f32 per point.
+pub func weight_span(curves: const Curves*) -> const f32[]?:
+    let entry = curves.find("w", Domain.point) else return none
+    if entry.kind != DataType.float32 or entry.width != 1 or entry.storage != Storage.array: return none
+    return attribute_ops.typed[f32](entry.data.view())
+
+## Whether `name` is a builtin attribute on `domain`: builders write those
+## themselves instead of carrying them.
+pub func is_builtin(name: str, domain: Domain) -> bool:
+    if domain == curve_domain:
+        return name == "curve_type" or name == "cyclic" or name == "resolution" or name == "order" or name == "knot_mode"
+    if domain == Domain.point:
+        return name == "w" or name == "handle_l" or name == "handle_r"
+    return false
+
+# mark: Heap storage
+
+pub func curves_share(curves: const Curves*) -> Curves*!:
+    return try curves.shared_storage()
+
+pub func curves_dispose(curves: Curves*):
+    curves.close()
+    free(Curves[](curves, 1)) in memory.heap
+
+## A Curves owning these columns (taken even on failure), with a fresh
+## cache, or `seed`'s evaluation shape when its columns match.
+pub func curves_assembled(positions: Column[Float3], origin: Vector3, offsets: Column[i32], knots: Column[f32], knot_offsets: Column[i32], attributes: AttributeStore, seed: const CurveCache*? = none) -> Curves*!:
+    var owned_positions = positions
+    errdefer owned_positions.release()
+    var owned_offsets = offsets
+    errdefer owned_offsets.release()
+    var owned_knots = knots
+    errdefer owned_knots.release()
+    var owned_knot_offsets = knot_offsets
+    errdefer owned_knot_offsets.release()
+    var owned_attributes = attributes
+    errdefer owned_attributes.close()
+    let cache = try new_cache(seed)
+    errdefer release_cache(cache)
+    let storage = try alloc Curves[1] in memory.heap
+    storage[0] = Curves(owned_positions, origin, owned_offsets, owned_knots, owned_knot_offsets, owned_attributes, cache)
+    return storage.data
+
+## The origin a set of f64 points keeps: zero near the world origin, else
+## the bounds center, so f32 positions stay precise.
+pub func origin_for(points: const Vector3[]) -> Vector3:
+    if points.length == 0: return Vector3()
+    var low = points[0]
+    var high = points[0]
+    for point in points:
+        low = Vector3(math.min(low.x, point.x), math.min(low.y, point.y), math.min(low.z, point.z))
+        high = Vector3(math.max(high.x, point.x), math.max(high.y, point.y), math.max(high.z, point.z))
+    let size = high.subtract(low)
+    let span = math.max(size.x, math.max(size.y, size.z))
+    let reach = math.max(math.max(math.max(math.abs(low.x), math.abs(high.x)), math.max(math.abs(low.y), math.abs(high.y))), math.max(math.abs(low.z), math.abs(high.z)))
+    if reach > origin_limit or reach > span * 8.0: return low.add(size.multiply_scalar(0.5))
+    return Vector3()

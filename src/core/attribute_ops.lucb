@@ -1,0 +1,175 @@
+## Whole-column attribute operations for topology changes: remapping through
+## parent maps and joining two meshes' attributes. Each writes one new column
+## per attribute with typed loops, never per-element f64 conversions.
+import memory
+import core.parallel
+import errors
+from core.attributes import Attribute, DataType, Domain, Storage, is_integer, scalar_bytes
+from core.strings import TableBuilder, table_count, table_text
+
+## `source` over a new domain of `elements`, element i taking its value from
+## element `parents[i]` (-1: zero, or "" for text). An empty map keeps the
+## indexing. Single and detail attributes do not depend on elements and are
+## shared. Large columns are gathered in parallel.
+pub func remapped(source: const Attribute*, parents: const i32[], elements: usize) -> Attribute!:
+    if source.storage == Storage.single or source.domain == Domain.detail:
+        var shared = source.share()
+        shared.elements = elements
+        return shared
+    if parents.length == 0 and elements == source.elements:
+        return source.share()
+    if parents.length != elements: error(errors.invalid, "an attribute parent map needs one parent per element")
+    var result = try Attribute.create(source.name(), source.domain, source.kind, source.width, elements)
+    errdefer result.release()
+    result.flags = source.flags
+    result.role = source.role
+    result.table = source.table.share()
+    let input = source.data.view()
+    let output = result.data.span()
+    if source.kind == DataType.boolean:
+        var bits = BitWork(input, output, parents)
+        parallel.parallel_for((elements + 63) // 64, 4096, gather_bits, (void*)&bits)
+    elif source.kind == DataType.int8:
+        let values = typed_mut[i8](output)
+        let old = typed[i8](input)
+        for at in 0..<elements:
+            let parent = parents[at]
+            for component in 0..<source.width:
+                values[at * source.width + component] = old[(usize)parent * source.width + component] if parent >= 0 else 0
+    else:
+        let words = source.tuple_bytes() // 4
+        var work = GatherWork(typed[u32](input), typed_mut[u32](output), words, parents, 0xFFFFFFFF if source.kind == DataType.text else 0)
+        parallel.parallel_for(elements, 65536, gather_words, (void*)&work)
+    return result
+
+struct GatherWork:
+    let input: const u32[]
+    let output: u32[]
+    ## 32-bit words per tuple.
+    let words: usize
+    let parents: const i32[]
+    ## The value of each word of an element without a parent.
+    let fill: u32
+
+func gather_words(context: void*?, first: usize, end: usize):
+    let work = (GatherWork*)(context else return)
+    let words = work.words
+    for at in first..<end:
+        let parent = work.parents[at]
+        let target = at * words
+        if parent < 0:
+            for word in 0..<words: work.output[target + word] = work.fill
+        else:
+            let origin = (usize)parent * words
+            for word in 0..<words: work.output[target + word] = work.input[origin + word]
+
+struct BitWork:
+    let input: const u8[]
+    let output: u8[]
+    let parents: const i32[]
+
+## Output words first..<end: each takes the bits of its elements' parents.
+func gather_bits(context: void*?, first: usize, end: usize):
+    let work = (BitWork*)(context else return)
+    let output = typed_mut[u64](work.output)
+    let input = typed[u64](work.input)
+    for word in first..<end:
+        var value: u64 = 0
+        let stop = word * 64 + 64 if work.parents.length > word * 64 + 64 else work.parents.length
+        for at in word * 64..<stop:
+            let parent = work.parents[at]
+            if parent >= 0 and (input[(usize)parent >> 6] >> (u64)((usize)parent & 63)) & 1 != 0:
+                value = value | ((u64)1 << (u64)(at & 63))
+        output[word] = value
+
+## One input of a concatenation: an attribute (or none where that input
+## lacks it) and the elements that input contributes.
+pub struct Piece:
+    pub let attribute: const Attribute*?
+    pub let count: usize
+
+## The attribute of a concatenation: each piece's elements in turn, zero (or
+## "") where a piece lacks the attribute. The pieces must agree on width,
+## integer-ness and text; the widest scalar type wins. A detail attribute
+## keeps the first value; single storage expands when the pieces differ.
+pub func concatenated(pieces: const Piece[]) -> Attribute!:
+    var model: const Attribute*? = none
+    var kind = DataType.boolean
+    for piece in pieces:
+        let attribute = piece.attribute else continue
+        if let first = model:
+            if attribute.width != first.width or is_integer(attribute.kind) != is_integer(first.kind) or (attribute.kind == DataType.text) != (first.kind == DataType.text) or (attribute.kind == DataType.boolean) != (first.kind == DataType.boolean):
+                error(errors.invalid, "Merge inputs have conflicting attribute schemas")
+            if scalar_bytes(attribute.kind) > scalar_bytes(kind): kind = attribute.kind
+        else:
+            model = attribute
+            kind = attribute.kind
+    let first = model else error(errors.invalid, "a concatenation needs the attribute on some input")
+    if first.domain == Domain.detail:
+        return first.share()
+    var total: usize = 0
+    for piece in pieces: total += piece.count
+    var result = try Attribute.create(first.name(), first.domain, kind, first.width, total)
+    errdefer result.release()
+    result.flags = first.flags
+    result.role = first.role
+    let output = result.data.span()
+    memory.set(output, 0)
+    if kind == DataType.text:
+        try concatenate_text(&result, pieces)
+        return result
+    var at: usize = 0
+    for piece in pieces:
+        let base = at
+        at += piece.count
+        let attribute = piece.attribute else continue
+        if attribute.kind == kind and attribute.storage == Storage.array and kind != DataType.boolean:
+            let size = attribute.tuple_bytes()
+            memory.copy(output[base * size..<(base + piece.count) * size], attribute.data.view(), piece.count * size)
+            continue
+        for element in 0..<piece.count:
+            for component in 0..<first.width:
+                write_number(output, kind, (base + element) * first.width + component, attribute.number(element, component))
+    return result
+
+## The text of a concatenation: one table of every piece's strings, each
+## piece's indices mapped into it.
+func concatenate_text(result: Attribute*, pieces: const Piece[]) -> !:
+    var table = TableBuilder()
+    defer table.close()
+    let output = typed_mut[i32](result.data.span())
+    var at: usize = 0
+    for piece in pieces:
+        let base = at
+        at += piece.count
+        if piece.attribute == none:
+            for element in base..<base + piece.count: output[element] = -1
+            continue
+        let attribute = piece.attribute else continue
+        let strings = attribute.table.view()
+        let mapping = try alloc i32[table_count(strings)] in memory.heap
+        defer free(mapping) in memory.heap
+        for index in 0..<mapping.length: mapping[index] = try table.intern(table_text(strings, index))
+        let values = attribute.data.view()
+        for element in 0..<piece.count:
+            let index = memory.read[i32]((void*)&values[(0 if attribute.storage == Storage.single else element) * 4])
+            output[base + element] = mapping[(usize)index] if index >= 0 and (usize)index < mapping.length else -1
+    result.table = try table.finish()
+
+## Write `value` as element `index` of a column of `kind`.
+pub func write_number(bytes: u8[], kind: DataType, index: usize, value: f64):
+    match kind:
+        .boolean:
+            if value != 0.0: bytes[index // 8] = bytes[index // 8] | ((u8)1 << (u8)(index % 8))
+        .int8: bytes[index] = (u8)(i8)value
+        .int32, .text: memory.write[i32]((void*)&bytes[index * 4], (i32)value)
+        .int64: memory.write[i64]((void*)&bytes[index * 8], (i64)value)
+        .float32: memory.write[f32]((void*)&bytes[index * 4], (f32)value)
+        _: memory.write[f64]((void*)&bytes[index * 8], value)
+
+## Column bytes as scalars; columns are 64-byte aligned.
+pub func typed[T](bytes: const u8[]) -> const T[]:
+    return T[]((T*)bytes.data, bytes.length // sizeof(T))
+
+pub func typed_mut[T](bytes: u8[]) -> T[]:
+    return T[]((T*)bytes.data, bytes.length // sizeof(T))

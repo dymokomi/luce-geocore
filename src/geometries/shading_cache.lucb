@@ -1,0 +1,183 @@
+## Derived shading data of one geometry, computed on first use and shared by
+## its snapshots: smooth normals for meshes without an authored N (per point,
+## or per corner where a cusp splits a point; see smooth_normals.lucb) and the
+## points' discrete principal curvatures (curvature.lucb). A mesh made by
+## moving points keeps the previous geometry's cache as its source and redoes
+## only the normals around the moved points.
+import memory
+import sync
+from core.float3 import Float3
+from core.shared import Column
+from geometries.smooth_normals import Surface, point_normals, corner_normals, affected_points, refresh_points, refresh_corners
+from geometries.curvature import CurvatureShape, point_curvatures
+
+pub struct ShadingCache:
+    pub var owners: @usize = 1
+    var lock: sync.Mutex
+    var ready: @u32
+    var smooth: Column[Float3]
+    ## Whether `smooth` holds a normal per corner (true) or per point.
+    var per_corner: bool
+    ## Before this cache is built: the previous geometry's cache and the
+    ## points that moved since.
+    var source: ShadingCache*? = none
+    var moved: u32[]
+    ## k1 and k2 of every point.
+    var curvature_ready: @u32
+    var curvature: Column[f32]
+
+    ## A cache for a mesh whose points `moved` over `previous`'s geometry.
+    ## Only a built `previous` is kept; otherwise this one computes afresh.
+    pub static func after(previous: ShadingCache*, moved: const u32[]) -> ShadingCache*!:
+        let cache = try new ShadingCache() in memory.heap
+        if previous.ready.load(.acquire) == 0 or moved.length == 0:
+            return cache
+        let copy = alloc u32[moved.length] in memory.heap catch failure:
+            free(cache) in memory.heap
+            error(failure.code, failure.message)
+        memory.copy(copy, moved, moved.length)
+        discard(previous.owners.add(1, .relaxed))
+        cache.source = previous
+        cache.moved = copy
+        return cache
+
+    ## The smooth normals, per point or per corner (`corner_domain`).
+    ## Published once, immutable after.
+    pub mutating func get(shape: const Surface*) -> const Float3[]!:
+        if self.ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.ready.load(.acquire) == 0:
+                if let source = self.source:
+                    try self.update_from(source, shape)
+                else:
+                    try self.compute(shape)
+                self.ready.store(1, .release)
+                self.drop_source()
+        return self.smooth.view()
+
+    pub func is_ready() -> bool:
+        return self.ready.load(.acquire) != 0
+
+    ## Whether the built normals are per corner (else per point).
+    pub func corner_domain() -> bool:
+        return self.per_corner
+
+    ## The smooth column's id and the column it was updated from (0: none);
+    ## meaningful once built.
+    pub func id() -> u64:
+        return self.smooth.id()
+
+    pub func parent() -> u64:
+        return self.smooth.parent()
+
+    pub func changed() -> (usize, usize):
+        return self.smooth.changed()
+
+    ## Every normal from scratch: per point, or per corner where a cusp splits
+    ## some point's corners. Under the lock.
+    mutating func compute(shape: const Surface*) -> !:
+        let points = shape.positions.length
+        var point_column = try Column[Float3].allocate(points)
+        errdefer point_column.release()
+        let split = try alloc bool[points] in memory.heap
+        defer free(split) in memory.heap
+        if not point_normals(shape, point_column.span(), split):
+            self.smooth = point_column
+            self.per_corner = false
+            return
+        var corner_column = try Column[Float3].allocate(shape.corners.length)
+        corner_normals(shape, point_column.view(), split, corner_column.span())
+        point_column.release()
+        self.smooth = corner_column
+        self.per_corner = true
+
+    ## Copy `source`'s normals and redo those around the moved points. Per
+    ## point, a point that gained a cusp turns the storage per corner: the
+    ## other points had none, so their corners copy their point's normal.
+    ## Under the lock.
+    mutating func update_from(source: const ShadingCache*, shape: const Surface*) -> !:
+        let affected = try affected_points(shape, self.moved)
+        defer free(affected) in memory.heap
+        var column = try Column[Float3].allocate(source.smooth.count())
+        errdefer column.release()
+        memory.copy(column.span(), source.smooth.view(), column.count())
+        if source.per_corner:
+            refresh_corners(shape, affected, column.span())
+        else:
+            let points = shape.positions.length
+            let split = try alloc bool[points] in memory.heap
+            defer free(split) in memory.heap
+            memory.set(u8[]((u8*)split.data, points), 0)
+            if refresh_points(shape, affected, column.span(), split):
+                var corners = try Column[Float3].allocate(shape.corners.length)
+                corner_normals(shape, column.view(), split, corners.span())
+                column.release()
+                self.smooth = corners
+                self.per_corner = true
+                return
+        # Provenance: GPU copies of the old normals update in place, just the
+        # range around the moved points.
+        column.set_parent(source.smooth.id())
+        let range = changed_range(shape, affected, source.per_corner)
+        column.set_changed(range.0, range.1)
+        self.smooth = column
+        self.per_corner = source.per_corner
+
+    ## k1 and k2 of every point, computed on first use.
+    pub mutating func curvatures(shape: const CurvatureShape*) -> const f32[]!:
+        if self.curvature_ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.curvature_ready.load(.acquire) == 0:
+                var column = try Column[f32].allocate(shape.positions.length * 2)
+                point_curvatures(shape, column.span())
+                self.curvature = column
+                self.curvature_ready.store(1, .release)
+        return self.curvature.view()
+
+    pub func has_curvatures() -> bool:
+        return self.curvature_ready.load(.acquire) != 0
+
+    ## The curvatures once `has_curvatures`.
+    pub func built_curvatures() -> const f32[]:
+        return self.curvature.view()
+
+    pub func curvature_id() -> u64:
+        return self.curvature.id()
+
+    mutating func drop_source():
+        if let source = self.source:
+            self.source = none
+            release_shading(source)
+        if self.moved.length > 0:
+            free(self.moved) in memory.heap
+            var empty: u32[]
+            self.moved = empty
+
+    ## Called by the last owner, after every reader.
+    mutating func close():
+        self.smooth.release()
+        self.curvature.release()
+        self.drop_source()
+
+## Give up one owner of `cache`; the last frees it.
+pub func release_shading(cache: ShadingCache*):
+    if cache.owners.sub(1, .acq_rel) > 1: return
+    cache.close()
+    free(cache) in memory.heap
+
+## The elements `affected` points own: themselves, or their corners.
+func changed_range(shape: const Surface*, affected: const u32[], corners: bool) -> (usize, usize):
+    if affected.length == 0: return (0, 0)
+    if not corners: return ((usize)affected[0], (usize)affected[affected.length - 1] + 1)
+    var first = shape.corners.length
+    var end: usize = 0
+    for point in affected:
+        for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
+            let face = (usize)shape.incident_faces[at]
+            let start = (usize)shape.offsets[face]
+            let stop = (usize)shape.offsets[face + 1]
+            first = start if start < first else first
+            end = stop if stop > end else end
+    return (first, end)

@@ -1,0 +1,16 @@
+## Three f32 components: stored positions and normals. Geometry math runs in
+## f64 (Vector3); storage is f32, as in Blender, Houdini and USD, which halves
+## memory and uploads to the GPU as is. A mesh keeps an f64 origin so large
+## coordinates keep their precision near the model.
+from math.vector import Vector3
+
+pub struct Float3:
+    pub var x: f32
+    pub var y: f32
+    pub var z: f32
+
+    pub static func of(value: Vector3) -> Float3:
+        return Float3((f32)value.x, (f32)value.y, (f32)value.z)
+
+    pub func vector() -> Vector3:
+        return Vector3((f64)self.x, (f64)self.y, (f64)self.z)

@@ -2,10 +2,10 @@
 ## row of its group syntax table), our functions, domain conversion, and the
 ## selection encoder's round trip. A 4 by 4 grid: point z*5+x, face z*4+x.
 import interop
-import math
+import luce_std.math
 import memory
-from geocore import Mesh, MeshPrimitives, Selection, Groups
-from geocore_kernel import clear_group_cache
+from luce_geocore.geocore import Mesh, MeshPrimitives, Selection, Groups
+from luce_geocore.kernel import clear_group_cache
 
 struct Row:
     let expression: str

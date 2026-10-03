@@ -3,10 +3,10 @@
 ## touched to the same values a fresh mesh computes. Discrete curvature: a
 ## sphere of radius r has k1 = k2 = 1/r; a plane's interior is flat and its
 ## boundary reads zero.
-import math
+import luce_std.math
 import memory
-import geocore
-from geocore import Mesh, Vector3, MeshPrimitives, MeshNormals
+import luce_geocore.geocore
+from luce_geocore.geocore import Mesh, Vector3, MeshPrimitives, MeshNormals
 
 func same(a: Vector3, b: Vector3):
     assert(a.subtract(b).length() < 0.00001)

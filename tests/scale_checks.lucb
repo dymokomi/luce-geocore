@@ -1,8 +1,8 @@
 ## Polygon normals, projected ears and retained triangles use area units.
 ## Expressing the same valid face in smaller units must not collapse it.
-import math
-import geocore
-from geocore import Vector3, MeshBuilder, Mesh
+import luce_std.math
+import luce_geocore.geocore
+from luce_geocore.geocore import Vector3, MeshBuilder, Mesh
 
 pub func exercise() -> !:
     for scale in [1e-7,1e-3,1.0,1e2]:

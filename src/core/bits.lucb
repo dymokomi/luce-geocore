@@ -1,0 +1,176 @@
+## Bit sets over elements: groups, selections and group-expression results.
+## Bit i is bit i % 64 of word i / 64, which is also the byte layout of a
+## boolean attribute's column on little-endian targets, so a group attribute
+## is read as words without conversion. Bits past `count` are always zero.
+## Whole-set operations run a word at a time, in parallel for large sets.
+import memory
+import core.parallel
+from core.shared import Column
+
+## Words above this count split across the pool.
+let parallel_words: usize = 16384
+
+pub func word_count(count: usize) -> usize:
+    return (count + 63) // 64
+
+## A read-only view of a bit set; valid while its column is.
+pub struct Bits:
+    pub let words: const u64[]
+    pub let count: usize
+
+    ## A view of a column of `count` bits (a boolean attribute's bytes or a
+    ## Column[u64]); the column must hold whole words.
+    pub static func of_bytes(bytes: const u8[], count: usize) -> Bits:
+        return Bits(u64[]((u64*)bytes.data, word_count(count)), count)
+
+    pub func get(at: usize) -> bool:
+        return (self.words[at >> 6] >> (u64)(at & 63)) & 1 != 0
+
+    ## How many bits are set.
+    pub func population() -> usize:
+        var total: usize = 0
+        for word in self.words: total += (usize)popcount(word)
+        return total
+
+    pub func any() -> bool:
+        for word in self.words:
+            if word != 0: return true
+        return false
+
+    ## The set bits' indices, ascending, into `out` (which holds population()).
+    pub func indices(out: i64[]):
+        var at: usize = 0
+        for index in 0..<self.words.length:
+            var word = self.words[index]
+            while word != 0:
+                let bit = (usize)trailing_zeros(word)
+                out[at] = (i64)(index * 64 + bit)
+                at += 1
+                word = word & (word - 1)
+
+## Bits being built: a private column until `finish` publishes it.
+pub struct BitsBuilder:
+    pub var column: Column[u64]
+    pub var count: usize
+
+    pub static func zeros(count: usize) -> BitsBuilder!:
+        var column = try Column[u64].allocate(word_count(count))
+        let words = column.span()
+        if words.length > 0: memory.set(u8[]((u8*)words.data, words.length * 8), 0)
+        return BitsBuilder(column, count)
+
+    pub static func ones(count: usize) -> BitsBuilder!:
+        var built = try BitsBuilder.zeros(count)
+        built.set_range(0, count)
+        return built
+
+    ## A private copy of `bits`.
+    pub static func copy_of(bits: Bits) -> BitsBuilder!:
+        var column = try Column[u64].copy_of(bits.words)
+        return BitsBuilder(column, bits.count)
+
+    pub mutating func words() -> u64[]:
+        return self.column.span()
+
+    pub func view() -> Bits:
+        return Bits(self.column.view(), self.count)
+
+    pub mutating func set(at: usize):
+        let words = self.column.span()
+        words[at >> 6] = words[at >> 6] | ((u64)1 << (u64)(at & 63))
+
+    pub mutating func clear(at: usize):
+        let words = self.column.span()
+        words[at >> 6] = words[at >> 6] & ~((u64)1 << (u64)(at & 63))
+
+    ## Set bits first..<end, a word at a time.
+    pub mutating func set_range(first: usize, end: usize):
+        if end <= first: return
+        let words = self.column.span()
+        var at = first
+        while at < end and at & 63 != 0:
+            words[at >> 6] = words[at >> 6] | ((u64)1 << (u64)(at & 63))
+            at += 1
+        while at + 64 <= end:
+            words[at >> 6] = ~(u64)0
+            at += 64
+        while at < end:
+            words[at >> 6] = words[at >> 6] | ((u64)1 << (u64)(at & 63))
+            at += 1
+
+    ## Set every `step`-th bit of first..<end, keeping `keep` of each step
+    ## (Houdini's `a-b:keep,step`).
+    pub mutating func set_stride(first: usize, end: usize, keep: usize, step: usize):
+        if step <= 1 or keep >= step:
+            self.set_range(first, end)
+            return
+        var at = first
+        while at < end:
+            let stop = at + keep if end - at > keep else end
+            self.set_range(at, stop)
+            if end - at <= step: return
+            at += step
+
+    pub mutating func unite(other: Bits):
+        self.combine(other, 0)
+
+    pub mutating func subtract(other: Bits):
+        self.combine(other, 1)
+
+    pub mutating func intersect(other: Bits):
+        self.combine(other, 2)
+
+    ## This = this ∪ ¬other (`!pattern` in a group expression).
+    pub mutating func unite_complement(other: Bits):
+        self.combine(other, 3)
+
+    pub mutating func invert():
+        var nothing: u64[1]
+        self.combine(Bits(nothing[..<0], self.count), 4)
+
+    mutating func combine(other: Bits, operation: u8):
+        var work = CombineWork(self.column.span(), other.words, operation, self.count)
+        parallel.parallel_for(work.target.length, parallel_words, combine_words, (void*)&work)
+
+    ## Publish: the column becomes immutable. The builder keeps nothing.
+    pub mutating func finish() -> Column[u64]:
+        let column = self.column
+        var empty: Column[u64]
+        self.column = empty
+        return column
+
+    pub mutating func close():
+        self.column.release()
+
+struct CombineWork:
+    let target: u64[]
+    let other: const u64[]
+    let operation: u8
+    let count: usize
+
+func combine_words(context: void*?, first: usize, end: usize):
+    let work = (CombineWork*)(context else return)
+    let last = work.target.length - 1
+    let tail: u64 = ~(u64)0 if work.count & 63 == 0 else ((u64)1 << (u64)(work.count & 63)) - 1
+    for at in first..<end:
+        let value = work.other[at] if at < work.other.length else 0
+        var result = work.target[at]
+        match work.operation:
+            0: result = result | value
+            1: result = result & ~value
+            2: result = result & value
+            3: result = result | ~value
+            _: result = ~result
+        # Bits past the count stay zero.
+        work.target[at] = result & tail if at == last else result
+
+## The number of set bits in a word.
+pub func popcount(word: u64) -> u32:
+    var value = word -% ((word >> 1) & 0x5555555555555555)
+    value = (value & 0x3333333333333333) +% ((value >> 2) & 0x3333333333333333)
+    value = (value +% (value >> 4)) & 0x0F0F0F0F0F0F0F0F
+    return (u32)((value *% 0x0101010101010101) >> 56)
+
+## The index of the lowest set bit of a nonzero word.
+pub func trailing_zeros(word: u64) -> u32:
+    return popcount((word & -%word) -% 1)

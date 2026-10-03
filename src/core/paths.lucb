@@ -1,0 +1,83 @@
+## Path filters: the patterns Blast and the outliner select object paths with
+## ("Camera/Lens:1", "*/solid_37", "* ^*/solid_37"). A pattern matches a path
+## by glob (`*`, `?`) or as its parent ("Camera" matches "Camera/Lens:1");
+## `^pattern` removes what it matches; the last pattern that matches decides.
+## Patterns are separated by spaces or commas; quotes keep spaces in one.
+## No patterns match every path.
+from core.growing import Growing
+
+pub struct PathFilter:
+    let text: str
+    ## Each pattern's first byte and end in `text`, quotes removed.
+    var spans: Growing[usize]
+
+    ## A filter over `text`, which must outlive it.
+    pub static func parse(text: str) -> PathFilter!:
+        var filter = PathFilter(text, Growing[usize]())
+        errdefer filter.close()
+        let bytes = text.bytes
+        var at: usize = 0
+        while at < bytes.length:
+            let byte = bytes[at]
+            if byte == 32 or byte == 9 or byte == 10 or byte == 44:
+                at += 1
+                continue
+            if byte == 34 or byte == 39:
+                var end = at + 1
+                while end < bytes.length and bytes[end] != byte: end += 1
+                try filter.spans.push(at + 1)
+                try filter.spans.push(end)
+                at = end + 1
+                continue
+            var end = at
+            while end < bytes.length and bytes[end] != 32 and bytes[end] != 9 and bytes[end] != 10 and bytes[end] != 44: end += 1
+            try filter.spans.push(at)
+            try filter.spans.push(end)
+            at = end
+        return filter
+
+    pub func is_empty() -> bool:
+        return self.spans.count == 0
+
+    pub func matches(path: str) -> bool:
+        if self.spans.count == 0: return true
+        var matched = false
+        for index in 0..<self.spans.count // 2:
+            var pattern = (str)self.text.bytes[self.spans.items[index * 2]..<self.spans.items[index * 2 + 1]]
+            let exclude = pattern.length > 0 and pattern.bytes[0] == 94
+            if exclude: pattern = (str)pattern.bytes[1..]
+            if glob(pattern, path) or parent_of(pattern, path): matched = not exclude
+        return matched
+
+    pub mutating func close():
+        self.spans.close()
+
+## Whether `path` lies under `parent` ("a/b" under "a").
+func parent_of(parent: str, path: str) -> bool:
+    return path.length > parent.length and path.bytes[parent.length] == 47 and (str)path.bytes[..<parent.length] == parent
+
+## Glob match of `*` (any run) and `?` (one byte), linear with backtracking
+## only to the latest `*`.
+pub func glob(pattern: str, value: str) -> bool:
+    let p = pattern.bytes
+    let v = value.bytes
+    var at: usize = 0
+    var position: usize = 0
+    var star: usize = p.length
+    var retry: usize = 0
+    while position < v.length:
+        if at < p.length and (p[at] == 63 or p[at] == v[position]):
+            at += 1
+            position += 1
+        elif at < p.length and p[at] == 42:
+            star = at
+            at += 1
+            retry = position
+        elif star < p.length:
+            retry += 1
+            position = retry
+            at = star + 1
+        else:
+            return false
+    while at < p.length and p[at] == 42: at += 1
+    return at == p.length

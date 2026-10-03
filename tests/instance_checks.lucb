@@ -2,15 +2,15 @@
 ## share keeps the rows (the same column id) and shares each prototype; so
 ## do path filters; saving writes each prototype once. Row attributes (a
 ## `path` per row) survive shares, filters, saves, appends and joins.
-import geocore
-import geocore_kernel
+import luce_geocore.geocore
+import luce_geocore.kernel as geocore_kernel
 import interop
-import math
+import luce_std.math
 import memory
 from io import path
-from geocore import Vector3, Mesh, GeometrySet
-from geocore_kernel import Instances, Placement, Attribute, Domain, TableBuilder, empty_set, dispose_set, adopt_set, instances_component, new_instances, save_geometry, load_geometry
-from geocore_growing import Growing
+from luce_geocore.geocore import Vector3, Mesh, GeometrySet
+from luce_geocore.kernel import Instances, Placement, Attribute, Domain, TableBuilder, empty_set, dispose_set, adopt_set, instances_component, new_instances, save_geometry, load_geometry
+from luce_geocore.core.growing import Growing
 
 pub func exercise() -> !:
     let cube = try Mesh.cube(1.0)

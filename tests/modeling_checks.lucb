@@ -5,9 +5,9 @@
 ## face z*4+x) with uv = (x, z), so a correct corner blend keeps every
 ## corner's uv equal to its point's x and z.
 import interop
-import math
-from geocore import Mesh, MeshPrimitives, AttributeKernels, Verbs, VerbResult, Vector3
-from geocore_kernel import clear_group_cache
+import luce_std.math
+from luce_geocore.geocore import Mesh, MeshPrimitives, AttributeKernels, Verbs, VerbResult, Vector3
+from luce_geocore.kernel import clear_group_cache
 
 pub func exercise() -> !:
     defer clear_group_cache()

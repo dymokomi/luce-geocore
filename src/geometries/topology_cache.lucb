@@ -1,0 +1,292 @@
+## What connectivity alone determines, computed on first use and shared by
+## every mesh with the same face offsets and corner points: snapshots, worker
+## transfers and position edits. Each item is published once under the lock
+## and immutable after, so readers on any thread need no lock once it is
+## ready. A mesh that never asks for edges never pays for them.
+import memory
+import sync
+import core.parallel
+from core.shared import Column
+from geometries.topology_hash import topology_hash
+
+pub struct TopologyCache:
+    pub var users: @usize = 1
+    var lock: sync.Mutex
+    var faces_ready: @u32
+    var corner_faces: Column[i32]
+    var edges_ready: @u32
+    var edge_points: Column[i32]
+    var corner_edges: Column[i32]
+    var incidence_ready: @u32
+    var point_face_offsets: Column[i32]
+    var point_faces: Column[i32]
+    var hash_ready: @u32
+    var hash: u64
+    ## Each edge's corners (one or two on a manifold), and each point's edges,
+    ## as offsets into one array: selection conversion, loops and rings.
+    var edge_corners_ready: @u32
+    var edge_corner_offsets: Column[i32]
+    var edge_corner_list: Column[i32]
+    var point_edges_ready: @u32
+    var point_edge_offsets: Column[i32]
+    var point_edge_list: Column[i32]
+    ## What another module derives from this connectivity (subdivision's
+    ## plans and display meshes), made by it on first use under its own
+    ## lock and disposed with the cache.
+    var extension_lock: sync.Mutex
+    var extension: void*? = none
+    var extension_dispose: func(void*) -> unit = ignore_extension
+
+    ## The face of every corner.
+    pub mutating func faces(offsets: const i32[], corners: usize) -> const i32[]!:
+        if self.faces_ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.faces_ready.load(.acquire) == 0:
+                var column = try Column[i32].allocate(corners)
+                var work = FaceWork(offsets, column.span())
+                parallel.parallel_for(offsets.length - 1, 4096, fill_faces, (void*)&work)
+                self.corner_faces = column
+                self.faces_ready.store(1, .release)
+        return self.corner_faces.view()
+
+    ## Two points per edge, and the edge of every corner (its edge to the next
+    ## corner). Edges are numbered by their first corner, so ids depend on
+    ## connectivity alone.
+    pub mutating func edges(offsets: const i32[], corners: const i32[], points: usize) -> (const i32[], const i32[])!:
+        if self.edges_ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.edges_ready.load(.acquire) == 0:
+                try self.build_edges(offsets, corners, points)
+                self.edges_ready.store(1, .release)
+        return (self.edge_points.view(), self.corner_edges.view())
+
+    ## For every point, the faces using it (a face once per corner at it), as
+    ## offsets into one array.
+    pub mutating func incidence(offsets: const i32[], corners: const i32[], points: usize) -> (const i32[], const i32[])!:
+        if self.incidence_ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.incidence_ready.load(.acquire) == 0:
+                try self.build_incidence(offsets, corners, points)
+                self.incidence_ready.store(1, .release)
+        return (self.point_face_offsets.view(), self.point_faces.view())
+
+    ## For every edge, the corners whose outgoing edge it is. Needs `edges`.
+    pub mutating func edge_corners(corner_edges: const i32[], edges: usize) -> (const i32[], const i32[])!:
+        if self.edge_corners_ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.edge_corners_ready.load(.acquire) == 0:
+                try bucketed(corner_edges, edges, &self.edge_corner_offsets, &self.edge_corner_list, 1)
+                self.edge_corners_ready.store(1, .release)
+        return (self.edge_corner_offsets.view(), self.edge_corner_list.view())
+
+    ## For every point, the edges ending at it. Needs `edges`.
+    pub mutating func point_edges(edge_points: const i32[], points: usize) -> (const i32[], const i32[])!:
+        if self.point_edges_ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.point_edges_ready.load(.acquire) == 0:
+                try bucketed(edge_points, points, &self.point_edge_offsets, &self.point_edge_list, 2)
+                self.point_edges_ready.store(1, .release)
+        return (self.point_edge_offsets.view(), self.point_edge_list.view())
+
+    pub mutating func connectivity_hash(offsets: const i32[], corners: const i32[], points: usize) -> u64:
+        if self.hash_ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.hash_ready.load(.acquire) == 0:
+                self.hash = topology_hash(points, offsets, corners)
+                self.hash_ready.store(1, .release)
+        return self.hash
+
+    ## Group each corner's edge by its low point (a counting sort in corner
+    ## order), find each group's first corner per high point in parallel, and
+    ## number the first corners in corner order.
+    mutating func build_edges(offsets: const i32[], corners: const i32[], points: usize) -> !:
+        let count = corners.length
+        let high = try alloc i32[count] in memory.heap
+        defer free(high) in memory.heap
+        let low = try alloc i32[count] in memory.heap
+        defer free(low) in memory.heap
+        var ends = EndWork(offsets, corners, low, high)
+        parallel.parallel_for(offsets.length - 1, 4096, fill_ends, (void*)&ends)
+        let starts = try alloc i32[points + 1] in memory.heap
+        defer free(starts) in memory.heap
+        for at in 0..<starts.length: starts[at] = 0
+        for corner in 0..<count: starts[(usize)low[corner] + 1] += 1
+        for point in 0..<points: starts[point + 1] += starts[point]
+        let bucket = try alloc i32[count] in memory.heap
+        defer free(bucket) in memory.heap
+        let cursor = try alloc i32[points] in memory.heap
+        defer free(cursor) in memory.heap
+        memory.copy(cursor, starts[..<points], points)
+        for corner in 0..<count:
+            let point = (usize)low[corner]
+            bucket[(usize)cursor[point]] = (i32)corner
+            cursor[point] += 1
+        # Reuse `low` for each corner's first corner of its edge.
+        var groups = GroupWork(starts, bucket, high, low)
+        parallel.parallel_for(points, 4096, first_corners, (void*)&groups)
+        let ids = try alloc i32[count] in memory.heap
+        defer free(ids) in memory.heap
+        var next: i32 = 0
+        for corner in 0..<count:
+            if low[corner] == (i32)corner:
+                ids[corner] = next
+                next += 1
+        var edge_points = try Column[i32].allocate((usize)next * 2)
+        errdefer edge_points.release()
+        var corner_edges = try Column[i32].allocate(count)
+        var fill = EdgeWork(offsets, corners, low, ids, edge_points.span(), corner_edges.span())
+        parallel.parallel_for(offsets.length - 1, 4096, fill_edges, (void*)&fill)
+        self.edge_points = edge_points
+        self.corner_edges = corner_edges
+
+    mutating func build_incidence(offsets: const i32[], corners: const i32[], points: usize) -> !:
+        var starts = try Column[i32].allocate(points + 1)
+        errdefer starts.release()
+        let first = starts.span()
+        for at in 0..<first.length: first[at] = 0
+        for corner in corners: first[(usize)corner + 1] += 1
+        for point in 0..<points: first[point + 1] += first[point]
+        var faces = try Column[i32].allocate(corners.length)
+        errdefer faces.release()
+        let cursor = try alloc i32[points] in memory.heap
+        defer free(cursor) in memory.heap
+        memory.copy(cursor, first[..<points], points)
+        let output = faces.span()
+        for face in 0..<offsets.length - 1:
+            for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
+                let point = (usize)corners[corner]
+                output[(usize)cursor[point]] = (i32)face
+                cursor[point] += 1
+        self.point_face_offsets = starts
+        self.point_faces = faces
+
+    ## The extension, made by `make` on first use; `dispose` frees it with
+    ## the cache. One module owns the slot.
+    pub mutating func extension_of(dispose: func(void*) -> unit, make: func() -> void*!) -> void*!:
+        self.extension_lock.lock()
+        defer self.extension_lock.unlock()
+        if let made = self.extension: return made
+        let made = try make()
+        self.extension = made
+        self.extension_dispose = dispose
+        return made
+
+    ## Called by the last owner, after every reader.
+    pub mutating func close():
+        if let made = self.extension:
+            let dispose = self.extension_dispose
+            dispose(made)
+            self.extension = none
+        self.corner_faces.release()
+        self.edge_points.release()
+        self.corner_edges.release()
+        self.point_face_offsets.release()
+        self.point_faces.release()
+        self.edge_corner_offsets.release()
+        self.edge_corner_list.release()
+        self.point_edge_offsets.release()
+        self.point_edge_list.release()
+
+func ignore_extension(context: void*):
+    discard(context)
+
+## A counting sort: element i of `keys` goes to bucket keys[i], and the
+## bucket lists `i / per` (so with per = 2, edge endpoints list their edge).
+func bucketed(keys: const i32[], buckets: usize, offsets: Column[i32]*, list: Column[i32]*, per: usize) -> !:
+    var starts = try Column[i32].allocate(buckets + 1)
+    errdefer starts.release()
+    let first = starts.span()
+    for at in 0..<first.length: first[at] = 0
+    for key in keys: first[(usize)key + 1] += 1
+    for at in 0..<buckets: first[at + 1] += first[at]
+    var items = try Column[i32].allocate(keys.length)
+    errdefer items.release()
+    let cursor = try alloc i32[buckets] in memory.heap
+    defer free(cursor) in memory.heap
+    memory.copy(cursor, first[..<buckets], buckets)
+    let output = items.span()
+    for at in 0..<keys.length:
+        let key = (usize)keys[at]
+        output[(usize)cursor[key]] = (i32)(at // per)
+        cursor[key] += 1
+    *offsets = starts
+    *list = items
+
+struct FaceWork:
+    let offsets: const i32[]
+    let faces: i32[]
+
+func fill_faces(context: void*?, first: usize, end: usize):
+    let work = (FaceWork*)(context else return)
+    for face in first..<end:
+        for corner in (usize)work.offsets[face]..<(usize)work.offsets[face + 1]:
+            work.faces[corner] = (i32)face
+
+struct EndWork:
+    let offsets: const i32[]
+    let corners: const i32[]
+    let low: i32[]
+    let high: i32[]
+
+func fill_ends(context: void*?, first: usize, end: usize):
+    let work = (EndWork*)(context else return)
+    for face in first..<end:
+        let start = (usize)work.offsets[face]
+        let stop = (usize)work.offsets[face + 1]
+        for corner in start..<stop:
+            let a = work.corners[corner]
+            let b = work.corners[corner + 1 if corner + 1 < stop else start]
+            work.low[corner] = a if a < b else b
+            work.high[corner] = b if a < b else a
+
+struct GroupWork:
+    let starts: const i32[]
+    let bucket: const i32[]
+    let high: const i32[]
+    let first: i32[]
+
+## Within one low point's corners (in corner order), a corner's edge starts
+## at the earliest corner with the same high point.
+func first_corners(context: void*?, first: usize, end: usize):
+    let work = (GroupWork*)(context else return)
+    for point in first..<end:
+        let start = (usize)work.starts[point]
+        let stop = (usize)work.starts[point + 1]
+        for at in start..<stop:
+            let corner = (usize)work.bucket[at]
+            var owner = corner
+            for earlier in start..<at:
+                let other = (usize)work.bucket[earlier]
+                if work.high[other] == work.high[corner]:
+                    owner = other
+                    break
+            work.first[corner] = (i32)owner
+
+struct EdgeWork:
+    let offsets: const i32[]
+    let corners: const i32[]
+    let first: const i32[]
+    let ids: const i32[]
+    let edge_points: i32[]
+    let corner_edges: i32[]
+
+func fill_edges(context: void*?, first: usize, end: usize):
+    let work = (EdgeWork*)(context else return)
+    for face in first..<end:
+        let start = (usize)work.offsets[face]
+        let stop = (usize)work.offsets[face + 1]
+        for corner in start..<stop:
+            let owner = (usize)work.first[corner]
+            let edge = work.ids[owner]
+            work.corner_edges[corner] = edge
+            if owner == corner:
+                let a = work.corners[corner]
+                let b = work.corners[corner + 1 if corner + 1 < stop else start]
+                work.edge_points[(usize)edge * 2] = a if a < b else b
+                work.edge_points[(usize)edge * 2 + 1] = b if a < b else a

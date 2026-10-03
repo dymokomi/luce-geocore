@@ -1,0 +1,341 @@
+## Immutable indexed polygon topology, shared by procedural geometry consumers.
+## Operators return new meshes; input snapshots never change. No editor state.
+##
+## Storage is structure-of-arrays: f32 positions relative to an f64 origin,
+## i32 face offsets and corner points, f32 face normals and i32 display
+## triangles, each a shared column. What connectivity alone determines (the
+## face of each corner, edges, point-face incidence, the connectivity hash) is
+## a lazy cache shared by every mesh with the same topology; the spatial index
+## is lazy per geometry and refits after a Move. Construction validates and
+## computes normals and triangles in parallel.
+##
+## A precise mesh also keeps its f64 points. B-rep tessellation builds its
+## chart meshes this way, since trims resolve features far below f32 spacing;
+## `point`, normals, triangulation and derived meshes then use the f64 points,
+## while display and spatial queries use the f32 positions as always.
+import interop
+import luce_std.math
+import memory
+import errors
+import core.parallel
+from core.geometry import Vertex, Bounds
+from core.polygon_topology import PolygonTopology
+from core.shared import Column
+from core.float3 import Float3
+from core.attributes import Attribute, AttributeStore, Domain, DataType, Storage, Role
+from core.attribute_ops import Piece
+import core.attribute_ops
+from core.bits import Bits, BitsBuilder, trailing_zeros
+from core.strings import TableBuilder, table_count, table_text
+from core.growing import Growing
+from core.idset import IdSet
+from core.paths import PathFilter
+from math.vector import Vector3
+from math.matrix import Matrix4
+from geometries.query_cache import QueryCache, release_query
+from geometries.shading_cache import ShadingCache, release_shading
+from geometries.smooth_normals import Surface
+from geometries.normal_refresh import refresh_normals
+from geometries.curvature import CurvatureShape
+from geometries.triangle_index import TriangleIndex
+from geometries.topology_cache import TopologyCache
+from geometries.polygon_triangulation import triangulate, unit_or_zero, is_degenerate
+import geometries.display_triangulation as display_triangles
+import geometries.position_edit
+import geometries.face_scratch
+
+## Coordinates beyond this, or beyond `origin_ratio` times the model's
+## size, keep an origin at the bounds center, so f32 positions stay precise
+## relative to the model.
+let origin_limit: f64 = 4096.0
+let origin_ratio: f64 = 8.0
+
+## The geometry core's polygon mesh. It is not a per-vertex `Geometry`:
+## renderers draw its arrays (luce-3d wraps it for the per-vertex path).
+pub struct Mesh: PolygonTopology:
+    var positions: Column[Float3]
+    ## Added to every position; zero for models near the world origin.
+    var origin: Vector3
+    ## faces + 1 entries: face f's corners are offsets[f]..<offsets[f + 1].
+    var offsets: Column[i32]
+    var corners: Column[i32]
+    var normals: Column[Float3]
+    ## Display triangles grouped by face, 3*(size-2) corner indices each.
+    var triangles: Column[i32]
+    var extent: Bounds
+    ## Absolute f64 points of a precise mesh; empty otherwise.
+    var precise: Column[Vector3]
+    var attributes: AttributeStore
+    var topology: TopologyCache*
+    var queries: QueryCache*
+    ## Smooth shading normals, lazy and shared like `queries`.
+    var shading: ShadingCache*
+
+    ## Optional display indices are grouped by polygon, 3*(size-2) entries each.
+    ## A wholly -1 face requests ordinary triangulation. Explicit triangles are
+    ## validated and affect rendering/picking, never the polygon edge topology.
+    pub func init(points: const Vector3[], sizes: const i64[], corners: const i64[], display: const i64[]? = none, precise: bool = false) -> !:
+        if points.length > 8388608 or sizes.length > 8388608 or corners.length > 33554432:
+            error(errors.limit, "polygon mesh exceeds 8M points/faces or 32M corners")
+        var used: usize = 0
+        var triangle_count: usize = 0
+        for size in sizes:
+            if size < 3:
+                error(errors.invalid, "a polygon needs at least 3 corners")
+            used += (usize)size
+            triangle_count += (usize)(size - 2)
+        if used != corners.length or triangle_count > 33554432:
+            error(errors.invalid, "polygon sizes must describe every corner")
+        var supplied: const i64[]
+        if let given = display:
+            if given.length != triangle_count * 3: error(errors.invalid, "display indices must cover every polygon")
+            supplied = given
+        let extent = try input_bounds(points)
+        let size = extent.maximum.subtract(extent.minimum)
+        let reach = math.max(math.max(math.abs(extent.minimum.x), math.abs(extent.maximum.x)), math.max(math.max(math.abs(extent.minimum.y), math.abs(extent.maximum.y)), math.max(math.abs(extent.minimum.z), math.abs(extent.maximum.z))))
+        let span = math.max(size.x, math.max(size.y, size.z))
+        let origin = extent.minimum.add(size.multiply_scalar(0.5)) if reach > origin_limit or reach > span * origin_ratio else Vector3()
+        var offset_column = try Column[i32].allocate(sizes.length + 1)
+        errdefer offset_column.release()
+        let offsets = offset_column.span()
+        var start: i32 = 0
+        for face in 0..<sizes.length:
+            offsets[face] = start
+            start += (i32)sizes[face]
+        offsets[sizes.length] = start
+        var corner_column = try Column[i32].allocate(corners.length)
+        errdefer corner_column.release()
+        var position_column = try Column[Float3].allocate(points.length)
+        errdefer position_column.release()
+        var normal_column = try Column[Float3].allocate(sizes.length)
+        errdefer normal_column.release()
+        var triangle_column = try Column[i32].allocate(triangle_count * 3)
+        errdefer triangle_column.release()
+        var exact: Column[Vector3]
+        if precise: exact = try Column[Vector3].copy_of(points)
+        errdefer exact.release()
+        var copy = CopyWork(points, origin, position_column.span(), corners, corner_column.span())
+        copy.invalid.store(0, .relaxed)
+        parallel.parallel_for(points.length if points.length > corners.length else corners.length, 65536, copy_input, (void*)&copy)
+        if copy.invalid.load(.acquire) != 0:
+            error(errors.invalid, "polygon references a missing point")
+        var work = BuildWork(position_column.view(), exact.view(), corners, offsets, supplied, display != none, normal_column.span(), triangle_column.span())
+        parallel.parallel_for(sizes.length, 1024, build_faces, (void*)&work)
+        if work.failed.load(.acquire) != 0:
+            # A serial pass reports the first failing face's own error.
+            for face in 0..<sizes.length: try build_face(&work, face)
+            error(errors.invalid, "polygon construction failed")
+        let topology = try new TopologyCache() in memory.heap
+        errdefer free(topology) in memory.heap
+        let queries = try new QueryCache() in memory.heap
+        errdefer free(queries) in memory.heap
+        let shading = try new ShadingCache() in memory.heap
+        self.positions = position_column
+        self.origin = origin
+        self.offsets = offset_column
+        self.corners = corner_column
+        self.normals = normal_column
+        self.triangles = triangle_column
+        self.extent = extent
+        self.precise = exact
+        self.attributes = AttributeStore()
+        self.topology = topology
+        self.queries = queries
+        self.shading = shading
+
+    ## This mesh with every column shared. Its `attributes`, `topology`,
+    ## `queries` and `shading` still name this mesh's: the caller replaces or
+    ## shares them.
+    func shared_columns() -> Mesh:
+        var copy = self
+        copy.positions = self.positions.share()
+        copy.offsets = self.offsets.share()
+        copy.corners = self.corners.share()
+        copy.normals = self.normals.share()
+        copy.triangles = self.triangles.share()
+        copy.precise = self.precise.share()
+        return copy
+
+    ## A heap snapshot sharing every column, cache and attribute: O(columns).
+    func snapshot_storage() -> Mesh*!:
+        var attributes = try self.attributes.shared()
+        errdefer attributes.close()
+        let storage = try alloc Mesh[1] in memory.heap
+        storage[0] = self.shared_columns()
+        storage[0].attributes = attributes
+        discard(self.topology.users.add(1, .relaxed))
+        discard(self.queries.owners.add(1, .relaxed))
+        discard(self.shading.owners.add(1, .relaxed))
+        return storage.data
+
+    func snapshot() -> interop.Reference[Mesh]!:
+        return try adopt_storage(try self.snapshot_storage())
+
+    ## This mesh without its f64 points: what B-rep tessellation publishes
+    ## once its precise work is done. Shares everything else; O(columns).
+    pub func without_precision() -> interop.Reference[Mesh]!:
+        let storage = try self.snapshot_storage()
+        storage.precise.release()
+        return try adopt_storage(storage)
+
+    ## Native owner for a worker mailbox: it shares the immutable columns and
+    ## caches through atomic counts. No ARC owners, callbacks or borrowed spans
+    ## cross threads; the receiver adopts it on its thread.
+    func detached_copy() -> Mesh*!:
+        return try self.snapshot_storage()
+
+    pub mutating func close():
+        self.attributes.close()
+        self.positions.release()
+        self.offsets.release()
+        self.corners.release()
+        self.normals.release()
+        self.triangles.release()
+        self.precise.release()
+        release_query(self.queries)
+        release_shading(self.shading)
+        if self.topology.users.sub(1, .acq_rel) == 1:
+            self.topology.close()
+            free(self.topology) in memory.heap
+
+pub let mesh_type: interop.Type[Mesh] = interop.Type[Mesh]("Mesh", Mesh.close, closeable = true)
+
+## Base-only transfer API; receiver exclusively owns the returned heap storage.
+pub func detached_mesh(source: interop.Reference[Mesh]) -> Mesh*!:
+    return try source.value().detached_copy()
+
+func dispose_detached(mesh: Mesh*):
+    mesh.close()
+    free(mesh) in memory.heap
+
+func make_mesh(points: const Vector3[], sizes: const i64[], corners: const i64[], display: const i64[]? = none, precise: bool = false) -> interop.Reference[Mesh]!:
+    return try interop.Reference[Mesh].adopt(new Mesh(points, sizes, corners, display, precise) in memory.heap, mesh_type, memory.heap)
+
+## Adoption disposes the storage itself when it fails.
+func adopt_storage(storage: Mesh*) -> interop.Reference[Mesh]!:
+    return try interop.Reference[Mesh].adopt(storage, mesh_type, memory.heap)
+
+func checked(index: i64, length: usize) -> !:
+    if index < 0 or (usize)index >= length:
+        error(errors.invalid, "mesh element index is out of range")
+
+func validate_map(parents: const i64[], count: usize, old_count: usize) -> !:
+    if parents.length == 0:
+        if count != 0 and count != old_count:
+            error(errors.invalid, "changed topology requires explicit attribute parent maps")
+        return
+    if parents.length != count:
+        error(errors.invalid, "attribute parent map has the wrong length")
+    for parent in parents:
+        if parent < -1 or (parent >= 0 and (usize)parent >= old_count):
+            error(errors.invalid, "attribute parent index out of range")
+
+## Finite and bounded to 1e6.
+func input_bounds(points: const Vector3[]) -> Bounds!:
+    var minimum = Vector3()
+    var maximum = Vector3()
+    for index in 0..<points.length:
+        let point = points[index]
+        if not point.is_finite() or math.abs(point.x) > 1000000.0 or math.abs(point.y) > 1000000.0 or math.abs(point.z) > 1000000.0:
+            error(errors.invalid, "mesh points must be finite and bounded to 1e6")
+        if index == 0:
+            minimum = point
+            maximum = point
+        else:
+            minimum = Vector3(math.min(minimum.x, point.x), math.min(minimum.y, point.y), math.min(minimum.z, point.z))
+            maximum = Vector3(math.max(maximum.x, point.x), math.max(maximum.y, point.y), math.max(maximum.z, point.z))
+    return Bounds(minimum, maximum)
+
+# mark: Parallel construction =================================================================
+
+struct CopyWork:
+    let points: const Vector3[]
+    let origin: Vector3
+    let positions: Float3[]
+    let corners: const i64[]
+    let output: i32[]
+    var invalid: @u32
+
+func copy_input(context: void*?, first: usize, end: usize):
+    let work = (CopyWork*)(context else return)
+    for at in first..<end:
+        if at < work.points.length:
+            work.positions[at] = Float3.of(work.points[at].subtract(work.origin))
+        if at < work.corners.length:
+            let corner = work.corners[at]
+            if corner < 0 or (usize)corner >= work.points.length:
+                work.invalid.store(1, .relaxed)
+            else:
+                work.output[at] = (i32)corner
+
+struct BuildWork:
+    let positions: const Float3[]
+    ## A precise mesh's f64 points; empty otherwise.
+    let exact: const Vector3[]
+    let corners: const i64[]
+    let offsets: const i32[]
+    let display: const i64[]
+    let has_display: bool
+    let normals: Float3[]
+    let triangles: i32[]
+    ## Whether any face failed.
+    var failed: @u32
+
+func build_faces(context: void*?, first: usize, end: usize):
+    let work = (BuildWork*)(context else return)
+    for face in first..<end:
+        build_face(work, face) catch failure:
+            discard(failure)
+            work.failed.store(1, .relaxed)
+            continue
+
+## Validate one face, compute its area normal, and write its display
+## triangles (supplied, or ear clipped in its plane). Everything reads the
+## stored points (f32, or f64 when precise), so a mesh rebuilt from another's
+## points gets the same normals and triangles.
+func build_face(work: BuildWork*, face: usize) -> !:
+    let start = (usize)work.offsets[face]
+    let count = (usize)work.offsets[face + 1] - start
+    # Small faces work on the stack, larger ones in heap scratch.
+    var point_stack: Vector3[256] = ---
+    var index_stack: i64[256] = ---
+    let points = try face_scratch.take[Vector3](point_stack, count, count)
+    defer face_scratch.release[Vector3](point_stack, points)
+    let indices = try face_scratch.take[i64](index_stack, count, count)
+    defer face_scratch.release[i64](index_stack, indices)
+    for at in 0..<count:
+        let a = work.corners[start + at]
+        if a == work.corners[start + (at + 1) % count]:
+            error(errors.invalid, "polygon has a collapsed edge")
+        points[at] = work.exact[(usize)a] if work.exact.length > 0 else work.positions[(usize)a].vector()
+        indices[at] = (i64)at
+    var normal = Vector3()
+    var extent2: f64 = 0.0
+    let origin = points[0]
+    for at in 0..<count:
+        let delta = points[at].subtract(origin)
+        extent2 = math.max(extent2, delta.dot(delta))
+        normal = normal.add(delta.cross(points[(at + 1) % count].subtract(origin)))
+    # A face without an area stays, with a zero normal (unit_or_zero).
+    let face_unit = unit_or_zero(normal, extent2)
+    work.normals[face] = Float3.of(face_unit)
+    let first = (start - face * 2) * 3
+    let size = (count - 2) * 3
+    var output_stack: i64[762] = ---
+    let output = try face_scratch.take[i64](output_stack, count, size)
+    defer face_scratch.release[i64](output_stack, output)
+    var provided = false
+    if work.has_display:
+        let part = work.display[first..<first + size]
+        if part[0] >= 0:
+            for at in 0..<size:
+                if part[at] < (i64)start or part[at] >= (i64)(start + count): error(errors.invalid, "display triangle leaves its polygon")
+                output[at] = part[at] - (i64)start
+            # A face without an area has no triangles with one to check.
+            if not is_degenerate(face_unit): try display_triangles.validate(points, indices, 0, count, output)
+            provided = true
+        else:
+            for index in part:
+                if index != -1: error(errors.invalid, "partial display triangulation is not valid")
+    if not provided: try triangulate(points, indices, 0, count, face_unit, output)
+    for at in 0..<size: work.triangles[first + at] = (i32)((i64)start + output[at])

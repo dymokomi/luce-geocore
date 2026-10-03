@@ -1,0 +1,78 @@
+## One lazy spatial index per mesh geometry, shared by snapshots on any
+## thread. Concurrent borrowed queries may initialize it; the owner count is
+## atomic. A mesh made by moving points keeps the previous geometry's cache
+## as its source and refits that tree instead of building one: its faces and
+## triangle slots are the same, even where a folded face was re-triangulated,
+## so the old leaves still partition its triangles.
+import sync
+import memory
+from core.float3 import Float3
+from geometries.triangle_index import TriangleIndex
+
+pub struct QueryCache:
+    pub var owners: @usize = 1
+    var lock: sync.Mutex
+    var ready: @u32
+    var index: TriangleIndex*? = none
+    ## The cache of the same faces before the positions moved, held until
+    ## this one is built.
+    var source: QueryCache*? = none
+
+    ## A cache for a mesh whose positions moved over the faces and triangle
+    ## slots of `previous`'s mesh; it holds `previous` until it is built.
+    ## An unbuilt `previous` passes on its own source, so a run of moves with
+    ## no query keeps one tree alive, not a chain.
+    pub static func after(previous: QueryCache*) -> QueryCache*!:
+        let cache = try new QueryCache() in memory.heap
+        previous.lock.lock()
+        var base = previous
+        if previous.ready.load(.acquire) == 0:
+            if let older = previous.source: base = older
+        discard(base.owners.add(1, .relaxed))
+        previous.lock.unlock()
+        cache.source = base
+        return cache
+
+    ## Publish only a fully built index. Allocation failure unlocks without
+    ## poisoning the cache, so a later query can retry. Published data is immutable.
+    pub mutating func get(positions: const Float3[], corners: const i32[], triangles: const i32[], faces: const i32[]) -> const TriangleIndex*!:
+        if self.ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.ready.load(.acquire) == 0:
+                var refitted = false
+                if let source = self.source:
+                    if source.ready.load(.acquire) != 0:
+                        let previous = source.index else trap("unpublished polygon query index")
+                        var fitted = try previous.refit(positions, triangles)
+                        let storage = alloc TriangleIndex[1] in memory.heap catch failure:
+                            fitted.close()
+                            error(failure.code, failure.message)
+                        storage[0] = fitted
+                        self.index = storage.data
+                        refitted = true
+                if not refitted:
+                    self.index = try new TriangleIndex(positions, corners, triangles, faces) in memory.heap
+                self.ready.store(1, .release)
+                if let source = self.source:
+                    self.source = none
+                    release_query(source)
+        return self.index else trap("unpublished polygon query index")
+
+    pub func is_ready() -> bool:
+        return self.ready.load(.acquire) != 0
+
+    ## Called by the last owner, after every reader.
+    mutating func close():
+        if let index = self.index:
+            index.close()
+            free(index) in memory.heap
+        if let source = self.source:
+            self.source = none
+            release_query(source)
+
+## Give up one owner of `cache`; the last frees it.
+pub func release_query(cache: QueryCache*):
+    if cache.owners.sub(1, .acq_rel) > 1: return
+    cache.close()
+    free(cache) in memory.heap

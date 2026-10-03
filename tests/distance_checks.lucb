@@ -1,7 +1,7 @@
 ## Point/triangle queries must stay accurate on thin cut-cell display ears.
 ## Test the primitive independently of CAD projection or tessellation policy.
-import math
-from geocore import Vector3, squared_triangle_distance
+import luce_std.math
+from luce_geocore.geocore import Vector3, squared_triangle_distance
 
 pub func exercise():
     # A near-edge point from the observed cancellation, not a meshing fixture.

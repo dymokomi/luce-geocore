@@ -1,14 +1,14 @@
 ## Groups, text attributes, bit sets, face subsets, concatenation and the
 ## geometry set: instances, points, paths, placement and realization.
-import geocore
-import geocore_kernel
+import luce_geocore.geocore
+import luce_geocore.kernel as geocore_kernel
 import interop
-import math
+import luce_std.math
 import memory
-from geocore import Mesh, MeshPrimitives, Vector3, GeometrySet
+from luce_geocore.geocore import Mesh, MeshPrimitives, Vector3, GeometrySet
 from verb_run import verb_mesh
-from geocore_kernel import Bits, BitsBuilder, MeshPart, Domain, popcount, trailing_zeros, edge_pairs, edge_bits_from_pairs, with_group_bits, concatenated
-from geocore_growing import Growing
+from luce_geocore.kernel import Bits, BitsBuilder, MeshPart, Domain, popcount, trailing_zeros, edge_pairs, edge_bits_from_pairs, with_group_bits, concatenated
+from luce_geocore.core.growing import Growing
 
 func near(a: f64, b: f64):
     assert(math.abs(a - b) < 0.000001)

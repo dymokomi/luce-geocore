@@ -1,0 +1,50 @@
+## 64-bit fingerprint of polygon connectivity: point count, face sizes and
+## corner indices, not positions or display triangles. Editors compare it to
+## guard recipes that address elements by index. The face sizes and corners
+## are hashed in fixed chunks in parallel and the chunk hashes combined in
+## order, so the value depends on neither the thread count nor how the arrays
+## are stored.
+import core.parallel
+
+## Mesh limits (8M faces, 32M corners) keep the chunks under 1024.
+let chunk: usize = 65536
+
+func mix(state: u64, value: u64) -> u64:
+    let scrambled = state ^ (value *% 0x9E3779B97F4A7C15)
+    return ((scrambled << 27) | (scrambled >> 37)) *% 5 +% 0x52DCE729
+
+## Never zero: callers use zero for "no guard recorded". `offsets` has one
+## entry per face and a final one; face f's size is offsets[f + 1] - offsets[f].
+pub func topology_hash(points: usize, offsets: const i32[], corners: const i32[]) -> u64:
+    let faces = offsets.length - 1 if offsets.length > 0 else 0
+    let total = faces + corners.length
+    let chunks = (total + chunk - 1) // chunk
+    var results: u64[1024] = ---
+    var work = Work(offsets, corners, faces, total, results[..<chunks])
+    parallel.parallel_for(chunks, 1, chunk_hashes, (void*)&work)
+    var state = mix(mix(0x6A09E667F3BCC908, (u64)points), (u64)faces)
+    for value in results[..<chunks]: state = mix(state, value)
+    # fmix64 avalanche so nearby topologies spread over all 64 bits.
+    state = (state ^ (state >> 33)) *% 0xFF51AFD7ED558CCD
+    state = (state ^ (state >> 33)) *% 0xC4CEB9FE1A85EC53
+    state = state ^ (state >> 33)
+    return state if state != 0 else 1
+
+struct Work:
+    let offsets: const i32[]
+    let corners: const i32[]
+    let faces: usize
+    let total: usize
+    let results: u64[]
+
+## Each chunk of the sequence face sizes, then corners.
+func chunk_hashes(context: void*?, first: usize, end: usize):
+    let work = (Work*)(context else return)
+    for index in first..<end:
+        let start = index * chunk
+        let stop = start + chunk if work.total - start > chunk else work.total
+        var state = mix(0x243F6A8885A308D3, (u64)index)
+        for at in start..<stop:
+            let value = (u64)(work.offsets[at + 1] - work.offsets[at]) if at < work.faces else (u64)work.corners[at - work.faces]
+            state = mix(state, value)
+        work.results[index] = state

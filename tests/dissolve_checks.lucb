@@ -1,7 +1,7 @@
 ## Local edit workspace must match sequential immutable dissolves exactly.
 import interop
 import memory
-from geocore import Mesh, MeshBuilder, DissolveWorkspace, Vector3, invalid, dissolve_edge
+from luce_geocore.geocore import Mesh, MeshBuilder, DissolveWorkspace, Vector3, invalid, dissolve_edge
 
 func equal(a: const Mesh*, b: const Mesh*) -> !:
     assert(a.point_count() == b.point_count() and a.face_count() == b.face_count())

@@ -3,8 +3,8 @@
 import memory
 import ownership
 import sync
-import geocore_parallel
-from geocore_kernel import clear_group_cache
+import luce_geocore.core.parallel as geocore_parallel
+from luce_geocore.kernel import clear_group_cache
 import polygon_checks
 import scale_checks
 import display_checks
@@ -31,7 +31,7 @@ import polydraw_checks
 import instance_checks
 import g6_checks
 import large_face_checks
-from geocore_kernel import set_small_faces
+from luce_geocore.kernel import set_small_faces
 
 ## Counts live blocks and fails the allocation after `remaining` more.
 ## Kernels allocate on pool workers too, so it takes a lock.

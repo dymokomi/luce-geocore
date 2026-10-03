@@ -4,7 +4,7 @@ import memory
 import ownership
 import sync
 import thread
-from geocore import Mesh, Vector3, mesh_type, detached_mesh
+from luce_geocore.geocore import Mesh, Vector3, mesh_type, detached_mesh
 
 struct Gate: memory.Allocator:
     let upstream: memory.Allocator

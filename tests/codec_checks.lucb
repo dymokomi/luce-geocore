@@ -2,19 +2,19 @@
 ## text, single storage, corner uv), a point cloud, curves (handles, custom
 ## knots) and nested instances saves and loads back byte for byte, also
 ## with every column chunked; the root key reads alone; bad files fail.
-import geocore
-import geocore_kernel
+import luce_geocore.geocore
+import luce_geocore.kernel as geocore_kernel
 import interop
-import math
+import luce_std.math
 import memory
 import strings
-import files
+import luce_std.files
 import c
 from io import path
-from geocore import Vector3, Mesh, MeshPrimitives, GeometrySet, AttributeKernels
-from geocore_kernel import Curves, CurvesBuilder, CurveType, Attribute, AttributeStore, Domain, DataType, set_curves, curves_type, empty_set, dispose_set, adopt_set, save_geometry, load_geometry, geometry_key, arc_curves, set_mesh, points_component, instances_component, Instances, PointCloud, cloud_positions, cloud_store, curves_knots, evaluated_positions, curves_dispose
-from geocore_growing import Growing
-from geocore_kernel import GeometryWriter, CrateReader, dtype_int32
+from luce_geocore.geocore import Vector3, Mesh, MeshPrimitives, GeometrySet, AttributeKernels
+from luce_geocore.kernel import Curves, CurvesBuilder, CurveType, Attribute, AttributeStore, Domain, DataType, set_curves, curves_type, empty_set, dispose_set, adopt_set, save_geometry, load_geometry, geometry_key, arc_curves, set_mesh, points_component, instances_component, Instances, PointCloud, cloud_positions, cloud_store, curves_knots, evaluated_positions, curves_dispose
+from luce_geocore.core.growing import Growing
+from luce_geocore.kernel import GeometryWriter, CrateReader, dtype_int32
 
 pub func exercise() -> !:
     let set = try sample_set()

@@ -3,9 +3,9 @@
 ## (in the plane, rotations about the picked centroid), grid and end
 ## snapping, deletes that split and open curves, closing and opening.
 import interop
-import math
-from geocore import Vector3, Mesh, GeometrySet, Sketches
-from geocore_kernel import Curves, set_curves, empty_set, adopt_set
+import luce_std.math
+from luce_geocore.geocore import Vector3, Mesh, GeometrySet, Sketches
+from luce_geocore.kernel import Curves, set_curves, empty_set, adopt_set
 
 func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
     return math.abs(a - b) < tolerance

@@ -5,11 +5,11 @@
 ## quad drawn over an existing face (wound against it); a ring of loose
 ## points ordered by angle; and too few corners failing.
 import interop
-import math
+import luce_std.math
 import memory
-from geocore import Mesh, MeshPrimitives, Verbs, Vector3
-from geocore_kernel import clear_group_cache, append_number
-from geocore_growing import Growing
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache, append_number
+from luce_geocore.core.growing import Growing
 
 pub func exercise() -> !:
     defer clear_group_cache()

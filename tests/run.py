@@ -26,7 +26,7 @@ with tempfile.TemporaryDirectory(prefix="luce-geocore-tests-") as temporary:
     for module in MODULES:
         for backend in ["--native", "--backend=c"]:
             print("TEST", module, backend, flush=True)
-            subprocess.run([str(args.base.resolve()), "test", str(ROOT / "src/luce_geocore" / module), backend],
+            subprocess.run([str(args.base.resolve()), "test", str(ROOT / "src" / module), backend],
                            check=True, cwd=ROOT, env=env, timeout=600)
     for flags in modes:
         print("TEST", " ".join(flags), flush=True)

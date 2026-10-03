@@ -1,0 +1,73 @@
+## The luce-geocore export: shared geometry with no GPU or UI dependency.
+## Vectors and matrices, polygon meshes and their builders, modeling kernels,
+## primitives and CPU spatial queries.
+import math.vector
+import math.matrix
+import core.geometry
+import core.polygon_topology
+import geometries.polygon
+import geometries.builder
+import geometries.normals
+import geometries.distance
+import geometries.overlays
+import geometries.primitives
+import geometries.dissolve_workspace
+import geometries.attribute_kernels
+import geometry_set
+import groups
+import verbs
+import subdivision
+import set_verbs
+import geometry_files
+import fields
+import curves
+import errors
+import core.attributes
+
+pub type Vector3 = vector.Vector3
+pub type Matrix4 = matrix.Matrix4
+pub type Geometry = geometry.Geometry
+pub type Vertex = geometry.Vertex
+pub type Bounds = geometry.Bounds
+pub type PolygonTopology = polygon_topology.PolygonTopology
+pub type Mesh = polygon.Mesh
+pub let mesh_type = polygon.mesh_type
+pub let detached_mesh = polygon.detached_mesh
+pub type MeshBuilder = builder.MeshBuilder
+pub type MeshNormals = normals.MeshNormals
+## Squared Euclidean distance to a triangle, including degenerate triangles.
+pub let squared_triangle_distance = distance.triangle_distance
+pub let mesh_overlay_points = overlays.mesh_overlay_points
+pub type MeshPrimitives = primitives.MeshPrimitives
+pub type DissolveWorkspace = dissolve_workspace.DissolveWorkspace
+pub let dissolve_edge = dissolve_workspace.dissolve_edge
+pub type AttributeKernels = attribute_kernels.AttributeKernels
+pub type GeometrySet = geometry_set.GeometrySet
+pub let geometry_set_type = geometry_set.geometry_set_type
+pub type Selection = groups.Selection
+## Selection domains (Domain.point, .corner, .face, .edge) and what a verb's
+## group names (GroupType); Luce passes them to the i64 parameters with int().
+pub type Domain = attributes.Domain
+pub type GroupType = groups.GroupType
+pub type Groups = groups.Groups
+pub type Verbs = verbs.Verbs
+pub type VerbResult = verbs.VerbResult
+pub type Subdivision = subdivision.Subdivision
+## Verbs over whole sets (curves, fields, conversions), and the one catalog
+## of every verb a node runs.
+pub type GeometryVerbs = set_verbs.GeometryVerbs
+pub type SetVerbResult = set_verbs.SetVerbResult
+pub type VerbCatalog = set_verbs.VerbCatalog
+## Attribute nodes on curves and point clouds.
+pub type SetAttributes = set_verbs.SetAttributes
+## Geometry files: a whole set as a .prism crate.
+pub type GeometryFile = geometry_files.GeometryFile
+## Volume and SDF previews for the viewport.
+pub type Fields = fields.Fields
+## Edit SDF: a set's SDF edited primitive by primitive, picked on proxies.
+pub type SdfEdits = fields.SdfEdits
+## Edit Sketch: planar sketches as curves, picked on point clouds.
+pub type Sketches = curves.Sketches
+pub let invalid: ErrorCode = errors.invalid
+pub let busy: ErrorCode = errors.busy
+pub let limit: ErrorCode = errors.limit

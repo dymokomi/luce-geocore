@@ -1,0 +1,310 @@
+## Verbs: every modeling operation as one registered Base kernel, after
+## Houdini's SOP verbs. A standalone node and a step of the Edit node call the
+## same verb, which sees neither. `Verbs.run` resolves the group expression to
+## bits on the verb's domain, runs the kernel, builds the output mesh, carries
+## every attribute and group through the kernel's provenance, and returns the
+## output selection (what the verb made: Extrude's front faces, Inset's inner
+## faces), which the viewport adopts after a tool.
+import interop
+import luce_std.math
+import memory
+import errors
+import core.parallel
+import core.attribute_ops
+from core.growing import Growing
+from core.shared import Column
+from core.float3 import Float3
+from core.bits import Bits, BitsBuilder, popcount, trailing_zeros
+from core.attributes import Attribute, AttributeStore, Domain, DataType, Storage, Role
+from core.geometry import Bounds
+from math.vector import Vector3
+from math.matrix import Matrix4
+from geometries.polygon import with_group_bits, Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute, edge_bits_from_pairs
+from geometries.polygon_triangulation import area_normal
+import geometries.face_scratch
+from groups import guess_domain, GroupResult, GroupReport, group_bits, converted, Topology, Selection, adopt_selection, strict_conversion, selection_bits
+
+## What a Group Type menu names: 0 guess (from the expression, else the
+## verb's own domain), then points, edges, faces, corners.
+pub func group_domain(group_type: i64, fallback: Domain) -> Domain!:
+    match group_type:
+        0: return fallback
+        1: return Domain.point
+        2: return Domain.edge
+        3: return Domain.face
+        4: return Domain.corner
+        _: error(errors.invalid, "unknown group type")
+
+pub enum ParmKind as u8:
+    number = 0
+    integer = 1
+    toggle = 2
+    vector = 3
+    menu = 4
+
+## One parameter of a verb: what the node's parameter pane shows, and where
+## its values sit among the numbers a run receives.
+pub struct ParmSpec:
+    pub let label: str
+    pub let kind: ParmKind
+    pub let initial: f64
+    pub let minimum: f64
+    pub let maximum: f64
+    ## Vectors: components (their defaults all `initial` unless `rest`).
+    pub let components: usize = 1
+    ## Menus: `Label|Label` (values 0, 1, …).
+    pub let choices: str = ""
+    pub let doc: str = ""
+    ## A soft maximum for sliders (0: the maximum).
+    pub let soft: f64 = 0.0
+
+## The values of one run: numbers in parameter order (a vector takes its
+## components), plus text.
+pub struct Parms:
+    pub let numbers: const f64[]
+
+    pub func at(index: usize) -> f64:
+        return self.numbers[index] if index < self.numbers.length else 0.0
+
+## Weighted parents of interpolated elements (a new point on an edge, a new
+## corner inside a face): element e takes entries offsets[e]..<offsets[e+1].
+pub struct Mix:
+    pub var offsets: Growing[i32]
+    pub var parents: Growing[i32]
+    pub var weights: Growing[f32]
+
+    pub func init():
+        self.offsets = Growing[i32]()
+        self.parents = Growing[i32]()
+        self.weights = Growing[f32]()
+
+    pub mutating func close():
+        self.offsets.close()
+        self.parents.close()
+        self.weights.close()
+
+## What a kernel reads: the input mesh, its group as bits of the verb's
+## domain (every element when the group is empty) and the parameters.
+pub struct VerbInput:
+    pub let mesh: const Mesh*
+    pub let group: Bits
+    pub let parms: Parms
+    ## Mirror across X, Y or Z (1..3; 0 none): the group is symmetric already,
+    ## and point verbs move mirrored points to mirrored places.
+    pub let symmetry: i64 = 0
+    ## The domain of `group`: the verb's, or its second domain.
+    pub let domain: Domain = Domain.face
+
+## What a kernel returns: new positions over the same topology, a topology
+## built with parents, or a finished mesh; and the output selection.
+pub struct VerbOutput:
+    ## Position verbs: every point's new position (relative to the input's
+    ## origin) and the points that moved.
+    pub var positions: Column[Float3]
+    pub var moved: Growing[u32]
+    pub var built: bool = false
+    pub var builder: TopologyBuilder
+    ## Verbs that make their mesh themselves (subsets).
+    pub var mesh: Mesh*? = none
+    ## The output selection and its domain.
+    pub var selection: BitsBuilder
+    pub var selection_domain: Domain = Domain.face
+    ## A warning for the node's info line (static text), and how many
+    ## elements it concerns.
+    pub var warning: str = ""
+    pub var skipped: usize = 0
+
+    pub func init():
+        self.positions = Column[Float3]()
+        self.moved = Growing[u32]()
+        self.built = false
+        self.builder = TopologyBuilder()
+        self.mesh = none
+        self.selection = BitsBuilder(Column[u64](), 0)
+        self.selection_domain = Domain.face
+        self.warning = ""
+        self.skipped = 0
+
+    pub mutating func close():
+        self.positions.release()
+        self.moved.close()
+        self.builder.close()
+        if let mesh = self.mesh: mesh_dispose(mesh)
+        self.mesh = none
+        self.selection.close()
+
+pub struct Verb:
+    ## The node kind and recipe name ("PolyExtrude").
+    pub let name: str
+    pub let category: str
+    pub let description: str
+    ## The domain the kernel works on; other group types convert to it.
+    pub let domain: Domain
+    ## Whether the group may name other domains (converted).
+    pub let converts: bool
+    pub let parms: const ParmSpec[]
+    ## False: positions and attributes only, element ids stable.
+    pub let changes_topology: bool
+    pub let cook: func(const VerbInput*, VerbOutput*) -> unit!
+    ## Groups of other domains convert with "any" related element (Blast:
+    ## a point deletes every face using it) instead of the default rules.
+    pub let loose: bool = false
+    ## A second domain the kernel takes as it is (PolyExtrude: edges);
+    ## detail when none.
+    pub let also: Domain = Domain.detail
+    ## Groups of other domains convert with "all" related elements (Dissolve:
+    ## a face group dissolves only the edges between its faces).
+    pub let strict: bool = false
+
+## A run's product: the output mesh, its selection and the warning.
+pub struct VerbRun:
+    pub var mesh: Mesh*
+    pub var selection: Column[u64]
+    pub var selection_count: usize
+    pub var selection_domain: Domain
+    pub var warning: str
+    pub var misses: usize
+
+    pub mutating func close():
+        mesh_dispose(self.mesh)
+        self.selection.release()
+
+## Run `verb` on `mesh`: the group (text; empty is every element) on
+## `group_type`'s domain, made symmetric across `symmetry` (0 none, 1 X,
+## 2 Y, 3 Z), converted to the verb's domain. With `keep`, the output
+## selection is the group carried through the verb (a new element is
+## selected when all its parents were) instead of what the verb made.
+pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false) -> VerbRun!:
+    let expression = group if not blank(group) else "*"
+    var domain = try group_domain(group_type, verb.domain)
+    if group_type == 0: domain = try guess_domain(mesh, expression, verb.domain)
+    let target = domain if domain == verb.also and verb.also != Domain.detail else verb.domain
+    if not verb.converts and domain != target: error(errors.invalid, "this operation works on another component type")
+    if symmetry < 0 or symmetry > 3: error(errors.invalid, "symmetry is 0 (none), 1 (X), 2 (Y) or 3 (Z)")
+    var result = try group_bits(mesh, expression, domain)
+    defer result.bits.release()
+    var chosen = try BitsBuilder.copy_of(Bits(result.bits.view(), (usize)(try mesh.domain_count((i64)(u8)domain))))
+    defer chosen.close()
+    if symmetry > 0:
+        var mirrored = try symmetric(mesh, chosen.view(), domain, symmetry)
+        chosen.close()
+        chosen = mirrored
+    # The group rides through the verb as `.carried` when it is kept.
+    var carrier: interop.Reference[Mesh]? = none
+    defer:
+        if let owner = carrier: owner.release()
+    var source = mesh
+    if keep:
+        let owner = try with_group_bits(mesh, ".carried", domain, chosen.view())
+        carrier = owner
+        source = owner.value()
+    var bits = try BitsBuilder.copy_of(chosen.view())
+    defer bits.close()
+    if domain != target:
+        let topology = try Topology.of(mesh)
+        var moved = try converted(&topology, bits.view(), domain, target, (strict_conversion(domain, target) or verb.strict) and not verb.loose)
+        bits.close()
+        bits = moved
+    var output = VerbOutput()
+    defer output.close()
+    let input = VerbInput(source, bits.view(), Parms(numbers), symmetry, target)
+    let cook = verb.cook
+    try cook(&input, &output)
+    let product = try finish(source, &output)
+    # Edges the kernel selected by their points: found on the output.
+    if output.built and output.builder.selected_edges.count > 0:
+        select_edges(product, &output) catch failure:
+            mesh_dispose(product)
+            error(failure.code, failure.message)
+    var selection = output.selection.finish()
+    var selection_domain = output.selection_domain
+    if keep:
+        let carried_index = product.find_attribute(".carried", (i64)(u8)domain)
+        if carried_index >= 0:
+            let entry = product.attribute_entry(carried_index) catch failure:
+                mesh_dispose(product)
+                selection.release()
+                error(failure.code, failure.message)
+            selection.release()
+            selection = Column[u64].copy_of(u64[]((u64*)entry.data.view().data, entry.data.view().length // 8)) catch failure:
+                mesh_dispose(product)
+                error(failure.code, failure.message)
+            selection_domain = domain
+            remove_attribute(product, ".carried", domain)
+    # The output selection also rides in the mesh as the group `.selection`
+    # (Houdini's cook selection), so it reaches the viewport with the result.
+    mark_selection(product, &selection, selection_domain) catch failure:
+        mesh_dispose(product)
+        selection.release()
+        error(failure.code, failure.message)
+    let count = (usize)(product.domain_count((i64)(u8)selection_domain) catch failure:
+        mesh_dispose(product)
+        selection.release()
+        error(failure.code, failure.message))
+    return VerbRun(product, selection, count, selection_domain, output.warning, result.report.misses)
+
+## The kernel's output as a mesh: moved positions share everything else, a
+## built topology carries every attribute through its provenance.
+func finish(source: const Mesh*, output: VerbOutput*) -> Mesh*!:
+    if let made = output.mesh:
+        output.mesh = none
+        return made
+    if output.built:
+        # Faces the kernel made degenerate (a bridge between coplanar loops,
+        # say): nothing sensible to show, so the input passes through.
+        let built: Mesh*? = output.builder.finish(source) catch failure:
+            if failure.code != errors.invalid: error(failure.code, failure.message)
+            output.warning = "The operation would make degenerate faces; the input passes through"
+            recover none
+        if let made = built:
+            # Meshes keep faces without an area; a verb making new ones
+            # still refuses.
+            if degenerate_faces(made) <= degenerate_faces(source): return made
+            mesh_dispose(made)
+            output.warning = "The operation would make degenerate faces; the input passes through"
+        output.selection.close()
+        output.selection = try BitsBuilder.zeros(0)
+        output.builder.selected_edges.clear()
+        return try mesh_share(source)
+    if not output.positions.is_empty():
+        # Points moved onto each other collapse faces: nothing sensible to
+        # make, so the input passes through with a warning.
+        let moved: Mesh*? = moved_storage(source, output.positions, output.moved.view()) catch failure:
+            if failure.code != errors.invalid: error(failure.code, failure.message)
+            output.warning = "The operation would collapse faces; the input passes through"
+            recover none
+        if let made = moved: return made
+    return try mesh_share(source)
+
+## The output selection as the edges between the builder's selected point
+## pairs.
+func select_edges(product: const Mesh*, output: VerbOutput*) -> !:
+    var bits = try BitsBuilder.zeros((usize)(try product.edge_count()))
+    errdefer bits.close()
+    discard(try edge_bits_from_pairs(product, output.builder.selected_edges.view(), &bits))
+    output.selection.close()
+    output.selection = bits
+    output.selection_domain = Domain.edge
+
+## Replace any `.selection` group of `mesh` with `bits` on `domain`.
+func mark_selection(mesh: Mesh*, bits: Column[u64]*, domain: Domain) -> !:
+    let domains: Domain[4] = [Domain.point, Domain.corner, Domain.face, Domain.edge]
+    for other in domains: remove_attribute(mesh, ".selection", other)
+    let count = (usize)(try mesh.domain_count((i64)(u8)domain))
+    if bits.count() < (count + 63) // 64:
+        var empty = try BitsBuilder.zeros(count)
+        bits.release()
+        *bits = empty.finish()
+    try put_attribute(mesh, try Attribute.group_of(".selection", domain, count, bits.view()))
+
+func blank(text: str) -> bool:
+    for byte in text.bytes:
+        if byte != 32 and byte != 9 and byte != 10: return false
+    return true
+
+## How many faces have no area (a zero normal).
+func degenerate_faces(mesh: const Mesh*) -> usize:
+    var count: usize = 0
+    for normal in mesh.face_normal_span():
+        if normal.x == 0.0 and normal.y == 0.0 and normal.z == 0.0: count += 1
+    return count

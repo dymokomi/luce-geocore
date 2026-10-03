@@ -1,0 +1,59 @@
+## An affine 4x4 matrix stored as four columns. Its implicit final row is
+## (0,0,0,1). Composition supports parent rotations and nonuniform scaling.
+from math.vector import Vector3
+import luce_std.math
+import errors
+
+pub struct Matrix4:
+    pub let x: Vector3 = Vector3(1.0, 0.0, 0.0)
+    pub let y: Vector3 = Vector3(0.0, 1.0, 0.0)
+    pub let z: Vector3 = Vector3(0.0, 0.0, 1.0)
+    pub let translation: Vector3 = Vector3()
+
+    pub static func compose(position: Vector3, rotation: Vector3, scale: Vector3) -> Matrix4:
+        return Matrix4(Vector3(scale.x, 0.0, 0.0).rotated(rotation),
+                       Vector3(0.0, scale.y, 0.0).rotated(rotation),
+                       Vector3(0.0, 0.0, scale.z).rotated(rotation), position)
+
+    pub func transform_direction(value: Vector3) -> Vector3:
+        return self.x.multiply_scalar(value.x).add(self.y.multiply_scalar(value.y)).add(self.z.multiply_scalar(value.z))
+
+    pub func transform_point(value: Vector3) -> Vector3:
+        return self.transform_direction(value).add(self.translation)
+
+    pub func multiply(other: Matrix4) -> Matrix4:
+        return Matrix4(self.transform_direction(other.x), self.transform_direction(other.y),
+                       self.transform_direction(other.z), self.transform_point(other.translation))
+
+    pub func determinant() -> f64:
+        return self.x.dot(self.y.cross(self.z))
+
+    ## Inverse transpose keeps normals perpendicular under composed nonuniform
+    ## scale. Reject singular matrices instead of producing NaNs or black geometry.
+    pub func transform_normal(value: Vector3) -> Vector3!:
+        let determinant = self.determinant()
+        if not math.is_finite(determinant) or determinant == 0.0:
+            error(errors.invalid, "the world transform is singular")
+        let a = self.y.cross(self.z).multiply_scalar(value.x)
+        let b = self.z.cross(self.x).multiply_scalar(value.y)
+        let c = self.x.cross(self.y).multiply_scalar(value.z)
+        return try a.add(b).add(c).multiply_scalar(1.0 / determinant).normalized()
+
+    ## The inverse of this affine matrix; fails when it is singular.
+    pub func inverse() -> Matrix4!:
+        let determinant = self.determinant()
+        if not math.is_finite(determinant) or math.abs(determinant) < 1.0e-300: error(errors.invalid, "the matrix is singular")
+        let a = self.y.cross(self.z).multiply_scalar(1.0 / determinant)
+        let b = self.z.cross(self.x).multiply_scalar(1.0 / determinant)
+        let c = self.x.cross(self.y).multiply_scalar(1.0 / determinant)
+        # Rows a, b, c of the inverse linear part, as columns of the result.
+        let linear = Matrix4(Vector3(a.x, b.x, c.x), Vector3(a.y, b.y, c.y), Vector3(a.z, b.z, c.z), Vector3())
+        let t = linear.transform_direction(self.translation)
+        return Matrix4(linear.x, linear.y, linear.z, Vector3(-t.x, -t.y, -t.z))
+
+    pub func is_finite() -> bool:
+        return self.x.is_finite() and self.y.is_finite() and self.z.is_finite() and self.translation.is_finite()
+
+    ## Exact identity, for preserving immutable geometry on no-op placements.
+    pub func is_identity() -> bool:
+        return self.x == Vector3(1.0, 0.0, 0.0) and self.y == Vector3(0.0, 1.0, 0.0) and self.z == Vector3(0.0, 0.0, 1.0) and self.translation == Vector3()

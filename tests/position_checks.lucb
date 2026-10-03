@@ -1,10 +1,10 @@
 ## Position-only edits keep topology and display triangles (a Move on
 ## tessellated CAD must not re-triangulate its cut-cell n-gons).
 import interop
-import math
+import luce_std.math
 import memory
-import geocore
-from geocore import Vector3, Matrix4, Mesh
+import luce_geocore.geocore
+from luce_geocore.geocore import Vector3, Matrix4, Mesh
 from verb_run import verb_mesh
 
 func index(mesh: const Mesh*, at: i64) -> i64!:

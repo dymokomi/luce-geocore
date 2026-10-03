@@ -1,0 +1,113 @@
+## Whole-mesh attribute kernels for the attribute nodes. Each computes one new
+## column in Base and shares every other: the Luce loops they replace made an
+## interop call per element (about 0.5 s on a 700k-face mesh).
+import interop
+import luce_std.math
+import memory
+import errors
+from math.vector import Vector3
+from core.attributes import Attribute, Domain, DataType, Storage
+from core.attribute_ops import typed_mut
+from geometries.polygon import Mesh
+
+pub struct AttributeKernels:
+    let reserved: u8 = 0
+
+    ## Corner uv = (x, z) * scale of each corner's point.
+    pub static func uv_project(source: interop.Reference[Mesh], scale: f64) -> interop.Reference[Mesh]!:
+        let mesh = try source.get()
+        if not math.is_finite(scale): error(errors.invalid, "UV scale must be finite")
+        let corners = mesh.corner_span()
+        let points = mesh.point_span()
+        let origin = mesh.position_origin()
+        var attribute = try Attribute.create("uv", Domain.corner, DataType.float64, 2, corners.length)
+        let values = typed_mut[f64](attribute.data.span())
+        for corner in 0..<corners.length:
+            let p = points[(usize)corners[corner]].vector().add(origin)
+            values[corner * 2] = p.x * scale
+            values[corner * 2 + 1] = p.z * scale
+        return try mesh.with_attribute_entry(attribute)
+
+    ## N on faces (the face normals) or points (the normalized sum of the
+    ## incident face normals; zero for isolated points).
+    pub static func normals(source: interop.Reference[Mesh], domain: i64) -> interop.Reference[Mesh]!:
+        let mesh = try source.get()
+        let face_domain = domain == 2
+        let normals = mesh.face_normal_span()
+        let count = normals.length if face_domain else (usize)mesh.point_count()
+        var attribute = try Attribute.create("N", Domain.face if face_domain else Domain.point, DataType.float64, 3, count)
+        let values = typed_mut[f64](attribute.data.span())
+        if face_domain:
+            for face in 0..<count:
+                values[face * 3] = (f64)normals[face].x
+                values[face * 3 + 1] = (f64)normals[face].y
+                values[face * 3 + 2] = (f64)normals[face].z
+            return try mesh.with_attribute_entry(attribute)
+        let sums = alloc Vector3[count] in memory.heap catch failure:
+            attribute.release()
+            error(failure.code, failure.message)
+        defer free(sums) in memory.heap
+        for at in 0..<count: sums[at] = Vector3()
+        let offsets = mesh.offset_span()
+        let corners = mesh.corner_span()
+        for face in 0..<normals.length:
+            for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
+                let point = (usize)corners[corner]
+                sums[point] = sums[point].add(normals[face].vector())
+        for at in 0..<count:
+            let length = sums[at].length()
+            let n = sums[at].multiply_scalar(1.0 / length) if length > 0.000001 else Vector3()
+            values[at * 3] = n.x
+            values[at * 3 + 1] = n.y
+            values[at * 3 + 2] = n.z
+        return try mesh.with_attribute_entry(attribute)
+
+    ## Face "area": the summed area of each face's display triangles.
+    pub static func face_areas(source: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
+        let mesh = try source.get()
+        let points = mesh.point_span()
+        let corners = mesh.corner_span()
+        let faces = try mesh.corner_face_span()
+        let triangles = mesh.triangle_span()
+        var attribute = try Attribute.create("area", Domain.face, DataType.float64, 1, (usize)mesh.face_count())
+        let values = typed_mut[f64](attribute.data.span())
+        for at in 0..<values.length: values[at] = 0.0
+        for triangle in 0..<triangles.length // 3:
+            let a = points[(usize)corners[(usize)triangles[triangle * 3]]].vector()
+            let b = points[(usize)corners[(usize)triangles[triangle * 3 + 1]]].vector()
+            let c = points[(usize)corners[(usize)triangles[triangle * 3 + 2]]].vector()
+            values[(usize)faces[(usize)triangles[triangle * 3]]] += b.subtract(a).cross(c.subtract(a)).length() * 0.5
+        return try mesh.with_attribute_entry(attribute)
+
+    ## `name` = `values` (1..4 components) on every element, optionally scaled
+    ## per element and component by a deterministic hash of the element id and
+    ## `seed`. Unscaled values are stored once for the whole domain.
+    pub static func filled(source: interop.Reference[Mesh], name: str, domain: i64, values: const f64[], integer: bool, randomize: bool, seed: f64) -> interop.Reference[Mesh]!:
+        let mesh = try source.get()
+        let count = (usize)(try mesh.domain_count(domain))
+        let width = values.length
+        if width < 1 or width > 4: error(errors.invalid, "an attribute value has 1..4 components")
+        if not randomize:
+            var rounded: f64[4]
+            for component in 0..<width:
+                rounded[component] = math.floor(values[component]) if integer else values[component]
+            return try mesh.with_single_attribute(name, domain, rounded[..<width], integer)
+        let generated = try alloc f64[count * width] in memory.heap
+        defer free(generated) in memory.heap
+        for id in 0..<count:
+            for component in 0..<width:
+                let random = math.sin((f64)(id * 7 + component) * 12.9898 + seed * 78.233) * 43758.5453
+                let value = values[component] * (random - math.floor(random))
+                generated[id * width + component] = math.floor(value) if integer else value
+        return try mesh.with_attribute(name, domain, (i64)width, generated, integer)
+
+    ## An integer `name` that is 1 on `members` of `domain` and 0 elsewhere.
+    pub static func membership(source: interop.Reference[Mesh], name: str, domain: i64, members: const i64[]) -> interop.Reference[Mesh]!:
+        let mesh = try source.get()
+        let count = (usize)(try mesh.domain_count(domain))
+        var attribute = try Attribute.create(name, Domain((u8)domain), DataType.int32, 1, count)
+        let values = typed_mut[i32](attribute.data.span())
+        for at in 0..<count: values[at] = 0
+        for id in members:
+            if id >= 0 and (usize)id < count: values[(usize)id] = 1
+        return try mesh.with_attribute_entry(attribute)

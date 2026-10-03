@@ -4,12 +4,12 @@
 ## makes the table. Each figure is one run, including building the output
 ## mesh with its attributes (topology caches are warm after the first case).
 import time
-import math
+import luce_std.math
 import interop
 import memory
-import geocore
-from geocore import Mesh, Vector3, Verbs, Subdivision
-import geocore_parallel
+import luce_geocore.geocore
+from luce_geocore.geocore import Mesh, Vector3, Verbs, Subdivision
+import luce_geocore.core.parallel as geocore_parallel
 
 ## One case: what it runs, on which mesh (0 grid, 1 tube cut in two, 2 grid
 ## with a ten-face hole), and its numbers.

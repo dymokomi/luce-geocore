@@ -1,9 +1,9 @@
 ## Shared typed attributes: snapshots and edits share columns (equal ids),
 ## adding one attribute writes that column only, single storage, the edge
 ## domain through topology changes, merges that widen types, and the kernels.
-import math
-import geocore
-from geocore import Mesh, Vector3, AttributeKernels, MeshPrimitives
+import luce_std.math
+import luce_geocore.geocore
+from luce_geocore.geocore import Mesh, Vector3, AttributeKernels, MeshPrimitives
 from verb_run import verb_mesh
 
 func near(a: f64, b: f64):

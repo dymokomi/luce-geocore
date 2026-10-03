@@ -3,10 +3,10 @@
 ## (inside a placed program too), rotations about the picked centroid,
 ## boolean and blend changes, deletes, and malformed picks failing.
 import interop
-import math
+import luce_std.math
 import memory
-from geocore import Vector3, Mesh, GeometrySet, SdfEdits
-from geocore_kernel import set_sdf, empty_set, adopt_set
+from luce_geocore.geocore import Vector3, Mesh, GeometrySet, SdfEdits
+from luce_geocore.kernel import set_sdf, empty_set, adopt_set
 
 func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
     return math.abs(a - b) < tolerance

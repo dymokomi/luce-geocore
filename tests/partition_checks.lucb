@@ -1,8 +1,8 @@
 ## A greedy ear may strand a nearly straight sampled boundary. Retain all
 ## seven canonical corners while finding a conditioned complete partition.
-import math
-import geocore
-from geocore import Vector3, Matrix4, Mesh
+import luce_std.math
+import luce_geocore.geocore
+from luce_geocore.geocore import Vector3, Matrix4, Mesh
 
 pub func single() -> !:
     try chain(1.0,0,false,0,1e-11)

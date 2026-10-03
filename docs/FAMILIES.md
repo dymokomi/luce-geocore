@@ -347,7 +347,7 @@ are built in.
 Another package registers its own once, before saving or loading:
 
 ```luce
-from geocore_kernel import register_codec, GeometryWriter, GeometryReader
+from luce_geocore.kernel import register_codec, GeometryWriter, GeometryReader
 
 register_codec(my_component_type(), encode, decode)
 ## encode(data: const void*, writer: GeometryWriter*, path: str) -> !

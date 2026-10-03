@@ -1,35 +1,16 @@
 #prisma 4.0
 def package "luce-geocore" {
     str owner = "dymokomi"
-    str version = "0.3.0"
+    str version = "0.4.0"
     str kind = "package"
     str language = "luce-base"
     str description = "Shared geometry for Luce: polygon meshes, attributes, modeling kernels and CPU spatial queries, with no GPU or UI dependency."
     str readme = "README.md"
-
-    def export "geocore" {
-        str module = "luce_geocore.geocore"
-    }
-
-    def export "geocore_kernel" {
-        str module = "luce_geocore.kernel"
-    }
-
-    def export "geocore_parallel" {
-        str module = "luce_geocore.core.parallel"
-    }
-
-    def export "geocore_growing" {
-        str module = "luce_geocore.core.growing"
-    }
-
-    def export "geocore_shared" {
-        str module = "luce_geocore.core.shared"
-    }
+    str[] public = ["geocore", "core.growing", "kernel", "core.parallel", "core.shared"]
 
     def dependency "luce-std" {
         str owner = "dymokomi"
-        str version = "^0.1.0"
+        str version = "^0.2.0"
         str path = "../luce-std"
     }
 }

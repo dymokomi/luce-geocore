@@ -1,9 +1,9 @@
 ## Display triangles are immutable geometry data, not additional wire edges.
 import interop
 import memory
-import math
-import geocore
-from geocore import Vector3, Matrix4, Mesh, MeshBuilder, detached_mesh, dissolve_edge
+import luce_std.math
+import luce_geocore.geocore
+from luce_geocore.geocore import Vector3, Matrix4, Mesh, MeshBuilder, detached_mesh, dissolve_edge
 from verb_run import verb_mesh
 
 func index(mesh: const Mesh*, at: i64) -> i64!:

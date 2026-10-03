@@ -1,7 +1,7 @@
 ## Precise meshes keep f64 points through construction, builders, derived
 ## meshes and position edits; ordinary meshes store f32 relative to an origin.
-import geocore
-from geocore import Vector3, Matrix4, MeshBuilder, Mesh
+import luce_geocore.geocore
+from luce_geocore.geocore import Vector3, Matrix4, MeshBuilder, Mesh
 from verb_run import verb_mesh
 
 pub func exercise() -> !:

@@ -4,17 +4,17 @@
 ## line per case, as verbs.lucb does; run.py makes the table. Each figure is
 ## one run of a --native --opt 3 build.
 import time
-import math
+import luce_std.math
 import interop
 import memory
-import geocore
-import geocore_kernel
-from geocore import Vector3, Mesh, MeshPrimitives, GeometrySet
-from geocore_kernel import Curves, CurvesBuilder, CurveType, evaluated_positions, evaluated_frames, curves_dispose, curves_type, set_curves, empty_set, dispose_set, adopt_set, run_set_verb, find_set_verb, save_geometry, load_geometry
-from geocore_growing import Growing
-from geocore_kernel import SdfOp, primitive_sdf, combined_sdf, release_sdf, sampled_sdf, surface_mesh, release_grid, mesh_level_set, points_level_set, mesh_dispose
+import luce_geocore.geocore
+import luce_geocore.kernel as geocore_kernel
+from luce_geocore.geocore import Vector3, Mesh, MeshPrimitives, GeometrySet
+from luce_geocore.kernel import Curves, CurvesBuilder, CurveType, evaluated_positions, evaluated_frames, curves_dispose, curves_type, set_curves, empty_set, dispose_set, adopt_set, run_set_verb, find_set_verb, save_geometry, load_geometry
+from luce_geocore.core.growing import Growing
+from luce_geocore.kernel import SdfOp, primitive_sdf, combined_sdf, release_sdf, sampled_sdf, surface_mesh, release_grid, mesh_level_set, points_level_set, mesh_dispose
 from io import path
-import geocore_parallel
+import luce_geocore.core.parallel as geocore_parallel
 
 func row(name: str, started: u64, count: usize):
     print(f"{name}\t{(f64)time.since(started) / 1000000.0}\t{count}\t")

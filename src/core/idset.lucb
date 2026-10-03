@@ -1,0 +1,44 @@
+## A set of column ids, for counting shared arrays once: a result store
+## charges each block to the first result that holds it.
+import memory
+from core.growing import Growing
+
+pub struct IdSet:
+    ## Open addressing; 0 marks an empty slot (ids start at 1).
+    var slots: Growing[u64]
+    var count: usize = 0
+
+    pub func init():
+        self.slots = Growing[u64]()
+        self.count = 0
+
+    ## Add `id`; true when it was not there before.
+    pub mutating func insert(id: u64) -> bool!:
+        if id == 0: return false
+        if (self.count + 1) * 2 > self.slots.count: try self.grow()
+        let mask = self.slots.count - 1
+        var slot = (usize)(id *% 0x9E3779B97F4A7C15 >> 17) & mask
+        while self.slots.items[slot] != 0:
+            if self.slots.items[slot] == id: return false
+            slot = (slot + 1) & mask
+        self.slots.items[slot] = id
+        self.count += 1
+        return true
+
+    ## `bytes` when the block `id` is new to the set, else 0.
+    pub mutating func charge(id: u64, bytes: usize) -> usize!:
+        return bytes if (try self.insert(id)) else 0
+
+    mutating func grow() -> !:
+        let old = self.slots
+        var fresh = Growing[u64]()
+        try fresh.fill(64 if old.count == 0 else old.count * 2, 0)
+        self.slots = fresh
+        self.count = 0
+        for id in old.view():
+            if id != 0: discard(try self.insert(id))
+        var spent = old
+        spent.close()
+
+    pub mutating func close():
+        self.slots.close()
