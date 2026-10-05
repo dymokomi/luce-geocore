@@ -172,7 +172,7 @@ struct MeshShape:
 
     ## Built in parallel: points and face normals, then point and edge
     ## normals (each gathered from its faces), then triangles.
-    func of(mesh: const Mesh*) -> MeshShape!:
+    static func of(mesh: const Mesh*) -> MeshShape!:
         var shape = MeshShape(Growing[Vector3](), Growing[i32](), Growing[i32](), Growing[Vector3](), Growing[Vector3](), Growing[Vector3]())
         errdefer shape.close()
         let positions = mesh.point_span()

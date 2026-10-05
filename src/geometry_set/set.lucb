@@ -35,7 +35,7 @@ pub struct Placement:
     pub let scale: Vector3
     pub let matrix: Matrix4
 
-    pub func compose(translation: Vector3, rotation: Vector3, scale: Vector3) -> Placement:
+    pub static func compose(translation: Vector3, rotation: Vector3, scale: Vector3) -> Placement:
         return Placement(translation, rotation, scale, Matrix4.compose(translation, rotation, scale))
 
 ## A component family: what a set may do with a component's data without

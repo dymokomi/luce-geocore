@@ -129,7 +129,7 @@ extend Mesh:
 
     ## Construct topology and its imported corner data once, without rebuilding
     ## triangulation, edge tables and BVH for each attribute. Empty spans omit it.
-    pub func from_corner_data(points: const Vector3[], sizes: const i64[], corners: const i64[], uv: const f64[], normals: const f64[]) -> interop.Reference[Mesh]!:
+    pub static func from_corner_data(points: const Vector3[], sizes: const i64[], corners: const i64[], uv: const f64[], normals: const f64[]) -> interop.Reference[Mesh]!:
         if (uv.length != 0 and uv.length != corners.length * 2) or (normals.length != 0 and normals.length != corners.length * 3):
             error(errors.invalid, "imported corner attribute size mismatch")
         let result = try make_mesh(points, sizes, corners)

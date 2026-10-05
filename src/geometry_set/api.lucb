@@ -4,7 +4,7 @@
 
 extend GeometrySet:
     ## A set holding `mesh` (shared, not copied).
-    pub func of_mesh(mesh: interop.Reference[Mesh]) -> interop.Reference[GeometrySet]!:
+    pub static func of_mesh(mesh: interop.Reference[Mesh]) -> interop.Reference[GeometrySet]!:
         let shared = try mesh_share(try mesh.get())
         let storage = empty_storage() catch failure:
             mesh_dispose(shared)

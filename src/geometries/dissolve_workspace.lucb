@@ -270,7 +270,7 @@ struct PointPlaces:
     var keys: i64[]
     var places: i64[]
 
-    func of(points: const i64[]) -> PointPlaces!:
+    static func of(points: const i64[]) -> PointPlaces!:
         var capacity: usize = 16
         while capacity < points.length * 2: capacity *= 2
         let keys = try new i64[capacity] --- in memory.heap
@@ -287,7 +287,7 @@ struct PointPlaces:
             places[slot] = (i64)at
         return PointPlaces(keys, places)
 
-    func slot_of(point: i64, capacity: usize) -> usize:
+    static func slot_of(point: i64, capacity: usize) -> usize:
         return (usize)(((u64)point *% 0x9E3779B97F4A7C15) >> 32) & (capacity - 1)
 
     ## The corner of `point` in the face, or -1.

@@ -197,17 +197,17 @@ pub struct Subdivision:
 
     ## The mesh the viewport draws for `mesh`: its subdivided limit surface,
     ## or `mesh` itself when it is not subdivided.
-    pub func display(mesh: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
+    pub static func display(mesh: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
         let storage = try subdivided_display(try mesh.get()) else return mesh.clone()
         return try mesh_adopt(storage)
 
     ## The display levels `mesh` asks for, after the budget clamp (0: none).
-    pub func level(mesh: interop.Reference[Mesh]) -> i64!:
+    pub static func level(mesh: interop.Reference[Mesh]) -> i64!:
         let settings = settings_of(try mesh.get())
         return 0 if settings.scheme == Scheme.off else (i64)settings.level
 
     ## The cage face a display face came from (-1 when it has no cage).
-    pub func cage_face(display: interop.Reference[Mesh], face: i64) -> i64!:
+    pub static func cage_face(display: interop.Reference[Mesh], face: i64) -> i64!:
         let index = (try display.get()).find_attribute(".cage_face", (i64)(u8)Domain.face)
         if index < 0: return -1
         return (i64)(try (try display.get()).attribute_value(index, face))

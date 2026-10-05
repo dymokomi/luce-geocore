@@ -185,7 +185,7 @@ pub struct GridSampler:
     var cached_key: u64 = 0xFFFFFFFFFFFFFFFF
     var cached_leaf: i64 = -1
 
-    pub func of(grid: const SparseGrid*) -> GridSampler:
+    pub static func of(grid: const SparseGrid*) -> GridSampler:
         return GridSampler(grid, 0xFFFFFFFFFFFFFFFF, -1)
 
     pub func voxel(i: i64, j: i64, k: i64) -> f32:

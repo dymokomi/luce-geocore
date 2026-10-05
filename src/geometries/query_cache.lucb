@@ -22,7 +22,7 @@ pub struct QueryCache:
     ## slots of `previous`'s mesh; it holds `previous` until it is built.
     ## An unbuilt `previous` passes on its own source, so a run of moves with
     ## no query keeps one tree alive, not a chain.
-    pub func after(previous: QueryCache*) -> QueryCache*!:
+    pub static func after(previous: QueryCache*) -> QueryCache*!:
         let cache = try new QueryCache() in memory.heap
         previous.lock.lock()
         var base = previous

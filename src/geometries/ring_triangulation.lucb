@@ -64,7 +64,7 @@ struct Ring:
         return self.area((usize)self.previous[at], at, (usize)self.next[at])
 
     ## Grid column (or row, of `size`) of coordinate `value`.
-    func cell(value: f64, low: f64, scale: f64, size: usize) -> usize:
+    static func cell(value: f64, low: f64, scale: f64, size: usize) -> usize:
         let place = (value - low) * scale
         if not (place > 0.0): return 0
         let index = (usize)place

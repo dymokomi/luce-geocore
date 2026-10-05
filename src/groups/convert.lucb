@@ -17,7 +17,7 @@ pub struct Topology:
     pub let point_edge_offsets: const i32[]
     pub let point_edges: const i32[]
 
-    pub func of(mesh: const Mesh*) -> Topology!:
+    pub static func of(mesh: const Mesh*) -> Topology!:
         let edge_corners = try mesh.edge_corner_span()
         let point_edges = try mesh.point_edge_span()
         return Topology((usize)mesh.point_count(), mesh.offset_span(), mesh.corner_span(), try mesh.corner_face_span(), try mesh.corner_edge_span(), try mesh.edge_span(),

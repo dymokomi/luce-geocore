@@ -111,7 +111,7 @@ pub struct GroupProgram:
 
     ## Compile `text`. Syntax errors fail with a message; `error_at` then
     ## holds the offset.
-    pub func parse(text: str) -> GroupProgram!:
+    pub static func parse(text: str) -> GroupProgram!:
         var program = GroupProgram(Growing[u8](), Growing[Term](), Growing[f64](), Growing[u32]())
         errdefer program.close()
         try program.source.assign(text.bytes)

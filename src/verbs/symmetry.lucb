@@ -17,7 +17,7 @@ struct PointHash:
     var heads: Growing[i32]
     var next: Growing[i32]
 
-    func build(positions: const Vector3[], size: f64) -> PointHash!:
+    static func build(positions: const Vector3[], size: f64) -> PointHash!:
         var grid = PointHash(size, Growing[i32](), Growing[i32]())
         errdefer grid.close()
         var buckets: usize = 1024

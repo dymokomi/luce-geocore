@@ -12,7 +12,7 @@ pub struct PathFilter:
     var spans: Growing[usize]
 
     ## A filter over `text`, which must outlive it.
-    pub func parse(text: str) -> PathFilter!:
+    pub static func parse(text: str) -> PathFilter!:
         var filter = PathFilter(text, Growing[usize]())
         errdefer filter.close()
         let bytes = text.bytes

@@ -53,59 +53,59 @@ pub func find_verb(name: str) -> Verb?:
 pub struct Verbs:
     let reserved: u8 = 0
 
-    pub func count() -> i64:
+    pub static func count() -> i64:
         return (i64)verb_count()
 
-    pub func index_of(name: str) -> i64:
+    pub static func index_of(name: str) -> i64:
         for index in 0..<verb_count():
             if verb_at(index).name == name: return (i64)index
         return -1
 
-    pub func name(index: i64) -> str:
+    pub static func name(index: i64) -> str:
         return verb_at(checked(index)).name
 
-    pub func category(index: i64) -> str:
+    pub static func category(index: i64) -> str:
         return verb_at(checked(index)).category
 
-    pub func description(index: i64) -> str:
+    pub static func description(index: i64) -> str:
         return verb_at(checked(index)).description
 
     ## The domain its kernel works on (0 points, 1 corners, 2 faces, 4 edges).
-    pub func domain(index: i64) -> i64:
+    pub static func domain(index: i64) -> i64:
         return (i64)(u8)verb_at(checked(index)).domain
 
-    pub func changes_topology(index: i64) -> bool:
+    pub static func changes_topology(index: i64) -> bool:
         return verb_at(checked(index)).changes_topology
 
-    pub func parm_count(index: i64) -> i64:
+    pub static func parm_count(index: i64) -> i64:
         return (i64)verb_at(checked(index)).parms.length
 
-    pub func parm_label(index: i64, parm: i64) -> str:
+    pub static func parm_label(index: i64, parm: i64) -> str:
         return parm_of(index, parm).label
 
     ## 0 number, 1 integer, 2 toggle, 3 vector, 4 menu.
-    pub func parm_kind(index: i64, parm: i64) -> i64:
+    pub static func parm_kind(index: i64, parm: i64) -> i64:
         return (i64)(u8)parm_of(index, parm).kind
 
-    pub func parm_initial(index: i64, parm: i64) -> f64:
+    pub static func parm_initial(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).initial
 
-    pub func parm_minimum(index: i64, parm: i64) -> f64:
+    pub static func parm_minimum(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).minimum
 
-    pub func parm_maximum(index: i64, parm: i64) -> f64:
+    pub static func parm_maximum(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).maximum
 
-    pub func parm_soft(index: i64, parm: i64) -> f64:
+    pub static func parm_soft(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).soft
 
-    pub func parm_components(index: i64, parm: i64) -> i64:
+    pub static func parm_components(index: i64, parm: i64) -> i64:
         return (i64)parm_of(index, parm).components
 
-    pub func parm_choices(index: i64, parm: i64) -> str:
+    pub static func parm_choices(index: i64, parm: i64) -> str:
         return parm_of(index, parm).choices
 
-    pub func parm_doc(index: i64, parm: i64) -> str:
+    pub static func parm_doc(index: i64, parm: i64) -> str:
         return parm_of(index, parm).doc
 
     ## Run verb `name` on `mesh`: `group` (empty: everything) read on
@@ -113,7 +113,7 @@ pub struct Verbs:
     ## 4 corners), the parameter values in order.
     ## `symmetry` mirrors the group across X, Y or Z (1..3); `keep` selects
     ## the group carried through the verb instead of what it made.
-    pub func run(name: str, mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false) -> interop.Reference[VerbResult]!:
+    pub static func run(name: str, mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false) -> interop.Reference[VerbResult]!:
         let verb = find_verb(name) else error(errors.invalid, "unknown operation")
         var product = try run_verb(&verb, try mesh.get(), group, group_type, numbers, symmetry, keep)
         let storage = new VerbResult[1] --- in memory.heap catch failure:

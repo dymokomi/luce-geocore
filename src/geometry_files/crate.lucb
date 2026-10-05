@@ -260,7 +260,7 @@ struct Sink:
     var used: usize = 0
     var written: usize = 0
 
-    func make(file: files.TemporaryFile*) -> Sink!:
+    static func make(file: files.TemporaryFile*) -> Sink!:
         return Sink(file, try new u8[1048576] --- in memory.heap, 0, 0)
 
     func put(data: const u8[]) -> !:
@@ -328,7 +328,7 @@ pub struct CrateReader:
     var pending: usize = 0
     var in_element: bool = false
 
-    pub func open(path: str) -> CrateReader!:
+    pub static func open(path: str) -> CrateReader!:
         let native = try strings.copy(path)
         defer strings.release(native)
         var file = try files.File.open((c.str)native)

@@ -28,7 +28,7 @@ pub struct ShadingCache:
 
     ## A cache for a mesh whose points `moved` over `previous`'s geometry.
     ## Only a built `previous` is kept; otherwise this one computes afresh.
-    pub func after(previous: ShadingCache*, moved: const u32[]) -> ShadingCache*!:
+    pub static func after(previous: ShadingCache*, moved: const u32[]) -> ShadingCache*!:
         let cache = try new ShadingCache() in memory.heap
         if previous.ready.load(.acquire) == 0 or moved.length == 0:
             return cache

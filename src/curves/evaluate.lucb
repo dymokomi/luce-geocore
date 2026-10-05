@@ -295,7 +295,7 @@ struct Knots:
     var large: f32[]
     var count: usize = 0
 
-    func make(count: usize) -> Knots!:
+    static func make(count: usize) -> Knots!:
         var knots = Knots()
         knots.count = count
         if count > 128:

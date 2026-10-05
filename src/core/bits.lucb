@@ -20,7 +20,7 @@ pub struct Bits:
 
     ## A view of a column of `count` bits (a boolean attribute's bytes or a
     ## Column[u64]); the column must hold whole words.
-    pub func of_bytes(bytes: const u8[], count: usize) -> Bits:
+    pub static func of_bytes(bytes: const u8[], count: usize) -> Bits:
         return Bits(u64[]((u64*)bytes.data, word_count(count)), count)
 
     pub func get(at: usize) -> bool:
@@ -53,19 +53,19 @@ pub struct BitsBuilder:
     pub var column: Column[u64]
     pub var count: usize
 
-    pub func zeros(count: usize) -> BitsBuilder!:
+    pub static func zeros(count: usize) -> BitsBuilder!:
         var column = try Column[u64].allocate(word_count(count))
         let words = column.span()
         if words.length > 0: memory.set(u8[]((u8*)words.data, words.length * 8), 0)
         return BitsBuilder(column, count)
 
-    pub func ones(count: usize) -> BitsBuilder!:
+    pub static func ones(count: usize) -> BitsBuilder!:
         var built = try BitsBuilder.zeros(count)
         built.set_range(0, count)
         return built
 
     ## A private copy of `bits`.
-    pub func copy_of(bits: Bits) -> BitsBuilder!:
+    pub static func copy_of(bits: Bits) -> BitsBuilder!:
         var column = try Column[u64].copy_of(bits.words)
         return BitsBuilder(column, bits.count)
 

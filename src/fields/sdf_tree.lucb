@@ -35,7 +35,7 @@ pub struct SdfTree:
 
     ## The tree of `sdf`; fails on a transform that does not hold exactly
     ## one distance (programs Luce's nodes and Edit SDF build always do).
-    pub func of(sdf: const Sdf*) -> SdfTree!:
+    pub static func of(sdf: const Sdf*) -> SdfTree!:
         var tree = SdfTree(Growing[SdfNode](), Growing[i32](), Growing[i32](), Growing[Matrix4](), no_node)
         errdefer tree.close()
         let ops = sdf.op_span()
@@ -153,7 +153,7 @@ pub struct SdfRewrite:
     var wrapped: Growing[i64]
     var wraps: Growing[f32]
 
-    pub func of(sdf: const Sdf*) -> SdfRewrite!:
+    pub static func of(sdf: const Sdf*) -> SdfRewrite!:
         var result = SdfRewrite(Growing[u8](), Growing[f32](), Growing[bool](), Growing[i64](), Growing[f32]())
         errdefer result.close()
         try result.codes.assign(sdf.op_span())

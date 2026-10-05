@@ -7,7 +7,7 @@ pub struct SdfEdits:
     let reserved: u8 = 0
 
     ## How many primitives the set's SDF has (0 without one).
-    pub func count(geometry: interop.Reference[GeometrySet]) -> i64!:
+    pub static func count(geometry: interop.Reference[GeometrySet]) -> i64!:
         let sdf = set_sdf(try geometry.get()) else return 0
         var tree = try SdfTree.of(sdf)
         defer tree.close()
@@ -15,7 +15,7 @@ pub struct SdfEdits:
 
     ## The proxies of the set's SDF primitives, tagged `sdf_prim` (empty
     ## without an SDF).
-    pub func proxies(geometry: interop.Reference[GeometrySet]) -> interop.Reference[Mesh]!:
+    pub static func proxies(geometry: interop.Reference[GeometrySet]) -> interop.Reference[Mesh]!:
         let sdf = set_sdf(try geometry.get()) else return try Mesh.empty()
         return try sdf_proxies(sdf)
 
@@ -25,7 +25,7 @@ pub struct SdfEdits:
     ## positive. `sizes`: sphere radius; box width, height, depth and
     ## rounding; torus ring and tube radii; capsule and cylinder radius and
     ## height.
-    pub func with_primitive(geometry: interop.Reference[GeometrySet], shape: i64, sizes: const f64[], position: Vector3, mode: i64, blend: f64) -> interop.Reference[GeometrySet]!:
+    pub static func with_primitive(geometry: interop.Reference[GeometrySet], shape: i64, sizes: const f64[], position: Vector3, mode: i64, blend: f64) -> interop.Reference[GeometrySet]!:
         let source = try geometry.get()
         if shape < 0 or shape > 4 or mode < 0 or mode > 2 or not (blend >= 0.0): error(errors.invalid, "an SDF primitive needs a shape 0..4, a mode 0..2 and a blend of at least 0")
         var values: f64[8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
@@ -56,7 +56,7 @@ pub struct SdfEdits:
     ## The set with the primitives `group` names on `pick` moved by
     ## Transform Components' numbers (translate, rotate in degrees, scale,
     ## pivot mode and custom pivot; the centroid pivot is the picked faces').
-    pub func transformed(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
+    pub static func transformed(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
         let source = try geometry.get()
         let sdf = set_sdf(source) else error(errors.invalid, "Edit SDF has no primitives to move")
         var tree = try SdfTree.of(sdf)
@@ -75,7 +75,7 @@ pub struct SdfEdits:
     ## `mode` (0 add, 1 subtract, 2 intersect; -1 keeps each) and `blend`
     ## (< 0 keeps each). Fails when none of them has a boolean (the first
     ## shape of a program has none).
-    pub func with_boolean(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, mode: i64, blend: f64) -> interop.Reference[GeometrySet]!:
+    pub static func with_boolean(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, mode: i64, blend: f64) -> interop.Reference[GeometrySet]!:
         if mode < -1 or mode > 2: error(errors.invalid, "an SDF boolean is 0 add, 1 subtract or 2 intersect")
         let source = try geometry.get()
         let sdf = set_sdf(source) else error(errors.invalid, "Edit SDF has no primitives")
@@ -93,7 +93,7 @@ pub struct SdfEdits:
 
     ## The set without the primitives `group` names; its SDF goes when none
     ## remain.
-    pub func without(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str) -> interop.Reference[GeometrySet]!:
+    pub static func without(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str) -> interop.Reference[GeometrySet]!:
         let source = try geometry.get()
         let sdf = set_sdf(source) else error(errors.invalid, "Edit SDF has no primitives to delete")
         var tree = try SdfTree.of(sdf)
@@ -127,7 +127,7 @@ struct ChosenPrimitives:
     var marks: Growing[bool]
     var centroid: Vector3
 
-    func of(pick: const Mesh*, group: str, count: usize) -> ChosenPrimitives!:
+    static func of(pick: const Mesh*, group: str, count: usize) -> ChosenPrimitives!:
         var result = ChosenPrimitives(Growing[bool](), Vector3())
         errdefer result.close()
         try result.marks.fill(count, false)

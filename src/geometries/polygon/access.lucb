@@ -2,7 +2,7 @@
 ## spatial queries.
 
 extend Mesh:
-    pub func cube(size: f64 = 2.0) -> interop.Reference[Mesh]!:
+    pub static func cube(size: f64 = 2.0) -> interop.Reference[Mesh]!:
         if not (size > 0.0 and size <= 100000.0):
             error(errors.invalid, "cube size must be in (0,100000]")
         let h = size * 0.5
@@ -12,7 +12,7 @@ extend Mesh:
         let corners: i64[24] = [1, 2, 6, 5, 4, 7, 3, 0, 3, 7, 6, 2, 0, 1, 5, 4, 5, 6, 7, 4, 0, 3, 2, 1]
         return try make_mesh(points, sizes, corners)
 
-    pub func empty() -> interop.Reference[Mesh]!:
+    pub static func empty() -> interop.Reference[Mesh]!:
         var points: Vector3[]
         var sizes: i64[]
         var corners: i64[]

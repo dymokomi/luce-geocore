@@ -38,7 +38,7 @@ struct Profile:
     var heights: f64[24]
     var count: usize
 
-    func empty() -> Profile:
+    static func empty() -> Profile:
         var result: Profile = ---
         result.count = 0
         return result

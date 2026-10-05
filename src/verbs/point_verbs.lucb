@@ -24,7 +24,7 @@ pub struct ComponentTransform:
     pub let translation: Vector3
     pub let pivot: Vector3
 
-    pub func of(numbers: const f64[], middle: Vector3) -> ComponentTransform!:
+    pub static func of(numbers: const f64[], middle: Vector3) -> ComponentTransform!:
         if numbers.length < 13: error(errors.invalid, "a transform needs its thirteen numbers")
         let degrees = 0.017453292519943295
         let linear = Matrix4.compose(Vector3(), Vector3(numbers[3] * degrees, numbers[4] * degrees, numbers[5] * degrees), Vector3(numbers[6], numbers[7], numbers[8]))
