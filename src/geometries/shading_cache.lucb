@@ -28,22 +28,22 @@ pub struct ShadingCache:
 
     ## A cache for a mesh whose points `moved` over `previous`'s geometry.
     ## Only a built `previous` is kept; otherwise this one computes afresh.
-    pub static func after(previous: ShadingCache*, moved: const u32[]) -> ShadingCache*!:
+    pub func after(previous: ShadingCache*, moved: const u32[]) -> ShadingCache*!:
         let cache = try new ShadingCache() in memory.heap
         if previous.ready.load(.acquire) == 0 or moved.length == 0:
             return cache
-        let copy = alloc u32[moved.length] in memory.heap catch failure:
+        let copy = new u32[moved.length] --- in memory.heap catch failure:
             free(cache) in memory.heap
             error(failure.code, failure.message)
         memory.copy(copy, moved, moved.length)
-        discard(previous.owners.add(1, .relaxed))
+        _ = previous.owners.add(1, .relaxed)
         cache.source = previous
         cache.moved = copy
         return cache
 
     ## The smooth normals, per point or per corner (`corner_domain`).
     ## Published once, immutable after.
-    pub mutating func get(shape: const Surface*) -> const Float3[]!:
+    pub func get(shape: const Surface*) -> const Float3[]!:
         if self.ready.load(.acquire) == 0:
             self.lock.lock()
             defer self.lock.unlock()
@@ -76,11 +76,11 @@ pub struct ShadingCache:
 
     ## Every normal from scratch: per point, or per corner where a cusp splits
     ## some point's corners. Under the lock.
-    mutating func compute(shape: const Surface*) -> !:
+    func compute(shape: const Surface*) -> !:
         let points = shape.positions.length
         var point_column = try Column[Float3].allocate(points)
         errdefer point_column.release()
-        let split = try alloc bool[points] in memory.heap
+        let split = try new bool[points] --- in memory.heap
         defer free(split) in memory.heap
         if not point_normals(shape, point_column.span(), split):
             self.smooth = point_column
@@ -96,7 +96,7 @@ pub struct ShadingCache:
     ## point, a point that gained a cusp turns the storage per corner: the
     ## other points had none, so their corners copy their point's normal.
     ## Under the lock.
-    mutating func update_from(source: const ShadingCache*, shape: const Surface*) -> !:
+    func update_from(source: const ShadingCache*, shape: const Surface*) -> !:
         let affected = try affected_points(shape, self.moved)
         defer free(affected) in memory.heap
         var column = try Column[Float3].allocate(source.smooth.count())
@@ -106,7 +106,7 @@ pub struct ShadingCache:
             refresh_corners(shape, affected, column.span())
         else:
             let points = shape.positions.length
-            let split = try alloc bool[points] in memory.heap
+            let split = try new bool[points] --- in memory.heap
             defer free(split) in memory.heap
             memory.set(u8[]((u8*)split.data, points), 0)
             if refresh_points(shape, affected, column.span(), split):
@@ -125,7 +125,7 @@ pub struct ShadingCache:
         self.per_corner = source.per_corner
 
     ## k1 and k2 of every point, computed on first use.
-    pub mutating func curvatures(shape: const CurvatureShape*) -> const f32[]!:
+    pub func curvatures(shape: const CurvatureShape*) -> const f32[]!:
         if self.curvature_ready.load(.acquire) == 0:
             self.lock.lock()
             defer self.lock.unlock()
@@ -146,7 +146,7 @@ pub struct ShadingCache:
     pub func curvature_id() -> u64:
         return self.curvature.id()
 
-    mutating func drop_source():
+    func drop_source():
         if let source = self.source:
             self.source = none
             release_shading(source)
@@ -156,7 +156,7 @@ pub struct ShadingCache:
             self.moved = empty
 
     ## Called by the last owner, after every reader.
-    mutating func close():
+    func close():
         self.smooth.release()
         self.curvature.release()
         self.drop_source()

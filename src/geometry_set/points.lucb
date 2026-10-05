@@ -17,11 +17,11 @@ pub struct PointCloud:
     func shared_storage() -> PointCloud*!:
         var attributes = try self.attributes.shared()
         errdefer attributes.close()
-        let storage = try alloc PointCloud[1] in memory.heap
+        let storage = try new PointCloud[1] --- in memory.heap
         storage[0] = PointCloud(self.positions.share(), self.origin, attributes)
         return storage.data
 
-    pub mutating func close():
+    pub func close():
         self.positions.release()
         self.attributes.close()
 
@@ -45,7 +45,7 @@ pub func cloud_with_store(cloud: const PointCloud*, attributes: AttributeStore) 
 pub func cloud_assembled(positions: Column[Float3], origin: Vector3, attributes: AttributeStore) -> PointCloud*!:
     var owned_positions = positions
     var owned_attributes = attributes
-    let storage = alloc PointCloud[1] in memory.heap catch failure:
+    let storage = new PointCloud[1] --- in memory.heap catch failure:
         owned_positions.release()
         owned_attributes.close()
         error(failure.code, failure.message)
@@ -60,7 +60,7 @@ pub func cloud_of_mesh(mesh: const Mesh*) -> PointCloud*!:
     for index in 0..<(usize)mesh.attribute_count():
         let entry = try mesh.attribute_entry((i64)index)
         if entry.domain == Domain.point: try attributes.put(entry.share())
-    let storage = try alloc PointCloud[1] in memory.heap
+    let storage = try new PointCloud[1] --- in memory.heap
     storage[0] = PointCloud(mesh_positions(mesh), mesh.position_origin(), attributes)
     return storage.data
 
@@ -101,7 +101,7 @@ func place_cloud(data: const void*, placement: const Placement*) -> void*!:
         out[at] = Float3.of(placement.matrix.transform_point(cloud.point(at)).subtract(origin))
     var attributes = try cloud.attributes.shared()
     errdefer attributes.close()
-    let storage = try alloc PointCloud[1] in memory.heap
+    let storage = try new PointCloud[1] --- in memory.heap
     storage[0] = PointCloud(positions.take(), origin, attributes)
     return (void*)storage.data
 
@@ -125,19 +125,19 @@ func join_clouds(first: const void*, second: const void*) -> void*!:
             let pieces: attribute_ops.Piece[2] = [attribute_ops.Piece(a.attributes.entry((usize)left) if left >= 0 else none, a.count()),
                                                   attribute_ops.Piece(b.attributes.entry((usize)right) if right >= 0 else none, b.count())]
             try attributes.put(try attribute_ops.concatenated(pieces))
-    let storage = try alloc PointCloud[1] in memory.heap
+    let storage = try new PointCloud[1] --- in memory.heap
     storage[0] = PointCloud(positions.take(), a.origin, attributes)
     return (void*)storage.data
 
 func no_paths(data: const void*, out: TableBuilder*) -> !:
-    discard(data)
-    discard(out)
+    _ = data
+    _ = out
 
 ## Points carry no paths: a filter keeps them all or none.
 func keep_cloud(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
     if filter.is_empty() == keep:
         return (void*)(try ((const PointCloud*)data).shared_storage())
-    let storage = try alloc PointCloud[1] in memory.heap
+    let storage = try new PointCloud[1] --- in memory.heap
     storage[0] = PointCloud(Column[Float3](), Vector3(), AttributeStore())
     return (void*)storage.data
 

@@ -55,7 +55,7 @@ func plan_profiles(context: void*?, first: usize, end: usize):
     defer known.close()
     for slot in first..<end:
         vertex_profiles(pass, &known, slot) catch failure:
-            discard(failure)
+            _ = failure
             pass.failed.store(1, .relaxed)
             return
 

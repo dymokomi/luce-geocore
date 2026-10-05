@@ -27,7 +27,7 @@ struct Cut:
         self.distance = Growing[f64]()
         self.cut = Growing[i32]()
 
-    mutating func close():
+    func close():
         self.distance.close()
         self.cut.close()
 

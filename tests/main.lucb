@@ -41,7 +41,7 @@ struct Tracker: memory.Allocator:
     var remaining: usize?
     var lock: sync.Mutex
 
-    pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
+    pub func allocate(size: usize, alignment: usize) -> u8[]?:
         if size == 0: return self.upstream.allocate(size, alignment)
         self.lock.lock()
         defer self.lock.unlock()
@@ -53,10 +53,10 @@ struct Tracker: memory.Allocator:
         self.live += 1
         return block
 
-    pub mutating func resize(block: u8[], size: usize) -> bool:
+    pub func resize(block: u8[], size: usize) -> bool:
         return self.upstream.resize(block, size)
 
-    pub mutating func release(block: u8[]):
+    pub func release(block: u8[]):
         if block.length == 0: return
         self.lock.lock()
         defer self.lock.unlock()
@@ -73,7 +73,7 @@ func settle(tracker: Tracker*):
     tracker.remaining = none
     clear_group_cache()
     ownership.collect()
-    discard(ownership.finish_run(0))
+    _ = ownership.finish_run(0)
     assert(tracker.live == 0)
 
 ## Fail each of the first `stages` allocations of `check` in turn; every

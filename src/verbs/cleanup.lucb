@@ -26,7 +26,7 @@ func cook_fuse(input: const VerbInput*, output: VerbOutput*) -> !:
     let distance = input.parms.at(0)
     if not (distance >= 0.000001 and distance <= 100000.0): error(errors.invalid, "Fuse distance must be in 1e-6..1e5")
     let points = (usize)input.mesh.point_count()
-    let target = try alloc i32[points] in memory.heap
+    let target = try new i32[points] --- in memory.heap
     defer free(target) in memory.heap
     try fuse_targets(input, distance, target)
     var nothing: Vector3[]
@@ -40,9 +40,9 @@ func fuse_targets(input: const VerbInput*, distance: f64, target: i32[]) -> !:
     let points = target.length
     let positions = mesh.point_span()
     let buckets: usize = 65536
-    let heads = try alloc i32[buckets] in memory.heap
+    let heads = try new i32[buckets] --- in memory.heap
     defer free(heads) in memory.heap
-    let next = try alloc i32[points] in memory.heap
+    let next = try new i32[points] --- in memory.heap
     defer free(next) in memory.heap
     for at in 0..<buckets: heads[at] = -1
     for point in 0..<points:
@@ -73,7 +73,7 @@ func cook_merge(input: const VerbInput*, output: VerbOutput*) -> !:
     let mode = input.parms.at(0)
     let mesh = input.mesh
     let points = (usize)mesh.point_count()
-    let target = try alloc i32[points] in memory.heap
+    let target = try new i32[points] --- in memory.heap
     defer free(target) in memory.heap
     for at in 0..<points: target[at] = (i32)at
     if mode == 4.0:
@@ -87,7 +87,7 @@ func cook_merge(input: const VerbInput*, output: VerbOutput*) -> !:
     if input.group.population() < 2:
         output.warning = "Merge needs two or more points in the group; the input passes through"
         return
-    let places = try alloc Vector3[points] in memory.heap
+    let places = try new Vector3[points] --- in memory.heap
     defer free(places) in memory.heap
     for at in 0..<points: places[at] = builder_position(mesh, at)
     if mode == 3.0:
@@ -104,9 +104,9 @@ func cook_merge(input: const VerbInput*, output: VerbOutput*) -> !:
             if input.group.get(point): target[point] = keep
     # At a center: each kept point moves to the mean of those merging into it.
     if mode == 0.0 or mode == 3.0:
-        let sums = try alloc Vector3[points] in memory.heap
+        let sums = try new Vector3[points] --- in memory.heap
         defer free(sums) in memory.heap
-        let counts = try alloc u32[points] in memory.heap
+        let counts = try new u32[points] --- in memory.heap
         defer free(counts) in memory.heap
         for at in 0..<points:
             sums[at] = Vector3()
@@ -148,7 +148,7 @@ func cell(x: i64, y: i64, z: i64, buckets: usize) -> usize:
 
 func cook_clean(input: const VerbInput*, output: VerbOutput*) -> !:
     let points = (usize)input.mesh.point_count()
-    let target = try alloc i32[points] in memory.heap
+    let target = try new i32[points] --- in memory.heap
     defer free(target) in memory.heap
     for at in 0..<points: target[at] = (i32)at
     var nothing: Vector3[]

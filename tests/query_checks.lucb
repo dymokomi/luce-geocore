@@ -12,7 +12,7 @@ struct Gate: memory.Allocator:
     var remaining: usize? = none
     var live: usize = 0
 
-    pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
+    pub func allocate(size: usize, alignment: usize) -> u8[]?:
         self.lock.lock()
         defer self.lock.unlock()
         if size == 0: return self.upstream.allocate(size, alignment)
@@ -23,12 +23,12 @@ struct Gate: memory.Allocator:
         self.live += 1
         return block
 
-    pub mutating func resize(block: u8[], size: usize) -> bool:
+    pub func resize(block: u8[], size: usize) -> bool:
         self.lock.lock()
         defer self.lock.unlock()
         return self.upstream.resize(block, size)
 
-    pub mutating func release(block: u8[]):
+    pub func release(block: u8[]):
         self.lock.lock()
         defer self.lock.unlock()
         if block.length == 0: return
@@ -40,38 +40,38 @@ func restore(previous: memory.Allocator):
     memory.heap = previous
 
 func grid() -> interop.Reference[Mesh]!:
-    let points = try alloc Vector3[192] in memory.heap
+    let points = try new Vector3[192] --- in memory.heap
     defer free(points) in memory.heap
     var sizes: i64[64]
     var corners: i64[192]
     for at in 0..<(usize)64:
         let x = (f64)(at % 8) * 2.0
         let y = (f64)(at // 8) * 2.0
-        points[at * 3] = Vector3(x,y,0.0)
-        points[at * 3 + 1] = Vector3(x+1.0,y,0.0)
-        points[at * 3 + 2] = Vector3(x,y+1.0,0.0)
+        points[at * 3] = Vector3(x, y, 0.0)
+        points[at * 3 + 1] = Vector3(x + 1.0, y, 0.0)
+        points[at * 3 + 2] = Vector3(x, y + 1.0, 0.0)
         sizes[at] = 3
-        for corner in 0..<(usize)3: corners[at*3+corner] = (i64)(at*3+corner)
-    return try interop.Reference[Mesh].adopt(new Mesh(points,sizes,corners) in memory.heap,mesh_type,memory.heap)
+        for corner in 0..<(usize)3: corners[at * 3 + corner] = (i64)(at * 3 + corner)
+    return try interop.Reference[Mesh].adopt(new Mesh(points, sizes, corners) in memory.heap, mesh_type, memory.heap)
 
 func queries(mesh: const Mesh*) -> !:
     try mesh.prepare_queries()
-    let p = Vector3(0.2,0.2,3.0)
-    let d = Vector3(0.0,0.0,-1.0)
+    let p = Vector3(0.2, 0.2, 3.0)
+    let d = Vector3(0.0, 0.0, -1.0)
     assert((try mesh.surface_distance(p)) == 3.0)
     assert((try mesh.closest_face(p)) == 0)
-    assert((try mesh.ray_face(p,d)) == 0)
-    assert((try mesh.ray_distance(p,d)) == 3.0)
-    assert((try mesh.ray_face(p,d.multiply_scalar(-1.0))) == -1)
+    assert((try mesh.ray_face(p, d)) == 0)
+    assert((try mesh.ray_distance(p, d)) == 3.0)
+    assert((try mesh.ray_face(p, d.multiply_scalar(-1.0))) == -1)
 
 func retry(gate: Gate*, stage: usize) -> bool!:
     let source = try grid()
     defer source.release()
-    let snapshot = try source.value().without_attribute("absent",0)
+    let snapshot = try source.value().without_attribute("absent", 0)
     defer snapshot.release()
     # The face of each corner is a topology cache the index reads; build it
     # first, so the baseline counts only what the index itself allocates.
-    discard(try source.value().triangle_face(0))
+    _ = try source.value().triangle_face(0)
     let baseline = gate.live
     gate.remaining = stage
     defer clear_limit(gate)
@@ -101,14 +101,14 @@ struct Readers:
 
 func read(raw: void*?):
     let readers = (Readers*)(raw else trap("missing query readers"))
-    discard(readers.waiting.add(1,.release))
+    _ = readers.waiting.add(1, .release)
     while readers.start.load(.acquire) == 0: thread.yield()
     for iteration in 0..<100:
         queries(readers.mesh) catch failure:
-            discard(readers.failures.add(1,.relaxed))
+            _ = readers.failures.add(1, .relaxed)
 
 func join(readers: Readers*, handles: const thread.Handle[]):
-    readers.start.store(1,.release)
+    readers.start.store(1, .release)
     for handle in handles: handle.join() catch failure: trap(failure.message)
 
 func concurrent() -> !:
@@ -120,62 +120,62 @@ func concurrent() -> !:
         copy.close()
         free(copy) in memory.heap
     source.close()
-    var readers = Readers(mesh=copy)
+    var readers = Readers(mesh = copy)
     var handles: thread.Handle[8]
     var started: usize = 0
-    defer join(&readers,handles[..<started])
+    defer join(&readers, handles[..<started])
     for at in 0..<handles.length:
-        handles[at] = try thread.spawn(read,(void*)&readers,name="mesh query")
+        handles[at] = try thread.spawn(read, (void*)&readers, name = "mesh query")
         started += 1
     while readers.waiting.load(.acquire) != 8: thread.yield()
-    join(&readers,handles)
+    join(&readers, handles)
     started = 0
     assert(readers.failures.load(.acquire) == 0)
     try queries(copy)
 
 func display_surface() -> !:
-    let points = [Vector3(),Vector3(1.0,0.0,0.0),Vector3(1.0,1.0,1.0),Vector3(0.0,1.0,0.0)]
-    let origin = Vector3(0.5,0.5,2.0)
-    let direction = Vector3(0.0,0.0,-1.0)
-    for raised in [false,true]:
-        let display: i64[6] = [0,1,2,0,2,3] if raised else [0,1,3,1,2,3]
-        var raw = try Mesh(points,[4],[0,1,2,3],display)
+    let points = [Vector3(), Vector3(1.0, 0.0, 0.0), Vector3(1.0, 1.0, 1.0), Vector3(0.0, 1.0, 0.0)]
+    let origin = Vector3(0.5, 0.5, 2.0)
+    let direction = Vector3(0.0, 0.0, -1.0)
+    for raised in [false, true]:
+        let display: i64[6] = [0, 1, 2, 0, 2, 3] if raised else [0, 1, 3, 1, 2, 3]
+        var raw = try Mesh(points, [4], [0, 1, 2, 3], display)
         defer raw.close()
-        let snapshot = try raw.without_attribute("absent",0)
+        let snapshot = try raw.without_attribute("absent", 0)
         defer snapshot.release()
         let copy = try detached_mesh(snapshot)
         defer:
             copy.close()
             free(copy) in memory.heap
         let expected = 1.5 if raised else 2.0
-        assert((try raw.ray_distance(origin,direction)) == expected)
-        assert((try snapshot.value().ray_distance(origin,direction)) == expected)
+        assert((try raw.ray_distance(origin, direction)) == expected)
+        assert((try snapshot.value().ray_distance(origin, direction)) == expected)
         try copy.prepare_queries()
-        assert((try copy.ray_distance(origin,direction)) == expected)
-        let on_surface = Vector3(0.5,0.5,0.5 if raised else 0.0)
+        assert((try copy.ray_distance(origin, direction)) == expected)
+        let on_surface = Vector3(0.5, 0.5, 0.5 if raised else 0.0)
         assert((try copy.surface_distance(on_surface)) == 0.0)
 
 pub func exercise() -> !:
     let previous = memory.heap
-    var gate = Gate(upstream=previous)
+    var gate = Gate(upstream = previous)
     memory.heap = &gate
     defer restore(previous)
     var failures: usize = 0
     # Fail each allocation of the index build in turn until one build succeeds.
     var succeeded = false
     for stage in 0..<(usize)256:
-        if try retry(&gate,stage): failures += 1
+        if try retry(&gate, stage): failures += 1
         else: succeeded = true
         ownership.collect()
-        discard(ownership.finish_run(0))
+        _ = ownership.finish_run(0)
         assert(gate.live == 0)
     assert(failures >= 4 and succeeded)
     for iteration in 0..<8:
         try concurrent()
         ownership.collect()
-        discard(ownership.finish_run(0))
+        _ = ownership.finish_run(0)
         assert(gate.live == 0)
     try display_surface()
     ownership.collect()
-    discard(ownership.finish_run(0))
+    _ = ownership.finish_run(0)
     assert(gate.live == 0)

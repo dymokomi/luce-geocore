@@ -5,54 +5,54 @@ from luce_geocore import geocore
 from luce_geocore.geocore import Vector3, MeshBuilder, Mesh
 
 pub func exercise() -> !:
-    for scale in [1e-7,1e-3,1.0,1e2]:
-        for offset in [0.0,1000.0]:
-            for axis in [0,1,2]:
-                for reverse in [false,true]: try concave(scale,offset,axis,reverse)
+    for scale in [1e-7, 1e-3, 1.0, 1e2]:
+        for offset in [0.0, 1000.0]:
+            for axis in [0, 1, 2]:
+                for reverse in [false, true]: try concave(scale, offset, axis, reverse)
     # The tiny area here comes from a narrow UV sliver, not merely unit scale.
-    var wedge = try Mesh([Vector3(),Vector3(7e-5,0.0,0.0),Vector3(7e-5,7e-9,0.0)],[3],[0,1,2])
+    var wedge = try Mesh([Vector3(), Vector3(7e-5, 0.0, 0.0), Vector3(7e-5, 7e-9, 0.0)], [3], [0, 1, 2])
     defer wedge.close()
     assert((try wedge.face_normal(0)).z == 1.0)
     # Collinear corners: the face stays, with a zero normal.
-    var flat = try Mesh([Vector3(),Vector3(1e-8,0.0,0.0),Vector3(2e-8,0.0,0.0)],[3],[0,1,2])
+    var flat = try Mesh([Vector3(), Vector3(1e-8, 0.0, 0.0), Vector3(2e-8, 0.0, 0.0)], [3], [0, 1, 2])
     defer flat.close()
     let zero = try flat.face_normal(0)
     assert(flat.face_count() == 1 and zero.x == 0.0 and zero.y == 0.0 and zero.z == 0.0)
 
 func concave(scale: f64, offset: f64, axis: i64, reverse: bool) -> !:
-    var points = [Vector3(),Vector3(),Vector3(),Vector3(),Vector3()]
-    let base = [Vector3(),Vector3(2.0,0.0,0.0),Vector3(2.0,2.0,0.0),Vector3(1.0,0.5,0.0),Vector3(0.0,2.0,0.0)]
+    var points = [Vector3(), Vector3(), Vector3(), Vector3(), Vector3()]
+    let base = [Vector3(), Vector3(2.0, 0.0, 0.0), Vector3(2.0, 2.0, 0.0), Vector3(1.0, 0.5, 0.0), Vector3(0.0, 2.0, 0.0)]
     var corners: i64[5]
     var builder = try MeshBuilder()
     defer builder.close()
     try builder.face(5)
     for at in 0..<(usize)5:
-        let p = base[at].add(Vector3(offset,offset,offset)).multiply_scalar(scale)
-        points[at] = p if axis == 0 else (Vector3(p.z,p.x,p.y) if axis == 1 else Vector3(p.y,p.z,p.x))
-        corners[at] = (i64)(4-at if reverse else at)
-        discard(try builder.point(points[at]))
+        let p = base[at].add(Vector3(offset, offset, offset)).multiply_scalar(scale)
+        points[at] = p if axis == 0 else (Vector3(p.z, p.x, p.y) if axis == 1 else Vector3(p.y, p.z, p.x))
+        corners[at] = (i64)(4 - at if reverse else at)
+        _ = try builder.point(points[at])
         try builder.corner(corners[at])
-    var direct = try Mesh(points,[5],corners)
+    var direct = try Mesh(points, [5], corners)
     defer direct.close()
     var indices: i64[9]
     try builder.triangulate_last(indices)
     try builder.set_last_display(indices)
     let retained = try builder.finish()
     defer retained.release()
-    let direction = Vector3(0.0,0.0,1.0) if axis == 0 else (Vector3(1.0,0.0,0.0) if axis == 1 else Vector3(0.0,1.0,0.0))
+    let direction = Vector3(0.0, 0.0, 1.0) if axis == 0 else (Vector3(1.0, 0.0, 0.0) if axis == 1 else Vector3(0.0, 1.0, 0.0))
     let expected = direction.multiply_scalar(-1.0 if reverse else 1.0)
     # Normals are stored in f32.
     assert((try direct.face_normal(0)).subtract(expected).length() < 1e-6)
     assert((try retained.value().face_normal(0)).subtract(expected).length() < 1e-6)
     var area: f64 = 0.0
     for triangle in 0..<(usize)3:
-        let a = points[(usize)corners[(usize)indices[triangle*3]]]
-        let b = points[(usize)corners[(usize)indices[triangle*3+1]]]
-        let c = points[(usize)corners[(usize)indices[triangle*3+2]]]
-        let signed = b.subtract(a).cross(c.subtract(a)).dot(expected)*0.5
+        let a = points[(usize)corners[(usize)indices[triangle * 3]]]
+        let b = points[(usize)corners[(usize)indices[triangle * 3 + 1]]]
+        let c = points[(usize)corners[(usize)indices[triangle * 3 + 2]]]
+        let signed = b.subtract(a).cross(c.subtract(a)).dot(expected) * 0.5
         assert(signed > 0.0)
         area += signed
-    assert(math.abs(area/(scale*scale)-2.5) < 1e-5)
+    assert(math.abs(area / (scale * scale) - 2.5) < 1e-5)
     for at in 0..<9:
         let a = direct.index(at)
         defer a.release()

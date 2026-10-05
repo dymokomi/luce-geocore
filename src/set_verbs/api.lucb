@@ -47,21 +47,21 @@ pub func find_set_verb(name: str) -> SetVerb?:
 pub struct GeometryVerbs:
     let reserved: u8 = 0
 
-    pub static func index_of(name: str) -> i64:
+    pub func index_of(name: str) -> i64:
         for index in 0..<set_verb_count():
             if set_verb_at(index).name == name: return (i64)index
         return -1
 
     ## Run set verb `name` on `input` (and `second`): `group` read on
     ## `group_type`'s domain, the parameter values in order.
-    pub static func run(name: str, input: interop.Reference[GeometrySet], second: interop.Reference[GeometrySet]?, group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[SetVerbResult]!:
+    pub func run(name: str, input: interop.Reference[GeometrySet], second: interop.Reference[GeometrySet]?, group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[SetVerbResult]!:
         let verb = find_set_verb(name) else error(errors.invalid, "unknown operation")
         var other: const GeometrySet*? = none
         if let given = second: other = try given.get()
         var output = try run_set_verb(&verb, try input.get(), other, group, group_type, numbers)
         let made = output.set else trap("a set verb made no set")
         output.set = none
-        let storage = alloc SetVerbResult[1] in memory.heap catch failure:
+        let storage = new SetVerbResult[1] --- in memory.heap catch failure:
             dispose_set(made)
             error(failure.code, failure.message)
         storage[0] = SetVerbResult(made, output.warning, output.misses)
@@ -83,7 +83,7 @@ pub struct SetVerbResult:
     pub func misses() -> i64:
         return (i64)self.missed
 
-    pub mutating func close():
+    pub func close():
         dispose_set(self.set)
 
 pub let set_verb_result_type: interop.Type[SetVerbResult] = interop.Type[SetVerbResult]("SetVerbResult", SetVerbResult.close, closeable = true)
@@ -93,67 +93,67 @@ pub let set_verb_result_type: interop.Type[SetVerbResult] = interop.Type[SetVerb
 pub struct VerbCatalog:
     let reserved: u8 = 0
 
-    pub static func count() -> i64:
+    pub func count() -> i64:
         return (i64)(verb_count() + set_verb_count())
 
-    pub static func index_of(name: str) -> i64:
+    pub func index_of(name: str) -> i64:
         for index in 0..<(usize)VerbCatalog.count():
             if entry(index).name == name: return (i64)index
         return -1
 
     ## Whether verb `index` runs on whole sets (else on the realized mesh).
-    pub static func is_set(index: i64) -> bool:
+    pub func is_set(index: i64) -> bool:
         return checked(index) >= verb_count()
 
-    pub static func name(index: i64) -> str:
+    pub func name(index: i64) -> str:
         return entry(checked(index)).name
 
-    pub static func category(index: i64) -> str:
+    pub func category(index: i64) -> str:
         return entry(checked(index)).category
 
-    pub static func description(index: i64) -> str:
+    pub func description(index: i64) -> str:
         return entry(checked(index)).description
 
     ## Inputs of its node: 0 for generators, 2 when it reads a second set.
-    pub static func inputs(index: i64) -> i64:
+    pub func inputs(index: i64) -> i64:
         return (i64)entry(checked(index)).inputs
 
-    pub static func second_required(index: i64) -> bool:
+    pub func second_required(index: i64) -> bool:
         return entry(checked(index)).second_required
 
     ## Whether its node has the Group and Group Type rows.
-    pub static func grouped(index: i64) -> bool:
+    pub func grouped(index: i64) -> bool:
         return entry(checked(index)).grouped
 
-    pub static func parm_count(index: i64) -> i64:
+    pub func parm_count(index: i64) -> i64:
         return (i64)entry(checked(index)).parms.length
 
-    pub static func parm_label(index: i64, parm: i64) -> str:
+    pub func parm_label(index: i64, parm: i64) -> str:
         return parm_of(index, parm).label
 
     ## 0 number, 1 integer, 2 toggle, 3 vector, 4 menu.
-    pub static func parm_kind(index: i64, parm: i64) -> i64:
+    pub func parm_kind(index: i64, parm: i64) -> i64:
         return (i64)(u8)parm_of(index, parm).kind
 
-    pub static func parm_initial(index: i64, parm: i64) -> f64:
+    pub func parm_initial(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).initial
 
-    pub static func parm_minimum(index: i64, parm: i64) -> f64:
+    pub func parm_minimum(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).minimum
 
-    pub static func parm_maximum(index: i64, parm: i64) -> f64:
+    pub func parm_maximum(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).maximum
 
-    pub static func parm_soft(index: i64, parm: i64) -> f64:
+    pub func parm_soft(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).soft
 
-    pub static func parm_components(index: i64, parm: i64) -> i64:
+    pub func parm_components(index: i64, parm: i64) -> i64:
         return (i64)parm_of(index, parm).components
 
-    pub static func parm_choices(index: i64, parm: i64) -> str:
+    pub func parm_choices(index: i64, parm: i64) -> str:
         return parm_of(index, parm).choices
 
-    pub static func parm_doc(index: i64, parm: i64) -> str:
+    pub func parm_doc(index: i64, parm: i64) -> str:
         return parm_of(index, parm).doc
 
 ## What the catalog needs of either kind of verb.

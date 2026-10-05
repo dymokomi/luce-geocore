@@ -103,14 +103,14 @@ pub struct GeometryWriter:
         self.kept = Growing[Column[u8]]()
         self.chunk = chunk_bytes
 
-    pub mutating func close():
+    pub func close():
         self.crate.close()
         self.scratch.close()
         for at in 0..<self.kept.count: self.kept.items[at].release()
         self.kept.close()
 
     ## `parent` + "/" + `name`, valid until the next call.
-    pub mutating func child(parent: str, name: str) -> str!:
+    pub func child(parent: str, name: str) -> str!:
         try self.scratch.assign(parent.bytes)
         try self.scratch.push(47)
         for byte in name.bytes: try self.scratch.push(byte)
@@ -118,7 +118,7 @@ pub struct GeometryWriter:
 
     ## A typed column of `rows` × `columns` components, its bytes COPIED now:
     ## safe whatever happens to them before the save. Chunked above 256 MiB.
-    pub mutating func column(name: str, dtype: u8, rows: usize, columns: usize, bytes: const u8[]) -> !:
+    pub func column(name: str, dtype: u8, rows: usize, columns: usize, bytes: const u8[]) -> !:
         var copy = try Column[u8].copy_of(bytes)
         let view = copy.view()
         self.kept.push(copy) catch failure:
@@ -128,7 +128,7 @@ pub struct GeometryWriter:
 
     ## A typed column streamed from `column`, which the writer retains (its
     ## block's users + 1) until it closes: no copy.
-    pub mutating func column_of(name: str, dtype: u8, rows: usize, columns: usize, column: const Column[u8]*) -> !:
+    pub func column_of(name: str, dtype: u8, rows: usize, columns: usize, column: const Column[u8]*) -> !:
         var share = column.share()
         let view = share.view()
         self.kept.push(share) catch failure:
@@ -138,7 +138,7 @@ pub struct GeometryWriter:
 
     ## A typed column BORROWING `bytes`, which must stay alive and unchanged
     ## until `save` returns: no copy. For columns of the set being saved.
-    pub mutating func column_borrowed(name: str, dtype: u8, rows: usize, columns: usize, bytes: const u8[]) -> !:
+    pub func column_borrowed(name: str, dtype: u8, rows: usize, columns: usize, bytes: const u8[]) -> !:
         if bytes.length <= self.chunk or rows <= 1:
             try self.crate.array_borrowed(name, dtype, rows, columns, bytes)
             return
@@ -160,14 +160,14 @@ pub struct GeometryWriter:
             try self.crate.array_borrowed((str)label.view(), dtype, end - first, columns, bytes[first * row_bytes..<end * row_bytes])
 
     ## Every attribute of `store` as children of `parent` (a0, a1, …).
-    pub mutating func attributes(parent: str, store: const AttributeStore*) -> !:
+    pub func attributes(parent: str, store: const AttributeStore*) -> !:
         var entries = Growing[const Attribute*]()
         defer entries.close()
         for index in 0..<store.count(): try entries.push(store.entry(index))
         try self.attribute_list(parent, entries.view())
 
     ## The attributes listed, as children of `parent`.
-    pub mutating func attribute_list(parent: str, entries: const (const Attribute*)[]) -> !:
+    pub func attribute_list(parent: str, entries: const (const Attribute*)[]) -> !:
         let base = try copied_text(parent)
         defer free(base) in memory.heap
         for index in 0..<entries.length:
@@ -202,7 +202,7 @@ func append_name(out: Growing[u8]*, name: str, suffix: str) -> !:
 
 ## The bytes of a typed slice, for a column payload (no copy).
 func bytes_view[T](values: const T[]) -> const u8[]:
-    return u8[]((u8*)values.data, values.length * sizeof(T))
+    return u8[]((u8*)values.data, values.length * memory.size_of(T))
 
 ## `set` under element `path` (kind "geometry"), its components as
 ## children; the root also records the format version and `key`.
@@ -224,7 +224,7 @@ pub func encode_set(writer: GeometryWriter*, set: const GeometrySet*, path: str,
 
 ## A copy of `text` the caller frees (paths outlive the writer's scratch).
 func copied_text(text: str) -> u8[]!:
-    let copy = try alloc u8[text.length] in memory.heap
+    let copy = try new u8[text.length] --- in memory.heap
     if text.length > 0: memory.copy(copy, text.bytes, text.length)
     return copy
 

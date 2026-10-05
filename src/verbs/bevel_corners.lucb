@@ -99,7 +99,7 @@ struct Scratch:
         self.lengths = Growing[f64]()
         self.slides = Growing[i32]()
 
-    mutating func close():
+    func close():
         self.edges.close()
         self.directions.close()
         self.lengths.close()
@@ -148,7 +148,7 @@ func plan_corners(context: void*?, first: usize, end: usize):
     defer scratch.close()
     for slot in first..<end:
         plan_vertex(pass.work, &scratch, slot, pass.filling) catch failure:
-            discard(failure)
+            _ = failure
             pass.failed.store(1, .relaxed)
             return
 

@@ -38,7 +38,7 @@ pub func corner_normals(shape: const Surface*, points: const Float3[], split: co
 ## Every point of a face around a moved point; the caller frees the list.
 pub func affected_points(shape: const Surface*, moved: const u32[]) -> u32[]!:
     let points = shape.positions.length
-    let marked = try alloc bool[points] in memory.heap
+    let marked = try new bool[points] --- in memory.heap
     defer free(marked) in memory.heap
     memory.set(u8[]((u8*)marked.data, points), 0)
     var count: usize = 0
@@ -50,7 +50,7 @@ pub func affected_points(shape: const Surface*, moved: const u32[]) -> u32[]!:
                 if not marked[p]:
                     marked[p] = true
                     count += 1
-    let affected = try alloc u32[count] in memory.heap
+    let affected = try new u32[count] --- in memory.heap
     var written: usize = 0
     for point in 0..<points:
         if marked[point]:

@@ -60,9 +60,9 @@ extend Mesh:
         let bytes = lines.bytes
         for at in 0..<bytes.length + 1:
             if at == bytes.length or bytes[at] == 10:
-                discard(try table.intern((str)bytes[start..<at]))
+                _ = try table.intern((str)bytes[start..<at])
                 start = at + 1
-        let indices = try alloc i32[count] in memory.heap
+        let indices = try new i32[count] --- in memory.heap
         defer free(indices) in memory.heap
         for at in 0..<count:
             let value = values[at]

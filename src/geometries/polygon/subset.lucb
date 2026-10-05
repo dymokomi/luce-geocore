@@ -34,7 +34,7 @@ extend Mesh:
         let corners = self.corners.view()
         let faces = offsets.length - 1
         # Output faces and corners in order: a serial prefix over faces.
-        let face_map = try alloc i32[faces] in memory.heap
+        let face_map = try new i32[faces] --- in memory.heap
         defer free(face_map) in memory.heap
         var face_total: usize = 0
         var corner_total: usize = 0
@@ -47,7 +47,7 @@ extend Mesh:
                 face_map[face] = -1
         # Points any kept face uses, numbered in point order.
         let points = self.positions.count()
-        let point_map = try alloc i32[points] in memory.heap
+        let point_map = try new i32[points] --- in memory.heap
         defer free(point_map) in memory.heap
         memory.set(u8[]((u8*)point_map.data, points * 4), 0)
         for face in 0..<faces:

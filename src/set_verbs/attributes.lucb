@@ -9,13 +9,13 @@ pub struct SetAttributes:
     let reserved: u8 = 0
 
     ## Whether the set has curves or a point cloud of its own.
-    pub static func present(geometry: interop.Reference[GeometrySet]) -> bool!:
+    pub func present(geometry: interop.Reference[GeometrySet]) -> bool!:
         let set = try geometry.get()
         return set_curves(set) != none or set.find(&points_component) != none
 
     ## Whether the set's curves (or else point cloud) have attribute `name`
     ## on `domain` (0 points, 2 curves, 3 detail).
-    pub static func has(geometry: interop.Reference[GeometrySet], name: str, domain: i64) -> bool!:
+    pub func has(geometry: interop.Reference[GeometrySet], name: str, domain: i64) -> bool!:
         let set = try geometry.get()
         let wanted = Domain.point if domain == 0 or domain == 1 else (curve_domain if domain == 2 else Domain.detail)
         if let lines = set_curves(set): return lines.find(name, wanted) != none
@@ -24,25 +24,25 @@ pub struct SetAttributes:
 
     ## `name` = `values` (1..4 components) on `domain`, optionally scaled per
     ## element by the mesh kernel's deterministic hash of the element id.
-    pub static func filled(geometry: interop.Reference[GeometrySet], name: str, domain: i64, values: const f64[], integer: bool, randomize: bool, seed: f64) -> interop.Reference[GeometrySet]!:
+    pub func filled(geometry: interop.Reference[GeometrySet], name: str, domain: i64, values: const f64[], integer: bool, randomize: bool, seed: f64) -> interop.Reference[GeometrySet]!:
         let edit = AttributeEdit(0, name, "", domain, values, integer, randomize, seed, "")
         return try adopt_set(try edited(try geometry.get(), &edit))
 
     ## Without attribute `name` on `domain`.
-    pub static func removed(geometry: interop.Reference[GeometrySet], name: str, domain: i64) -> interop.Reference[GeometrySet]!:
+    pub func removed(geometry: interop.Reference[GeometrySet], name: str, domain: i64) -> interop.Reference[GeometrySet]!:
         var none_values: f64[]
         let edit = AttributeEdit(1, name, "", domain, none_values, false, false, 0.0, "")
         return try adopt_set(try edited(try geometry.get(), &edit))
 
     ## Attribute `name` on `domain` called `replacement`.
-    pub static func renamed(geometry: interop.Reference[GeometrySet], name: str, replacement: str, domain: i64) -> interop.Reference[GeometrySet]!:
+    pub func renamed(geometry: interop.Reference[GeometrySet], name: str, replacement: str, domain: i64) -> interop.Reference[GeometrySet]!:
         var none_values: f64[]
         let edit = AttributeEdit(2, name, replacement, domain, none_values, false, false, 0.0, "")
         return try adopt_set(try edited(try geometry.get(), &edit))
 
     ## A group `name` of the curves' elements `expression` selects on
     ## `domain` (0 points, 2 curves; menu value 4 edges does not apply).
-    pub static func grouped(geometry: interop.Reference[GeometrySet], name: str, domain: i64, expression: str) -> interop.Reference[GeometrySet]!:
+    pub func grouped(geometry: interop.Reference[GeometrySet], name: str, domain: i64, expression: str) -> interop.Reference[GeometrySet]!:
         var none_values: f64[]
         let edit = AttributeEdit(3, name, "", domain, none_values, false, false, 0.0, expression)
         return try adopt_set(try edited(try geometry.get(), &edit))
@@ -114,7 +114,7 @@ func apply_edit(store: AttributeStore*, edit: const AttributeEdit*, domain: Doma
                 attribute.elements = size
                 try store.put(attribute)
                 return
-            let generated = try alloc f64[size * width] in memory.heap
+            let generated = try new f64[size * width] --- in memory.heap
             defer free(generated) in memory.heap
             for id in 0..<size:
                 for component in 0..<width:

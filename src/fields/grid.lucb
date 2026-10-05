@@ -134,7 +134,7 @@ pub struct SparseGrid:
         let transform = matrix.multiply(self.transform)
         return try new_grid(self.name(), self.class, self.background, transform, self.keys.share(), self.values.share(), self.masks.share())
 
-    pub mutating func close():
+    pub func close():
         self.keys.release()
         self.values.release()
         self.masks.release()
@@ -155,14 +155,14 @@ pub func new_grid(name: str, class: GridClass, background: f32, transform: Matri
     let inverse = try affine_inverse(transform)
     var label: u8[64]
     if name.length > 0: memory.copy(label[..<name.length], name.bytes, name.length)
-    let storage = try alloc SparseGrid[1] in memory.heap
+    let storage = try new SparseGrid[1] --- in memory.heap
     storage[0] = SparseGrid(label = label, label_length = name.length, class = class, background = background, transform = transform, inverse = inverse,
                             keys = owned_keys, values = owned_values, masks = owned_masks)
     storage[0].users.store(1, .relaxed)
     return storage.data
 
 pub func share_grid(grid: SparseGrid*) -> SparseGrid*:
-    discard(grid.users.add(1, .relaxed))
+    _ = grid.users.add(1, .relaxed)
     return grid
 
 pub func release_grid(grid: SparseGrid*):
@@ -185,10 +185,10 @@ pub struct GridSampler:
     var cached_key: u64 = 0xFFFFFFFFFFFFFFFF
     var cached_leaf: i64 = -1
 
-    pub static func of(grid: const SparseGrid*) -> GridSampler:
+    pub func of(grid: const SparseGrid*) -> GridSampler:
         return GridSampler(grid, 0xFFFFFFFFFFFFFFFF, -1)
 
-    pub mutating func voxel(i: i64, j: i64, k: i64) -> f32:
+    pub func voxel(i: i64, j: i64, k: i64) -> f32:
         let key = leaf_key(leaf_of(i), leaf_of(j), leaf_of(k))
         if key != self.cached_key:
             self.cached_key = key
@@ -201,7 +201,7 @@ pub struct GridSampler:
         return self.cached_leaf >= 0
 
     ## The trilinear value at world point `point`.
-    pub mutating func sample(point: Vector3) -> f64:
+    pub func sample(point: Vector3) -> f64:
         let p = self.grid.inverse.transform_point(point)
         let fx = math.floor(p.x)
         let fy = math.floor(p.y)
@@ -250,7 +250,7 @@ pub func grid_of_leaves(name: str, class: GridClass, background: f32, transform:
     errdefer masks.release()
     var work = LeafWork(packed.view(), values.span(), masks.span(), fill, context)
     parallel.parallel_for(unique, 16, fill_leaves, (void*)&work)
-    discard(count)
+    _ = count
     return try new_grid(name, class, background, transform, packed.take(), values.take(), masks.take())
 
 struct LeafWork:
@@ -281,9 +281,9 @@ pub func sort_pairs(keys: u64[], values: u64[]) -> !:
     var passes: usize = 0
     while passes < 8 and (differ >> (u64)(passes * 8)) != 0: passes += 1
     let paired = values.length > 0
-    let key_scratch = try alloc u64[keys.length] in memory.heap
+    let key_scratch = try new u64[keys.length] --- in memory.heap
     defer free(key_scratch) in memory.heap
-    let value_scratch = try alloc u64[keys.length if paired else 0] in memory.heap
+    let value_scratch = try new u64[keys.length if paired else 0] --- in memory.heap
     defer free(value_scratch) in memory.heap
     var in_place = true
     for pass in 0..<passes:

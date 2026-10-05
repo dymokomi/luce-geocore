@@ -31,7 +31,7 @@ pub func set_small_faces(limit: usize):
 ## it with `release(stack, block)`.
 pub func take[T](stack: T[], corners: usize, length: usize) -> T[]!:
     if length == 0 or (corners <= small_limit and length <= stack.length): return stack[..<length]
-    return try alloc T[length] in memory.heap
+    return try new T[length] --- in memory.heap
 
 ## Free `block` from `take` when it is not `stack`'s own storage.
 pub func release[T](stack: T[], block: T[]):

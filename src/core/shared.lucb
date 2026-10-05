@@ -32,7 +32,7 @@ pub struct Block:
     pub var changed_first: usize = 0
     pub var changed_end: usize = 0
 
-assert(sizeof(Block) <= 64, "the block header must fit before the elements")
+assert(memory.size_of(Block) <= 64, "the block header must fit before the elements")
 
 ## A typed handle. Copying the handle does not share: `share()` does, and
 ## each share is released once. The zero value is an empty column.
@@ -40,9 +40,9 @@ pub struct Column[T]:
     var block: Block*?
 
     ## `count` uninitialised elements, owned by the caller alone.
-    pub static func allocate(count: usize) -> Column[T]!:
-        let bytes = count * sizeof(T)
-        let storage = try alloc(header_bytes + bytes, 64) in memory.heap
+    pub func allocate(count: usize) -> Column[T]!:
+        let bytes = count * memory.size_of(T)
+        let storage = memory.heap.allocate(header_bytes + bytes, 64) else error(memory.exhausted, "no memory for a column")
         let block = (Block*)storage.data
         block.users.store(1, .relaxed)
         block.id = fresh_id()
@@ -54,13 +54,13 @@ pub struct Column[T]:
         return Column[T](block)
 
     ## A new column holding a copy of `values`.
-    pub static func copy_of(values: const T[]) -> Column[T]!:
+    pub func copy_of(values: const T[]) -> Column[T]!:
         var column = try Column[T].allocate(values.length)
         if values.length > 0: memory.copy(column.span(), values, values.length)
         return column
 
     ## `count` copies of `value`.
-    pub static func filled(count: usize, value: T) -> Column[T]!:
+    pub func filled(count: usize, value: T) -> Column[T]!:
         var column = try Column[T].allocate(count)
         let items = column.span()
         for at in 0..<count: items[at] = value
@@ -96,13 +96,13 @@ pub struct Column[T]:
 
     ## Another owner of the same contents: O(1), no copy.
     pub func share() -> Column[T]:
-        if let block = self.block: discard(block.users.add(1, .relaxed))
+        if let block = self.block: _ = block.users.add(1, .relaxed)
         return Column[T](self.block)
 
     ## Write access to contents only this handle owns (just allocated, or
     ## made writable). Writing a shared block would change other owners'
     ## data under them, so that traps.
-    pub mutating func span() -> T[]:
+    pub func span() -> T[]:
         if let block = self.block:
             if block.users.load(.acquire) != 1: trap("writing a shared column")
             return T[]((T*)((u8*)block + header_bytes), block.count)
@@ -112,7 +112,7 @@ pub struct Column[T]:
     ## Copy on write: a private copy when others share the contents, then a
     ## fresh id either way, since the caller is about to change them. The
     ## new id's parent is the old one, for incremental caches.
-    pub mutating func writable() -> T[]!:
+    pub func writable() -> T[]!:
         let block = self.block else return self.span()
         if block.users.load(.acquire) != 1:
             var copy = try Column[T].copy_of(self.view())
@@ -127,7 +127,7 @@ pub struct Column[T]:
         return self.span()
 
     ## Record that these contents were derived from the block `id`.
-    pub mutating func set_parent(id: u64):
+    pub func set_parent(id: u64):
         if let block = self.block:
             block.parent = id
             block.changed_first = 0
@@ -135,7 +135,7 @@ pub struct Column[T]:
 
     ## Narrow what differs from the parent to elements first..<end (a local
     ## edit), so incremental caches copy only those.
-    pub mutating func set_changed(first: usize, end: usize):
+    pub func set_changed(first: usize, end: usize):
         if let block = self.block:
             block.changed_first = first if first < block.count else block.count
             block.changed_end = end if end < block.count else block.count
@@ -149,13 +149,13 @@ pub struct Column[T]:
 
     ## This handle's share, moved out: the handle is left empty, so a later
     ## `release` of it (a defer) does nothing.
-    pub mutating func take() -> Column[T]:
+    pub func take() -> Column[T]:
         let moved = Column[T](self.block)
         self.block = none
         return moved
 
     ## Give up this share; the last one frees the block.
-    pub mutating func release():
+    pub func release():
         let block = self.block else return
         self.block = none
         if block.users.sub(1, .acq_rel) != 1: return

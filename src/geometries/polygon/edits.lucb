@@ -65,7 +65,7 @@ extend Mesh:
         let old_faces = try self.corner_faces()
         let old_offsets = self.offsets.view()
         let offsets = output.offsets.view()
-        let parents = try alloc i32[(usize)(try output.edge_count())] in memory.heap
+        let parents = try new i32[(usize)(try output.edge_count())] --- in memory.heap
         for at in 0..<parents.length: parents[at] = -1
         for face in 0..<offsets.length - 1:
             let start = (usize)offsets[face]
@@ -109,7 +109,7 @@ extend Mesh:
         if not delta.is_finite():
             error(errors.invalid, "point displacement must be finite")
         let count = self.positions.count()
-        let marked = try alloc bool[count] in memory.heap
+        let marked = try new bool[count] --- in memory.heap
         defer free(marked) in memory.heap
         memory.set(u8[]((u8*)marked.data, count), 0)
         var unique: usize = 0
@@ -127,7 +127,7 @@ extend Mesh:
         var fresh = self.positions.share()
         defer fresh.release()
         let output = try fresh.writable()
-        let moved = try alloc u32[unique] in memory.heap
+        let moved = try new u32[unique] --- in memory.heap
         defer free(moved) in memory.heap
         var written: usize = 0
         for point in 0..<count:
@@ -166,7 +166,7 @@ extend Mesh:
         errdefer release_query(queries)
         let shading = try ShadingCache.after(self.shading, moved)
         errdefer release_shading(shading)
-        let storage = try alloc Mesh[1] in memory.heap
+        let storage = try new Mesh[1] --- in memory.heap
         storage[0] = self.shared_columns()
         # Record provenance: caches keyed on the old positions update in place.
         owned.set_parent(self.positions.id())
@@ -184,7 +184,7 @@ extend Mesh:
         storage[0].attributes = attributes
         storage[0].queries = queries
         storage[0].shading = shading
-        discard(self.topology.users.add(1, .relaxed))
+        _ = self.topology.users.add(1, .relaxed)
         return storage.data
 
     ## A display mesh: `fresh` positions (relative to this mesh's origin, the
@@ -213,7 +213,7 @@ extend Mesh:
         let shading = try ShadingCache.after(self.shading, moved)
         errdefer release_shading(shading)
         let extent = try position_edit.bounds_of(owned.view(), self.origin)
-        let storage = try alloc Mesh[1] in memory.heap
+        let storage = try new Mesh[1] --- in memory.heap
         storage[0] = self.shared_columns()
         owned.set_parent(self.positions.id())
         if moved.length > 0 and moved.length < owned.count():
@@ -226,7 +226,7 @@ extend Mesh:
         storage[0].attributes = attributes
         storage[0].queries = queries
         storage[0].shading = shading
-        discard(self.topology.users.add(1, .relaxed))
+        _ = self.topology.users.add(1, .relaxed)
         return storage.data
 
     pub func transformed(translation: Vector3, rotation: Vector3, scale: Vector3) -> interop.Reference[Mesh]!:
@@ -257,7 +257,7 @@ extend Mesh:
             let output = fresh.span()
             for at in 0..<previous.length:
                 output[at] = Float3.of(matrix.transform_direction(previous[at].vector()))
-            let moved = try alloc u32[previous.length] in memory.heap
+            let moved = try new u32[previous.length] --- in memory.heap
             defer free(moved) in memory.heap
             for at in 0..<moved.length: moved[at] = (u32)at
             let placed_mesh = try self.repositioned(fresh, origin, moved, true)
@@ -270,11 +270,11 @@ extend Mesh:
         let old_corners = self.corners.view()
         let offsets = self.offsets.view()
         let faces = offsets.length - 1
-        let sizes = try alloc i64[faces] in memory.heap
+        let sizes = try new i64[faces] --- in memory.heap
         defer free(sizes) in memory.heap
-        let corners = try alloc i64[old_corners.length] in memory.heap
+        let corners = try new i64[old_corners.length] --- in memory.heap
         defer free(corners) in memory.heap
-        let parents = try alloc i64[old_corners.length] in memory.heap
+        let parents = try new i64[old_corners.length] --- in memory.heap
         defer free(parents) in memory.heap
         for face in 0..<faces:
             let start = (usize)offsets[face]
@@ -285,12 +285,12 @@ extend Mesh:
                 parents[start + at] = (i64)(start + count - 1 - at)
         var unchanged: i64[]
         let old_triangles = self.triangles.view()
-        let display = try alloc i64[old_triangles.length] in memory.heap
+        let display = try new i64[old_triangles.length] --- in memory.heap
         defer free(display) in memory.heap
-        for triangle in 0..<display.length//3:
+        for triangle in 0..<display.length // 3:
             for at in 0..<(usize)3:
-                let old = (usize)old_triangles[triangle*3+(2-at)]
-                display[triangle*3+at] = parents[old]
+                let old = (usize)old_triangles[triangle * 3 + (2 - at)]
+                display[triangle * 3 + at] = parents[old]
         let result = try self.remapped(points, sizes, corners, unchanged, unchanged, parents, true, display)
         errdefer result.release()
         try position_edit.transform_normals(&result.value().attributes, matrix)
@@ -298,7 +298,7 @@ extend Mesh:
 
     ## Every point placed by `matrix`, in f64; the caller frees them.
     func world_points(matrix: Matrix4) -> Vector3[]!:
-        let points = try alloc Vector3[self.positions.count()] in memory.heap
+        let points = try new Vector3[self.positions.count()] --- in memory.heap
         for at in 0..<points.length:
             points[at] = matrix.transform_point(self.point_at(at))
         return points
@@ -310,13 +310,13 @@ extend Mesh:
         let offsets = self.offsets.view()
         let old_corners = self.corners.view()
         let old_triangles = self.triangles.view()
-        let sizes = try alloc i64[offsets.length - 1] in memory.heap
+        let sizes = try new i64[offsets.length - 1] --- in memory.heap
         defer free(sizes) in memory.heap
         for face in 0..<sizes.length: sizes[face] = (i64)(offsets[face + 1] - offsets[face])
-        let corners = try alloc i64[old_corners.length] in memory.heap
+        let corners = try new i64[old_corners.length] --- in memory.heap
         defer free(corners) in memory.heap
         for at in 0..<corners.length: corners[at] = (i64)old_corners[at]
-        let display = try alloc i64[old_triangles.length] in memory.heap
+        let display = try new i64[old_triangles.length] --- in memory.heap
         defer free(display) in memory.heap
         for at in 0..<display.length: display[at] = (i64)old_triangles[at]
         var unchanged: i64[]
@@ -333,7 +333,7 @@ extend Mesh:
 
 ## A parent map in i32 (the caller frees it); empty stays empty.
 func narrowed(parents: const i64[]) -> i32[]!:
-    let result = try alloc i32[parents.length] in memory.heap
+    let result = try new i32[parents.length] --- in memory.heap
     for at in 0..<parents.length: result[at] = (i32)parents[at]
     return result
 
@@ -345,7 +345,7 @@ func changed_points(previous: const Float3[], next: const Float3[]) -> u32[]!:
         let a = previous[at]
         let b = next[at]
         if a.x != b.x or a.y != b.y or a.z != b.z: count += 1
-    let moved = try alloc u32[count] in memory.heap
+    let moved = try new u32[count] --- in memory.heap
     var written: usize = 0
     for at in 0..<next.length:
         let a = previous[at]

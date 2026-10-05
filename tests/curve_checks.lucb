@@ -188,7 +188,7 @@ func tagged_copy(curves: Curves*) -> Curves*!:
     defer curves_dispose(curves)
     let copy = try curves_share(curves)
     errdefer curves_dispose(copy)
-    var values = try alloc f64[copy.point_count()] in memory.heap
+    var values = try new f64[copy.point_count()] --- in memory.heap
     defer free(values) in memory.heap
     for at in 0..<values.length: values[at] = (f64)at
     let weights = try Attribute.from_numbers("weight", Domain.point, 1, values, false, float32 = true)
@@ -275,7 +275,7 @@ pub func verbs() -> !:
     let typed = try apply("Set Curve Type", set.value(), "0", [3.0])
     defer typed.release()
     assert((try evaluated_offsets(set_curves(typed.value()) else trap("curves")))[1] == 25)
-    discard(before)
+    _ = before
     # Generators.
     let line = try apply("Curve Line", set.value(), "", [0.0, 0.0, 0.0, 1.0, 3.0, 4.0, 0.0])
     defer line.release()

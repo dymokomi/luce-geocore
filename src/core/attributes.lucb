@@ -100,7 +100,7 @@ pub struct Attribute:
 
     ## An attribute whose column the caller fills: `elements` tuples, or one
     ## tuple for single storage. Booleans need width 1.
-    pub static func create(name: str, domain: Domain, kind: DataType, width: usize, elements: usize, storage: Storage = Storage.array) -> Attribute!:
+    pub func create(name: str, domain: Domain, kind: DataType, width: usize, elements: usize, storage: Storage = Storage.array) -> Attribute!:
         try check_name(name)
         if width < 1 or width > 4 or ((kind == DataType.boolean or kind == DataType.text) and width != 1):
             error(errors.invalid, "attribute tuples have 1..4 components; booleans and text have one")
@@ -112,7 +112,7 @@ pub struct Attribute:
         return Attribute(label, name.length, domain, kind, width, storage, elements, try Column[u8].allocate(bytes), 0, role_of(name), empty)
 
     ## A group of `elements` on `domain`, with no members yet (every bit zero).
-    pub static func group(name: str, domain: Domain, elements: usize) -> Attribute!:
+    pub func group(name: str, domain: Domain, elements: usize) -> Attribute!:
         var attribute = try Attribute.create(name, domain, DataType.boolean, 1, elements)
         let bytes = attribute.data.span()
         if bytes.length > 0: memory.set(bytes, 0)
@@ -120,7 +120,7 @@ pub struct Attribute:
         return attribute
 
     ## A group whose members are the bits of `words` (`elements` of them).
-    pub static func group_of(name: str, domain: Domain, elements: usize, words: const u64[]) -> Attribute!:
+    pub func group_of(name: str, domain: Domain, elements: usize, words: const u64[]) -> Attribute!:
         var attribute = try Attribute.group(name, domain, elements)
         let bytes = attribute.data.span()
         memory.copy(bytes, u8[]((u8*)words.data, words.length * 8), bytes.length)
@@ -128,7 +128,7 @@ pub struct Attribute:
 
     ## A text attribute: element i is string `values[i]` of `table` (which it
     ## shares), or one value for the domain with single storage.
-    pub static func text(name: str, domain: Domain, elements: usize, table: Column[u8], values: const i32[], storage: Storage = Storage.array) -> Attribute!:
+    pub func text(name: str, domain: Domain, elements: usize, table: Column[u8], values: const i32[], storage: Storage = Storage.array) -> Attribute!:
         var attribute = try Attribute.create(name, domain, DataType.text, 1, elements, storage)
         let out = typed_mut_i32(attribute.data.span())
         memory.copy(out, values, out.length)
@@ -139,7 +139,7 @@ pub struct Attribute:
     ## other numbers float64, so every value reads back exactly.
     ## `float32` stores non-integer values as f32 (half the bytes; about 7
     ## significant digits), as display and analysis attributes want.
-    pub static func from_numbers(name: str, domain: Domain, width: usize, values: const f64[], integer: bool, storage: Storage = Storage.array, float32: bool = false) -> Attribute!:
+    pub func from_numbers(name: str, domain: Domain, width: usize, values: const f64[], integer: bool, storage: Storage = Storage.array, float32: bool = false) -> Attribute!:
         if width < 1 or width > 4 or values.length % width != 0:
             error(errors.invalid, "attribute needs a tuple size of 1..4 dividing its values")
         if values.length // width > 33554432:
@@ -219,7 +219,7 @@ pub struct Attribute:
         copy.label_length = name.length
         return copy
 
-    pub mutating func release():
+    pub func release():
         self.data.release()
         self.table.release()
 
@@ -257,7 +257,7 @@ pub struct AttributeStore:
 
     ## Add `attribute` (taking its share), replacing one of the same name and
     ## domain. On failure the store is unchanged and the share released.
-    pub mutating func put(attribute: Attribute) -> !:
+    pub func put(attribute: Attribute) -> !:
         var owned = attribute
         let found = self.find(owned.name(), (i64)(u8)owned.domain)
         if found >= 0:
@@ -271,16 +271,16 @@ pub struct AttributeStore:
 
     ## The column of attribute `index`, written copy-on-write: other owners of
     ## it keep their contents.
-    pub mutating func writable(index: usize) -> u8[]!:
+    pub func writable(index: usize) -> u8[]!:
         return try self.entries.items[index].data.writable()
 
     ## After `writable`: only tuples first..<end of attribute `index` differ
     ## from the column it was written from.
-    pub mutating func set_changed(index: usize, first: usize, end: usize):
+    pub func set_changed(index: usize, first: usize, end: usize):
         let tuple = self.entries.items[index].tuple_bytes()
         self.entries.items[index].data.set_changed(first * tuple, end * tuple)
 
-    pub mutating func remove(index: usize):
+    pub func remove(index: usize):
         self.entries.items[index].release()
         for at in index + 1..<self.entries.count:
             self.entries.items[at - 1] = self.entries.items[at]
@@ -299,7 +299,7 @@ pub struct AttributeStore:
         copy.normals = self.normals
         return copy
 
-    mutating func reindex():
+    func reindex():
         self.colors = [-1, -1, -1, -1, -1]
         self.uvs = [-1, -1, -1, -1, -1]
         self.normals = [-1, -1, -1, -1, -1]
@@ -316,6 +316,6 @@ pub struct AttributeStore:
         for entry in self.entries.view(): total += entry.data.bytes() + entry.table.bytes()
         return total
 
-    pub mutating func close():
+    pub func close():
         for index in 0..<self.entries.count: self.entries.items[index].release()
         self.entries.close()

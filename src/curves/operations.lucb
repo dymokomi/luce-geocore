@@ -68,11 +68,11 @@ func resampled_all(curves: const Curves*, mode: i64, count: i64, length: f64) ->
     starts[curve_total] = (i32)total
     var positions = try Column[Float3].allocate(total)
     errdefer positions.release()
-    let parents = try alloc i32[total] in memory.heap
+    let parents = try new i32[total] --- in memory.heap
     defer free(parents) in memory.heap
-    let others = try alloc i32[total] in memory.heap
+    let others = try new i32[total] --- in memory.heap
     defer free(others) in memory.heap
-    let mix = try alloc f32[total] in memory.heap
+    let mix = try new f32[total] --- in memory.heap
     defer free(mix) in memory.heap
     var work = ResampleWork(curves, try evaluated_offsets(curves), try evaluated_positions(curves), frames, out_offsets.view(), positions.span(), parents, others, mix)
     parallel.parallel_for(curve_total, 64, resample_curves, (void*)&work)
@@ -239,9 +239,9 @@ func turned(value: Vector3, axis: Vector3, angle: f64) -> Vector3:
 ## Selected curves reversed: their points, handles and knots run backwards.
 pub func reversed(curves: const Curves*, selected: Bits) -> Curves*!:
     let count = curves.curve_count()
-    let order = try alloc i32[count] in memory.heap
+    let order = try new i32[count] --- in memory.heap
     defer free(order) in memory.heap
-    let flags = try alloc bool[count] in memory.heap
+    let flags = try new bool[count] --- in memory.heap
     defer free(flags) in memory.heap
     for curve in 0..<count:
         order[curve] = (i32)curve

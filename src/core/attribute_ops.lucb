@@ -147,7 +147,7 @@ func concatenate_text(result: Attribute*, pieces: const Piece[]) -> !:
             continue
         let attribute = piece.attribute else continue
         let strings = attribute.table.view()
-        let mapping = try alloc i32[table_count(strings)] in memory.heap
+        let mapping = try new i32[table_count(strings)] --- in memory.heap
         defer free(mapping) in memory.heap
         for index in 0..<mapping.length: mapping[index] = try table.intern(table_text(strings, index))
         let values = attribute.data.view()
@@ -169,7 +169,7 @@ pub func write_number(bytes: u8[], kind: DataType, index: usize, value: f64):
 
 ## Column bytes as scalars; columns are 64-byte aligned.
 pub func typed[T](bytes: const u8[]) -> const T[]:
-    return T[]((T*)bytes.data, bytes.length // sizeof(T))
+    return T[]((T*)bytes.data, bytes.length // memory.size_of(T))
 
 pub func typed_mut[T](bytes: u8[]) -> T[]:
-    return T[]((T*)bytes.data, bytes.length // sizeof(T))
+    return T[]((T*)bytes.data, bytes.length // memory.size_of(T))

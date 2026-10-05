@@ -123,7 +123,7 @@ struct Bevel:
         self.patch_skipped = Growing[u8]()
         self.skipped = 0
 
-    mutating func close():
+    func close():
         self.slot_of.close()
         self.vertex_points.close()
         self.fan_starts.close()
@@ -206,9 +206,9 @@ func build(work: Bevel*, mesh: const Mesh*, output: VerbOutput*) -> !:
         if made.b >= 0:
             let parents: i32[2] = [made.a, made.b]
             let weights: f32[2] = [1.0 - made.t, made.t]
-            discard(try builder.mixed_point(made.position, parents[..<2], weights[..<2]))
+            _ = try builder.mixed_point(made.position, parents[..<2], weights[..<2])
         else:
-            discard(try builder.point(made.position, made.a))
+            _ = try builder.point(made.position, made.a)
     let faces = topology.faces()
     var run: usize = 0
     for face in 0..<faces:
@@ -297,7 +297,7 @@ struct Ring:
     var t: f32[6]
     var count: usize = 0
 
-    mutating func add(point: i32, side: u8, t: f32):
+    func add(point: i32, side: u8, t: f32):
         if self.count > 0 and self.points[self.count - 1] == point: return
         self.points[self.count] = point
         self.sides[self.count] = side

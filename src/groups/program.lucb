@@ -111,7 +111,7 @@ pub struct GroupProgram:
 
     ## Compile `text`. Syntax errors fail with a message; `error_at` then
     ## holds the offset.
-    pub static func parse(text: str) -> GroupProgram!:
+    pub func parse(text: str) -> GroupProgram!:
         var program = GroupProgram(Growing[u8](), Growing[Term](), Growing[f64](), Growing[u32]())
         errdefer program.close()
         try program.source.assign(text.bytes)
@@ -135,7 +135,7 @@ pub struct GroupProgram:
     pub func is_empty() -> bool:
         return self.top_count == 0
 
-    pub mutating func close():
+    pub func close():
         self.source.close()
         self.terms.close()
         self.numbers.close()
@@ -152,16 +152,16 @@ struct Parser:
         let index = self.at + offset
         return self.program.source.items[index] if index < self.program.source.count else 0
 
-    mutating func skip_spaces():
+    func skip_spaces():
         while self.peek() == 32 or self.peek() == 9 or self.peek() == 10: self.at += 1
 
-    mutating func fail(message: str) -> !:
+    func fail(message: str) -> !:
         self.program.error_at = (i64)self.at
         error(errors.invalid, message)
 
     ## Terms until the end, a ')' or a ',' (inside a call): appended in one
     ## run after any children they contain.
-    mutating func expression(depth: usize) -> (u32, u32)!:
+    func expression(depth: usize) -> (u32, u32)!:
         if depth > 32: try self.fail("group syntax: calls nest too deep")
         var collected = Growing[Term]()
         defer collected.close()
@@ -174,7 +174,7 @@ struct Parser:
         for term in collected.view(): try self.program.terms.push(term)
         return (first, (u32)collected.count)
 
-    mutating func term(depth: usize) -> Term!:
+    func term(depth: usize) -> Term!:
         var combine = Combine.add
         let prefix = self.peek()
         if prefix == 33: combine = Combine.add_complement
@@ -185,7 +185,7 @@ struct Parser:
         term.combine = combine
         return term
 
-    mutating func atom(depth: usize) -> Term!:
+    func atom(depth: usize) -> Term!:
         let byte = self.peek()
         if byte == 42 and ends_word(self.peek_at(1)):
             self.at += 1
@@ -219,7 +219,7 @@ struct Parser:
         return Term(kind = AtomKind.name, text = (u32)start, text_length = (u32)word.length)
 
     ## `n`, `n-m`, `n-m:step`, `n-m:keep,step`, `n-`, or `n e m`.
-    mutating func numbers_atom() -> Term!:
+    func numbers_atom() -> Term!:
         let first = try self.number()
         if self.peek() == 101 and is_digit(self.peek_at(1)):
             self.at += 1
@@ -251,7 +251,7 @@ struct Parser:
         return Term(kind = AtomKind.range, first = index, count = 4)
 
     ## `p a`, `p a-b`, `p a-b-c…`.
-    mutating func point_edges() -> Term!:
+    func point_edges() -> Term!:
         self.at += 1
         let index = (u32)self.program.numbers.count
         try self.program.numbers.push(try self.number())
@@ -262,7 +262,7 @@ struct Parser:
         return Term(kind = AtomKind.point_edges, first = index, count = (u32)(self.program.numbers.count - (usize)index))
 
     ## `{glob ^glob …}`: each a name term.
-    mutating func name_filter() -> Term!:
+    func name_filter() -> Term!:
         self.at += 1
         var collected = Growing[Term]()
         defer collected.close()
@@ -285,7 +285,7 @@ struct Parser:
         return Term(kind = AtomKind.names, first = first, count = (u32)collected.count)
 
     ## `@name[.x|[i]][op values]`. No spaces inside.
-    mutating func attribute() -> Term!:
+    func attribute() -> Term!:
         self.at += 1
         let start = self.at
         while is_name_byte(self.peek()) or self.peek() == 58: self.at += 1
@@ -322,7 +322,7 @@ struct Parser:
         if not ends_word(self.peek()): try self.fail("group syntax: unexpected text after a value")
         return term
 
-    mutating func comparison() -> Compare:
+    func comparison() -> Compare:
         let a = self.peek()
         let b = self.peek_at(1)
         if a == 61 and b == 61:
@@ -343,7 +343,7 @@ struct Parser:
         return Compare.exists
 
     ## One value: a number, a range `a-b` (low/high pair), or a text glob.
-    mutating func value(quoted: bool) -> !:
+    func value(quoted: bool) -> !:
         let start = self.at
         while not (self.peek() == 0 or self.peek() == 32 or self.peek() == 9 or self.peek() == 41 or (self.peek() == 44 and not quoted) or (self.peek() == 34 and quoted)): self.at += 1
         let text = (str)self.program.source.items[start..<self.at]
@@ -363,7 +363,7 @@ struct Parser:
         try self.program.spans.push((u32)start)
         try self.program.spans.push((u32)text.length)
 
-    mutating func number() -> f64!:
+    func number() -> f64!:
         let start = self.at
         while is_digit(self.peek()) or self.peek() == 46: self.at += 1
         if let value = parse_number((str)self.program.source.items[start..<self.at]): return value

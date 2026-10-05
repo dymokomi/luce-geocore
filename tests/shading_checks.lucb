@@ -28,13 +28,13 @@ pub func exercise() -> !:
     defer moved.release()
     # The moved mesh updated its predecessor's normals; a new mesh computes all.
     let m = moved.value()
-    let points = try alloc Vector3[(usize)m.point_count()] in memory.heap
+    let points = try new Vector3[(usize)m.point_count()] --- in memory.heap
     defer free(points) in memory.heap
     for at in 0..<points.length: points[at] = try m.point((i64)at)
-    let sizes = try alloc i64[(usize)m.face_count()] in memory.heap
+    let sizes = try new i64[(usize)m.face_count()] --- in memory.heap
     defer free(sizes) in memory.heap
     for face in 0..<sizes.length: sizes[face] = try m.face_size((i64)face)
-    let corners = try alloc i64[(usize)m.vertex_count()] in memory.heap
+    let corners = try new i64[(usize)m.vertex_count()] --- in memory.heap
     defer free(corners) in memory.heap
     for corner in 0..<corners.length: corners[corner] = try m.corner_point((i64)corner)
     var fresh = try Mesh(points, sizes, corners)

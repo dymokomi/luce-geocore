@@ -43,11 +43,11 @@ pub struct TableBuilder:
         return (str)self.bytes.items[start..<(usize)self.ends.items[index]]
 
     ## The index of `text`, added when new.
-    pub mutating func intern(text: str) -> i32!:
+    pub func intern(text: str) -> i32!:
         if self.slots.count == 0 or (self.ends.count + 1) * 2 > self.slots.count:
             try self.rehash(64 if self.slots.count == 0 else self.slots.count * 2)
         let mask = self.slots.count - 1
-        var slot = (usize)hash(text) & mask
+        var slot = (usize)text.hash() & mask
         while self.slots.items[slot] != 0:
             let index = (usize)self.slots.items[slot] - 1
             if self.text(index) == text: return (i32)index
@@ -61,11 +61,11 @@ pub struct TableBuilder:
         self.slots.items[slot] = (u32)self.ends.count
         return (i32)(self.ends.count - 1)
 
-    mutating func rehash(capacity: usize) -> !:
+    func rehash(capacity: usize) -> !:
         try self.slots.fill(capacity, 0)
         let mask = capacity - 1
         for index in 0..<self.ends.count:
-            var slot = (usize)hash(self.text(index)) & mask
+            var slot = (usize)self.text(index).hash() & mask
             while self.slots.items[slot] != 0: slot = (slot + 1) & mask
             self.slots.items[slot] = (u32)(index + 1)
 
@@ -79,7 +79,7 @@ pub struct TableBuilder:
         if self.bytes.count > 0: memory.copy(out[4 + count * 4..], self.bytes.view(), self.bytes.count)
         return column
 
-    pub mutating func close():
+    pub func close():
         self.bytes.close()
         self.ends.close()
         self.slots.close()

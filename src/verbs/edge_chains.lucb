@@ -21,14 +21,14 @@ struct EdgeChains:
     func chain(index: usize) -> const i32[]:
         return self.points.items[(usize)self.starts.items[index]..<(usize)self.starts.items[index + 1]]
 
-    mutating func close():
+    func close():
         self.points.close()
         self.starts.close()
         self.closed.close()
 
 func edge_chains(topology: const Topology*, group: Bits, chains: EdgeChains*) -> !:
     let points = topology.points
-    let degree = try alloc u32[points] in memory.heap
+    let degree = try new u32[points] --- in memory.heap
     defer free(degree) in memory.heap
     for at in 0..<points: degree[at] = 0
     for edge in 0..<topology.edges():

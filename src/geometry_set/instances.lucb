@@ -72,7 +72,7 @@ pub struct Instances:
 
     ## Add a row attribute (taken, even on failure): on the point domain, one
     ## element per row; it replaces one of the same name.
-    pub mutating func put_attribute(attribute: Attribute) -> !:
+    pub func put_attribute(attribute: Attribute) -> !:
         var owned = attribute
         if owned.domain != Domain.point or owned.elements != self.size:
             owned.release()
@@ -84,14 +84,14 @@ pub struct Instances:
         return Instance(self.prototypes.items[(usize)row.prototype], row.translation, row.rotation, row.scale, row.visible)
 
     ## Add prototype `set` (taken, even on failure); its index.
-    pub mutating func add_prototype(set: GeometrySet*) -> usize!:
+    pub func add_prototype(set: GeometrySet*) -> usize!:
         self.prototypes.push(set) catch failure:
             dispose_set(set)
             error(failure.code, failure.message)
         return self.prototypes.count - 1
 
     ## Add an instance of prototype `prototype`.
-    pub mutating func add_instance(prototype: usize, placement: const Placement*, visible: bool) -> !:
+    pub func add_instance(prototype: usize, placement: const Placement*, visible: bool) -> !:
         if prototype >= self.prototypes.count: error(errors.invalid, "instance prototype out of range")
         if self.size == self.rows.count():
             # Grow by doubling: appends are amortized O(1).
@@ -109,15 +109,15 @@ pub struct Instances:
         self.size += 1
 
     ## Add an instance of its own prototype `set` (taken, even on failure).
-    pub mutating func add(set: GeometrySet*, placement: const Placement*, visible: bool) -> !:
+    pub func add(set: GeometrySet*, placement: const Placement*, visible: bool) -> !:
         let prototype = try self.add_prototype(set)
         try self.add_instance(prototype, placement, visible)
 
     ## Add every instance of `other`, sharing its prototypes; into an empty
     ## component its rows are shared as they are.
-    pub mutating func add_all(other: const Instances*) -> !:
+    pub func add_all(other: const Instances*) -> !:
         let base = self.prototypes.count
-        for at in 0..<other.prototypes.count: discard(try self.add_prototype(try other.prototypes.items[at].storage()))
+        for at in 0..<other.prototypes.count: _ = try self.add_prototype(try other.prototypes.items[at].storage())
         if self.size == 0 and base == 0:
             self.rows.release()
             self.rows = other.rows.share()
@@ -144,7 +144,7 @@ pub struct Instances:
 
 ## A new, empty instances component.
 pub func new_instances() -> Instances*!:
-    let storage = try alloc Instances[1] in memory.heap
+    let storage = try new Instances[1] --- in memory.heap
     storage[0] = Instances(Growing[GeometrySet*](), Column[InstanceRow](), 0, AttributeStore())
     return storage.data
 
@@ -196,7 +196,7 @@ func instances_size(data: const void*) -> usize:
 func instances_bytes(data: const void*, ids: IdSet*) -> usize!:
     let instances = (const Instances*)data
     # The rows in use, not a builder's spare capacity.
-    var total: usize = 64 + (try ids.charge(instances.rows.id(), instances.size * sizeof(InstanceRow))) + instances.attributes.bytes()
+    var total: usize = 64 + (try ids.charge(instances.rows.id(), instances.size * memory.size_of(InstanceRow))) + instances.attributes.bytes()
     for set in instances.prototypes.view(): total += try set_bytes(set, ids)
     return total
 
@@ -242,7 +242,7 @@ func filter_instances(data: const void*, filter: const PathFilter*, keep: bool) 
     let source = (const Instances*)data
     let result = try new_instances()
     errdefer close_instances((void*)result)
-    for set in source.prototypes.view(): discard(try result.add_prototype(try set_filtered(set, filter, keep)))
+    for set in source.prototypes.view(): _ = try result.add_prototype(try set_filtered(set, filter, keep))
     result.rows.release()
     result.rows = source.rows.share()
     result.size = source.size

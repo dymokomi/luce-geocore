@@ -104,10 +104,10 @@ func timed(shape: Shape, count: usize) -> f64!:
     var points = Growing[Vector3]()
     defer points.close()
     try shape(count, &points)
-    let corners = try alloc i64[points.count] in memory.heap
+    let corners = try new i64[points.count] --- in memory.heap
     defer free(corners) in memory.heap
     for at in 0..<points.count: corners[at] = (i64)at
-    let output = try alloc i64[(points.count - 2) * 3] in memory.heap
+    let output = try new i64[(points.count - 2) * 3] --- in memory.heap
     defer free(output) in memory.heap
     let started = time.now()
     try triangulate_polygon(points.view(), corners, 0, points.count, plane_normal(), output)
@@ -121,13 +121,13 @@ func valid(mesh: const Mesh*) -> !:
     let offsets = mesh.offset_span()
     let corners = mesh.corner_span()
     let triangles = mesh.triangle_span()
-    let points = try alloc Vector3[positions.length] in memory.heap
+    let points = try new Vector3[positions.length] --- in memory.heap
     defer free(points) in memory.heap
     for at in 0..<positions.length: points[at] = positions[at].vector()
-    let wide = try alloc i64[corners.length] in memory.heap
+    let wide = try new i64[corners.length] --- in memory.heap
     defer free(wide) in memory.heap
     for at in 0..<corners.length: wide[at] = (i64)corners[at]
-    let indices = try alloc i64[triangles.length] in memory.heap
+    let indices = try new i64[triangles.length] --- in memory.heap
     defer free(indices) in memory.heap
     for at in 0..<triangles.length: indices[at] = (i64)triangles[at]
     for face in 0..<offsets.length - 1:
@@ -143,7 +143,7 @@ func polygon_mesh(shape: Shape, count: usize) -> interop.Reference[Mesh]!:
     try shape(count, &points)
     var builder = try MeshBuilder()
     defer builder.close()
-    for point in points.view(): discard(try builder.point(point))
+    for point in points.view(): _ = try builder.point(point)
     try builder.face((i64)points.count)
     for at in 0..<points.count: try builder.corner((i64)at)
     return try builder.finish()
@@ -151,7 +151,7 @@ func polygon_mesh(shape: Shape, count: usize) -> interop.Reference[Mesh]!:
 ## Direct triangulation of every shape a little over the small-face size.
 func polygon_checks(count: usize) -> !:
     let shapes: Shape[4] = [circle, star, comb, spiral]
-    for shape in shapes: discard(try timed(shape, count))
+    for shape in shapes: _ = try timed(shape, count)
 
 ## Mesh construction: the face whole, its triangles valid, its normal the
 ## plane's; supplied triangles are validated; a flat copy agrees.
@@ -167,11 +167,11 @@ func mesh_checks(count: usize) -> !:
         let normal = try geometry.face_normal(0)
         assert(normal.subtract(plane_normal()).length() < 0.00001)
         # The same polygon given its own triangles back.
-        let points = try alloc Vector3[(usize)size] in memory.heap
+        let points = try new Vector3[(usize)size] --- in memory.heap
         defer free(points) in memory.heap
-        let corners = try alloc i64[(usize)size] in memory.heap
+        let corners = try new i64[(usize)size] --- in memory.heap
         defer free(corners) in memory.heap
-        let display = try alloc i64[(usize)(size - 2) * 3] in memory.heap
+        let display = try new i64[(usize)(size - 2) * 3] --- in memory.heap
         defer free(display) in memory.heap
         for at in 0..<(usize)size:
             points[at] = try geometry.point((i64)at)
@@ -191,7 +191,7 @@ func builder_checks(count: usize) -> !:
     defer builder.close()
     try builder.copy_points(source)
     try builder.copy_face(source, 0)
-    let projected = try alloc i64[(count - 2) * 3] in memory.heap
+    let projected = try new i64[(count - 2) * 3] --- in memory.heap
     defer free(projected) in memory.heap
     try builder.triangulate_last(projected)
     for at in 0..<projected.length: assert(projected[at] == (i64)source.triangle_span()[at])
@@ -322,7 +322,7 @@ func open_tube(count: usize) -> interop.Reference[Mesh]!:
     for row in 0..<(usize)2:
         for at in 0..<count:
             let angle = (f64)at * 6.283185307179586 / (f64)count
-            discard(try builder.point(Vector3(math.cos(angle), math.sin(angle), (f64)row)))
+            _ = try builder.point(Vector3(math.cos(angle), math.sin(angle), (f64)row))
     for at in 0..<count:
         let next = (at + 1) % count
         try builder.face(4)
@@ -334,7 +334,7 @@ func quad_strip(count: usize) -> interop.Reference[Mesh]!:
     var builder = try MeshBuilder()
     defer builder.close()
     for at in 0..<count + 1:
-        for row in 0..<(usize)2: discard(try builder.point(Vector3((f64)at, (f64)row, 0.0)))
+        for row in 0..<(usize)2: _ = try builder.point(Vector3((f64)at, (f64)row, 0.0))
     for at in 0..<count:
         try builder.face(4)
         for point in [2 * at, 2 * at + 2, 2 * at + 3, 2 * at + 1]: try builder.corner((i64)point)
@@ -357,10 +357,10 @@ func dissolve_checks() -> !:
     defer builder.close()
     for at in 0..<half + 1:
         let angle = (f64)at * 3.141592653589793 / (f64)half
-        discard(try builder.point(placed(math.cos(angle), math.sin(angle))))
+        _ = try builder.point(placed(math.cos(angle), math.sin(angle)))
     for at in 1..<half:
         let angle = 3.141592653589793 + (f64)at * 3.141592653589793 / (f64)half
-        discard(try builder.point(placed(math.cos(angle), math.sin(angle))))
+        _ = try builder.point(placed(math.cos(angle), math.sin(angle)))
     try builder.face((i64)half + 1)
     for at in 0..<half + 1: try builder.corner((i64)at)
     try builder.face((i64)half + 1)
@@ -399,7 +399,7 @@ func codec_checks() -> !:
     try file.assign(path.temp().bytes)
     try file.push(47)
     for byte in "luce-geocore-large-face.prism".bytes: try file.push(byte)
-    discard(try save_geometry(set.value(), (str)file.view(), 11, 268435456))
+    _ = try save_geometry(set.value(), (str)file.view(), 11, 268435456)
     let loaded = try adopt_set(try load_geometry((str)file.view()))
     defer loaded.release()
     let a = set_mesh(set.value()) else trap("no mesh saved")

@@ -13,14 +13,14 @@ pub struct Selection:
     var report: GroupReport
 
     ## Nothing selected on `domain` of `mesh`.
-    pub static func empty(mesh: interop.Reference[Mesh], domain: i64) -> interop.Reference[Selection]!:
+    pub func empty(mesh: interop.Reference[Mesh], domain: i64) -> interop.Reference[Selection]!:
         let geometry = try mesh.get()
         let target = try domain_of(domain)
         var bits = try BitsBuilder.zeros((usize)(try geometry.domain_count(domain)))
         return try adopt_selection(bits.finish(), bits.count, target, (u64)geometry.topology_hash(), GroupReport())
 
     ## The elements of `domain` a group expression names.
-    pub static func of(mesh: interop.Reference[Mesh], expression: str, domain: i64) -> interop.Reference[Selection]!:
+    pub func of(mesh: interop.Reference[Mesh], expression: str, domain: i64) -> interop.Reference[Selection]!:
         let geometry = try mesh.get()
         let target = try domain_of(domain)
         var result = try group_bits(geometry, expression, target)
@@ -226,7 +226,7 @@ pub struct Selection:
     func with_bits(column: Column[u64]) -> interop.Reference[Selection]!:
         return try adopt_selection(column, self.elements, self.domain_value, self.topology, GroupReport())
 
-    pub mutating func close():
+    pub func close():
         self.bits.release()
 
 pub let selection_type: interop.Type[Selection] = interop.Type[Selection]("Selection", Selection.close, closeable = true)
@@ -234,7 +234,7 @@ pub let selection_type: interop.Type[Selection] = interop.Type[Selection]("Selec
 ## A selection owning `column` (taken, released on failure).
 pub func adopt_selection(column: Column[u64], elements: usize, domain: Domain, topology: u64, report: GroupReport) -> interop.Reference[Selection]!:
     var owned = column
-    let storage = alloc Selection[1] in memory.heap catch failure:
+    let storage = new Selection[1] --- in memory.heap catch failure:
         owned.release()
         error(failure.code, failure.message)
     storage[0] = Selection(owned, elements, domain, topology, report)
@@ -262,7 +262,7 @@ pub struct Groups:
     let reserved: u8 = 0
 
     ## "" when `expression` parses, else the error, with its byte offset.
-    pub static func check(expression: str) -> interop.Owned[str]!:
+    pub func check(expression: str) -> interop.Owned[str]!:
         var program = GroupProgram.parse(expression) catch failure:
             return try interop.copy_text(failure.message)
         program.close()
@@ -270,7 +270,7 @@ pub struct Groups:
 
     ## A snapshot of `mesh` with group `name` holding what `expression`
     ## names on `domain` (the Group node).
-    pub static func with_group(mesh: interop.Reference[Mesh], name: str, domain: i64, expression: str) -> interop.Reference[Mesh]!:
+    pub func with_group(mesh: interop.Reference[Mesh], name: str, domain: i64, expression: str) -> interop.Reference[Mesh]!:
         let geometry = try mesh.get()
         let target = try domain_of(domain)
         var result = try group_bits(geometry, expression, target)
@@ -278,7 +278,7 @@ pub struct Groups:
         return try with_group_bits(geometry, name, target, Bits(result.bits.view(), (usize)(try geometry.domain_count(domain))))
 
     ## Elements `expression` names on `domain`.
-    pub static func count(mesh: interop.Reference[Mesh], expression: str, domain: i64) -> i64!:
+    pub func count(mesh: interop.Reference[Mesh], expression: str, domain: i64) -> i64!:
         let geometry = try mesh.get()
         var result = try group_bits(geometry, expression, try domain_of(domain))
         defer result.bits.release()

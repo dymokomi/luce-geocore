@@ -127,9 +127,9 @@ func group_corners(input: const VerbInput*, topology: const Topology*, builder: 
 ## bottom up, in heap scratch of the same size.
 func merge_sort(angles: f64[], points: i32[]) -> !:
     let count = angles.length
-    let spare_angles = try alloc f64[count] in memory.heap
+    let spare_angles = try new f64[count] --- in memory.heap
     defer free(spare_angles) in memory.heap
-    let spare_points = try alloc i32[count] in memory.heap
+    let spare_points = try new i32[count] --- in memory.heap
     defer free(spare_points) in memory.heap
     var from_angles = angles
     var from_points = points
@@ -177,7 +177,7 @@ func least_spread(builder: const TopologyBuilder*, points: const i32[], center: 
             for column in 0..<(usize)3: a[row * 3 + column] += values[row] * values[column]
     var vectors: f64[9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
     for sweep in 0..<(usize)32:
-        discard(sweep)
+        _ = sweep
         for (p, q) in [((usize)0, (usize)1), ((usize)0, (usize)2), ((usize)1, (usize)2)]:
             let apq = a[p * 3 + q]
             if math.abs(apq) < 1.0e-300: continue

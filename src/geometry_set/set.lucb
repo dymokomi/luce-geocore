@@ -35,7 +35,7 @@ pub struct Placement:
     pub let scale: Vector3
     pub let matrix: Matrix4
 
-    pub static func compose(translation: Vector3, rotation: Vector3, scale: Vector3) -> Placement:
+    pub func compose(translation: Vector3, rotation: Vector3, scale: Vector3) -> Placement:
         return Placement(translation, rotation, scale, Matrix4.compose(translation, rotation, scale))
 
 ## A component family: what a set may do with a component's data without
@@ -75,9 +75,9 @@ pub struct ComponentType:
     pub let trace: func(const void*, func(ownership.Object*, void*) -> unit, void*) -> unit
 
 func trace_nothing(data: const void*, visit: func(ownership.Object*, void*) -> unit, context: void*):
-    discard(data)
-    discard(visit)
-    discard(context)
+    _ = data
+    _ = visit
+    _ = context
 
 pub let no_trace: func(const void*, func(ownership.Object*, void*) -> unit, void*) -> unit = trace_nothing
 
@@ -133,7 +133,7 @@ pub struct GeometrySet:
 
     ## Put `data` (taken, closed on failure) as the `kind` component,
     ## replacing any. Empty data is dropped instead.
-    pub mutating func put(kind: const ComponentType*, data: void*) -> !:
+    pub func put(kind: const ComponentType*, data: void*) -> !:
         let close = kind.close
         register(kind) catch failure:
             close(data)
@@ -157,12 +157,12 @@ pub struct GeometrySet:
             close(data)
             error(failure.code, failure.message)
 
-    mutating func remove_at(index: usize):
+    func remove_at(index: usize):
         for at in index + 1..<self.entries.count: self.entries.items[at - 1] = self.entries.items[at]
         self.entries.count -= 1
 
     ## Drop the `kind` component, if there is one.
-    pub mutating func remove(kind: const ComponentType*):
+    pub func remove(kind: const ComponentType*):
         for index in 0..<self.entries.count:
             if self.entries.items[index].kind == kind:
                 let data = self.entries.items[index].data
@@ -187,7 +187,7 @@ pub struct GeometrySet:
     ## A heap set sharing every component, for instances and adoption.
     pub func storage() -> GeometrySet*!:
         var copy = try self.shared()
-        let storage = alloc GeometrySet[1] in memory.heap catch failure:
+        let storage = new GeometrySet[1] --- in memory.heap catch failure:
             copy.close()
             error(failure.code, failure.message)
         storage[0] = copy
@@ -197,7 +197,7 @@ pub struct GeometrySet:
     pub func component(index: i64) -> const Component*:
         return &self.entries.items[(usize)index]
 
-    pub mutating func close():
+    pub func close():
         for entry in self.entries.view():
             let close = entry.kind.close
             close(entry.data)

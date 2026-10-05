@@ -72,7 +72,7 @@ struct Ring:
 
     ## The grid cell of corner `at`.
     func cell_of(at: usize) -> usize:
-        return self.cell(self.y[at], self.low_y, self.scale_y, self.rows) * self.columns + self.cell(self.x[at], self.low_x, self.scale_x, self.columns)
+        return Ring.cell(self.y[at], self.low_y, self.scale_y, self.rows) * self.columns + Ring.cell(self.x[at], self.low_x, self.scale_x, self.columns)
 
     ## Whether corner `point` lies in triangle a, b, c or on its edges, with
     ## the same tolerance as the small-face ear test.
@@ -116,18 +116,18 @@ struct Ring:
         let high_x = math.max(self.x[a], math.max(self.x[ear], self.x[c]))
         let low_y = math.min(self.y[a], math.min(self.y[ear], self.y[c]))
         let high_y = math.max(self.y[a], math.max(self.y[ear], self.y[c]))
-        let first_column = self.cell(low_x, self.low_x, self.scale_x, self.columns)
-        let last_column = self.cell(high_x, self.low_x, self.scale_x, self.columns)
-        let first_row = self.cell(low_y, self.low_y, self.scale_y, self.rows)
-        let last_row = self.cell(high_y, self.low_y, self.scale_y, self.rows)
+        let first_column = Ring.cell(low_x, self.low_x, self.scale_x, self.columns)
+        let last_column = Ring.cell(high_x, self.low_x, self.scale_x, self.columns)
+        let first_row = Ring.cell(low_y, self.low_y, self.scale_y, self.rows)
+        let last_row = Ring.cell(high_y, self.low_y, self.scale_y, self.rows)
         for row in first_row..=last_row:
             var from_column = first_column
             var to_column = last_column
             if first_row != last_row:
                 let (low, high) = self.row_span(a, ear, c, row)
                 if low > high: continue
-                let left = self.cell(low, self.low_x, self.scale_x, self.columns)
-                let right = self.cell(high, self.low_x, self.scale_x, self.columns)
+                let left = Ring.cell(low, self.low_x, self.scale_x, self.columns)
+                let right = Ring.cell(high, self.low_x, self.scale_x, self.columns)
                 if left > from_column: from_column = left
                 if right < to_column: to_column = right
             for column in from_column..=to_column:
@@ -140,7 +140,7 @@ struct Ring:
         return true
 
     ## Classify corner `at` again after a neighbor of it was clipped.
-    mutating func classify(at: usize):
+    func classify(at: usize):
         let kind = convex if self.turn(at) > self.epsilon else reflex
         if kind == self.kinds[at]: return
         if kind == reflex: self.reflex_count += 1
@@ -148,7 +148,7 @@ struct Ring:
         self.kinds[at] = kind
 
     ## Take corner `ear` out of the ring (its triangle already written).
-    mutating func unlink(ear: usize):
+    func unlink(ear: usize):
         let a = self.previous[ear]
         let c = self.next[ear]
         self.next[(usize)a] = c
@@ -166,13 +166,13 @@ struct Candidates:
     var head: usize
     var size: usize
 
-    mutating func push(at: usize):
+    func push(at: usize):
         if self.queued[at] != 0: return
         self.queue[(self.head + self.size) % self.queue.length] = (u32)at
         self.queued[at] = 1
         self.size += 1
 
-    mutating func pop() -> usize:
+    func pop() -> usize:
         let at = (usize)self.queue[self.head]
         self.head = (self.head + 1) % self.queue.length
         self.size -= 1
@@ -181,7 +181,7 @@ struct Candidates:
 
     ## Every convex corner of the ring from `first` on (`remaining` corners),
     ## every other one first.
-    mutating func seed(ring: const Ring*, first: usize, remaining: usize):
+    func seed(ring: const Ring*, first: usize, remaining: usize):
         for parity in 0..<(usize)2:
             var at = first
             for step in 0..<remaining:
@@ -222,9 +222,9 @@ pub func triangulate_ring(points: const Vector3[], corners: const i64[], start: 
     let turn = 0.5 * math.atan2(2.0 * (sum_uv / n - sum_u * sum_v / (n * n)), (sum_uu - sum_u * sum_u / n) / n - (sum_vv - sum_v * sum_v / n) / n)
     let along = u.multiply_scalar(math.cos(turn)).add(v.multiply_scalar(math.sin(turn)))
     let up = v.multiply_scalar(math.cos(turn)).subtract(u.multiply_scalar(math.sin(turn)))
-    let x = try alloc f64[count] in memory.heap
+    let x = try new f64[count] --- in memory.heap
     defer free(x) in memory.heap
-    let y = try alloc f64[count] in memory.heap
+    let y = try new f64[count] --- in memory.heap
     defer free(y) in memory.heap
     var low_x = 0.0
     var high_x = 0.0
@@ -238,11 +238,11 @@ pub func triangulate_ring(points: const Vector3[], corners: const i64[], start: 
         high_x = math.max(high_x, x[at])
         low_y = math.min(low_y, y[at])
         high_y = math.max(high_y, y[at])
-    let next = try alloc u32[count] in memory.heap
+    let next = try new u32[count] --- in memory.heap
     defer free(next) in memory.heap
-    let previous = try alloc u32[count] in memory.heap
+    let previous = try new u32[count] --- in memory.heap
     defer free(previous) in memory.heap
-    let kinds = try alloc u8[count] in memory.heap
+    let kinds = try new u8[count] --- in memory.heap
     defer free(kinds) in memory.heap
     for at in 0..<count:
         next[at] = (u32)((at + 1) % count)
@@ -254,13 +254,13 @@ pub func triangulate_ring(points: const Vector3[], corners: const i64[], start: 
     let aspect = width / height if width > 0.0 and height > 0.0 else 1.0
     let columns = grid_size(math.sqrt((f64)count * aspect), count)
     let rows = grid_size(math.sqrt((f64)count / aspect), count)
-    let cells = try alloc u32[columns * rows + 1] in memory.heap
+    let cells = try new u32[columns * rows + 1] --- in memory.heap
     defer free(cells) in memory.heap
-    let members = try alloc u32[count] in memory.heap
+    let members = try new u32[count] --- in memory.heap
     defer free(members) in memory.heap
-    let queue = try alloc u32[count] in memory.heap
+    let queue = try new u32[count] --- in memory.heap
     defer free(queue) in memory.heap
-    let queued = try alloc u8[count] in memory.heap
+    let queued = try new u8[count] --- in memory.heap
     defer free(queued) in memory.heap
     var ring = Ring(x, y, next, previous, kinds, 0, math.max(1e-30, extent2 * 1e-14), cells, members, columns, rows, low_x, low_y,
                     (f64)columns / width if width > 0.0 else 0.0, (f64)rows / height if height > 0.0 else 0.0)
@@ -312,7 +312,7 @@ pub func triangulate_ring(points: const Vector3[], corners: const i64[], start: 
         candidates.push(c)
         cursor = a
         fresh = false
-    discard(emit(output, written, start, (usize)ring.previous[cursor], cursor, (usize)ring.next[cursor]))
+    _ = emit(output, written, start, (usize)ring.previous[cursor], cursor, (usize)ring.next[cursor])
 
 ## Cells along one side of the grid: `wanted` rounded down, 1..count.
 func grid_size(wanted: f64, count: usize) -> usize:

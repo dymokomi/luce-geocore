@@ -23,7 +23,7 @@ pub struct Plan:
     pub func template() -> const Mesh*:
         return self.meshes.items[self.meshes.count - 1]
 
-    pub mutating func close():
+    pub func close():
         for mesh in self.meshes.view(): mesh_dispose(mesh)
         self.meshes.close()
         for column in self.edge_sharpness.view():
@@ -149,7 +149,7 @@ func refine_topology(mesh: const Mesh*, scheme: Scheme) -> Mesh*!:
         let b = topology.edge_points[edge * 2 + 1]
         parents[0] = a
         parents[1] = b
-        discard(try builder.mixed_point(builder.position(a).add(builder.position(b)).multiply_scalar(0.5), parents[..<2], half[..<2]))
+        _ = try builder.mixed_point(builder.position(a).add(builder.position(b)).multiply_scalar(0.5), parents[..<2], half[..<2])
     let edge_base = (i32)points
     if scheme == Scheme.loop:
         # Four triangles: one at each corner, one in the middle.
@@ -187,7 +187,7 @@ func refine_topology(mesh: const Mesh*, scheme: Scheme) -> Mesh*!:
             face_parents[at] = topology.corners[start + at]
             face_weights[at] = (f32)(1.0 / (f64)size)
             center = center.add(builder.position(topology.corners[start + at]))
-        discard(try builder.mixed_point(center.multiply_scalar(1.0 / (f64)size), face_parents, face_weights))
+        _ = try builder.mixed_point(center.multiply_scalar(1.0 / (f64)size), face_parents, face_weights)
     let face_base = (i32)(points + edges)
     var mixed_parents: i32[256]
     var mixed_weights: f32[256]

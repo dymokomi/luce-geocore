@@ -22,7 +22,7 @@ func cook_fill(input: const VerbInput*, output: VerbOutput*) -> !:
     let topology = try Topology.of(mesh)
     let points = topology.points
     # The group's boundary edges, each as the one corner that uses it.
-    let starting = try alloc i32[points] in memory.heap
+    let starting = try new i32[points] --- in memory.heap
     defer free(starting) in memory.heap
     for at in 0..<points: starting[at] = -1
     var candidates: usize = 0
@@ -127,7 +127,7 @@ func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
     let topology = try Topology.of(mesh)
     let faces = topology.faces()
     # Regions: faces joined across dissolved interior edges (union-find).
-    let parent = try alloc i32[faces] in memory.heap
+    let parent = try new i32[faces] --- in memory.heap
     defer free(parent) in memory.heap
     for face in 0..<faces: parent[face] = (i32)face
     var dissolved = try BitsBuilder.zeros(topology.edges())
@@ -151,11 +151,11 @@ func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
         if a != b: parent[(usize)(a if a > b else b)] = a if a < b else b
     for face in 0..<faces: parent[face] = find(parent, (i32)face)
     # Each region's boundary corners, walked into one loop when it is simple.
-    let members = try alloc u32[faces] in memory.heap
+    let members = try new u32[faces] --- in memory.heap
     defer free(members) in memory.heap
     memory.set(u8[]((u8*)members.data, faces * 4), 0)
     for face in 0..<faces: members[(usize)parent[face]] += 1
-    var boundary_count = try alloc u32[faces] in memory.heap
+    var boundary_count = try new u32[faces] --- in memory.heap
     defer free(boundary_count) in memory.heap
     memory.set(u8[]((u8*)boundary_count.data, faces * 4), 0)
     for corner in 0..<topology.corners.length:
@@ -163,7 +163,7 @@ func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
         if members[region] < 2 or dissolved.view().get((usize)topology.corner_edges[corner]): continue
         boundary_count[region] += 1
     # Walk each region once, from its first boundary corner.
-    let loop_of = try alloc i32[faces] in memory.heap
+    let loop_of = try new i32[faces] --- in memory.heap
     defer free(loop_of) in memory.heap
     for face in 0..<faces: loop_of[face] = -1
     var loops = Growing[i32]()
@@ -197,7 +197,7 @@ func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
     try loop_starts.push((u32)loops.count)
     let merged = loop_starts.count - 1
     # Group points left between two edges go from the faces around them.
-    let removable = try alloc u8[topology.points] in memory.heap
+    let removable = try new u8[topology.points] --- in memory.heap
     defer free(removable) in memory.heap
     memory.set(removable, 0)
     var removals: usize = 0

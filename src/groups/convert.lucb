@@ -17,7 +17,7 @@ pub struct Topology:
     pub let point_edge_offsets: const i32[]
     pub let point_edges: const i32[]
 
-    pub static func of(mesh: const Mesh*) -> Topology!:
+    pub func of(mesh: const Mesh*) -> Topology!:
         let edge_corners = try mesh.edge_corner_span()
         let point_edges = try mesh.point_edge_span()
         return Topology((usize)mesh.point_count(), mesh.offset_span(), mesh.corner_span(), try mesh.corner_face_span(), try mesh.corner_edge_span(), try mesh.edge_span(),
@@ -76,9 +76,9 @@ pub func converted(topology: const Topology*, bits: Bits, source: Domain, destin
     if destination == Domain.detail:
         if (all and bits.population() == bits.count) or (not all and bits.any()): out.set(0)
         return out
-    let hits = try alloc u32[size] in memory.heap
+    let hits = try new u32[size] --- in memory.heap
     defer free(hits) in memory.heap
-    let totals = try alloc u32[size] in memory.heap
+    let totals = try new u32[size] --- in memory.heap
     defer free(totals) in memory.heap
     memory.set(u8[]((u8*)hits.data, size * 4), 0)
     memory.set(u8[]((u8*)totals.data, size * 4), 0)
@@ -166,7 +166,7 @@ pub func connected(topology: const Topology*, bits: Bits, domain: Domain) -> Bit
         return try converted(topology, filled.view(), Domain.point, domain, false)
     var out = try BitsBuilder.copy_of(bits)
     errdefer out.close()
-    let queue = try alloc u32[topology.size(domain)] in memory.heap
+    let queue = try new u32[topology.size(domain)] --- in memory.heap
     defer free(queue) in memory.heap
     var head: usize = 0
     var tail: usize = 0

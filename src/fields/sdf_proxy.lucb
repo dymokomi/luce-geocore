@@ -38,12 +38,12 @@ struct Profile:
     var heights: f64[24]
     var count: usize
 
-    static func empty() -> Profile:
+    func empty() -> Profile:
         var result: Profile = ---
         result.count = 0
         return result
 
-    mutating func add(radius: f64, height: f64):
+    func add(radius: f64, height: f64):
         self.radii[self.count] = radius
         self.heights[self.count] = height
         self.count += 1
@@ -95,12 +95,12 @@ func lathe(out: MeshBuilder*, world: Matrix4, profile: Profile, closed: bool) ->
         rows[row] = next
         poles[row] = not closed and profile.radii[row] == 0.0 and (row == 0 or row + 1 == profile.count)
         if poles[row]:
-            discard(try out.point(world.transform_point(Vector3(0.0, profile.heights[row], 0.0))))
+            _ = try out.point(world.transform_point(Vector3(0.0, profile.heights[row], 0.0)))
             next += 1
             continue
         for segment in 0..<proxy_segments:
             let phi = (f64)segment * 2.0 * 3.141592653589793 / (f64)proxy_segments
-            discard(try out.point(world.transform_point(Vector3(math.cos(phi) * profile.radii[row], profile.heights[row], math.sin(phi) * profile.radii[row]))))
+            _ = try out.point(world.transform_point(Vector3(math.cos(phi) * profile.radii[row], profile.heights[row], math.sin(phi) * profile.radii[row])))
         next += proxy_segments
     let bands = profile.count if closed else profile.count - 1
     for band in 0..<bands:
@@ -132,7 +132,7 @@ func cuboid(out: MeshBuilder*, world: Matrix4, half: Vector3) -> !:
         let x = half.x if corner & 1 != 0 else -half.x
         let y = half.y if corner & 2 != 0 else -half.y
         let z = half.z if corner & 4 != 0 else -half.z
-        discard(try out.point(world.transform_point(Vector3(x, y, z))))
+        _ = try out.point(world.transform_point(Vector3(x, y, z)))
     let sides: i64[24] = [0, 2, 3, 1, 4, 5, 7, 6, 0, 1, 5, 4, 2, 6, 7, 3, 0, 4, 6, 2, 1, 3, 7, 5]
     for side in 0..<(usize)6:
         try out.face(4)

@@ -58,14 +58,14 @@ func temporaries(file: Growing[u8]*) -> !:
     var noise = Growing[i32]()
     defer noise.close()
     for at in 0..<(usize)1000: try noise.push(-1)
-    discard(try writer.crate.save((str)file.view()))
+    _ = try writer.crate.save((str)file.view())
     var reader = try CrateReader.open((str)file.view())
     defer reader.close()
-    discard(try reader.next_element())
-    discard(try reader.next_element())
+    _ = try reader.next_element()
+    _ = try reader.next_element()
     let header = (try reader.next_property()) else trap("probe")
     assert(header.name == "values" and header.bytes == 4000)
-    var read = try alloc i32[1000] in memory.heap
+    var read = try new i32[1000] --- in memory.heap
     defer free(read) in memory.heap
     try reader.read_payload(u8[]((u8*)read.data, 4000))
     for at in 0..<(usize)1000: assert(read[at] == (i32)(at * 7))
@@ -147,7 +147,7 @@ func same_bytes(a: const u8[], b: const u8[]):
     for at in 0..<a.length: assert(a[at] == b[at])
 
 func bytes_of[T](values: const T[]) -> const u8[]:
-    return u8[]((u8*)values.data, values.length * sizeof(T))
+    return u8[]((u8*)values.data, values.length * memory.size_of(T))
 
 func same_attribute(a: const Attribute*, b: const Attribute*):
     assert(a.name() == b.name() and a.domain == b.domain and a.kind == b.kind and a.width == b.width)

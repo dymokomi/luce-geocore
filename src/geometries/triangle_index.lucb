@@ -42,11 +42,11 @@ pub struct TriangleIndex:
         self.triangles = triangles
         self.faces = faces
         let count = triangles.length // 3
-        let order = try alloc u32[count] in memory.heap
+        let order = try new u32[count] --- in memory.heap
         errdefer free(order) in memory.heap
-        let lo = try alloc Float3[count] in memory.heap
+        let lo = try new Float3[count] --- in memory.heap
         defer free(lo) in memory.heap
-        let hi = try alloc Float3[count] in memory.heap
+        let hi = try new Float3[count] --- in memory.heap
         defer free(hi) in memory.heap
         var boxes = BoxWork(positions, corners, triangles, lo, hi, order)
         parallel.parallel_for(count, 16384, fill_boxes, (void*)&boxes)
@@ -61,10 +61,10 @@ pub struct TriangleIndex:
     ## This tree over moved `positions` and `triangles` with the same slots
     ## (a folded face may have re-triangulated): only the boxes change.
     pub func refit(positions: const Float3[], triangles: const i32[]) -> TriangleIndex!:
-        let order = try alloc u32[self.order.length] in memory.heap
+        let order = try new u32[self.order.length] --- in memory.heap
         errdefer free(order) in memory.heap
         memory.copy(order, self.order, self.order.length)
-        let nodes = try alloc Node[self.nodes.length] in memory.heap
+        let nodes = try new Node[self.nodes.length] --- in memory.heap
         errdefer free(nodes) in memory.heap
         memory.copy(nodes, self.nodes, self.nodes.length)
         var work = RefitWork(positions, self.corners, triangles, order, nodes)
@@ -157,7 +157,7 @@ pub struct TriangleIndex:
                         face = self.face_of(triangle)
         return RayHit(face, math.sqrt(best) if face >= 0 else -1.0)
 
-    pub mutating func close():
+    pub func close():
         free(self.order) in memory.heap
         if self.nodes.length > 0: free(self.nodes) in memory.heap
 
@@ -188,25 +188,25 @@ struct Builder:
         self.placeholders = Growing[bool]()
         self.tasks = Growing[Task]()
 
-    mutating func build() -> Node[]!:
+    func build() -> Node[]!:
         let count = self.order.length
         var empty: Node[]
         if count == 0: return empty
         let task_size = count // 64 + leaf_size
-        discard(try self.split_top(0, count, 0, task_size))
+        _ = try self.split_top(0, count, 0, task_size)
         var work = TaskWork(self.lo, self.hi, self.order, self.tasks.items[..<self.tasks.count], 0)
         parallel.parallel_for(self.tasks.count, 1, build_tasks, (void*)&work)
         if work.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory building a triangle index")
         var total: usize = 0
         for at in 0..<self.top.count:
             total += self.tasks.items[(usize)self.top.items[at].first].nodes.count if self.placeholders.items[at] else 1
-        let nodes = try alloc Node[total] in memory.heap
+        let nodes = try new Node[total] --- in memory.heap
         var written: usize = 0
         self.splice(0, nodes, &written)
         return nodes
 
     ## Returns the node index in `top`.
-    mutating func split_top(first: usize, end: usize, depth: usize, task_size: usize) -> usize!:
+    func split_top(first: usize, end: usize, depth: usize, task_size: usize) -> usize!:
         let id = self.top.count
         let bounds = extent(self.lo, self.hi, self.order, first, end)
         if end - first <= task_size or depth >= 12:
@@ -217,13 +217,13 @@ struct Builder:
         try self.top.push(Node(bounds.0, bounds.1, 0, 0))
         try self.placeholders.push(false)
         let middle = partition(self.lo, self.hi, self.order, first, end, bounds.0, bounds.1)
-        discard(try self.split_top(first, middle, depth + 1, task_size))
+        _ = try self.split_top(first, middle, depth + 1, task_size)
         let right = try self.split_top(middle, end, depth + 1, task_size)
         self.top.items[id].first = (u32)right
         return id
 
     ## Write top node `id`'s subtree into `output` in preorder.
-    mutating func splice(id: usize, output: Node[], written: usize*):
+    func splice(id: usize, output: Node[], written: usize*):
         if self.placeholders.items[id]:
             let task = &self.tasks.items[(usize)self.top.items[id].first]
             let base = *written
@@ -240,7 +240,7 @@ struct Builder:
         output[here].first = (u32)*written
         self.splice((usize)self.top.items[id].first, output, written)
 
-    mutating func close():
+    func close():
         for at in 0..<self.tasks.count: self.tasks.items[at].nodes.close()
         self.tasks.close()
         self.top.close()
@@ -257,10 +257,10 @@ func build_tasks(context: void*?, first: usize, end: usize):
     let work = (TaskWork*)(context else return)
     for index in first..<end:
         let task = &work.tasks[index]
-        discard(build_subtree(work.lo, work.hi, work.order, task.first, task.end, 0, &task.nodes) catch failure:
-            discard(failure)
-            discard(work.failed.add(1, .relaxed))
-            recover 0)
+        _ = build_subtree(work.lo, work.hi, work.order, task.first, task.end, 0, &task.nodes) catch failure:
+            _ = failure
+            _ = work.failed.add(1, .relaxed)
+            recover 0
 
 ## Preorder subtree over order[first..<end] appended to `nodes`; returns its index.
 func build_subtree(lo: const Float3[], hi: const Float3[], order: u32[], first: usize, end: usize, depth: usize, nodes: Growing[Node]*) -> usize!:
@@ -271,7 +271,7 @@ func build_subtree(lo: const Float3[], hi: const Float3[], order: u32[], first: 
         return id
     try nodes.push(Node(bounds.0, bounds.1, 0, 0))
     let middle = partition(lo, hi, order, first, end, bounds.0, bounds.1)
-    discard(try build_subtree(lo, hi, order, first, middle, depth + 1, nodes))
+    _ = try build_subtree(lo, hi, order, first, middle, depth + 1, nodes)
     let right = try build_subtree(lo, hi, order, middle, end, depth + 1, nodes)
     nodes.items[id].first = (u32)right
     return id

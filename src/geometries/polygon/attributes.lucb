@@ -5,31 +5,40 @@
 extend Mesh:
     pub func attribute_count() -> i64:
         return (i64)self.attributes.count()
+
     pub func find_attribute(name: str, domain: i64) -> i64:
         return self.attributes.find(name, domain)
+
     pub func attribute_name(index: i64) -> str!:
         try checked(index, self.attributes.count())
         return self.attributes.entry((usize)index).name()
+
     pub func attribute_domain(index: i64) -> i64!:
         try checked(index, self.attributes.count())
         return (i64)(u8)self.attributes.entry((usize)index).domain
+
     pub func attribute_width(index: i64) -> i64!:
         try checked(index, self.attributes.count())
         return (i64)self.attributes.entry((usize)index).width
+
     pub func attribute_integer(index: i64) -> bool!:
         try checked(index, self.attributes.count())
         return self.attributes.entry((usize)index).integer()
+
     ## The scalar type (core.attributes.DataType) and storage (0 array, 1 single).
     pub func attribute_type(index: i64) -> i64!:
         try checked(index, self.attributes.count())
         return (i64)(u8)self.attributes.entry((usize)index).kind
+
     pub func attribute_storage(index: i64) -> i64!:
         try checked(index, self.attributes.count())
         return (i64)(u8)self.attributes.entry((usize)index).storage
+
     ## The change id of attribute `index`'s column.
     pub func attribute_id(index: i64) -> u64!:
         try checked(index, self.attributes.count())
         return self.attributes.entry((usize)index).data.id()
+
     pub func attribute_value(index: i64, element: i64, component: i64 = 0) -> f64!:
         try checked(index, self.attributes.count())
         let entry = self.attributes.entry((usize)index)
@@ -93,9 +102,9 @@ extend Mesh:
         let count = (usize)(try self.domain_count(target))
         let source_count = (usize)(try self.domain_count(domain))
         let width = entry.width
-        let values = try alloc f64[count * width] in memory.heap
+        let values = try new f64[count * width] --- in memory.heap
         defer free(values) in memory.heap
-        let weights = try alloc usize[count] in memory.heap
+        let weights = try new usize[count] --- in memory.heap
         defer free(weights) in memory.heap
         for at in 0..<values.length:
             values[at] = 0.0
@@ -120,7 +129,7 @@ extend Mesh:
 
     ## Construct topology and its imported corner data once, without rebuilding
     ## triangulation, edge tables and BVH for each attribute. Empty spans omit it.
-    pub static func from_corner_data(points: const Vector3[], sizes: const i64[], corners: const i64[], uv: const f64[], normals: const f64[]) -> interop.Reference[Mesh]!:
+    pub func from_corner_data(points: const Vector3[], sizes: const i64[], corners: const i64[], uv: const f64[], normals: const f64[]) -> interop.Reference[Mesh]!:
         if (uv.length != 0 and uv.length != corners.length * 2) or (normals.length != 0 and normals.length != corners.length * 3):
             error(errors.invalid, "imported corner attribute size mismatch")
         let result = try make_mesh(points, sizes, corners)

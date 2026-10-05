@@ -123,11 +123,11 @@ func subdivision_rows(grid: interop.Reference[Mesh]) -> !:
 
 ## The n×n quad grid in the XZ plane, one unit per quad.
 func quad_grid(n: usize) -> interop.Reference[Mesh]!:
-    let points = try alloc Vector3[(n + 1) * (n + 1)] in memory.heap
+    let points = try new Vector3[(n + 1) * (n + 1)] --- in memory.heap
     defer free(points) in memory.heap
-    let sizes = try alloc i64[n * n] in memory.heap
+    let sizes = try new i64[n * n] --- in memory.heap
     defer free(sizes) in memory.heap
-    let corners = try alloc i64[n * n * 4] in memory.heap
+    let corners = try new i64[n * n * 4] --- in memory.heap
     defer free(corners) in memory.heap
     for z in 0..<n + 1:
         for x in 0..<n + 1: points[z * (n + 1) + x] = Vector3((f64)x - (f64)n * 0.5, 0.0, (f64)z - (f64)n * 0.5)
@@ -144,11 +144,11 @@ func quad_grid(n: usize) -> interop.Reference[Mesh]!:
 
 ## An open tube of n rows of n quads around the Y axis.
 func open_tube(n: usize) -> interop.Reference[Mesh]!:
-    let points = try alloc Vector3[n * (n + 1)] in memory.heap
+    let points = try new Vector3[n * (n + 1)] --- in memory.heap
     defer free(points) in memory.heap
-    let sizes = try alloc i64[n * n] in memory.heap
+    let sizes = try new i64[n * n] --- in memory.heap
     defer free(sizes) in memory.heap
-    let corners = try alloc i64[n * n * 4] in memory.heap
+    let corners = try new i64[n * n * 4] --- in memory.heap
     defer free(corners) in memory.heap
     for y in 0..<n + 1:
         for i in 0..<n:

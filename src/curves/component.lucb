@@ -217,12 +217,12 @@ pub struct Owned:
         return self.storage else trap("released curves")
 
     ## Hand the storage on; the scope's release then does nothing.
-    pub mutating func take() -> Curves*:
+    pub func take() -> Curves*:
         let storage = self.storage else trap("released curves")
         self.storage = none
         return storage
 
-    pub mutating func release():
+    pub func release():
         if let storage = self.storage: curves_dispose(storage)
         self.storage = none
 
@@ -234,7 +234,7 @@ func curve_paths(data: const void*, out: TableBuilder*) -> !:
     let entry = curves.find("path", curve_domain) else return
     if entry.kind != DataType.text: return
     let table = entry.table.view()
-    for at in 0..<table_count(table): discard(try out.intern(table_text(table, at)))
+    for at in 0..<table_count(table): _ = try out.intern(table_text(table, at))
 
 func filter_curves(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
     let curves = (const Curves*)data

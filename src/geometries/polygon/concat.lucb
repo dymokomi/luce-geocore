@@ -19,15 +19,15 @@ pub func concatenated(parts: const MeshPart[]) -> interop.Reference[Mesh]!:
 
 func concatenated_storage(parts: const MeshPart[]) -> Mesh*!:
     # Reflected parts are placed first; `placed` keeps them alive meanwhile.
-    let placed = try alloc (interop.Reference[Mesh]?)[parts.length] in memory.heap
+    let placed = try new (interop.Reference[Mesh]?)[parts.length] --- in memory.heap
     for at in 0..<parts.length: placed[at] = none
     defer:
         for at in 0..<parts.length:
             if let owner = placed[at]: owner.release()
         free(placed) in memory.heap
-    let meshes = try alloc (const Mesh*)[parts.length] in memory.heap
+    let meshes = try new (const Mesh*)[parts.length] --- in memory.heap
     defer free(meshes) in memory.heap
-    let matrices = try alloc Matrix4[parts.length] in memory.heap
+    let matrices = try new Matrix4[parts.length] --- in memory.heap
     defer free(matrices) in memory.heap
     var points: usize = 0
     var faces: usize = 0
@@ -84,7 +84,7 @@ func concatenated_storage(parts: const MeshPart[]) -> Mesh*!:
     if precise: exact = try Column[Vector3].allocate(points)
     defer exact.release()
     # Where each part starts in the points, faces, corners and triangles.
-    let bases = try alloc usize[parts.length * 4] in memory.heap
+    let bases = try new usize[parts.length * 4] --- in memory.heap
     defer free(bases) in memory.heap
     var sums: usize[4] = [0, 0, 0, 0]
     for at in 0..<parts.length:
@@ -141,7 +141,7 @@ func concat_part(context: void*?, index: usize):
 ## The union of the parts' attributes on `output`, each part's range turned
 ## by its matrix when the attribute is a normal or a vector.
 func concatenate_attributes(meshes: const (const Mesh*)[], matrices: const Matrix4[], output: Mesh*) -> !:
-    let pieces = try alloc Piece[meshes.length] in memory.heap
+    let pieces = try new Piece[meshes.length] --- in memory.heap
     defer free(pieces) in memory.heap
     for at in 0..<meshes.length:
         for index in 0..<meshes[at].attributes.count():

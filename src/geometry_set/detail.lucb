@@ -7,7 +7,7 @@
 
 extend GeometrySet:
     ## Replace the detail attributes with `store` (taken, even on failure).
-    mutating func take_detail(store: AttributeStore) -> !:
+    func take_detail(store: AttributeStore) -> !:
         self.detail.close()
         self.detail = store
 

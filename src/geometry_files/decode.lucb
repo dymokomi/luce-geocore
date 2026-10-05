@@ -8,11 +8,11 @@ pub struct GeometryReader:
     var peeked: (str, str)?
     var ended: bool = false
 
-    pub mutating func close():
+    pub func close():
         self.crate.close()
 
     ## The next element, consuming it.
-    pub mutating func next_element() -> (str, str)?!:
+    pub func next_element() -> (str, str)?!:
         if let found = self.peeked:
             self.peeked = none
             return found
@@ -23,7 +23,7 @@ pub struct GeometryReader:
 
     ## The next element, left for the next `next_element`. The current
     ## element's unread properties are skipped.
-    pub mutating func peek_element() -> (str, str)?!:
+    pub func peek_element() -> (str, str)?!:
         if self.peeked == none and not self.ended:
             self.peeked = try self.crate.next_element()
             if self.peeked == none: self.ended = true
@@ -31,16 +31,16 @@ pub struct GeometryReader:
 
     ## The next child of `parent`, consuming it; none when the next element
     ## is not one.
-    pub mutating func next_child(parent: str) -> (str, str)?!:
+    pub func next_child(parent: str) -> (str, str)?!:
         let found = (try self.peek_element()) else return none
         if not is_child(found.0, parent): return none
         return try self.next_element()
 
-    pub mutating func next_property() -> PropertyHeader?!:
+    pub func next_property() -> PropertyHeader?!:
         return try self.crate.next_property()
 
     ## An int64 (or other integer) scalar.
-    pub mutating func integer(header: PropertyHeader) -> i64!:
+    pub func integer(header: PropertyHeader) -> i64!:
         var bytes: u8[8] = [0, 0, 0, 0, 0, 0, 0, 0]
         let width = dtype_width(header.dtype)
         if header.rank != 0 or width == 0 or width > 8 or header.dtype == dtype_float32 or header.dtype == dtype_float64: error(errors.invalid, "expected an integer property")
@@ -48,23 +48,23 @@ pub struct GeometryReader:
         return memory.read[i64]((void*)&bytes[0])
 
     ## Three f64 components.
-    pub mutating func triple(header: PropertyHeader) -> Vector3!:
+    pub func triple(header: PropertyHeader) -> Vector3!:
         if header.dtype != dtype_float64 or header.bytes != 24: error(errors.invalid, "expected three float64 components")
         var values: f64[3] = [0.0, 0.0, 0.0]
         try self.crate.read_payload(u8[]((u8*)&values[0], 24))
         return Vector3(values[0], values[1], values[2])
 
     ## A str scalar, into `out`.
-    pub mutating func text(header: PropertyHeader, out: Growing[u8]*) -> !:
+    pub func text(header: PropertyHeader, out: Growing[u8]*) -> !:
         if header.dtype != dtype_str: error(errors.invalid, "expected a text property")
         try self.crate.read_text(out)
 
     ## A typed array as a new column of T: one property, or `<name>_chunks`
     ## followed by its chunks.
-    pub mutating func column[T](header: PropertyHeader) -> Column[T]!:
+    pub func column[T](header: PropertyHeader) -> Column[T]!:
         if not ends_with(header.name, "_chunks"):
-            if header.bytes % sizeof(T) != 0: error(errors.invalid, "a geometry column has the wrong element size")
-            var column = try Column[T].allocate(header.bytes // sizeof(T))
+            if header.bytes % memory.size_of(T) != 0: error(errors.invalid, "a geometry column has the wrong element size")
+            var column = try Column[T].allocate(header.bytes // memory.size_of(T))
             errdefer column.release()
             try self.crate.read_payload(bytes_of(&column))
             return column
@@ -76,8 +76,8 @@ pub struct GeometryReader:
         let rows_first = (usize)first.dims[0]
         if rows_first == 0 or chunks == 0: error(errors.invalid, "a chunked column is empty")
         let row_bytes = first.bytes // rows_first
-        if (rows * row_bytes) % sizeof(T) != 0: error(errors.invalid, "a geometry column has the wrong element size")
-        var column = try Column[T].allocate(rows * row_bytes // sizeof(T))
+        if (rows * row_bytes) % memory.size_of(T) != 0: error(errors.invalid, "a geometry column has the wrong element size")
+        var column = try Column[T].allocate(rows * row_bytes // memory.size_of(T))
         errdefer column.release()
         let bytes = bytes_of(&column)
         var at = first.bytes
@@ -91,15 +91,15 @@ pub struct GeometryReader:
         return column
 
     ## The attribute children of `parent`, into `store`.
-    pub mutating func attributes(parent: str, store: AttributeStore*) -> !:
+    pub func attributes(parent: str, store: AttributeStore*) -> !:
         while true:
             let found = (try self.peek_element()) else return
             if not is_child(found.0, parent) or found.1 != "attribute": return
-            discard(try self.next_element())
+            _ = try self.next_element()
             try store.put(try self.attribute())
 
     ## One attribute element's properties.
-    mutating func attribute() -> Attribute!:
+    func attribute() -> Attribute!:
         var name = Growing[u8]()
         defer name.close()
         var domain = Growing[u8]()
@@ -297,7 +297,7 @@ func decode_instances(reader: GeometryReader*, path: str) -> void*!:
     try reader.attributes(path, &attributes)
     while let found = try reader.next_child(path):
         if found.1 != "geometry": error(errors.invalid, "instances hold geometry prototypes")
-        discard(try instances.add_prototype(try decode_set(reader, found.0)))
+        _ = try instances.add_prototype(try decode_set(reader, found.0))
     for at in 0..<total:
         let prototype = prototypes.items[at]
         if prototype < 0 or (usize)prototype >= instances.prototype_count(): error(errors.invalid, "a saved instance names a missing prototype")
@@ -321,7 +321,7 @@ func ends_with(text: str, suffix: str) -> bool:
 
 func bytes_of[T](column: Column[T]*) -> u8[]:
     let span = column.span()
-    return u8[]((u8*)span.data, span.length * sizeof(T))
+    return u8[]((u8*)span.data, span.length * memory.size_of(T))
 
 func domain_of(name: str) -> Domain!:
     if name == "point": return Domain.point

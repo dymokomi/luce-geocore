@@ -39,7 +39,7 @@ func named_group(mesh: const Mesh*, bits: Bits, domain: Domain, out: Growing[u8]
 
 func encode_numbers(bits: Bits, out: Growing[u8]*) -> !:
     let count = bits.population()
-    let ids = try alloc i64[count] in memory.heap
+    let ids = try new i64[count] --- in memory.heap
     defer free(ids) in memory.heap
     bits.indices(ids)
     var at: usize = 0

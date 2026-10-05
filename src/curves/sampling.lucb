@@ -50,7 +50,7 @@ pub func control_parents(curves: const Curves*, curve: usize, evaluated: usize, 
             let spans = (f64)(evaluated if settings.cyclic else evaluated - 1)
             let segments = (f64)(points if settings.cyclic else points - 1)
             if evaluated != points and spans > 0.0: position = position / spans * segments
-        _: discard(0)
+        _: _ = 0
     var a = (usize)math.floor(position)
     var t = position - (f64)a
     if not settings.cyclic and a >= points - 1:

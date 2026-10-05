@@ -48,7 +48,7 @@ pub func mesh_level_set(mesh: const Mesh*, voxel: f64, band: f64, name: str) -> 
     let reach = band * voxel
     let triangles = shape.corners.count // 3
     # Leaves each triangle's grown box touches: count, then list.
-    let counts = try alloc usize[triangles + 1] in memory.heap
+    let counts = try new usize[triangles + 1] --- in memory.heap
     defer free(counts) in memory.heap
     var count_work = BinWork(&shape, voxel, reach, counts, nothing[u64](), nothing[u64](), 0)
     parallel.parallel_for(triangles, 1024, bin_triangles, (void*)&count_work)
@@ -59,9 +59,9 @@ pub func mesh_level_set(mesh: const Mesh*, voxel: f64, band: f64, name: str) -> 
         total += count
     counts[triangles] = total
     if total > 400000000: error(errors.limit, "the voxels are too small for this mesh")
-    let pair_keys = try alloc u64[total] in memory.heap
+    let pair_keys = try new u64[total] --- in memory.heap
     defer free(pair_keys) in memory.heap
-    let pair_triangles = try alloc u64[total] in memory.heap
+    let pair_triangles = try new u64[total] --- in memory.heap
     defer free(pair_triangles) in memory.heap
     var list_work = BinWork(&shape, voxel, reach, counts, pair_keys, pair_triangles, 1)
     parallel.parallel_for(triangles, 1024, bin_triangles, (void*)&list_work)
@@ -125,7 +125,7 @@ func queried_level_set(mesh: const Mesh*, shape: const MeshShape*, voxel: f64, b
     # The leaves the triangles' grown boxes touch. Neighbouring triangles
     # of a dense mesh touch the same leaves: a triangle whose leaf box is its
     # predecessor's lists none.
-    let counts = try alloc usize[triangles + 1] in memory.heap
+    let counts = try new usize[triangles + 1] --- in memory.heap
     defer free(counts) in memory.heap
     var count_work = BinWork(shape, voxel, reach, counts, nothing[u64](), nothing[u64](), 3)
     parallel.parallel_for(triangles, 4096, bin_triangles, (void*)&count_work)
@@ -136,7 +136,7 @@ func queried_level_set(mesh: const Mesh*, shape: const MeshShape*, voxel: f64, b
         total += count
     counts[triangles] = total
     if total > 400000000: error(errors.limit, "the voxels are too small for this mesh")
-    let listed = try alloc u64[total] in memory.heap
+    let listed = try new u64[total] --- in memory.heap
     defer free(listed) in memory.heap
     var list_work = BinWork(shape, voxel, reach, counts, listed, nothing[u64](), 4)
     parallel.parallel_for(triangles, 4096, bin_triangles, (void*)&list_work)
@@ -149,7 +149,7 @@ func queried_level_set(mesh: const Mesh*, shape: const MeshShape*, voxel: f64, b
 
 func fill_query_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[]):
     let work = (RasterWork*)(context else return)
-    discard(leaf)
+    _ = leaf
     let (lx, ly, lz) = key_leaf(key)
     query_leaf(work, lx, ly, lz, work.band * work.voxel, values, mask)
 
@@ -172,7 +172,7 @@ struct MeshShape:
 
     ## Built in parallel: points and face normals, then point and edge
     ## normals (each gathered from its faces), then triangles.
-    static func of(mesh: const Mesh*) -> MeshShape!:
+    func of(mesh: const Mesh*) -> MeshShape!:
         var shape = MeshShape(Growing[Vector3](), Growing[i32](), Growing[i32](), Growing[Vector3](), Growing[Vector3](), Growing[Vector3]())
         errdefer shape.close()
         let positions = mesh.point_span()
@@ -199,7 +199,7 @@ struct MeshShape:
         parallel.parallel_for(faces, 4096, shape_triangles, (void*)&work)
         return shape
 
-    mutating func close():
+    func close():
         self.points.close()
         self.corners.close()
         self.faces.close()

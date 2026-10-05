@@ -11,24 +11,27 @@ pub struct Sketches:
     let reserved: u8 = 0
 
     ## The sketch plane: its origin, normal and in-plane axes.
-    pub static func plane_origin(geometry: interop.Reference[GeometrySet]) -> Vector3!:
+    pub func plane_origin(geometry: interop.Reference[GeometrySet]) -> Vector3!:
         return (try sketch_plane_of(try geometry.get())).origin
-    pub static func plane_normal(geometry: interop.Reference[GeometrySet]) -> Vector3!:
+
+    pub func plane_normal(geometry: interop.Reference[GeometrySet]) -> Vector3!:
         return (try sketch_plane_of(try geometry.get())).normal
-    pub static func plane_u(geometry: interop.Reference[GeometrySet]) -> Vector3!:
+
+    pub func plane_u(geometry: interop.Reference[GeometrySet]) -> Vector3!:
         return (try sketch_plane_of(try geometry.get())).u
-    pub static func plane_v(geometry: interop.Reference[GeometrySet]) -> Vector3!:
+
+    pub func plane_v(geometry: interop.Reference[GeometrySet]) -> Vector3!:
         return (try sketch_plane_of(try geometry.get())).v
 
     ## The set with its sketch plane through `origin` facing `normal`
     ## (curves already drawn stay where they are).
-    pub static func with_plane(geometry: interop.Reference[GeometrySet], origin: Vector3, normal: Vector3) -> interop.Reference[GeometrySet]!:
+    pub func with_plane(geometry: interop.Reference[GeometrySet], origin: Vector3, normal: Vector3) -> interop.Reference[GeometrySet]!:
         let plane = try SketchPlane.of(origin, normal)
         let placed = try geometry.value().with_detail("sketch.plane_origin", [plane.origin.x, plane.origin.y, plane.origin.z], 1)
         defer placed.release()
         return try placed.value().with_detail("sketch.plane_normal", [plane.normal.x, plane.normal.y, plane.normal.z], 3)
 
-    pub static func curve_count(geometry: interop.Reference[GeometrySet]) -> i64!:
+    pub func curve_count(geometry: interop.Reference[GeometrySet]) -> i64!:
         let curves = set_curves(try geometry.get()) else return 0
         return (i64)curves.curve_count()
 
@@ -37,7 +40,7 @@ pub struct Sketches:
     ## height), 2 an arc (radius, start and end degrees), 3 a circle
     ## (radius), 4 a rectangle (width, height), 5 a spline (width, height).
     ## Arcs and circles are exact NURBS; the spline is a cubic NURBS.
-    pub static func with_shape(geometry: interop.Reference[GeometrySet], shape: i64, sizes: const f64[], a: f64, b: f64) -> interop.Reference[GeometrySet]!:
+    pub func with_shape(geometry: interop.Reference[GeometrySet], shape: i64, sizes: const f64[], a: f64, b: f64) -> interop.Reference[GeometrySet]!:
         let source = try geometry.get()
         let existing = set_curves(source)
         let plane = try sketch_plane_of(source)
@@ -73,7 +76,7 @@ pub struct Sketches:
 
     ## What level `level` picks on: 0 Object and 1 Segments the sample cloud,
     ## 2 Points the control points (an empty mesh without curves).
-    pub static func pick(geometry: interop.Reference[GeometrySet], level: i64) -> interop.Reference[Mesh]!:
+    pub func pick(geometry: interop.Reference[GeometrySet], level: i64) -> interop.Reference[Mesh]!:
         let curves = set_curves(try geometry.get()) else return try Mesh.empty()
         if level == 2: return try control_cloud(curves)
         return try sample_cloud(curves)
@@ -84,7 +87,7 @@ pub struct Sketches:
     ## snapping follows the fifteen numbers: a grid spacing (the moved
     ## points land on the plane's grid) and an end reach (a moved end of an
     ## open curve lands on an unmoved end within it); 0 is off.
-    pub static func moved(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
+    pub func moved(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
         let source = try geometry.get()
         let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves to move")
         var chosen = try SketchChoice.of(curves, try pick.get(), group, group_type)
@@ -123,7 +126,7 @@ pub struct Sketches:
 
     ## The set with the chosen control points snapped to a grid of
     ## `spacing` in the sketch plane (their height off it kept).
-    pub static func snapped(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, spacing: f64) -> interop.Reference[GeometrySet]!:
+    pub func snapped(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, spacing: f64) -> interop.Reference[GeometrySet]!:
         if not (spacing > 0.0): error(errors.invalid, "a grid needs a positive spacing")
         let source = try geometry.get()
         let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves to snap")
@@ -143,7 +146,7 @@ pub struct Sketches:
     ## The set with each chosen end point of an open curve moved onto the
     ## nearest end point of another curve (or its own other end) within
     ## `tolerance`.
-    pub static func joined(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, tolerance: f64) -> interop.Reference[GeometrySet]!:
+    pub func joined(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, tolerance: f64) -> interop.Reference[GeometrySet]!:
         if not (tolerance > 0.0): error(errors.invalid, "snapping ends needs a positive tolerance")
         let source = try geometry.get()
         let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves to join")
@@ -170,7 +173,7 @@ pub struct Sketches:
     ## The set without what `group` names: control points (their curves keep
     ## the rest), segments (open curves split there; closed ones open) or
     ## whole curves. Curves left under two points go.
-    pub static func without(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64) -> interop.Reference[GeometrySet]!:
+    pub func without(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64) -> interop.Reference[GeometrySet]!:
         let source = try geometry.get()
         let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves to delete")
         var chosen = try SketchChoice.of(curves, try pick.get(), group, group_type)
@@ -217,7 +220,7 @@ pub struct Sketches:
         return try adopt_set(try with_curves(source, try out.finish(curves)))
 
     ## The set with the curves `group` touches closed (`cyclic`) or opened.
-    pub static func with_closure(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, cyclic: bool) -> interop.Reference[GeometrySet]!:
+    pub func with_closure(geometry: interop.Reference[GeometrySet], pick: interop.Reference[Mesh], group: str, group_type: i64, cyclic: bool) -> interop.Reference[GeometrySet]!:
         let source = try geometry.get()
         let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves")
         var chosen = try SketchChoice.of(curves, try pick.get(), group, group_type)

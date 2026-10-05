@@ -72,7 +72,7 @@ struct Fronts:
         self.places = Growing[Vector3]()
         self.insets = Growing[Vector3]()
 
-    mutating func close():
+    func close():
         self.of_corner.close()
         self.points.close()
         self.places.close()
@@ -120,10 +120,10 @@ func extrude_faces(input: const VerbInput*, output: VerbOutput*, settings: Extru
             try sector(mesh, &topology, input.group, normals, settings, corner, &fronts)
     # Inner points of regions: one front point each, along their faces'
     # summed normals.
-    let inner = try alloc i32[topology.points] in memory.heap
+    let inner = try new i32[topology.points] --- in memory.heap
     defer free(inner) in memory.heap
     for at in 0..<topology.points: inner[at] = -1
-    let sums = try alloc Vector3[topology.points] in memory.heap
+    let sums = try new Vector3[topology.points] --- in memory.heap
     defer free(sums) in memory.heap
     for face in 0..<faces:
         if not input.group.get(face): continue
@@ -188,7 +188,7 @@ func build_faces(input: const VerbInput*, output: VerbOutput*, topology: const T
     output.built = true
     let first_front = builder.point_count()
     for front in 0..<fronts.points.count:
-        discard(try builder.point(fronts.places.items[front], fronts.points.items[front]))
+        _ = try builder.point(fronts.places.items[front], fronts.points.items[front])
     # Wall rows between each boundary point and its front: rows 1..<divisions.
     let rows = settings.divisions
     let first_row = builder.point_count()
@@ -197,7 +197,7 @@ func build_faces(input: const VerbInput*, output: VerbOutput*, topology: const T
         for front in 0..<fronts.points.count:
             let point = fronts.points.items[front]
             let start = point_of(mesh, point)
-            discard(try builder.point(start.add(fronts.places.items[front].subtract(start).multiply_scalar(t)), point))
+            _ = try builder.point(start.add(fronts.places.items[front].subtract(start).multiply_scalar(t)), point)
     let faces = topology.faces()
     var walls: usize = 0
     for face in 0..<faces:
@@ -288,9 +288,9 @@ func extrude_edges(input: const VerbInput*, output: VerbOutput*, settings: Extru
         return
     let topology = try Topology.of(mesh)
     let normals = mesh.face_normal_span()
-    let sums = try alloc Vector3[topology.points] in memory.heap
+    let sums = try new Vector3[topology.points] --- in memory.heap
     defer free(sums) in memory.heap
-    let front = try alloc i32[topology.points] in memory.heap
+    let front = try new i32[topology.points] --- in memory.heap
     defer free(front) in memory.heap
     for at in 0..<topology.points:
         sums[at] = Vector3()
@@ -315,7 +315,7 @@ func extrude_edges(input: const VerbInput*, output: VerbOutput*, settings: Extru
         front[point] = (i32)builder.point_count()
         let start = point_of(mesh, (i32)point)
         for row in 1..<rows + 1:
-            discard(try builder.point(start.add(direction.multiply_scalar(settings.distance * (f64)row / (f64)rows)), (i32)point))
+            _ = try builder.point(start.add(direction.multiply_scalar(settings.distance * (f64)row / (f64)rows)), (i32)point)
     for edge in 0..<topology.edges():
         if not input.group.get(edge): continue
         # Face the way the edge's first face does: it runs a→b there, so the

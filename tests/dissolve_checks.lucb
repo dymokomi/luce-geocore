@@ -10,7 +10,7 @@ func equal(a: const Mesh*, b: const Mesh*) -> !:
     for face in 0..<a.face_count():
         assert((try a.face_size(face)) == (try b.face_size(face)))
         assert((try a.face_normal(face)) == (try b.face_normal(face)))
-        for corner in 0..<(try a.face_size(face)): assert((try a.face_point(face,corner)) == (try b.face_point(face,corner)))
+        for corner in 0..<(try a.face_size(face)): assert((try a.face_point(face, corner)) == (try b.face_point(face, corner)))
     for at in 0..<a.index_count():
         let x = a.index(at)
         defer x.release()
@@ -21,47 +21,47 @@ func equal(a: const Mesh*, b: const Mesh*) -> !:
     for at in 0..<a.attribute_count():
         let name = try a.attribute_name(at)
         let domain = try a.attribute_domain(at)
-        let other = b.find_attribute(name,domain)
+        let other = b.find_attribute(name, domain)
         assert(other >= 0 and (try a.attribute_width(at)) == (try b.attribute_width(other)))
         for element in 0..<(try a.domain_count(domain)):
             for component in 0..<(try a.attribute_width(at)):
-                assert((try a.attribute_value(at,element,component)) == (try b.attribute_value(other,element,component)))
+                assert((try a.attribute_value(at, element, component)) == (try b.attribute_value(other, element, component)))
 
 func make(bent: bool, reverse: bool) -> interop.Reference[Mesh]!:
     var builder = try MeshBuilder()
     defer builder.close()
     for row in 0..<3:
-        for col in 0..<9: discard(try builder.point(Vector3((f64)col,(f64)row,(f64)(row*col)*0.03 if bent else 0.0)))
+        for col in 0..<9: _ = try builder.point(Vector3((f64)col, (f64)row, (f64)(row * col) * 0.03 if bent else 0.0))
     for row in 0..<2:
         for col in 0..<8:
-            let p = row*9+col
-            let ids = [p,p+1,p+10,p+9]
+            let p = row * 9 + col
+            let ids = [p, p + 1, p + 10, p + 9]
             try builder.face(4)
-            for at in 0..<(usize)4: try builder.corner(ids[3-at if reverse else at])
+            for at in 0..<(usize)4: try builder.corner(ids[3 - at if reverse else at])
     var mesh = try builder.finish()
     errdefer mesh.release()
     for domain in 0..<4:
-        let values = try alloc f64[(usize)(try mesh.value().domain_count(domain))] in memory.heap
+        let values = try new f64[(usize)(try mesh.value().domain_count(domain))] --- in memory.heap
         defer free(values) in memory.heap
-        for at in 0..<values.length: values[at] = (f64)at+0.25
-        let next = try mesh.value().with_attribute("id",domain,1,values)
+        for at in 0..<values.length: values[at] = (f64)at + 0.25
+        let next = try mesh.value().with_attribute("id", domain, 1, values)
         mesh.release()
         mesh = next
-    let normals = try alloc f64[(usize)mesh.value().vertex_count()*3] in memory.heap
+    let normals = try new f64[(usize)mesh.value().vertex_count() * 3] --- in memory.heap
     defer free(normals) in memory.heap
-    for at in 0..<normals.length: normals[at] = 1.0 if at%3 == 2 else 0.0
-    let shaded = try mesh.value().with_attribute("N",1,3,normals)
+    for at in 0..<normals.length: normals[at] = 1.0 if at % 3 == 2 else 0.0
+    let shaded = try mesh.value().with_attribute("N", 1, 3, normals)
     mesh.release()
     mesh = shaded
     return mesh
 
 func find(mesh: const Mesh*, a: i64, b: i64) -> i64!:
     for edge in 0..<(try mesh.edge_count()):
-        if (try mesh.edge_point(edge,0)) == a and (try mesh.edge_point(edge,1)) == b: return edge
+        if (try mesh.edge_point(edge, 0)) == a and (try mesh.edge_point(edge, 1)) == b: return edge
     return -1
 
 pub func single(bent: bool = false, reverse: bool = false) -> !:
-    let source = try make(bent,reverse)
+    let source = try make(bent, reverse)
     defer source.release()
     var work = try DissolveWorkspace(source.value())
     defer work.close()
@@ -70,31 +70,31 @@ pub func single(bent: bool = false, reverse: bool = false) -> !:
     var accepted: usize = 0
     var rejected: usize = 0
     for edge in 0..<(try source.value().edge_count()):
-        let a = try source.value().edge_point(edge,0)
-        let b = try source.value().edge_point(edge,1)
-        let id = try find(current.value(),a,b)
+        let a = try source.value().edge_point(edge, 0)
+        let b = try source.value().edge_point(edge, 1)
+        let id = try find(current.value(), a, b)
         if id < 0: continue
-        let next: interop.Reference[Mesh]? = dissolve_edge(current.value(),id) catch failure:
-            if failure.code != invalid: error(failure.code,failure.message)
+        let next: interop.Reference[Mesh]? = dissolve_edge(current.value(), id) catch failure:
+            if failure.code != invalid: error(failure.code, failure.message)
             recover none
         if let result = next:
             defer result.release()
             try work.dissolve(edge)
             let actual = try work.finish()
             defer actual.release()
-            try equal(result.value(),actual.value())
+            try equal(result.value(), actual.value())
             current.release()
             current = result.clone()
             accepted += 1
         else:
             var refused = false
             work.dissolve(edge) catch failure:
-                if failure.code != invalid: error(failure.code,failure.message)
+                if failure.code != invalid: error(failure.code, failure.message)
                 refused = true
             assert(refused)
             let actual = try work.finish()
             defer actual.release()
-            try equal(current.value(),actual.value())
+            try equal(current.value(), actual.value())
             rejected += 1
     assert(accepted >= 8 and rejected >= 4)
     # Neighbor slots must be reciprocal after all joins; removed faces never
@@ -102,30 +102,30 @@ pub func single(bent: bool = false, reverse: bool = false) -> !:
     for face in 0..<work.face_slots():
         if not work.active(face): continue
         for side in 0..<(try work.face_size(face)):
-            let other = try work.neighbor(face,side)
+            let other = try work.neighbor(face, side)
             if other < 0: continue
             assert(work.active(other))
-            let edge = try work.face_edge(face,side)
+            let edge = try work.face_edge(face, side)
             var reciprocal = false
             for at in 0..<(try work.face_size(other)):
-                if (try work.face_edge(other,at)) == edge: reciprocal = (try work.neighbor(other,at)) == face
+                if (try work.face_edge(other, at)) == edge: reciprocal = (try work.neighbor(other, at)) == face
             assert(reciprocal)
 
 pub func exercise() -> !:
-    for bent in [false,true]:
-        for reverse in [false,true]: try single(bent,reverse)
+    for bent in [false, true]:
+        for reverse in [false, true]: try single(bent, reverse)
     try retry()
     try boundaries()
 
 ## Isolate package allocation failure paths from the comparison oracle's ARC
 ## clone/root-buffer behavior. Scratch itself holds no managed references.
 pub func allocations() -> !:
-    let source = try make(false,false)
+    let source = try make(false, false)
     defer source.release()
     var work = try DissolveWorkspace(source.value())
     defer work.close()
     for column in 0..<8:
-        let edge = try find(source.value(),9+column,10+column)
+        let edge = try find(source.value(), 9 + column, 10 + column)
         assert(edge >= 0)
         try work.dissolve(edge)
     let result = try work.finish()
@@ -134,22 +134,25 @@ pub func allocations() -> !:
 
 struct Denied: memory.Allocator:
     let upstream: memory.Allocator
-    pub mutating func allocate(size: usize, alignment: usize) -> u8[]?:
-        return self.upstream.allocate(size,alignment) if size == 0 else none
-    pub mutating func resize(block: u8[], size: usize) -> bool:
+
+    pub func allocate(size: usize, alignment: usize) -> u8[]?:
+        return self.upstream.allocate(size, alignment) if size == 0 else none
+
+    pub func resize(block: u8[], size: usize) -> bool:
         return false
-    pub mutating func release(block: u8[]):
+
+    pub func release(block: u8[]):
         self.upstream.release(block)
 
 func restore(previous: memory.Allocator):
     memory.heap = previous
 
 func retry() -> !:
-    let source = try make(true,false)
+    let source = try make(true, false)
     defer source.release()
     var work = try DissolveWorkspace(source.value())
     defer work.close()
-    let edge = try find(source.value(),9,10)
+    let edge = try find(source.value(), 9, 10)
     let previous = memory.heap
     var denied = Denied(previous)
     memory.heap = &denied
@@ -162,39 +165,39 @@ func retry() -> !:
     assert(rejected and work.face_slots() == source.value().face_count())
     let unchanged = try work.finish()
     defer unchanged.release()
-    try equal(source.value(),unchanged.value())
+    try equal(source.value(), unchanged.value())
     try work.dissolve(edge)
     let actual = try work.finish()
     defer actual.release()
-    let expected = try dissolve_edge(source.value(),edge)
+    let expected = try dissolve_edge(source.value(), edge)
     defer expected.release()
-    try equal(expected.value(),actual.value())
+    try equal(expected.value(), actual.value())
 
 func boundaries() -> !:
-    let source = try make(false,false)
+    let source = try make(false, false)
     defer source.release()
-    var work = try DissolveWorkspace(source.value(),0)
+    var work = try DissolveWorkspace(source.value(), 0)
     defer work.close()
     var rejected = false
-    work.dissolve(try find(source.value(),9,10)) catch failure:
-        if failure.code == memory.exhausted: error(failure.code,failure.message)
+    work.dissolve(try find(source.value(), 9, 10)) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
         rejected = true
     assert(rejected)
     let unchanged = try work.finish()
     defer unchanged.release()
-    try equal(source.value(),unchanged.value())
+    try equal(source.value(), unchanged.value())
     # Nonmanifold incidence and same-direction use must not become false
     # neighbor pairs merely because the mutable table stores two incident slots.
-    let points = [Vector3(),Vector3(1.0,0.0,0.0),Vector3(0.0,1.0,0.0),Vector3(0.0,-1.0,0.0),Vector3(1.0,1.0,0.0)]
-    for nonmanifold in [false,true]:
-        let sizes = [3,3,3]
-        let corners = [0,1,2,0,1,4,1,0,3]
-        var raw = try Mesh(points,sizes[..<(3 if nonmanifold else (usize)2)],corners[..<(9 if nonmanifold else (usize)6)])
+    let points = [Vector3(), Vector3(1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, -1.0, 0.0), Vector3(1.0, 1.0, 0.0)]
+    for nonmanifold in [false, true]:
+        let sizes = [3, 3, 3]
+        let corners = [0, 1, 2, 0, 1, 4, 1, 0, 3]
+        var raw = try Mesh(points, sizes[..<(3 if nonmanifold else (usize)2)], corners[..<(9 if nonmanifold else (usize)6)])
         defer raw.close()
         var scratch = try DissolveWorkspace(&raw)
         defer scratch.close()
         rejected = false
-        scratch.dissolve(try find(&raw,0,1)) catch failure:
-            if failure.code != invalid: error(failure.code,failure.message)
+        scratch.dissolve(try find(&raw, 0, 1)) catch failure:
+            if failure.code != invalid: error(failure.code, failure.message)
             rejected = true
         assert(rejected and scratch.face_slots() == raw.face_count())

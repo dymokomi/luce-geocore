@@ -13,102 +13,102 @@ func index(mesh: const Mesh*, at: i64) -> i64!:
 
 func indices(mesh: const Mesh*, expected: const i64[]) -> !:
     assert(mesh.index_count() == (i64)expected.length)
-    for at in 0..<expected.length: assert((try index(mesh,(i64)at)) == expected[at])
+    for at in 0..<expected.length: assert((try index(mesh, (i64)at)) == expected[at])
 
 func oriented(mesh: const Mesh*) -> !:
-    for triangle in 0..<mesh.index_count()//3:
-        let av = mesh.vertex(try index(mesh,triangle*3))
+    for triangle in 0..<mesh.index_count() // 3:
+        let av = mesh.vertex(try index(mesh, triangle * 3))
         defer av.release()
-        let bv = mesh.vertex(try index(mesh,triangle*3+1))
+        let bv = mesh.vertex(try index(mesh, triangle * 3 + 1))
         defer bv.release()
-        let cv = mesh.vertex(try index(mesh,triangle*3+2))
+        let cv = mesh.vertex(try index(mesh, triangle * 3 + 2))
         defer cv.release()
         let a = try av.get()
         let b = try bv.get()
         let c = try cv.get()
         let normal = b.position.subtract(a.position).cross(c.position.subtract(a.position))
-        for n in [a.normal,b.normal,c.normal]: assert(normal.dot(n) > 0.0)
+        for n in [a.normal, b.normal, c.normal]: assert(normal.dot(n) > 0.0)
 
 pub func exercise() -> !:
     try pinched_dissolve()
-    for scale in [0.00001,1.0,100.0]:
-        for offset in [0.0,3.0]: try tiny_face_union(scale,offset)
-    for scale in [0.00001,1.0]:
-        for width in [0.000001,0.4]:
-            for bend in [0.0,0.3]: try dissolved(scale,width,bend)
-    let points = [Vector3(1.0,0.0,0.0),Vector3(math.cos(0.2),math.sin(0.2),0.0),Vector3(math.cos(0.4),math.sin(0.4),0.0),Vector3(math.cos(0.4),math.sin(0.4),1.0),Vector3(1.0,0.0,1.0)]
-    let corners: i64[5] = [1,2,3,4,0]
-    let display: i64[9] = [3,4,0,0,1,2,0,2,3]
-    var raw = try Mesh(points,[5],corners,display)
+    for scale in [0.00001, 1.0, 100.0]:
+        for offset in [0.0, 3.0]: try tiny_face_union(scale, offset)
+    for scale in [0.00001, 1.0]:
+        for width in [0.000001, 0.4]:
+            for bend in [0.0, 0.3]: try dissolved(scale, width, bend)
+    let points = [Vector3(1.0, 0.0, 0.0), Vector3(math.cos(0.2), math.sin(0.2), 0.0), Vector3(math.cos(0.4), math.sin(0.4), 0.0), Vector3(math.cos(0.4), math.sin(0.4), 1.0), Vector3(1.0, 0.0, 1.0)]
+    let corners: i64[5] = [1, 2, 3, 4, 0]
+    let display: i64[9] = [3, 4, 0, 0, 1, 2, 0, 2, 3]
+    var raw = try Mesh(points, [5], corners, display)
     defer raw.close()
-    try indices(&raw,display)
+    try indices(&raw, display)
     assert(raw.face_count() == 1 and (try raw.edge_count()) == 5)
     var normals: f64[15]
     for at in 0..<corners.length:
         let p = points[(usize)corners[at]]
-        normals[at*3] = p.x
-        normals[at*3+1] = p.y
-        normals[at*3+2] = 0.0
-    let mesh = try raw.with_attribute("N",1,3,normals)
+        normals[at * 3] = p.x
+        normals[at * 3 + 1] = p.y
+        normals[at * 3 + 2] = 0.0
+    let mesh = try raw.with_attribute("N", 1, 3, normals)
     defer mesh.release()
     try oriented(mesh.value())
     let detached = try detached_mesh(mesh)
     defer:
         detached.close()
         free(detached) in memory.heap
-    try indices(detached,display)
+    try indices(detached, display)
     try oriented(detached)
-    let snapshot = try mesh.value().with_attribute("id",2,1,[4.0],true)
+    let snapshot = try mesh.value().with_attribute("id", 2, 1, [4.0], true)
     defer snapshot.release()
-    try indices(snapshot.value(),display)
-    for reflected in [false,true]:
-        let placed = try mesh.value().placed(Matrix4.compose(Vector3(2.0,3.0,4.0),Vector3(0.2,0.3,0.4),Vector3(-2.0 if reflected else 2.0,3.0,0.5)))
+    try indices(snapshot.value(), display)
+    for reflected in [false, true]:
+        let placed = try mesh.value().placed(Matrix4.compose(Vector3(2.0, 3.0, 4.0), Vector3(0.2, 0.3, 0.4), Vector3(-2.0 if reflected else 2.0, 3.0, 0.5)))
         defer placed.release()
         var expected: i64[9]
-        for at in 0..<expected.length: expected[at] = 4-display[at//3*3+2-at%3] if reflected else display[at]
-        try indices(placed.value(),expected)
+        for at in 0..<expected.length: expected[at] = 4 - display[at // 3 * 3 + 2 - at % 3] if reflected else display[at]
+        try indices(placed.value(), expected)
         try oriented(placed.value())
     let merged = try mesh.value().merged(mesh)
     defer merged.release()
     var doubled: i64[18]
-    for at in 0..<doubled.length: doubled[at] = display[at%9]+(5 if at >= 9 else 0)
-    try indices(merged.value(),doubled)
+    for at in 0..<doubled.length: doubled[at] = display[at % 9] + (5 if at >= 9 else 0)
+    try indices(merged.value(), doubled)
     let compact = try merged.value().without_faces([0])
     defer compact.release()
-    try indices(compact.value(),display)
+    try indices(compact.value(), display)
     assert(compact.value().point_count() == 5 and (try compact.value().edge_count()) == 5)
-    let reversed = try verb_mesh("Reverse",mesh,"0",3,[0.0])
+    let reversed = try verb_mesh("Reverse", mesh, "0", 3, [0.0])
     defer reversed.release()
     var reversed_indices: i64[9]
-    for at in 0..<reversed_indices.length: reversed_indices[at] = 4-display[at//3*3+2-at%3]
-    try indices(reversed.value(),reversed_indices)
+    for at in 0..<reversed_indices.length: reversed_indices[at] = 4 - display[at // 3 * 3 + 2 - at % 3]
+    try indices(reversed.value(), reversed_indices)
     # Position-only edits keep supplied display data while no triangle folds;
     # topology-changing edits above re-triangulate their new faces.
-    let moved = try mesh.value().moved_points([1],Vector3(0.0,0.0,0.1))
+    let moved = try mesh.value().moved_points([1], Vector3(0.0, 0.0, 0.1))
     defer moved.release()
-    try indices(moved.value(),display)
+    try indices(moved.value(), display)
     # Rewinding a failed builder face must not reuse that face's old triangles.
     var builder = try MeshBuilder()
     defer builder.close()
     try builder.copy_points(mesh.value())
-    try builder.copy_face(mesh.value(),0)
+    try builder.copy_face(mesh.value(), 0)
     builder.nf = 0
     builder.nc = 0
     try builder.face(5)
     for corner in corners: try builder.corner(corner)
     let rebuilt = try builder.finish()
     defer rebuilt.release()
-    var generic = try Mesh(points,[5],corners)
+    var generic = try Mesh(points, [5], corners)
     defer generic.close()
     var projected: i64[9]
     try builder.triangulate_last(projected)
-    try indices(&generic,projected)
-    for at in 0..<generic.index_count(): assert((try index(rebuilt.value(),at)) == (try index(&generic,at)))
+    try indices(&generic, projected)
+    for at in 0..<generic.index_count(): assert((try index(rebuilt.value(), at)) == (try index(&generic, at)))
     # Validation rejects partial, reversed, repeated and cross-face indices.
-    for bad in [[3,4,0,0,1,2,0,2,9],[-1,4,0,0,1,2,0,2,3],[3,0,4,0,1,2,0,2,3],[3,4,0,3,4,0,0,2,3]]:
+    for bad in [[3, 4, 0, 0, 1, 2, 0, 2, 9], [-1, 4, 0, 0, 1, 2, 0, 2, 3], [3, 0, 4, 0, 1, 2, 0, 2, 3], [3, 4, 0, 3, 4, 0, 0, 2, 3]]:
         var rejected = false
-        var candidate: Mesh? = Mesh(points,[5],corners,bad) catch failure:
-            if failure.code != geocore.invalid: error(failure.code,failure.message)
+        var candidate: Mesh? = Mesh(points, [5], corners, bad) catch failure:
+            if failure.code != geocore.invalid: error(failure.code, failure.message)
             rejected = true
             recover none
         if let value = candidate:
@@ -119,46 +119,46 @@ pub func exercise() -> !:
 ## Joining two polygons preserves their exact display surface, including
 ## deliberate diagonal choices, thin boundary cells and nonplanar unions.
 func dissolved(scale: f64, width: f64, bend: f64) -> !:
-    let raw = [Vector3(),Vector3(width,0.0,0.0),Vector3(1.0,0.0,bend),Vector3(0.0,1.0,0.0),Vector3(width,1.0,bend*width),Vector3(1.0,1.0,0.0)]
+    let raw = [Vector3(), Vector3(width, 0.0, 0.0), Vector3(1.0, 0.0, bend), Vector3(0.0, 1.0, 0.0), Vector3(width, 1.0, bend * width), Vector3(1.0, 1.0, 0.0)]
     var builder = try MeshBuilder()
     defer builder.close()
-    for p in raw: discard(try builder.point(p.multiply_scalar(scale).add(Vector3(3.0,-7.0,11.0))))
+    for p in raw: _ = try builder.point(p.multiply_scalar(scale).add(Vector3(3.0, -7.0, 11.0)))
     try builder.face(4)
-    for p in [0,1,4,3]: try builder.corner(p)
-    try builder.set_last_display([0,1,2,0,2,3])
+    for p in [0, 1, 4, 3]: try builder.corner(p)
+    try builder.set_last_display([0, 1, 2, 0, 2, 3])
     try builder.face(4)
-    for p in [1,2,5,4]: try builder.corner(p)
-    try builder.set_last_display([0,1,3,1,2,3])
+    for p in [1, 2, 5, 4]: try builder.corner(p)
+    try builder.set_last_display([0, 1, 3, 1, 2, 3])
     let source = try builder.finish()
     defer source.release()
     var seam: i64 = -1
     for edge in 0..<(try source.value().edge_count()):
-        if (try source.value().edge_point(edge,0)) == 1 and (try source.value().edge_point(edge,1)) == 4: seam = edge
+        if (try source.value().edge_point(edge, 0)) == 1 and (try source.value().edge_point(edge, 1)) == 4: seam = edge
     assert(seam >= 0)
-    let result = try dissolve_edge(source.value(),seam)
+    let result = try dissolve_edge(source.value(), seam)
     defer result.release()
     let mesh = result.value()
     assert(mesh.face_count() == 1 and (try mesh.edge_count()) == 6 and mesh.point_count() == 6 and mesh.index_count() == 12)
     for at in 0..<source.value().index_count():
-        let expected = try source.value().corner_point(try index(source.value(),at))
-        let actual = try mesh.corner_point(try index(mesh,at))
+        let expected = try source.value().corner_point(try index(source.value(), at))
+        let actual = try mesh.corner_point(try index(mesh, at))
         assert(expected == actual)
     for at in 0..<mesh.point_count(): assert((try mesh.point(at)) == (try source.value().point(at)))
 
 func pinched_dissolve() -> !:
     var builder = try MeshBuilder()
     defer builder.close()
-    for p in [Vector3(),Vector3(1.0,0.0,0.0),Vector3(0.0,1.0,0.0)]: discard(try builder.point(p))
-    for corners in [[0,1,2],[1,0,2]]:
+    for p in [Vector3(), Vector3(1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0)]: _ = try builder.point(p)
+    for corners in [[0, 1, 2], [1, 0, 2]]:
         try builder.face(3)
         for id in corners: try builder.corner(id)
     let source = try builder.finish()
     defer source.release()
-    let result = dissolve_edge(source.value(),0) catch failure:
-        if failure.code != geocore.invalid: error(failure.code,failure.message)
+    let result = dissolve_edge(source.value(), 0) catch failure:
+        if failure.code != geocore.invalid: error(failure.code, failure.message)
         return
     defer result.release()
-    error(geocore.invalid,"pinched dissolve was unexpectedly accepted")
+    error(geocore.invalid, "pinched dissolve was unexpectedly accepted")
 
 ## A small well-conditioned corner triangle remains the same valid triangle
 ## after its internal edge is dissolved into a much larger neighboring face.
@@ -166,21 +166,21 @@ func pinched_dissolve() -> !:
 func tiny_face_union(scale: f64, offset: f64) -> !:
     var builder = try MeshBuilder()
     defer builder.close()
-    for p in [Vector3(),Vector3(1e-4,0.0,0.0),Vector3(1.0,0.0,0.0),Vector3(1.0,1.0,0.0),Vector3(0.0,1e-4,0.0)]:
-        discard(try builder.point(p.multiply_scalar(scale).add(Vector3(offset,offset,offset))))
+    for p in [Vector3(), Vector3(1e-4, 0.0, 0.0), Vector3(1.0, 0.0, 0.0), Vector3(1.0, 1.0, 0.0), Vector3(0.0, 1e-4, 0.0)]:
+        _ = try builder.point(p.multiply_scalar(scale).add(Vector3(offset, offset, offset)))
     try builder.face(3)
-    for id in [0,1,4]: try builder.corner(id)
+    for id in [0, 1, 4]: try builder.corner(id)
     try builder.face(4)
-    for id in [1,2,3,4]: try builder.corner(id)
+    for id in [1, 2, 3, 4]: try builder.corner(id)
     let source = try builder.finish()
     defer source.release()
     var seam: i64 = -1
     for edge in 0..<(try source.value().edge_count()):
-        if (try source.value().edge_point(edge,0)) == 1 and (try source.value().edge_point(edge,1)) == 4: seam = edge
+        if (try source.value().edge_point(edge, 0)) == 1 and (try source.value().edge_point(edge, 1)) == 4: seam = edge
     assert(seam >= 0)
-    let result = try dissolve_edge(source.value(),seam)
+    let result = try dissolve_edge(source.value(), seam)
     defer result.release()
     assert(result.value().face_count() == 1 and (try result.value().edge_count()) == 5)
     assert(result.value().point_count() == 5 and result.value().index_count() == 9)
     for at in 0..<9:
-        assert((try result.value().corner_point(try index(result.value(),at))) == (try source.value().corner_point(try index(source.value(),at))))
+        assert((try result.value().corner_point(try index(result.value(), at))) == (try source.value().corner_point(try index(source.value(), at))))

@@ -18,7 +18,7 @@ struct Reach:
         self.edges = Growing[u32]()
         self.points = Growing[u32]()
 
-    mutating func close():
+    func close():
         self.faces.close()
         self.edges.close()
         self.points.close()

@@ -38,7 +38,7 @@ pub func assembled(positions: Column[Float3], origin: Vector3, offsets: Column[i
     errdefer free(queries) in memory.heap
     let shading = try new ShadingCache() in memory.heap
     errdefer free(shading) in memory.heap
-    let storage = try alloc Mesh[1] in memory.heap
+    let storage = try new Mesh[1] --- in memory.heap
     storage[0].positions = owned_positions
     storage[0].origin = origin
     storage[0].offsets = owned_offsets
@@ -68,7 +68,7 @@ func finish_faces(context: void*?, first: usize, end: usize):
     let work = (FinishWork*)(context else return)
     for face in first..<end:
         finish_face(work, face) catch failure:
-            discard(failure)
+            _ = failure
             work.failed.store(1, .relaxed)
 
 ## The face's normal and, when its first index is -1, its triangles.

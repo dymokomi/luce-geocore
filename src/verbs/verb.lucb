@@ -78,7 +78,7 @@ pub struct Mix:
         self.parents = Growing[i32]()
         self.weights = Growing[f32]()
 
-    pub mutating func close():
+    pub func close():
         self.offsets.close()
         self.parents.close()
         self.weights.close()
@@ -125,7 +125,7 @@ pub struct VerbOutput:
         self.warning = ""
         self.skipped = 0
 
-    pub mutating func close():
+    pub func close():
         self.positions.release()
         self.moved.close()
         self.builder.close()
@@ -165,7 +165,7 @@ pub struct VerbRun:
     pub var warning: str
     pub var misses: usize
 
-    pub mutating func close():
+    pub func close():
         mesh_dispose(self.mesh)
         self.selection.release()
 
@@ -281,7 +281,7 @@ func finish(source: const Mesh*, output: VerbOutput*) -> Mesh*!:
 func select_edges(product: const Mesh*, output: VerbOutput*) -> !:
     var bits = try BitsBuilder.zeros((usize)(try product.edge_count()))
     errdefer bits.close()
-    discard(try edge_bits_from_pairs(product, output.builder.selected_edges.view(), &bits))
+    _ = try edge_bits_from_pairs(product, output.builder.selected_edges.view(), &bits)
     output.selection.close()
     output.selection = bits
     output.selection_domain = Domain.edge

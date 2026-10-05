@@ -2,17 +2,17 @@
 ## spatial queries.
 
 extend Mesh:
-    pub static func cube(size: f64 = 2.0) -> interop.Reference[Mesh]!:
+    pub func cube(size: f64 = 2.0) -> interop.Reference[Mesh]!:
         if not (size > 0.0 and size <= 100000.0):
             error(errors.invalid, "cube size must be in (0,100000]")
         let h = size * 0.5
         let points: Vector3[8] = [Vector3(-h, 0.0, -h), Vector3(h, 0.0, -h), Vector3(h, size, -h), Vector3(-h, size, -h),
-                                 Vector3(-h, 0.0, h), Vector3(h, 0.0, h), Vector3(h, size, h), Vector3(-h, size, h)]
+                                  Vector3(-h, 0.0, h), Vector3(h, 0.0, h), Vector3(h, size, h), Vector3(-h, size, h)]
         let sizes: i64[6] = [4, 4, 4, 4, 4, 4]
         let corners: i64[24] = [1, 2, 6, 5, 4, 7, 3, 0, 3, 7, 6, 2, 0, 1, 5, 4, 5, 6, 7, 4, 0, 3, 2, 1]
         return try make_mesh(points, sizes, corners)
 
-    pub static func empty() -> interop.Reference[Mesh]!:
+    pub func empty() -> interop.Reference[Mesh]!:
         var points: Vector3[]
         var sizes: i64[]
         var corners: i64[]
@@ -20,15 +20,20 @@ extend Mesh:
 
     pub func point_count() -> i64:
         return (i64)self.positions.count()
+
     pub func face_count() -> i64:
         return (i64)self.offsets.count() - 1
+
     pub func vertex_count() -> i64:
         return (i64)self.corners.count()
+
     pub func index_count() -> i64:
         return (i64)self.triangles.count()
+
     ## Edges are derived on first use, which can fail for memory.
     pub func edge_count() -> i64!:
         return (i64)(try self.edge_arrays()).0.length // 2
+
     pub func bounds() -> Bounds:
         return self.extent
 
@@ -40,6 +45,7 @@ extend Mesh:
         if domain < 0 or domain > 4:
             error(errors.invalid, "unknown attribute domain")
         return (i64)(try self.domain_size(Domain((u8)domain)))
+
     func domain_size(domain: Domain) -> usize!:
         match domain:
             .point: return self.positions.count()
@@ -63,15 +69,19 @@ extend Mesh:
     pub func corner_point(corner: i64) -> i64!:
         try checked(corner, self.corners.count())
         return (i64)self.corners.view()[(usize)corner]
+
     pub func corner_face(corner: i64) -> i64!:
         try checked(corner, self.corners.count())
         return (i64)(try self.corner_faces())[(usize)corner]
+
     pub func corner_edge(corner: i64) -> i64!:
         try checked(corner, self.corners.count())
         return (i64)(try self.edge_arrays()).1[(usize)corner]
+
     pub func face_offset(face: i64) -> i64!:
         try checked(face, self.offsets.count() - 1)
         return (i64)self.offsets.view()[(usize)face]
+
     pub func triangle_face(triangle: i64) -> i64!:
         try checked(triangle, self.triangles.count() // 3)
         return (i64)(try self.corner_faces())[(usize)self.triangles.view()[(usize)triangle * 3]]
@@ -88,10 +98,12 @@ extend Mesh:
     func point_at(index: usize) -> Vector3:
         if not self.precise.is_empty(): return self.precise.view()[index]
         return self.positions.view()[index].vector().add(self.origin)
+
     pub func face_size(face: i64) -> i64!:
         try checked(face, self.offsets.count() - 1)
         let offsets = self.offsets.view()
         return (i64)(offsets[(usize)face + 1] - offsets[(usize)face])
+
     pub func face_point(face: i64, corner: i64) -> i64!:
         let size = try self.face_size(face)
         try checked(corner, (usize)size)
@@ -102,9 +114,11 @@ extend Mesh:
         let size = try self.face_size(face)
         try checked(corner, (usize)size)
         return (i64)(try self.edge_arrays()).1[(usize)self.offsets.view()[(usize)face] + (usize)corner]
+
     pub func face_normal(face: i64) -> Vector3!:
         try checked(face, self.offsets.count() - 1)
         return self.normals.view()[(usize)face].vector()
+
     pub func face_center(face: i64) -> Vector3!:
         let size = try self.face_size(face)
         let corners = self.corners.view()
@@ -113,6 +127,7 @@ extend Mesh:
         for at in start..<start + (usize)size:
             sum = sum.add(self.point_at((usize)corners[at]))
         return sum.multiply_scalar(1.0 / (f64)size)
+
     pub func edge_point(edge: i64, end: i64) -> i64!:
         let edges = (try self.edge_arrays()).0
         try checked(edge, edges.length // 2)
@@ -187,11 +202,11 @@ extend Mesh:
         # Points on an edge used once are boundary points.
         let points = self.positions.count()
         let edges = try self.edge_arrays()
-        let uses = try alloc u32[edges.0.length // 2] in memory.heap
+        let uses = try new u32[edges.0.length // 2] --- in memory.heap
         defer free(uses) in memory.heap
         memory.set(u8[]((u8*)uses.data, uses.length * 4), 0)
         for edge in edges.1: uses[(usize)edge] += 1
-        let boundary = try alloc bool[points] in memory.heap
+        let boundary = try new bool[points] --- in memory.heap
         defer free(boundary) in memory.heap
         memory.set(u8[]((u8*)boundary.data, points), 0)
         for edge in 0..<uses.length:
@@ -234,7 +249,7 @@ extend Mesh:
     ## Build the shared query index now, for example before worker-to-UI transfer.
     ## Otherwise the first ray/distance query builds it. Failure is retryable.
     pub func prepare_queries() -> !:
-        discard(try self.query_index())
+        _ = try self.query_index()
 
     ## Nearest two-sided face intersection. -1 means no hit; direction must be
     ## normalized for the returned distance to be world-space distance.
@@ -248,14 +263,19 @@ extend Mesh:
     ## caches such as GPU buffers key on them.
     pub func points_id() -> u64:
         return self.positions.id()
+
     pub func corners_id() -> u64:
         return self.corners.id()
+
     pub func offsets_id() -> u64:
         return self.offsets.id()
+
     pub func triangles_id() -> u64:
         return self.triangles.id()
+
     pub func normals_id() -> u64:
         return self.normals.id()
+
     ## Edges are derived from the corners, so their id is the corners' id.
     pub func edges_id() -> u64:
         return self.corners.id()
@@ -268,20 +288,28 @@ extend Mesh:
     ## of them). Positions are relative to position_origin().
     pub func point_span() -> const Float3[]:
         return self.positions.view()
+
     pub func position_origin() -> Vector3:
         return self.origin
+
     pub func offset_span() -> const i32[]:
         return self.offsets.view()
+
     pub func corner_span() -> const i32[]:
         return self.corners.view()
+
     pub func corner_face_span() -> const i32[]!:
         return try self.corner_faces()
+
     pub func face_normal_span() -> const Float3[]:
         return self.normals.view()
+
     pub func triangle_span() -> const i32[]:
         return self.triangles.view()
+
     pub func edge_span() -> const i32[]!:
         return (try self.edge_arrays()).0
+
     pub func corner_edge_span() -> const i32[]!:
         return (try self.edge_arrays()).1
 
@@ -298,6 +326,7 @@ extend Mesh:
     ## The arrays a position edit derived positions and face normals from, or 0.
     pub func points_parent() -> u64:
         return self.positions.parent()
+
     pub func normals_parent() -> u64:
         return self.normals.parent()
 
@@ -308,11 +337,11 @@ extend Mesh:
         return try self.smooth_normals()
 
     pub func smooth_normals_corner_domain() -> bool!:
-        discard(try self.smooth_normals())
+        _ = try self.smooth_normals()
         return self.shading.corner_domain()
 
     pub func smooth_normals_ids() -> (u64, u64)!:
-        discard(try self.smooth_normals())
+        _ = try self.smooth_normals()
         return (self.shading.id(), self.shading.parent())
 
     ## k1 and k2 of every point (discrete principal curvatures), computed on first
@@ -321,7 +350,7 @@ extend Mesh:
         return try self.curvatures()
 
     pub func curvature_id() -> u64!:
-        discard(try self.curvatures())
+        _ = try self.curvatures()
         return self.shading.curvature_id()
 
     ## The positions' and smooth normals' changed elements (see Column.changed).
@@ -329,7 +358,7 @@ extend Mesh:
         return self.positions.changed()
 
     pub func smooth_changed() -> (usize, usize)!:
-        discard(try self.smooth_normals())
+        _ = try self.smooth_normals()
         return self.shading.changed()
 
     ## Faces around each point (one per corner there), as offsets into a list.

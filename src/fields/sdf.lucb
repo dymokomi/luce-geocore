@@ -67,7 +67,7 @@ pub struct Sdf:
     pub func bounds() -> Bounds:
         return program_bounds(self.ops.view(), self.params.view())
 
-    mutating func close():
+    func close():
         self.ops.release()
         self.params.release()
         if let mesh = self.preview: mesh_dispose(mesh)
@@ -90,7 +90,7 @@ pub func new_sdf(ops: Column[u8], params: Column[f32]) -> Sdf*!:
 
 ## An SDF of no ops (what an emptied component holds before it is dropped).
 func empty_sdf() -> Sdf*!:
-    let storage = try alloc Sdf[1] in memory.heap
+    let storage = try new Sdf[1] --- in memory.heap
     let sdf = storage.data
     sdf.users.store(1, .relaxed)
     sdf.ops = Column[u8]()
@@ -102,7 +102,7 @@ func empty_sdf() -> Sdf*!:
     return sdf
 
 pub func share_sdf(sdf: Sdf*) -> Sdf*:
-    discard(sdf.users.add(1, .relaxed))
+    _ = sdf.users.add(1, .relaxed)
     return sdf
 
 pub func release_sdf(sdf: Sdf*):

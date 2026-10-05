@@ -30,7 +30,7 @@ func encode_volume(data: const void*, writer: GeometryWriter*, path: str) -> !:
         try writer.column_borrowed("masks", dtype_uint64, masks.length // mask_words, mask_words, bytes_view(masks))
 
 func decode_volume(reader: GeometryReader*, path: str) -> void*!:
-    while let header = try reader.next_property(): discard(header)
+    while let header = try reader.next_property(): _ = header
     let volume = try new_volume()
     errdefer release_volume(volume)
     while let found = try reader.next_child(path):
@@ -88,5 +88,5 @@ func decode_sdf(reader: GeometryReader*, path: str) -> void*!:
     while let header = try reader.next_property():
         if header.name == "ops" or header.name == "ops_chunks": ops = try reader.column[u8](header)
         elif header.name == "params" or header.name == "params_chunks": params = try reader.column[f32](header)
-    discard(path)
+    _ = path
     return (void*)(try new_sdf(ops.take(), params.take()))

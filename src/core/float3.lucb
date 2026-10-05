@@ -9,7 +9,7 @@ pub struct Float3:
     pub var y: f32
     pub var z: f32
 
-    pub static func of(value: Vector3) -> Float3:
+    pub func of(value: Vector3) -> Float3:
         return Float3((f32)value.x, (f32)value.y, (f32)value.z)
 
     pub func vector() -> Vector3:

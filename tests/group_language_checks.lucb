@@ -176,6 +176,6 @@ func errors_and_reports() -> !:
     defer converted.release()
     assert(converted.value().converted())
     var failed = false
-    discard(Selection.of(mesh, "@nothing>0", 2)) catch failure:
+    _ = Selection.of(mesh, "@nothing>0", 2) catch failure:
         failed = true
     assert(failed)

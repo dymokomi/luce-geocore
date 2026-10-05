@@ -58,12 +58,12 @@ pub func allocations() -> !:
     defer moved.release()
     let both = try moved.value().merged(solid)
     defer both.release()
-    discard(try both.value().bounds())
+    _ = try both.value().bounds()
     var file = Growing[u8]()
     defer file.close()
     try file.assign(path.temp().bytes)
     for byte in "/luce-geocore-fields-small.prism".bytes: try file.push(byte)
-    discard(try save_geometry(both.value(), (str)file.view(), 1, 1024))
+    _ = try save_geometry(both.value(), (str)file.view(), 1, 1024)
     let loaded = try adopt_set(try load_geometry((str)file.view()))
     loaded.release()
 
@@ -203,7 +203,7 @@ pub func level_sets() -> !:
 ## every face facing away from `inside`.
 func closed_and_outward(mesh: interop.Reference[Mesh], inside: Vector3) -> !:
     let m = mesh.value()
-    let counts = try alloc i64[(usize)(try m.edge_count())] in memory.heap
+    let counts = try new i64[(usize)(try m.edge_count())] --- in memory.heap
     defer free(counts) in memory.heap
     for at in 0..<counts.length: counts[at] = 0
     for face in 0..<m.face_count():
@@ -288,7 +288,7 @@ pub func sets_and_files() -> !:
     defer file.close()
     try file.assign(path.temp().bytes)
     for byte in "/luce-geocore-fields.prism".bytes: try file.push(byte)
-    discard(try save_geometry(shifted.value(), (str)file.view(), 3, 4096))
+    _ = try save_geometry(shifted.value(), (str)file.view(), 3, 4096)
     let loaded = try adopt_set(try load_geometry((str)file.view()))
     defer loaded.release()
     let x = (set_volume(shifted.value()) else trap("volume")).grid(0)

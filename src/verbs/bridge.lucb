@@ -32,7 +32,7 @@ struct Chains:
     func size(chain: usize) -> usize:
         return (usize)(self.starts.items[chain + 1] - self.starts.items[chain])
 
-    mutating func close():
+    func close():
         self.corners.close()
         self.starts.close()
         self.closed.close()
@@ -47,7 +47,7 @@ func cook_bridge(input: const VerbInput*, output: VerbOutput*) -> !:
     try find_chains(&topology, input.group, &chains)
     # Pair each chain with the nearest unpaired one of the same kind.
     let count = chains.count()
-    let partner = try alloc i32[count] in memory.heap
+    let partner = try new i32[count] --- in memory.heap
     defer free(partner) in memory.heap
     for at in 0..<count: partner[at] = -1
     var pairs: usize = 0
@@ -87,9 +87,9 @@ func cook_bridge(input: const VerbInput*, output: VerbOutput*) -> !:
 ## boundary edges of the group leave are pinches, which no chain crosses.
 func find_chains(topology: const Topology*, group: Bits, chains: Chains*) -> !:
     let points = topology.points
-    let leaving = try alloc i32[points] in memory.heap
+    let leaving = try new i32[points] --- in memory.heap
     defer free(leaving) in memory.heap
-    let arriving = try alloc u8[points] in memory.heap
+    let arriving = try new u8[points] --- in memory.heap
     defer free(arriving) in memory.heap
     for at in 0..<points:
         leaving[at] = -1
@@ -160,7 +160,7 @@ struct Side:
         self.corners = Growing[i32]()
         self.along = Growing[f64]()
 
-    mutating func close():
+    func close():
         self.points.close()
         self.corners.close()
         self.along.close()
@@ -203,7 +203,7 @@ func bridge_pair(mesh: const Mesh*, topology: const Topology*, chains: const Cha
     if n == m:
         # Rows between the sides: row 0 is the first chain, row `divisions`
         # the second.
-        let rows = try alloc i32[(n + 1) * (divisions + 1)] in memory.heap
+        let rows = try new i32[(n + 1) * (divisions + 1)] --- in memory.heap
         defer free(rows) in memory.heap
         for index in 0..<n + 1:
             rows[index] = a.points.items[index]

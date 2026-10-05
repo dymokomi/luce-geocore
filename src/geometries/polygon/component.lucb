@@ -25,7 +25,7 @@ pub func mesh_paths(mesh: const Mesh*, out: TableBuilder*) -> !:
     let entry = mesh.attributes.entry((usize)index)
     if entry.kind != DataType.text: return
     let table = entry.table.view()
-    let used = try alloc bool[table_count(table)] in memory.heap
+    let used = try new bool[table_count(table)] --- in memory.heap
     defer free(used) in memory.heap
     for at in 0..<used.length: used[at] = false
     let values = attribute_ops.typed[i32](entry.data.view())
@@ -34,7 +34,7 @@ pub func mesh_paths(mesh: const Mesh*, out: TableBuilder*) -> !:
         let value = values[element]
         if value >= 0 and (usize)value < used.length: used[(usize)value] = true
     for at in 0..<used.length:
-        if used[at]: discard(try out.intern(table_text(table, at)))
+        if used[at]: _ = try out.intern(table_text(table, at))
 
 ## The faces whose path `filter` matches (every face for an empty filter),
 ## kept, or removed when not `keep`. Faces without a path never match a
@@ -50,7 +50,7 @@ pub func mesh_filtered(mesh: const Mesh*, filter: const PathFilter*, keep: bool)
         if index >= 0 and mesh.attributes.entry((usize)index).kind == DataType.text:
             let entry = mesh.attributes.entry((usize)index)
             let table = entry.table.view()
-            let hits = try alloc bool[table_count(table)] in memory.heap
+            let hits = try new bool[table_count(table)] --- in memory.heap
             defer free(hits) in memory.heap
             for at in 0..<hits.length: hits[at] = filter.matches(table_text(table, at))
             let values = attribute_ops.typed[i32](entry.data.view())

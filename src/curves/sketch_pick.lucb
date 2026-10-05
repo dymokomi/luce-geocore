@@ -21,7 +21,7 @@ pub struct SketchPlane:
 
     ## The plane through `origin` facing `normal`, with in-plane axes: X and
     ## Y on XY, Y and Z on YZ, Z and X on the ground, else any pair.
-    pub static func of(origin: Vector3, normal: Vector3) -> SketchPlane!:
+    pub func of(origin: Vector3, normal: Vector3) -> SketchPlane!:
         let n = normal.normalized() catch failure: error(errors.invalid, "a sketch plane needs a nonzero normal")
         var u = Vector3(0.0, 0.0, 1.0)
         if math.abs(n.z) >= 0.99: u = Vector3(1.0, 0.0, 0.0)
@@ -51,7 +51,7 @@ func detail_vector(store: const AttributeStore*, name: str, fallback: Vector3) -
 ## two points).
 func segment_count(curves: const Curves*, curve: usize) -> usize:
     let (first, points) = curves.range(curve)
-    discard(first)
+    _ = first
     if points < 2: return 0
     return points if curves.settings(curve).cyclic else points - 1
 
@@ -64,7 +64,7 @@ pub func control_cloud(curves: const Curves*) -> interop.Reference[Mesh]!:
     for curve in 0..<curves.curve_count():
         let (first, points) = curves.range(curve)
         for at in first..<first + points:
-            discard(try out.point(curves.point(at)))
+            _ = try out.point(curves.point(at))
             try tags.push((f64)curve)
     let cloud = try out.finish()
     defer cloud.release()
@@ -89,7 +89,7 @@ pub func sample_cloud(curves: const Curves*) -> interop.Reference[Mesh]!:
         let count = (usize)evaluated[curve + 1] - start
         if points == 0 or count == 0: continue
         if segments == 0 or count < 2:
-            discard(try out.point(curves.point(first)))
+            _ = try out.point(curves.point(first))
             try curve_tags.push((f64)curve)
             try segment_tags.push(-1.0)
             base += segments
@@ -102,15 +102,15 @@ pub func sample_cloud(curves: const Curves*) -> interop.Reference[Mesh]!:
             let b = positions[start + (edge + 1) % count].vector()
             for step in 0..<steps:
                 let t = (f64)step / (f64)steps
-                discard(try out.point(a.multiply_scalar(1.0 - t).add(b.multiply_scalar(t)).add(curves.origin)))
+                _ = try out.point(a.multiply_scalar(1.0 - t).add(b.multiply_scalar(t)).add(curves.origin))
                 let (parent, other, share) = control_parents(curves, curve, count, edge, t)
-                discard(other)
-                discard(share)
+                _ = other
+                _ = share
                 try curve_tags.push((f64)curve)
                 let within = (usize)parent - first
                 try segment_tags.push((f64)(base + (within if within < segments else segments - 1)))
         if not cyclic:
-            discard(try out.point(positions[start + count - 1].vector().add(curves.origin)))
+            _ = try out.point(positions[start + count - 1].vector().add(curves.origin))
             try curve_tags.push((f64)curve)
             try segment_tags.push((f64)(base + segments - 1))
         base += segments
@@ -131,7 +131,7 @@ pub struct SketchChoice:
     pub var centroid: Vector3
     pub var any: bool
 
-    pub static func of(curves: const Curves*, pick: const Mesh*, group: str, group_type: i64) -> SketchChoice!:
+    pub func of(curves: const Curves*, pick: const Mesh*, group: str, group_type: i64) -> SketchChoice!:
         var result = SketchChoice(Growing[bool](), Growing[bool](), Growing[bool](), Vector3(), false)
         errdefer result.close()
         try result.points.fill(curves.point_count(), false)
@@ -177,7 +177,7 @@ pub struct SketchChoice:
             result.any = true
         return result
 
-    pub mutating func close():
+    pub func close():
         self.points.close()
         self.curves.close()
         self.segments.close()

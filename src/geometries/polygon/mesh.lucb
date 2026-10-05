@@ -160,12 +160,12 @@ pub struct Mesh: PolygonTopology:
     func snapshot_storage() -> Mesh*!:
         var attributes = try self.attributes.shared()
         errdefer attributes.close()
-        let storage = try alloc Mesh[1] in memory.heap
+        let storage = try new Mesh[1] --- in memory.heap
         storage[0] = self.shared_columns()
         storage[0].attributes = attributes
-        discard(self.topology.users.add(1, .relaxed))
-        discard(self.queries.owners.add(1, .relaxed))
-        discard(self.shading.owners.add(1, .relaxed))
+        _ = self.topology.users.add(1, .relaxed)
+        _ = self.queries.owners.add(1, .relaxed)
+        _ = self.shading.owners.add(1, .relaxed)
         return storage.data
 
     func snapshot() -> interop.Reference[Mesh]!:
@@ -184,7 +184,7 @@ pub struct Mesh: PolygonTopology:
     func detached_copy() -> Mesh*!:
         return try self.snapshot_storage()
 
-    pub mutating func close():
+    pub func close():
         self.attributes.close()
         self.positions.release()
         self.offsets.release()
@@ -285,7 +285,7 @@ func build_faces(context: void*?, first: usize, end: usize):
     let work = (BuildWork*)(context else return)
     for face in first..<end:
         build_face(work, face) catch failure:
-            discard(failure)
+            _ = failure
             work.failed.store(1, .relaxed)
             continue
 

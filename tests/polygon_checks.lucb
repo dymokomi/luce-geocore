@@ -35,7 +35,7 @@ pub func exercise() -> !:
     assert((try empty.value().surface_distance(Vector3())) == -1.0)
     assert((try empty.value().closest_face(Vector3())) == -1)
     # Exercise BVH growth past its initial capacity, including failed growth.
-    let points = try alloc Vector3[192] in memory.heap
+    let points = try new Vector3[192] --- in memory.heap
     defer free(points) in memory.heap
     var sizes: i64[64]
     var corners: i64[192]

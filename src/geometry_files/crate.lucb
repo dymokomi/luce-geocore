@@ -95,7 +95,7 @@ pub struct CrateWriter:
         self.elements = Growing[ElementPlan]()
         self.properties = Growing[PropertyPlan]()
 
-    pub mutating func close():
+    pub func close():
         self.pool.close()
         self.texts.close()
         self.slots.close()
@@ -108,7 +108,7 @@ pub struct CrateWriter:
         return (str)self.pool.items[(usize)text.first..<(usize)(text.first + text.length)]
 
     ## The string table index of `text`, added when new.
-    mutating func intern(text: str) -> u32!:
+    func intern(text: str) -> u32!:
         if (self.texts.count + 1) * 2 > self.slots.count:
             var size: usize = 64
             while size < (self.texts.count + 1) * 4: size *= 2
@@ -135,7 +135,7 @@ pub struct CrateWriter:
         return at
 
     ## Start element `path` of `kind`; properties follow until the next.
-    pub mutating func element(path: str, kind: str) -> !:
+    pub func element(path: str, kind: str) -> !:
         let path_index = try self.intern(path)
         let kind_index = try self.intern(kind)
         try self.elements.push(ElementPlan(path_index, kind_index, self.properties.count, 0))
@@ -144,13 +144,13 @@ pub struct CrateWriter:
     ## `columns` when above 1): the bytes must stay alive and unchanged until
     ## `save` returns. Callers with temporaries use GeometryWriter.column,
     ## which copies, or copied_array.
-    pub mutating func array_borrowed(name: str, dtype: u8, rows: usize, columns: usize, payload: const u8[]) -> !:
+    pub func array_borrowed(name: str, dtype: u8, rows: usize, columns: usize, payload: const u8[]) -> !:
         if rows > 4294967295: error(errors.limit, "a prism dimension exceeds 2^32")
         let rank: u8 = 2 if columns > 1 else 1
         try self.add(PropertyPlan(try self.intern(name), dtype, rank, [(u32)rows, (u32)columns, 0], payload, 0, 0, false))
 
     ## A scalar property whose bytes are copied now.
-    pub mutating func scalar(name: str, dtype: u8, bytes: const u8[]) -> !:
+    pub func scalar(name: str, dtype: u8, bytes: const u8[]) -> !:
         let first = self.inline.count
         try self.inline.reserve(first + bytes.length)
         memory.copy(self.inline.items[first..], bytes, bytes.length)
@@ -158,21 +158,21 @@ pub struct CrateWriter:
         var empty: const u8[]
         try self.add(PropertyPlan(try self.intern(name), dtype, 0, [0, 0, 0], empty, first, bytes.length, true))
 
-    pub mutating func integer(name: str, value: i64) -> !:
+    pub func integer(name: str, value: i64) -> !:
         var copy = value
         try self.scalar(name, dtype_int64, u8[]((u8*)&copy, 8))
 
-    pub mutating func number(name: str, value: f64) -> !:
+    pub func number(name: str, value: f64) -> !:
         var copy = value
         try self.scalar(name, dtype_float64, u8[]((u8*)&copy, 8))
 
     ## Three f64 components (a translation, an origin).
-    pub mutating func triple(name: str, x: f64, y: f64, z: f64) -> !:
+    pub func triple(name: str, x: f64, y: f64, z: f64) -> !:
         let values: f64[3] = [x, y, z]
         try self.copied_array(name, dtype_float64, 3, u8[]((u8*)&values[0], 24))
 
     ## A small rank-1 array whose bytes are copied now.
-    pub mutating func copied_array(name: str, dtype: u8, count: usize, bytes: const u8[]) -> !:
+    pub func copied_array(name: str, dtype: u8, count: usize, bytes: const u8[]) -> !:
         let first = self.inline.count
         try self.inline.reserve(first + bytes.length)
         memory.copy(self.inline.items[first..], bytes, bytes.length)
@@ -181,7 +181,7 @@ pub struct CrateWriter:
         try self.add(PropertyPlan(try self.intern(name), dtype, 1, [(u32)count, 0, 0], empty, first, bytes.length, true))
 
     ## A str scalar: u32 length and the bytes.
-    pub mutating func text(name: str, value: str) -> !:
+    pub func text(name: str, value: str) -> !:
         var encoded: u8[4] = [(u8)(value.length & 255), (u8)((value.length >> 8) & 255), (u8)((value.length >> 16) & 255), (u8)((value.length >> 24) & 255)]
         let first = self.inline.count
         try self.inline.reserve(first + 4 + value.length)
@@ -191,14 +191,14 @@ pub struct CrateWriter:
         var empty: const u8[]
         try self.add(PropertyPlan(try self.intern(name), dtype_str, 0, [0, 0, 0], empty, first, 4 + value.length, true))
 
-    mutating func add(property: PropertyPlan) -> !:
+    func add(property: PropertyPlan) -> !:
         if self.elements.count == 0: error(errors.invalid, "a prism property needs an element")
         try self.properties.push(property)
         self.elements.items[self.elements.count - 1].count += 1
 
     ## Write the document to `path`: through a temporary file in the same
     ## directory, renamed over `path` when complete. Returns the bytes.
-    pub mutating func save(path: str) -> usize!:
+    pub func save(path: str) -> usize!:
         let directory = try strings.copy(parent_directory(path))
         defer strings.release(directory)
         let destination = try strings.copy(path)
@@ -260,10 +260,10 @@ struct Sink:
     var used: usize = 0
     var written: usize = 0
 
-    static func make(file: files.TemporaryFile*) -> Sink!:
-        return Sink(file, try alloc u8[1048576] in memory.heap, 0, 0)
+    func make(file: files.TemporaryFile*) -> Sink!:
+        return Sink(file, try new u8[1048576] --- in memory.heap, 0, 0)
 
-    mutating func put(data: const u8[]) -> !:
+    func put(data: const u8[]) -> !:
         if data.length > self.buffer.length - self.used:
             try self.flush()
             if data.length >= self.buffer.length:
@@ -274,19 +274,19 @@ struct Sink:
         self.used += data.length
         self.written += data.length
 
-    mutating func text(value: str) -> !:
+    func text(value: str) -> !:
         try self.put(value.bytes)
 
-    mutating func uint(value: u64, width: usize) -> !:
+    func uint(value: u64, width: usize) -> !:
         var bytes: u8[8] = ---
         for at in 0..<width: bytes[at] = (u8)((value >> (u64)(at * 8)) & 255)
         try self.put(bytes[..<width])
 
-    mutating func flush() -> !:
+    func flush() -> !:
         if self.used > 0: try write_all(self.file, self.buffer[..<self.used])
         self.used = 0
 
-    mutating func close():
+    func close():
         free(self.buffer) in memory.heap
 
 func write_all(file: files.TemporaryFile*, data: const u8[]) -> !:
@@ -328,12 +328,12 @@ pub struct CrateReader:
     var pending: usize = 0
     var in_element: bool = false
 
-    pub static func open(path: str) -> CrateReader!:
+    pub func open(path: str) -> CrateReader!:
         let native = try strings.copy(path)
         defer strings.release(native)
         var file = try files.File.open((c.str)native)
         errdefer file.destroy()
-        let buffer = try alloc u8[1048576] in memory.heap
+        let buffer = try new u8[1048576] --- in memory.heap
         var reader = CrateReader(file, buffer, 0, 0, Growing[u8](), Growing[Text]())
         errdefer reader.close()
         let magic = try reader.take_bytes(6)
@@ -352,7 +352,7 @@ pub struct CrateReader:
         reader.elements_left = (usize)(try reader.uint(4))
         return reader
 
-    pub mutating func close():
+    pub func close():
         self.file.destroy()
         free(self.buffer) in memory.heap
         self.pool.close()
@@ -364,7 +364,7 @@ pub struct CrateReader:
         return (str)self.pool.items[(usize)text.first..<(usize)(text.first + text.length)]
 
     ## The next element's path and kind, or none after the last.
-    pub mutating func next_element() -> (str, str)?!:
+    pub func next_element() -> (str, str)?!:
         try self.finish_element()
         if self.elements_left == 0: return none
         self.elements_left -= 1
@@ -375,7 +375,7 @@ pub struct CrateReader:
         return (path, kind)
 
     ## The current element's next property, or none after its last.
-    pub mutating func next_property() -> PropertyHeader?!:
+    pub func next_property() -> PropertyHeader?!:
         try self.skip_payload()
         if self.properties_left == 0: return none
         self.properties_left -= 1
@@ -401,18 +401,18 @@ pub struct CrateReader:
         return PropertyHeader(name, dtype, rank, dims, bytes)
 
     ## The current property's payload into `into` (exactly its bytes).
-    pub mutating func read_payload(into: u8[]) -> !:
+    pub func read_payload(into: u8[]) -> !:
         if self.pending == 0 or into.length != self.pending - 1: error(errors.invalid, "prism payload size mismatch")
         try self.read_exact(into)
         self.pending = 0
         try self.finish_property()
 
     ## A scalar or small payload into a fixed buffer.
-    pub mutating func read_small(into: u8[]) -> !:
+    pub func read_small(into: u8[]) -> !:
         try self.read_payload(into)
 
     ## A str scalar (copied into `out`).
-    pub mutating func read_text(out: Growing[u8]*) -> !:
+    pub func read_text(out: Growing[u8]*) -> !:
         let length = (usize)(try self.uint(4))
         try out.reserve(length)
         try self.read_exact(out.items[..<length])
@@ -420,7 +420,7 @@ pub struct CrateReader:
         self.pending = 0
         try self.finish_property()
 
-    mutating func skip_payload() -> !:
+    func skip_payload() -> !:
         if self.pending == 0: return
         var left = self.pending - 1
         while left > 0:
@@ -433,26 +433,26 @@ pub struct CrateReader:
         try self.finish_property()
 
     ## The animation flag (none here) and the catalog type name.
-    mutating func finish_property() -> !:
+    func finish_property() -> !:
         if try self.uint(1) != 0: error(errors.invalid, "animated geometry properties are not supported")
         let length = (usize)(try self.uint(4))
-        discard(try self.take_bytes(length))
+        _ = try self.take_bytes(length)
 
     ## The rest of the current element: metadata, override flag, tombstones.
-    mutating func finish_element() -> !:
+    func finish_element() -> !:
         if not self.in_element: return
         while self.properties_left > 0 or self.pending > 0:
-            discard(try self.next_property())
+            _ = try self.next_property()
             try self.skip_payload()
         let metadata = (usize)(try self.uint(4))
-        for at in 0..<metadata * 2: discard(try self.uint(4))
-        discard(try self.uint(1))
+        for at in 0..<metadata * 2: _ = try self.uint(4)
+        _ = try self.uint(1)
         for list in 0..<(usize)2:
             let count = (usize)(try self.uint(4))
-            for at in 0..<count: discard(try self.uint(4))
+            for at in 0..<count: _ = try self.uint(4)
         self.in_element = false
 
-    mutating func fill() -> !:
+    func fill() -> !:
         if self.start > 0:
             let kept = self.end - self.start
             if kept > 0: memory.move(self.buffer[..<kept], self.buffer[self.start..<self.end], kept)
@@ -463,20 +463,20 @@ pub struct CrateReader:
         self.end += count
 
     ## Bytes from the buffer, reading more as needed (at most its size).
-    mutating func take_bytes(count: usize) -> const u8[]!:
+    func take_bytes(count: usize) -> const u8[]!:
         if count > self.buffer.length: error(errors.invalid, "implausible prism record")
         while self.end - self.start < count: try self.fill()
         let first = self.start
         self.start += count
         return self.buffer[first..<first + count]
 
-    mutating func uint(width: usize) -> u64!:
+    func uint(width: usize) -> u64!:
         let bytes = try self.take_bytes(width)
         var value: u64 = 0
         for at in 0..<width: value = value | ((u64)bytes[at] << (u64)(at * 8))
         return value
 
-    mutating func peek_uint(width: usize) -> u64!:
+    func peek_uint(width: usize) -> u64!:
         while self.end - self.start < width: try self.fill()
         var value: u64 = 0
         for at in 0..<width: value = value | ((u64)self.buffer[self.start + at] << (u64)(at * 8))
@@ -484,7 +484,7 @@ pub struct CrateReader:
 
     ## Exactly `into.length` bytes: what is buffered, then straight from the
     ## file into `into`.
-    mutating func read_exact(into: u8[]) -> !:
+    func read_exact(into: u8[]) -> !:
         var at: usize = 0
         let buffered = self.end - self.start
         if buffered > 0:

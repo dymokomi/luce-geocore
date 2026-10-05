@@ -38,7 +38,7 @@ func made(mesh: interop.Reference[Mesh], name: str, group: str, group_type: i64,
 func surface(mesh: interop.Reference[Mesh], closed: bool) -> !:
     let geometry = mesh.value()
     let edges = (usize)(try geometry.edge_count())
-    let uses = try alloc i32[edges * 2] in memory.heap
+    let uses = try new i32[edges * 2] --- in memory.heap
     defer free(uses) in memory.heap
     for at in 0..<uses.length: uses[at] = 0
     for face in 0..<geometry.face_count():

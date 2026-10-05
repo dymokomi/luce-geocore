@@ -20,7 +20,7 @@ pub struct Volume:
     pub func grid(index: usize) -> const SparseGrid*:
         return self.grids.items[index]
 
-    mutating func close():
+    func close():
         for grid in self.grids.view(): release_grid(grid)
         self.grids.close()
         if let mesh = self.preview: mesh_dispose(mesh)
@@ -28,7 +28,7 @@ pub struct Volume:
 
 ## A new volume of no grids.
 pub func new_volume() -> Volume*!:
-    let storage = try alloc Volume[1] in memory.heap
+    let storage = try new Volume[1] --- in memory.heap
     let volume = storage.data
     volume.users.store(1, .relaxed)
     volume.grids = Growing[SparseGrid*]()
@@ -67,7 +67,7 @@ pub func set_sdf(set: const GeometrySet*) -> const Sdf*?:
 
 func share_volume(data: const void*) -> void*!:
     let volume = (Volume*)data
-    discard(volume.users.add(1, .relaxed))
+    _ = volume.users.add(1, .relaxed)
     return (void*)volume
 
 func close_volume(data: void*):
@@ -105,8 +105,8 @@ func join_volumes(first: const void*, second: const void*) -> void*!:
     return (void*)volume
 
 func no_field_paths(data: const void*, out: TableBuilder*) -> !:
-    discard(data)
-    discard(out)
+    _ = data
+    _ = out
 
 func keep_volume(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
     if filter.is_empty() == keep: return try share_volume(data)

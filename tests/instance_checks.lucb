@@ -10,6 +10,7 @@ from io import path
 from luce_geocore.geocore import Vector3, Mesh, GeometrySet
 from luce_geocore.kernel import Instances, Placement, Attribute, Domain, TableBuilder, empty_set, dispose_set, adopt_set, instances_component, new_instances, save_geometry, load_geometry
 from luce_geocore.core.growing import Growing
+import strings
 
 pub func exercise() -> !:
     let cube = try Mesh.cube(1.0)
@@ -56,7 +57,7 @@ pub func exercise() -> !:
     defer file.close()
     try file.assign(path.temp().bytes)
     for byte in "/luce-geocore-instances.prism".bytes: try file.push(byte)
-    discard(try save_geometry(set.value(), (str)file.view(), 1, 268435456))
+    _ = try save_geometry(set.value(), (str)file.view(), 1, 268435456)
     let loaded = try adopt_set(try load_geometry((str)file.view()))
     defer loaded.release()
     let back = (const Instances*)(loaded.value().find(instances_component()) else trap("instances"))
@@ -83,11 +84,11 @@ func fill(instances: Instances*, a: const GeometrySet*, b: const GeometrySet*) -
     # Each row's path.
     var table = TableBuilder()
     defer table.close()
-    let values = try alloc i32[10000] in memory.heap
+    let values = try new i32[10000] --- in memory.heap
     defer free(values) in memory.heap
     for at in 0..<(usize)10000:
         var text: u8[32] = ---
-        values[at] = try table.intern(try format(text, f"/row{at}"))
+        values[at] = try table.intern(try strings.format(text, f"/row{at}"))
     var column = try table.finish()
     defer column.release()
     try instances.put_attribute(try Attribute.text("path", Domain.point, 10000, column, values))

@@ -19,7 +19,7 @@ struct Loops:
         self.used = Growing[u8]()
         self.loop = Growing[i32]()
 
-    mutating func close():
+    func close():
         self.pairs.close()
         self.open.close()
         self.used.close()
@@ -87,7 +87,7 @@ func plan_patches(context: void*?, first: usize, end: usize):
     defer scratch.close()
     for slot in first..<end:
         vertex_patches(pass, &scratch, slot) catch failure:
-            discard(failure)
+            _ = failure
             pass.failed.store(1, .relaxed)
             return
 

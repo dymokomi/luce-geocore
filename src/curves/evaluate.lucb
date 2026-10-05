@@ -37,7 +37,7 @@ pub struct CurveCache:
     var lengths: Column[f32]
     var totals: Column[f32]
 
-    mutating func close():
+    func close():
         self.eval_offsets.release()
         self.basis_first.release()
         self.basis_starts.release()
@@ -209,7 +209,7 @@ func count_curves(context: void*?, first: usize, end: usize):
     let work = (ShapeWork*)(context else return)
     for curve in first..<end:
         let (start, points) = work.curves.range(curve)
-        discard(start)
+        _ = start
         let settings = work.curves.settings(curve)
         work.nurbs[curve] = -1
         if points <= 1:
@@ -295,17 +295,17 @@ struct Knots:
     var large: f32[]
     var count: usize = 0
 
-    static func make(count: usize) -> Knots!:
+    func make(count: usize) -> Knots!:
         var knots = Knots()
         knots.count = count
         if count > 128:
-            knots.large = try alloc f32[count] in memory.heap
+            knots.large = try new f32[count] --- in memory.heap
         return knots
 
-    mutating func values() -> f32[]:
+    func values() -> f32[]:
         return self.large if self.large.length > 0 else self.small[..<self.count]
 
-    mutating func close():
+    func close():
         if self.large.length > 0: free(self.large) in memory.heap
 
 struct BasisWork:
@@ -321,7 +321,7 @@ func fill_basis(context: void*?, first: usize, end: usize):
     for curve in first..<end:
         if work.firsts[curve] < 0: continue
         curve_basis(work, curve) catch failure:
-            discard(failure)
+            _ = failure
             work.failed.store(1, .relaxed)
 
 func curve_basis(work: BasisWork*, curve: usize) -> !:

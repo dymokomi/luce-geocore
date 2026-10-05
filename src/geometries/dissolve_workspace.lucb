@@ -43,27 +43,27 @@ pub struct DissolveWorkspace: PolygonTopology:
     ## Room for joined faces of up to 256 corners is made up front; larger
     ## ones grow the storage.
     pub func init(mesh: const Mesh*, edits: usize = 128) -> !:
-        if edits > 128: error(errors.limit,"dissolve workspace exceeds edit budget")
+        if edits > 128: error(errors.limit, "dissolve workspace exceeds edit budget")
         let nf = (usize)mesh.face_count()
         let nc = (usize)mesh.vertex_count()
         let nt = (usize)mesh.index_count()
-        let points = try alloc Vector3[(usize)mesh.point_count()] in memory.heap
+        let points = try new Vector3[(usize)mesh.point_count()] --- in memory.heap
         errdefer free(points) in memory.heap
-        let faces = try alloc Face[nf+edits] in memory.heap
+        let faces = try new Face[nf + edits] --- in memory.heap
         errdefer free(faces) in memory.heap
-        let corners = try alloc i64[nc+edits*256] in memory.heap
+        let corners = try new i64[nc + edits * 256] --- in memory.heap
         errdefer free(corners) in memory.heap
-        let parents = try alloc i64[corners.length] in memory.heap
+        let parents = try new i64[corners.length] --- in memory.heap
         errdefer free(parents) in memory.heap
-        let edges = try alloc i64[corners.length] in memory.heap
+        let edges = try new i64[corners.length] --- in memory.heap
         errdefer free(edges) in memory.heap
-        let triangles = try alloc i64[nt+edits*762] in memory.heap
+        let triangles = try new i64[nt + edits * 762] --- in memory.heap
         errdefer free(triangles) in memory.heap
-        let first = try alloc i64[(usize)(try mesh.edge_count())] in memory.heap
+        let first = try new i64[(usize)(try mesh.edge_count())] --- in memory.heap
         errdefer free(first) in memory.heap
-        let second = try alloc i64[first.length] in memory.heap
+        let second = try new i64[first.length] --- in memory.heap
         errdefer free(second) in memory.heap
-        let forward = try alloc bool[first.length] in memory.heap
+        let forward = try new bool[first.length] --- in memory.heap
         defer free(forward) in memory.heap
         for at in 0..<first.length:
             first[at] = -1
@@ -73,12 +73,12 @@ pub struct DissolveWorkspace: PolygonTopology:
         for face in 0..<nf:
             let start = (usize)(try mesh.face_offset((i64)face))
             let count = (usize)(try mesh.face_size((i64)face))
-            faces[face] = Face(start,count,(start-face*2)*3,(i64)face)
+            faces[face] = Face(start, count, (start - face * 2) * 3, (i64)face)
             for side in 0..<count:
-                let at = start+side
+                let at = start + side
                 let point = try mesh.corner_point((i64)at)
                 let edge = (usize)(try mesh.corner_edge((i64)at))
-                let direction = point == (try mesh.edge_point((i64)edge,0))
+                let direction = point == (try mesh.edge_point((i64)edge, 0))
                 corners[at] = point
                 parents[at] = (i64)at
                 edges[at] = (i64)edge
@@ -112,79 +112,87 @@ pub struct DissolveWorkspace: PolygonTopology:
     ## Includes removed slots; scan in order, skipping !active(face).
     pub func face_slots() -> i64:
         return (i64)self.nf
+
     pub func active(face: i64) -> bool:
         return face >= 0 and (usize)face < self.nf and self.faces[(usize)face].active
+
     pub func face_size(face: i64) -> i64!:
-        if not self.active(face): error(errors.invalid,"inactive dissolve face")
+        if not self.active(face): error(errors.invalid, "inactive dissolve face")
         return (i64)self.faces[(usize)face].count
+
     func corner(face: i64, side: i64) -> usize!:
         let count = try self.face_size(face)
-        if side < 0 or side >= count: error(errors.invalid,"dissolve corner out of range")
-        return self.faces[(usize)face].start+(usize)side
+        if side < 0 or side >= count: error(errors.invalid, "dissolve corner out of range")
+        return self.faces[(usize)face].start + (usize)side
+
     pub func face_point(face: i64, side: i64) -> i64!:
-        return self.corners[try self.corner(face,side)]
+        return self.corners[try self.corner(face, side)]
+
     pub func face_edge(face: i64, side: i64) -> i64!:
-        return self.edges[try self.corner(face,side)]
+        return self.edges[try self.corner(face, side)]
+
     pub func point_count() -> i64:
         return (i64)self.points.length
+
     pub func point(id: i64) -> Vector3!:
-        if id < 0 or (usize)id >= self.points.length: error(errors.invalid,"dissolve point out of range")
+        if id < 0 or (usize)id >= self.points.length: error(errors.invalid, "dissolve point out of range")
         return self.points[(usize)id]
+
     pub func edge_point(edge: i64, side: i64) -> i64!:
-        return try self.source.edge_point(edge,side)
+        return try self.source.edge_point(edge, side)
 
     ## The other active face, or -1 for a boundary/nonmanifold edge.
     pub func neighbor(face: i64, side: i64) -> i64!:
-        let edge = (usize)(try self.face_edge(face,side))
+        let edge = (usize)(try self.face_edge(face, side))
         if self.first[edge] < 0 or self.second[edge] < 0: return -1
         return self.second[edge] if self.first[edge] == face else self.first[edge]
 
     ## Join the two faces in their current order, preserving all source display
     ## triangles and corner provenance. A rejected edit leaves active data intact.
-    pub mutating func dissolve(edge: i64) -> !:
-        if edge < 0 or (usize)edge >= self.first.length: error(errors.invalid,"dissolve edge out of range")
-        if not self.manifold: error(errors.invalid,"Operation needs consistently oriented manifold topology")
+    pub func dissolve(edge: i64) -> !:
+        if edge < 0 or (usize)edge >= self.first.length: error(errors.invalid, "dissolve edge out of range")
+        if not self.manifold: error(errors.invalid, "Operation needs consistently oriented manifold topology")
         let left = self.first[(usize)edge]
         let right = self.second[(usize)edge]
-        if left < 0 or right < 0 or left == right: error(errors.invalid,"Dissolve needs an internal manifold edge")
-        if self.nf == self.faces.length: error(errors.limit,"dissolve workspace exceeds edit budget")
+        if left < 0 or right < 0 or left == right: error(errors.invalid, "Dissolve needs an internal manifold edge")
+        if self.nf == self.faces.length: error(errors.limit, "dissolve workspace exceeds edit budget")
         let a = self.faces[(usize)(left if left < right else right)]
         let b = self.faces[(usize)(right if left < right else left)]
-        let count = a.count+b.count-2
-        try self.reserve(count,(count-2)*3)
+        let count = a.count + b.count - 2
+        try self.reserve(count, (count - 2) * 3)
         var written: usize = 0
-        for face in [a,b]:
+        for face in [a, b]:
             var side: usize = 0
-            while side < face.count and self.edges[face.start+side] != edge: side += 1
-            if side == face.count: error(errors.invalid,"dissolve adjacency lost a corner")
+            while side < face.count and self.edges[face.start + side] != edge: side += 1
+            if side == face.count: error(errors.invalid, "dissolve adjacency lost a corner")
             for step in 1..<face.count:
-                let at = face.start+(side+step)%face.count
-                self.corners[self.nc+written] = self.corners[at]
-                self.parents[self.nc+written] = self.parents[at]
-                self.edges[self.nc+written] = self.edges[at]
+                let at = face.start + (side + step) % face.count
+                self.corners[self.nc + written] = self.corners[at]
+                self.parents[self.nc + written] = self.parents[at]
+                self.edges[self.nc + written] = self.edges[at]
                 written += 1
         var triangles: usize = 0
         if count <= face_scratch.small_faces():
             for at in 0..<count:
                 for before in 0..<at:
-                    if self.corners[self.nc+at] == self.corners[self.nc+before]: error(errors.invalid,"dissolve requires a simple polygon union")
-            for face in [a,b]:
-                for at in 0..<(face.count-2)*3:
-                    let point = self.corners[(usize)self.triangles[face.triangle+at]]
+                    if self.corners[self.nc + at] == self.corners[self.nc + before]: error(errors.invalid, "dissolve requires a simple polygon union")
+            for face in [a, b]:
+                for at in 0..<(face.count - 2) * 3:
+                    let point = self.corners[(usize)self.triangles[face.triangle + at]]
                     var mapped: usize = 0
-                    while mapped < count and self.corners[self.nc+mapped] != point: mapped += 1
-                    if mapped == count: error(errors.invalid,"dissolve lost a source triangle corner")
-                    self.triangles[self.nt+triangles] = (i64)(self.nc+mapped)
+                    while mapped < count and self.corners[self.nc + mapped] != point: mapped += 1
+                    if mapped == count: error(errors.invalid, "dissolve lost a source triangle corner")
+                    self.triangles[self.nt + triangles] = (i64)(self.nc + mapped)
                     triangles += 1
         else:
             # A large union: the same checks through a hash of its points.
-            var places = try PointPlaces.of(self.corners[self.nc..<self.nc+count])
+            var places = try PointPlaces.of(self.corners[self.nc..<self.nc + count])
             defer places.close()
-            for face in [a,b]:
-                for at in 0..<(face.count-2)*3:
-                    let mapped = places.find(self.corners[(usize)self.triangles[face.triangle+at]])
-                    if mapped < 0: error(errors.invalid,"dissolve lost a source triangle corner")
-                    self.triangles[self.nt+triangles] = (i64)self.nc+mapped
+            for face in [a, b]:
+                for at in 0..<(face.count - 2) * 3:
+                    let mapped = places.find(self.corners[(usize)self.triangles[face.triangle + at]])
+                    if mapped < 0: error(errors.invalid, "dissolve lost a source triangle corner")
+                    self.triangles[self.nt + triangles] = (i64)self.nc + mapped
                     triangles += 1
         # Match Mesh's validation for the changed face only. Every other
         # face was already validated; the full output is validated again at finish.
@@ -192,17 +200,17 @@ pub struct DissolveWorkspace: PolygonTopology:
         var normal = Vector3()
         var extent: f64 = 0.0
         for at in 0..<count:
-            let p = self.points[(usize)self.corners[self.nc+at]].subtract(origin)
-            let q = self.points[(usize)self.corners[self.nc+(at+1)%count]].subtract(origin)
+            let p = self.points[(usize)self.corners[self.nc + at]].subtract(origin)
+            let q = self.points[(usize)self.corners[self.nc + (at + 1) % count]].subtract(origin)
             normal = normal.add(p.cross(q))
-            extent = math.max(extent,p.dot(p))
-        discard(try area_normal(normal,extent))
-        try display_triangles.validate(self.points,self.corners,self.nc,count,self.triangles[self.nt..<self.nt+triangles])
-        self.faces[self.nf] = Face(self.nc,count,self.nt,a.parent)
+            extent = math.max(extent, p.dot(p))
+        _ = try area_normal(normal, extent)
+        try display_triangles.validate(self.points, self.corners, self.nc, count, self.triangles[self.nt..<self.nt + triangles])
+        self.faces[self.nf] = Face(self.nc, count, self.nt, a.parent)
         self.faces[(usize)left].active = false
         self.faces[(usize)right].active = false
         for at in 0..<count:
-            let id = (usize)self.edges[self.nc+at]
+            let id = (usize)self.edges[self.nc + at]
             if self.first[id] == left or self.first[id] == right: self.first[id] = (i64)self.nf
             if self.second[id] == left or self.second[id] == right: self.second[id] = (i64)self.nf
         self.first[(usize)edge] = -1
@@ -219,24 +227,24 @@ pub struct DissolveWorkspace: PolygonTopology:
         var stack: i64[762] = ---
         for face in self.faces[..<self.nf]:
             if not face.active: continue
-            try out.face((i64)face.count,face.parent)
-            for at in face.start..<face.start+face.count: try out.corner(self.corners[at],self.parents[at])
-            let count = (face.count-2)*3
-            let display = try face_scratch.take[i64](stack,face.count,count)
-            defer face_scratch.release[i64](stack,display)
-            for at in 0..<count: display[at] = self.triangles[face.triangle+at]-(i64)face.start
+            try out.face((i64)face.count, face.parent)
+            for at in face.start..<face.start + face.count: try out.corner(self.corners[at], self.parents[at])
+            let count = (face.count - 2) * 3
+            let display = try face_scratch.take[i64](stack, face.count, count)
+            defer face_scratch.release[i64](stack, display)
+            for at in 0..<count: display[at] = self.triangles[face.triangle + at] - (i64)face.start
             try out.set_last_display(display)
         return try out.finish(self.source)
 
     ## Room for `corners` more corners and `indices` more display indices.
     ## A failure leaves every stored value as it was.
-    mutating func reserve(corners: usize, indices: usize) -> !:
-        try grow(&self.corners,self.nc,self.nc+corners)
-        try grow(&self.parents,self.nc,self.nc+corners)
-        try grow(&self.edges,self.nc,self.nc+corners)
-        try grow(&self.triangles,self.nt,self.nt+indices)
+    func reserve(corners: usize, indices: usize) -> !:
+        try grow(&self.corners, self.nc, self.nc + corners)
+        try grow(&self.parents, self.nc, self.nc + corners)
+        try grow(&self.edges, self.nc, self.nc + corners)
+        try grow(&self.triangles, self.nt, self.nt + indices)
 
-    pub mutating func close():
+    pub func close():
         free(self.points) in memory.heap
         free(self.faces) in memory.heap
         free(self.corners) in memory.heap
@@ -249,10 +257,10 @@ pub struct DissolveWorkspace: PolygonTopology:
 ## `values` holding at least `needed`, its first `used` kept (doubling).
 func grow(values: i64[]*, used: usize, needed: usize) -> !:
     if needed <= values.length: return
-    var capacity: usize = values.length*2 if values.length > 0 else 16
+    var capacity: usize = values.length * 2 if values.length > 0 else 16
     while capacity < needed: capacity *= 2
-    let grown = try alloc i64[capacity] in memory.heap
-    memory.copy(grown,*values,used)
+    let grown = try new i64[capacity] --- in memory.heap
+    memory.copy(grown, *values, used)
     free(*values) in memory.heap
     *values = grown
 
@@ -262,35 +270,35 @@ struct PointPlaces:
     var keys: i64[]
     var places: i64[]
 
-    static func of(points: const i64[]) -> PointPlaces!:
+    func of(points: const i64[]) -> PointPlaces!:
         var capacity: usize = 16
-        while capacity < points.length*2: capacity *= 2
-        let keys = try alloc i64[capacity] in memory.heap
+        while capacity < points.length * 2: capacity *= 2
+        let keys = try new i64[capacity] --- in memory.heap
         errdefer free(keys) in memory.heap
-        let places = try alloc i64[capacity] in memory.heap
+        let places = try new i64[capacity] --- in memory.heap
         errdefer free(places) in memory.heap
         for at in 0..<capacity: keys[at] = -1
         for at in 0..<points.length:
-            var slot = PointPlaces.slot_of(points[at],capacity)
+            var slot = PointPlaces.slot_of(points[at], capacity)
             while keys[slot] >= 0:
-                if keys[slot] == points[at]: error(errors.invalid,"dissolve requires a simple polygon union")
-                slot = (slot+1)&(capacity-1)
+                if keys[slot] == points[at]: error(errors.invalid, "dissolve requires a simple polygon union")
+                slot = (slot + 1) & (capacity - 1)
             keys[slot] = points[at]
             places[slot] = (i64)at
-        return PointPlaces(keys,places)
+        return PointPlaces(keys, places)
 
-    static func slot_of(point: i64, capacity: usize) -> usize:
-        return (usize)(((u64)point*%0x9E3779B97F4A7C15)>>32)&(capacity-1)
+    func slot_of(point: i64, capacity: usize) -> usize:
+        return (usize)(((u64)point *% 0x9E3779B97F4A7C15) >> 32) & (capacity - 1)
 
     ## The corner of `point` in the face, or -1.
     func find(point: i64) -> i64:
-        var slot = PointPlaces.slot_of(point,self.keys.length)
+        var slot = PointPlaces.slot_of(point, self.keys.length)
         while self.keys[slot] >= 0:
             if self.keys[slot] == point: return self.places[slot]
-            slot = (slot+1)&(self.keys.length-1)
+            slot = (slot + 1) & (self.keys.length - 1)
         return -1
 
-    mutating func close():
+    func close():
         free(self.keys) in memory.heap
         free(self.places) in memory.heap
 

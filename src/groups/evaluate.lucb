@@ -39,7 +39,7 @@ struct Evaluation:
     var topology: Topology?
     let report: GroupReport*
 
-    mutating func connectivity() -> Topology!:
+    func connectivity() -> Topology!:
         if let known = self.topology: return known
         let built = try Topology.of(self.mesh)
         self.topology = built
@@ -49,7 +49,7 @@ struct Evaluation:
         return (usize)(try self.mesh.domain_count((i64)(u8)domain))
 
     ## Terms first..<first + count combined into bits of `target`.
-    mutating func terms(first: u32, count: u32, target: Domain) -> BitsBuilder!:
+    func terms(first: u32, count: u32, target: Domain) -> BitsBuilder!:
         var result = try BitsBuilder.zeros(try self.size(target))
         errdefer result.close()
         for index in first..<first + count:
@@ -63,7 +63,7 @@ struct Evaluation:
                 _: result.intersect(atom.view())
         return result
 
-    mutating func atom(term: const Term*, target: Domain) -> BitsBuilder!:
+    func atom(term: const Term*, target: Domain) -> BitsBuilder!:
         let size = try self.size(target)
         match term.kind:
             .all: return try BitsBuilder.ones(size)
@@ -79,7 +79,7 @@ struct Evaluation:
 
     ## Numbers name elements of the target; on edges they name faces, whose
     ## edges are taken (Houdini's edge groups).
-    mutating func range(term: const Term*, target: Domain) -> BitsBuilder!:
+    func range(term: const Term*, target: Domain) -> BitsBuilder!:
         let domain = Domain.face if target == Domain.edge else target
         let size = try self.size(domain)
         var bits = try BitsBuilder.zeros(size)
@@ -99,20 +99,20 @@ struct Evaluation:
         return try self.convert_owned(bits, domain, target)
 
     ## `bits` of `source` as bits of `destination` (the builder is taken).
-    mutating func convert_owned(bits: BitsBuilder, source: Domain, destination: Domain) -> BitsBuilder!:
+    func convert_owned(bits: BitsBuilder, source: Domain, destination: Domain) -> BitsBuilder!:
         var owned = bits
         if source == destination: return owned
         defer owned.close()
         return try self.convert(owned.view(), source, destination, false)
 
-    mutating func convert(bits: Bits, source: Domain, destination: Domain, all: bool) -> BitsBuilder!:
+    func convert(bits: Bits, source: Domain, destination: Domain, all: bool) -> BitsBuilder!:
         if source == destination: return try BitsBuilder.copy_of(bits)
         let topology = try self.connectivity()
         return try converted(&topology, bits, source, destination, all)
 
     ## Groups whose names match `pattern` on the target domain; when none
     ## does, the first domain where some do, converted.
-    mutating func name(pattern: str, target: Domain) -> BitsBuilder!:
+    func name(pattern: str, target: Domain) -> BitsBuilder!:
         let order: Domain[5] = [target, Domain.point, Domain.face, Domain.edge, Domain.corner]
         for at in 0..<order.length:
             let domain = order[at]
@@ -135,7 +135,7 @@ struct Evaluation:
 
     ## `@name[component] op values`: an attribute on the target domain, else
     ## on its own domain and converted (any element of a face, and so on).
-    mutating func attribute(term: const Term*, target: Domain) -> BitsBuilder!:
+    func attribute(term: const Term*, target: Domain) -> BitsBuilder!:
         let name = self.program.text(term)
         var source = Source(kind = 0, domain = target)
         if name == "ptnum": source = Source(kind = 1, domain = Domain.point)
@@ -170,7 +170,7 @@ struct Evaluation:
         return -1
 
     ## Elements of `domain` whose value passes the term's test, in parallel.
-    mutating func tested(term: const Term*, source: const Source*, domain: Domain) -> BitsBuilder!:
+    func tested(term: const Term*, source: const Source*, domain: Domain) -> BitsBuilder!:
         let size = try self.size(domain)
         var bits = try BitsBuilder.zeros(size)
         errdefer bits.close()
@@ -190,9 +190,9 @@ struct Evaluation:
 
     ## Text attributes: `=` and `==` match any glob, `!=` none; no operator
     ## means a nonempty text.
-    mutating func test_text(term: const Term*, entry: const Attribute*, domain: Domain, bits: BitsBuilder*) -> !:
+    func test_text(term: const Term*, entry: const Attribute*, domain: Domain, bits: BitsBuilder*) -> !:
         let table = entry.table.view()
-        let hits = try alloc bool[table_count(table)] in memory.heap
+        let hits = try new bool[table_count(table)] --- in memory.heap
         defer free(hits) in memory.heap
         for index in 0..<hits.length:
             let text = table_text(table, index)
@@ -211,7 +211,7 @@ struct Evaluation:
             if value >= 0 and (usize)value < hits.length and hits[(usize)value]: bits.set(element)
 
     ## `p a`, `p a-b-c…` and `f e m` on the edge domain.
-    mutating func edge_atom(term: const Term*) -> BitsBuilder!:
+    func edge_atom(term: const Term*) -> BitsBuilder!:
         let topology = try self.connectivity()
         var bits = try BitsBuilder.zeros(topology.edges())
         errdefer bits.close()
@@ -243,7 +243,7 @@ struct Evaluation:
             else: bits.set((usize)edge)
         return bits
 
-    mutating func call(term: const Term*, target: Domain) -> BitsBuilder!:
+    func call(term: const Term*, target: Domain) -> BitsBuilder!:
         let steps = (usize)math.max(0.0, term.argument)
         match term.function:
             .loop, .ring:

@@ -154,10 +154,10 @@ extend Mesh:
         if source.k1 >= 0: count = (try self.attribute_entry(source.k1)).elements
         else: count = (try self.curvature_span()).length // 2
         if count == 0: return 1.0
-        let packed = try alloc f32[count * 3] in memory.heap
+        let packed = try new f32[count * 3] --- in memory.heap
         defer free(packed) in memory.heap
         try self.pack_curvature(source, packed)
-        let values = try alloc f64[count] in memory.heap
+        let values = try new f64[count] --- in memory.heap
         defer free(values) in memory.heap
         var largest: f64 = 0.0
         for at in 0..<count:

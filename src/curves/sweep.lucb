@@ -11,7 +11,7 @@ pub struct Profile:
     pub var points: Growing[Vector3]
     pub var cyclic: bool = false
 
-    pub mutating func close():
+    pub func close():
         self.points.close()
 
 ## A circle profile of `segments` points.
@@ -50,7 +50,7 @@ pub func swept(curves: const Curves*, selected: Bits, profile: const Profile*, c
     let around = ring if profile.cyclic else ring - 1
     let count = curves.curve_count()
     # Per curve: first point, face, corner (and triangle entry) of its part.
-    var starts = try alloc SweepStart[count + 1] in memory.heap
+    var starts = try new SweepStart[count + 1] --- in memory.heap
     defer free(starts) in memory.heap
     var points: usize = 0
     var faces: usize = 0
@@ -82,13 +82,13 @@ pub func swept(curves: const Curves*, selected: Bits, profile: const Profile*, c
     errdefer triangle_corners.release()
     var uv = try Attribute.create("uv", Domain.corner, DataType.float32, 2, corners)
     defer uv.release()
-    let face_parents = try alloc i32[faces] in memory.heap
+    let face_parents = try new i32[faces] --- in memory.heap
     defer free(face_parents) in memory.heap
-    let point_parents = try alloc i32[points] in memory.heap
+    let point_parents = try new i32[points] --- in memory.heap
     defer free(point_parents) in memory.heap
-    let point_others = try alloc i32[points] in memory.heap
+    let point_others = try new i32[points] --- in memory.heap
     defer free(point_others) in memory.heap
-    let point_mix = try alloc f32[points] in memory.heap
+    let point_mix = try new f32[points] --- in memory.heap
     defer free(point_mix) in memory.heap
     var work = SweepWork(curves, selected, profile, caps, offsets, path, frames, starts, positions.span(), face_offsets.span(), corner_points.span(),
                          triangle_corners.span(), attribute_ops.typed_mut[f32](uv.data.span()), face_parents, point_parents, point_others, point_mix)

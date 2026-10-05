@@ -40,7 +40,7 @@ pub struct SetVerbOutput:
     pub var warning: str = ""
     pub var misses: usize = 0
 
-    pub mutating func close():
+    pub func close():
         if let made = self.set: dispose_set(made)
         self.set = none
 

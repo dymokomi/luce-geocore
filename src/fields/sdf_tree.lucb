@@ -35,7 +35,7 @@ pub struct SdfTree:
 
     ## The tree of `sdf`; fails on a transform that does not hold exactly
     ## one distance (programs Luce's nodes and Edit SDF build always do).
-    pub static func of(sdf: const Sdf*) -> SdfTree!:
+    pub func of(sdf: const Sdf*) -> SdfTree!:
         var tree = SdfTree(Growing[SdfNode](), Growing[i32](), Growing[i32](), Growing[Matrix4](), no_node)
         errdefer tree.close()
         let ops = sdf.op_span()
@@ -79,7 +79,7 @@ pub struct SdfTree:
             if here.second >= 0: tree.worlds.items[(usize)here.second] = inner
         return tree
 
-    mutating func add(node: SdfNode) -> i32!:
+    func add(node: SdfNode) -> i32!:
         let id = (i32)self.nodes.count
         try self.nodes.push(node)
         if node.first >= 0: self.nodes.items[(usize)node.first].parent = id
@@ -119,7 +119,7 @@ pub struct SdfTree:
         if parent >= 0 and self.nodes.items[(usize)parent].second == node: return parent
         return no_node
 
-    pub mutating func close():
+    pub func close():
         self.nodes.close()
         self.owner.close()
         self.primitives.close()
@@ -153,7 +153,7 @@ pub struct SdfRewrite:
     var wrapped: Growing[i64]
     var wraps: Growing[f32]
 
-    pub static func of(sdf: const Sdf*) -> SdfRewrite!:
+    pub func of(sdf: const Sdf*) -> SdfRewrite!:
         var result = SdfRewrite(Growing[u8](), Growing[f32](), Growing[bool](), Growing[i64](), Growing[f32]())
         errdefer result.close()
         try result.codes.assign(sdf.op_span())
@@ -164,7 +164,7 @@ pub struct SdfRewrite:
 
     ## Move primitive `index` of `tree` by `delta` in world space: composed
     ## into the transform placing it, or a new one around it.
-    pub mutating func move(tree: const SdfTree*, index: usize, delta: Matrix4) -> !:
+    pub func move(tree: const SdfTree*, index: usize, delta: Matrix4) -> !:
         let wrap = tree.wrap(index)
         let node = tree.nodes.items[(usize)(wrap if wrap >= 0 else tree.primitives.items[index])]
         # The move in the frame the placement lives in: O⁻¹·D·O.
@@ -182,7 +182,7 @@ pub struct SdfRewrite:
     ## Primitive `index`'s boolean set to `mode` (0 add, 1 subtract,
     ## 2 intersect; -1 keeps it), smooth over `blend` when positive (< 0
     ## keeps the blend). False when it has none (the first shape).
-    pub mutating func combine(tree: const SdfTree*, index: usize, mode: i64, blend: f64) -> bool:
+    pub func combine(tree: const SdfTree*, index: usize, mode: i64, blend: f64) -> bool:
         let node = tree.combiner(index)
         if node < 0: return false
         let at = (usize)tree.nodes.items[(usize)node].start
@@ -197,7 +197,7 @@ pub struct SdfRewrite:
     ## The primitives marked in `chosen` removed: with every transform and
     ## modifier around them, and each boolean left with one operand, which
     ## takes its place. False when nothing would remain.
-    pub mutating func remove(tree: const SdfTree*, chosen: const bool[]) -> bool!:
+    pub func remove(tree: const SdfTree*, chosen: const bool[]) -> bool!:
         var removed = Growing[bool]()
         defer removed.close()
         try removed.fill(tree.nodes.count, false)
@@ -246,7 +246,7 @@ pub struct SdfRewrite:
                 next += 1
         return try new_sdf(ops.take(), params.take())
 
-    pub mutating func close():
+    pub func close():
         self.codes.close()
         self.params.close()
         self.dropped.close()

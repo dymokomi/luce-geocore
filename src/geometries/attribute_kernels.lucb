@@ -14,7 +14,7 @@ pub struct AttributeKernels:
     let reserved: u8 = 0
 
     ## Corner uv = (x, z) * scale of each corner's point.
-    pub static func uv_project(source: interop.Reference[Mesh], scale: f64) -> interop.Reference[Mesh]!:
+    pub func uv_project(source: interop.Reference[Mesh], scale: f64) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         if not math.is_finite(scale): error(errors.invalid, "UV scale must be finite")
         let corners = mesh.corner_span()
@@ -30,7 +30,7 @@ pub struct AttributeKernels:
 
     ## N on faces (the face normals) or points (the normalized sum of the
     ## incident face normals; zero for isolated points).
-    pub static func normals(source: interop.Reference[Mesh], domain: i64) -> interop.Reference[Mesh]!:
+    pub func normals(source: interop.Reference[Mesh], domain: i64) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let face_domain = domain == 2
         let normals = mesh.face_normal_span()
@@ -43,7 +43,7 @@ pub struct AttributeKernels:
                 values[face * 3 + 1] = (f64)normals[face].y
                 values[face * 3 + 2] = (f64)normals[face].z
             return try mesh.with_attribute_entry(attribute)
-        let sums = alloc Vector3[count] in memory.heap catch failure:
+        let sums = new Vector3[count] --- in memory.heap catch failure:
             attribute.release()
             error(failure.code, failure.message)
         defer free(sums) in memory.heap
@@ -63,7 +63,7 @@ pub struct AttributeKernels:
         return try mesh.with_attribute_entry(attribute)
 
     ## Face "area": the summed area of each face's display triangles.
-    pub static func face_areas(source: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
+    pub func face_areas(source: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let points = mesh.point_span()
         let corners = mesh.corner_span()
@@ -82,7 +82,7 @@ pub struct AttributeKernels:
     ## `name` = `values` (1..4 components) on every element, optionally scaled
     ## per element and component by a deterministic hash of the element id and
     ## `seed`. Unscaled values are stored once for the whole domain.
-    pub static func filled(source: interop.Reference[Mesh], name: str, domain: i64, values: const f64[], integer: bool, randomize: bool, seed: f64) -> interop.Reference[Mesh]!:
+    pub func filled(source: interop.Reference[Mesh], name: str, domain: i64, values: const f64[], integer: bool, randomize: bool, seed: f64) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let count = (usize)(try mesh.domain_count(domain))
         let width = values.length
@@ -92,7 +92,7 @@ pub struct AttributeKernels:
             for component in 0..<width:
                 rounded[component] = math.floor(values[component]) if integer else values[component]
             return try mesh.with_single_attribute(name, domain, rounded[..<width], integer)
-        let generated = try alloc f64[count * width] in memory.heap
+        let generated = try new f64[count * width] --- in memory.heap
         defer free(generated) in memory.heap
         for id in 0..<count:
             for component in 0..<width:
@@ -102,7 +102,7 @@ pub struct AttributeKernels:
         return try mesh.with_attribute(name, domain, (i64)width, generated, integer)
 
     ## An integer `name` that is 1 on `members` of `domain` and 0 elsewhere.
-    pub static func membership(source: interop.Reference[Mesh], name: str, domain: i64, members: const i64[]) -> interop.Reference[Mesh]!:
+    pub func membership(source: interop.Reference[Mesh], name: str, domain: i64, members: const i64[]) -> interop.Reference[Mesh]!:
         let mesh = try source.get()
         let count = (usize)(try mesh.domain_count(domain))
         var attribute = try Attribute.create(name, Domain((u8)domain), DataType.int32, 1, count)

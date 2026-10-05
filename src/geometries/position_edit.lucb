@@ -25,7 +25,7 @@ pub struct Repositioned:
     pub var triangles: Column[i32]
     pub var extent: Bounds
 
-    pub mutating func close():
+    pub func close():
         self.normals.release()
         self.triangles.release()
 
@@ -46,7 +46,7 @@ pub struct Shape:
 pub func bounds_of(positions: const Float3[], origin: Vector3) -> Bounds!:
     if positions.length == 0: return Bounds(origin, origin)
     let chunks = (positions.length + 65535) // 65536
-    let results = try alloc Extent[chunks] in memory.heap
+    let results = try new Extent[chunks] --- in memory.heap
     defer free(results) in memory.heap
     var work = ExtentWork(positions, results)
     parallel.parallel_for(chunks, 1, chunk_extent, (void*)&work)
@@ -93,7 +93,7 @@ func chunk_extent(context: void*?, first: usize, end: usize):
 pub func reposition(shape: const Shape*, normals: Column[Float3], moved: const u32[], rigid: bool) -> Repositioned!:
     let extent = try bounds_of(shape.positions, shape.origin)
     let faces = shape.offsets.length - 1
-    let touched = try alloc bool[faces] in memory.heap
+    let touched = try new bool[faces] --- in memory.heap
     defer free(touched) in memory.heap
     memory.set(u8[]((u8*)touched.data, touched.length), 0)
     var count: usize = 0
@@ -103,7 +103,7 @@ pub func reposition(shape: const Shape*, normals: Column[Float3], moved: const u
             if not touched[face]:
                 touched[face] = true
                 count += 1
-    let list = try alloc u32[count] in memory.heap
+    let list = try new u32[count] --- in memory.heap
     defer free(list) in memory.heap
     var written: usize = 0
     for face in 0..<faces:
@@ -118,7 +118,7 @@ pub func reposition(shape: const Shape*, normals: Column[Float3], moved: const u
     if work.failed.load(.acquire) != 0:
         # A serial pass reports the first failing face's own error.
         for face in list:
-            if not is_degenerate(output[(usize)face].vector()): discard(try face_normal(shape, (usize)face))
+            if not is_degenerate(output[(usize)face].vector()): _ = try face_normal(shape, (usize)face)
     var triangles: Column[i32]
     errdefer triangles.release()
     if work.folded.load(.acquire) != 0:
@@ -142,7 +142,7 @@ func face_normals(context: void*?, first: usize, end: usize):
     for at in first..<end:
         let face = (usize)work.list[at]
         let normal = face_normal(work.shape, face) catch failure:
-            discard(failure)
+            _ = failure
             # A face that had no area keeps its zero normal; one that
             # collapses now fails the edit.
             if not is_degenerate(work.normals[face].vector()): work.failed.store(1, .relaxed)

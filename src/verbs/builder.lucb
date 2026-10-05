@@ -41,7 +41,7 @@ pub struct TopologyBuilder:
         self.fans = false
 
     ## Start from `source`'s frame (its origin).
-    pub mutating func begin(source: const Mesh*) -> !:
+    pub func begin(source: const Mesh*) -> !:
         self.origin = source.position_origin()
         try self.offsets.push(0)
         try self.point_mix.offsets.push(0)
@@ -57,19 +57,19 @@ pub struct TopologyBuilder:
         return self.corners.count
 
     ## A point at `position` (world) with one parent (-1: new).
-    pub mutating func point(position: Vector3, parent: i32) -> i32!:
+    pub func point(position: Vector3, parent: i32) -> i32!:
         try self.positions.push(position.subtract(self.origin))
         try self.point_parents.push(parent)
         return (i32)(self.positions.count - 1)
 
     ## A point interpolated from weighted parents.
-    pub mutating func mixed_point(position: Vector3, parents: const i32[], weights: const f32[]) -> i32!:
+    pub func mixed_point(position: Vector3, parents: const i32[], weights: const f32[]) -> i32!:
         try self.positions.push(position.subtract(self.origin))
         try self.point_parents.push(try mix_entry(&self.point_mix, parents, weights))
         return (i32)(self.positions.count - 1)
 
     ## Every point of `source`, each its own parent, in one pass.
-    pub mutating func copy_points(source: const Mesh*) -> !:
+    pub func copy_points(source: const Mesh*) -> !:
         let positions = source.point_span()
         let exact = precise_span(source)
         let first = self.positions.count
@@ -82,7 +82,7 @@ pub struct TopologyBuilder:
         self.point_parents.count += positions.length
 
     ## Set point `index`'s position (world).
-    pub mutating func move_point(index: i32, position: Vector3):
+    pub func move_point(index: i32, position: Vector3):
         self.positions.items[(usize)index] = position.subtract(self.origin)
 
     pub func position(index: i32) -> Vector3:
@@ -91,39 +91,39 @@ pub struct TopologyBuilder:
     ## Start a face whose parent is `parent`; `copied` when its corners will
     ## be its parent's, in order (its triangles are then kept), `reversed`
     ## when they will be its parent's in reverse order.
-    pub mutating func face(parent: i32, copied: bool = false, reversed: bool = false) -> !:
+    pub func face(parent: i32, copied: bool = false, reversed: bool = false) -> !:
         try self.face_parents.push(parent)
         try self.copied.push(2 if reversed else (1 if copied else 0))
 
-    pub mutating func corner(point: i32, parent: i32) -> !:
+    pub func corner(point: i32, parent: i32) -> !:
         try self.corners.push(point)
         try self.corner_parents.push(parent)
 
-    pub mutating func mixed_corner(point: i32, parents: const i32[], weights: const f32[]) -> !:
+    pub func mixed_corner(point: i32, parents: const i32[], weights: const f32[]) -> !:
         try self.corners.push(point)
         try self.corner_parents.push(try mix_entry(&self.corner_mix, parents, weights))
 
     ## A corner mix that several corners share (see `shared_corner`): a
     ## face's center in every one of its subdivided quads stores its parents
     ## once, not once a quad, which for an n-gon is n rather than n * n.
-    pub mutating func shared_mix(parents: const i32[], weights: const f32[]) -> i32!:
+    pub func shared_mix(parents: const i32[], weights: const f32[]) -> i32!:
         return try mix_entry(&self.corner_mix, parents, weights)
 
     ## A corner at `point` whose parent is `mix` from `shared_mix`.
-    pub mutating func shared_corner(point: i32, mix: i32) -> !:
+    pub func shared_corner(point: i32, mix: i32) -> !:
         try self.corners.push(point)
         try self.corner_parents.push(mix)
 
     ## Close the face begun last; faces need at least 3 corners (the corner
     ## budget is checked in finish).
-    pub mutating func end_face() -> !:
+    pub func end_face() -> !:
         let size = (i64)self.corners.count - (i64)self.offsets.items[self.offsets.count - 1]
         if size < 3: error(errors.invalid, "an operation made a face with fewer than 3 corners")
         try self.offsets.push((i32)self.corners.count)
 
     ## Faces first..<end of `source` unchanged (points numbered as in the
     ## input: after `copy_points`), in one tight pass.
-    pub mutating func copy_faces(source: const Mesh*, first: usize, end: usize) -> !:
+    pub func copy_faces(source: const Mesh*, first: usize, end: usize) -> !:
         if end <= first: return
         let offsets = source.offset_span()
         let corners = source.corner_span()
@@ -151,7 +151,7 @@ pub struct TopologyBuilder:
 
     ## Face `face` of `source` unchanged: its corners (with this builder's
     ## point numbers `points`, or its own when empty) and its triangles.
-    pub mutating func copy_face(source: const Mesh*, face: usize, points: const i32[]) -> !:
+    pub func copy_face(source: const Mesh*, face: usize, points: const i32[]) -> !:
         let offsets = source.offset_span()
         let corners = source.corner_span()
         try self.face((i32)face, true)
@@ -162,16 +162,16 @@ pub struct TopologyBuilder:
 
     ## Select the edge between points `a` and `b` of the result (the output
     ## selection is then these edges).
-    pub mutating func select_edge(a: i32, b: i32) -> !:
+    pub func select_edge(a: i32, b: i32) -> !:
         try self.selected_edges.push(a)
         try self.selected_edges.push(b)
 
     ## Remove the points no corner uses, renumbering the rest in order (a
     ## verb that replaces some input points copies them all first).
     ## A point selection `selected`, when given, is renumbered with them.
-    pub mutating func drop_unused_points(selected: BitsBuilder*? = none) -> !:
+    pub func drop_unused_points(selected: BitsBuilder*? = none) -> !:
         let points = self.positions.count
-        let map = try alloc i32[points] in memory.heap
+        let map = try new i32[points] --- in memory.heap
         defer free(map) in memory.heap
         for at in 0..<points: map[at] = -1
         for point in self.corners.view(): map[(usize)point] = 0
@@ -195,7 +195,7 @@ pub struct TopologyBuilder:
 
     ## The mesh: positions, faces, triangles (kept or clipped), normals, and
     ## every attribute of `source` through the parents.
-    pub mutating func finish(source: const Mesh*) -> Mesh*!:
+    pub func finish(source: const Mesh*) -> Mesh*!:
         let points = self.positions.count
         let faces = self.face_parents.count
         let corner_total = self.corners.count
@@ -226,7 +226,7 @@ pub struct TopologyBuilder:
         try propagate(source, storage, self.point_parents.view(), self.face_parents.view(), self.corner_parents.view(), &self.point_mix, &self.corner_mix)
         return storage
 
-    pub mutating func close():
+    pub func close():
         self.positions.close()
         self.offsets.close()
         self.corners.close()

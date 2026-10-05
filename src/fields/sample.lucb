@@ -112,7 +112,7 @@ struct SdfFill:
 
 func fill_sdf_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[]):
     let work = (SdfFill*)(context else return)
-    discard(leaf)
+    _ = leaf
     let (lx, ly, lz) = key_leaf(key)
     let limit = work.band * work.voxel
     for at in 0..<mask_words: mask[at] = 0
@@ -163,7 +163,7 @@ pub func points_level_set(points: const Vector3[], radius: f64, voxel: f64, band
 
 ## Point indices sorted by their leaf keys (stable).
 func sort_by_key(order: u64[], keys: const u64[]) -> !:
-    let scratch = try alloc u64[order.length] in memory.heap
+    let scratch = try new u64[order.length] --- in memory.heap
     defer free(scratch) in memory.heap
     var from_order = true
     for pass in 0..<(usize)8:
@@ -201,7 +201,7 @@ func first_of(work: const PointFill*, key: u64) -> usize:
 
 func fill_point_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[]):
     let work = (PointFill*)(context else return)
-    discard(leaf)
+    _ = leaf
     let (lx, ly, lz) = key_leaf(key)
     let limit = work.band * work.voxel
     for at in 0..<leaf_voxels: values[at] = (f32)limit

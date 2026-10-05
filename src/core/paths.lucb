@@ -12,7 +12,7 @@ pub struct PathFilter:
     var spans: Growing[usize]
 
     ## A filter over `text`, which must outlive it.
-    pub static func parse(text: str) -> PathFilter!:
+    pub func parse(text: str) -> PathFilter!:
         var filter = PathFilter(text, Growing[usize]())
         errdefer filter.close()
         let bytes = text.bytes
@@ -49,7 +49,7 @@ pub struct PathFilter:
             if glob(pattern, path) or parent_of(pattern, path): matched = not exclude
         return matched
 
-    pub mutating func close():
+    pub func close():
         self.spans.close()
 
 ## Whether `path` lies under `parent` ("a/b" under "a").

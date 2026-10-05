@@ -9,40 +9,40 @@ pub struct Growing[T]:
     pub func view() -> const T[]:
         return self.items[..<self.count]
 
-    pub mutating func clear():
+    pub func clear():
         self.count = 0
 
-    pub mutating func reserve(capacity: usize) -> !:
+    pub func reserve(capacity: usize) -> !:
         if capacity <= self.items.length: return
         var size: usize = 64 if self.items.length == 0 else self.items.length
         while size < capacity: size *= 2
-        let grown = try alloc T[size] in memory.heap
+        let grown = try new T[size] --- in memory.heap
         if self.count > 0: memory.copy(grown, self.items, self.count)
         if self.items.length > 0: free(self.items) in memory.heap
         self.items = grown
 
-    pub mutating func push(value: T) -> !:
+    pub func push(value: T) -> !:
         try self.reserve(self.count + 1)
         self.items[self.count] = value
         self.count += 1
 
-    pub mutating func fill(count: usize, value: T) -> !:
+    pub func fill(count: usize, value: T) -> !:
         try self.reserve(count)
         for at in 0..<count: self.items[at] = value
         self.count = count
 
     ## Grow to `count` items, the new ones `value` (the rest kept).
-    pub mutating func extend(count: usize, value: T) -> !:
+    pub func extend(count: usize, value: T) -> !:
         try self.reserve(count)
         for at in self.count..<count: self.items[at] = value
         if count > self.count: self.count = count
 
-    pub mutating func assign(values: const T[]) -> !:
+    pub func assign(values: const T[]) -> !:
         try self.reserve(values.length)
         if values.length > 0: memory.copy(self.items, values, values.length)
         self.count = values.length
 
-    pub mutating func close():
+    pub func close():
         if self.items.length > 0: free(self.items) in memory.heap
         var empty: T[]
         self.items = empty

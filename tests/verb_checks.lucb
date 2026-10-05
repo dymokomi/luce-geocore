@@ -267,7 +267,7 @@ func edit_options(mesh: interop.Reference[Mesh]) -> !:
 func tint_weights(mesh: interop.Reference[Mesh]) -> !:
     let face = try Selection.of(mesh, "5", 2)
     defer face.release()
-    let weights = try alloc f32[25] in memory.heap
+    let weights = try new f32[25] --- in memory.heap
     defer free(weights) in memory.heap
     try selection_weights(try mesh.get(), try face.get(), 0.6, 0, 0, weights)
     near((f64)weights[12], 1.0)

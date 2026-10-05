@@ -14,14 +14,14 @@ pub func mesh_edge_curves(mesh: const Mesh*, chosen: Bits, boundary: bool) -> Cu
     defer used.close()
     if boundary:
         let (edge_offsets, edge_corners) = try mesh.edge_corner_span()
-        discard(edge_corners)
+        _ = edge_corners
         for edge in 0..<edge_count:
             if edge_offsets[edge + 1] - edge_offsets[edge] != 1: used.clear(edge)
     let (point_offsets, point_edges) = try mesh.point_edge_span()
     let points = mesh.point_span()
     let origin = mesh.position_origin()
     # Chosen edges at each point.
-    let degree = try alloc u32[points.length] in memory.heap
+    let degree = try new u32[points.length] --- in memory.heap
     defer free(degree) in memory.heap
     for point in 0..<points.length:
         var chosen_here: u32 = 0

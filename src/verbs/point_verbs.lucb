@@ -24,7 +24,7 @@ pub struct ComponentTransform:
     pub let translation: Vector3
     pub let pivot: Vector3
 
-    pub static func of(numbers: const f64[], middle: Vector3) -> ComponentTransform!:
+    pub func of(numbers: const f64[], middle: Vector3) -> ComponentTransform!:
         if numbers.length < 13: error(errors.invalid, "a transform needs its thirteen numbers")
         let degrees = 0.017453292519943295
         let linear = Matrix4.compose(Vector3(), Vector3(numbers[3] * degrees, numbers[4] * degrees, numbers[5] * degrees), Vector3(numbers[6], numbers[7], numbers[8]))
@@ -79,7 +79,7 @@ struct Points:
 
 func begin_points(input: const VerbInput*, output: VerbOutput*) -> const u32[]!:
     output.positions = mesh_positions(input.mesh)
-    discard(try output.positions.writable())
+    _ = try output.positions.writable()
     try output.moved.reserve(input.group.population())
     for word in 0..<input.group.words.length:
         var pending = input.group.words[word]
@@ -206,7 +206,7 @@ func cook_smooth(input: const VerbInput*, output: VerbOutput*) -> !:
     let edges = try input.mesh.edge_span()
     let around = try input.mesh.point_edge_span()
     let positions = output.positions.span()
-    let next = try alloc Float3[moved.length] in memory.heap
+    let next = try new Float3[moved.length] --- in memory.heap
     defer free(next) in memory.heap
     for _ in 0..<rounds:
         var work = SmoothWork(positions, moved, edges, around.0, around.1, next, amount)

@@ -64,7 +64,7 @@ pub func exercise() -> !:
 
 ## `source` saved to `file` and loaded back keeps its detail attributes.
 func round_trip(source: interop.Reference[GeometrySet], file: str) -> !:
-    discard(try save_geometry(source.value(), file, 3, 268435456))
+    _ = try save_geometry(source.value(), file, 3, 268435456)
     let loaded = try adopt_set(try load_geometry(file))
     defer loaded.release()
     assert(loaded.value().detail_count() == 2 and same(try vector_of(loaded, "sketch.plane_normal"), Vector3(0.0, 0.0, 1.0)))

@@ -17,7 +17,7 @@ pub func propagate(source: const Mesh*, output: Mesh*, point_parents: const i32[
         # Each verb makes its own output selection.
         if entry.name() == ".selection": continue
         if entry.domain == Domain.edge and edge_map.length == 0:
-            let representatives = try alloc i32[corner_parents.length] in memory.heap
+            let representatives = try new i32[corner_parents.length] --- in memory.heap
             defer free(representatives) in memory.heap
             for at in 0..<corner_parents.length:
                 representatives[at] = corner_parents[at] if corner_parents[at] >= 0 else -1
@@ -35,7 +35,7 @@ func carried(entry: const Attribute*, point_parents: const i32[], face_parents: 
 ## `source` over elements taking parents[i] (>= 0), nothing (-1), or mix entry
 ## -2 - parents[i].
 func mixed(source: const Attribute*, parents: const i32[], mix: const Mix*) -> Attribute!:
-    var direct = try alloc i32[parents.length] in memory.heap
+    var direct = try new i32[parents.length] --- in memory.heap
     defer free(direct) in memory.heap
     var any = false
     for at in 0..<parents.length:

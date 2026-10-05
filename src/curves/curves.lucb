@@ -115,12 +115,12 @@ pub struct Curves:
     pub func shared_storage() -> Curves*!:
         var attributes = try self.attributes.shared()
         errdefer attributes.close()
-        let storage = try alloc Curves[1] in memory.heap
+        let storage = try new Curves[1] --- in memory.heap
         storage[0] = Curves(self.positions.share(), self.origin, self.offsets.share(), self.knots.share(), self.knot_offsets.share(), attributes, self.cache)
-        discard(self.cache.users.add(1, .relaxed))
+        _ = self.cache.users.add(1, .relaxed)
         return storage.data
 
-    pub mutating func close():
+    pub func close():
         self.positions.release()
         self.offsets.release()
         self.knots.release()
@@ -130,7 +130,7 @@ pub struct Curves:
 
     ## Add or replace an attribute (taking its share) of curves this caller
     ## alone owns: just built, or a fresh share it is about to publish.
-    pub mutating func put_attribute(attribute: Attribute) -> !:
+    pub func put_attribute(attribute: Attribute) -> !:
         try self.attributes.put(attribute)
 
     ## The attribute `name` on `domain`, if present.
@@ -247,7 +247,7 @@ pub func curves_assembled(positions: Column[Float3], origin: Vector3, offsets: C
     errdefer owned_attributes.close()
     let cache = try new_cache(seed)
     errdefer release_cache(cache)
-    let storage = try alloc Curves[1] in memory.heap
+    let storage = try new Curves[1] --- in memory.heap
     storage[0] = Curves(owned_positions, origin, owned_offsets, owned_knots, owned_knot_offsets, owned_attributes, cache)
     return storage.data
 

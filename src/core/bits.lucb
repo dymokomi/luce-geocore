@@ -20,7 +20,7 @@ pub struct Bits:
 
     ## A view of a column of `count` bits (a boolean attribute's bytes or a
     ## Column[u64]); the column must hold whole words.
-    pub static func of_bytes(bytes: const u8[], count: usize) -> Bits:
+    pub func of_bytes(bytes: const u8[], count: usize) -> Bits:
         return Bits(u64[]((u64*)bytes.data, word_count(count)), count)
 
     pub func get(at: usize) -> bool:
@@ -53,38 +53,38 @@ pub struct BitsBuilder:
     pub var column: Column[u64]
     pub var count: usize
 
-    pub static func zeros(count: usize) -> BitsBuilder!:
+    pub func zeros(count: usize) -> BitsBuilder!:
         var column = try Column[u64].allocate(word_count(count))
         let words = column.span()
         if words.length > 0: memory.set(u8[]((u8*)words.data, words.length * 8), 0)
         return BitsBuilder(column, count)
 
-    pub static func ones(count: usize) -> BitsBuilder!:
+    pub func ones(count: usize) -> BitsBuilder!:
         var built = try BitsBuilder.zeros(count)
         built.set_range(0, count)
         return built
 
     ## A private copy of `bits`.
-    pub static func copy_of(bits: Bits) -> BitsBuilder!:
+    pub func copy_of(bits: Bits) -> BitsBuilder!:
         var column = try Column[u64].copy_of(bits.words)
         return BitsBuilder(column, bits.count)
 
-    pub mutating func words() -> u64[]:
+    pub func words() -> u64[]:
         return self.column.span()
 
     pub func view() -> Bits:
         return Bits(self.column.view(), self.count)
 
-    pub mutating func set(at: usize):
+    pub func set(at: usize):
         let words = self.column.span()
         words[at >> 6] = words[at >> 6] | ((u64)1 << (u64)(at & 63))
 
-    pub mutating func clear(at: usize):
+    pub func clear(at: usize):
         let words = self.column.span()
         words[at >> 6] = words[at >> 6] & ~((u64)1 << (u64)(at & 63))
 
     ## Set bits first..<end, a word at a time.
-    pub mutating func set_range(first: usize, end: usize):
+    pub func set_range(first: usize, end: usize):
         if end <= first: return
         let words = self.column.span()
         var at = first
@@ -100,7 +100,7 @@ pub struct BitsBuilder:
 
     ## Set every `step`-th bit of first..<end, keeping `keep` of each step
     ## (Houdini's `a-b:keep,step`).
-    pub mutating func set_stride(first: usize, end: usize, keep: usize, step: usize):
+    pub func set_stride(first: usize, end: usize, keep: usize, step: usize):
         if step <= 1 or keep >= step:
             self.set_range(first, end)
             return
@@ -111,35 +111,35 @@ pub struct BitsBuilder:
             if end - at <= step: return
             at += step
 
-    pub mutating func unite(other: Bits):
+    pub func unite(other: Bits):
         self.combine(other, 0)
 
-    pub mutating func subtract(other: Bits):
+    pub func subtract(other: Bits):
         self.combine(other, 1)
 
-    pub mutating func intersect(other: Bits):
+    pub func intersect(other: Bits):
         self.combine(other, 2)
 
     ## This = this ∪ ¬other (`!pattern` in a group expression).
-    pub mutating func unite_complement(other: Bits):
+    pub func unite_complement(other: Bits):
         self.combine(other, 3)
 
-    pub mutating func invert():
+    pub func invert():
         var nothing: u64[1]
         self.combine(Bits(nothing[..<0], self.count), 4)
 
-    mutating func combine(other: Bits, operation: u8):
+    func combine(other: Bits, operation: u8):
         var work = CombineWork(self.column.span(), other.words, operation, self.count)
         parallel.parallel_for(work.target.length, parallel_words, combine_words, (void*)&work)
 
     ## Publish: the column becomes immutable. The builder keeps nothing.
-    pub mutating func finish() -> Column[u64]:
+    pub func finish() -> Column[u64]:
         let column = self.column
         var empty: Column[u64]
         self.column = empty
         return column
 
-    pub mutating func close():
+    pub func close():
         self.column.release()
 
 struct CombineWork:

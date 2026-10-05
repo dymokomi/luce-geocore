@@ -45,8 +45,8 @@ pub struct Job:
     var after: Job*? = none
 
 func skip_item(context: void*?, index: usize):
-    discard(context)
-    discard(index)
+    _ = context
+    _ = index
 
 ## Batches with items still to hand out, oldest first; guarded by `lock`.
 var lock: sync.Mutex
@@ -95,9 +95,9 @@ struct Barrier:
     var arrived: @usize
 
 func meet(context: void*?, index: usize):
-    discard(index)
+    _ = index
     let barrier = (Barrier*)(context else return)
-    discard(barrier.arrived.add(1, .acq_rel))
+    _ = barrier.arrived.add(1, .acq_rel)
     while barrier.arrived.load(.acquire) < barrier.threads: thread.yield()
 
 ## Put a batch out on the pool's workers alone (at most `limit`, 0: all of
@@ -110,7 +110,7 @@ pub func start(job: Job*, count: usize, entry: func(void*?, usize) -> unit, cont
         job.next.store(count, .relaxed)
         for index in 0..<count:
             entry(context, index)
-            discard(job.finished.add(1, .acq_rel))
+            _ = job.finished.add(1, .acq_rel)
         return
     enqueue(job, count, entry, context, limit)
     lock.lock()
@@ -171,7 +171,7 @@ func work_on(job: Job*):
             ownership.finish_task()
         else:
             entry(job.context, index)
-        discard(job.finished.add(1, .acq_rel))
+        _ = job.finished.add(1, .acq_rel)
 
 ## Drop `job` from the queue if it is there; under `lock`.
 func unlink(job: Job*):
@@ -212,7 +212,7 @@ func ensure_workers():
     for _ in 0..<wanted:
         let handle = thread.spawn(worker_main, none, stack = worker_stack, name = "luce-pool") catch failure:
             # Fewer workers only means less help: callers do the rest.
-            discard(failure)
+            _ = failure
             break
         handle.detach()
         worker_count += 1
@@ -231,7 +231,7 @@ func next_job() -> Job*?:
     return none
 
 func worker_main(context: void*?):
-    discard(context)
+    _ = context
     on_worker = true
     lock.lock()
     while true:
@@ -252,11 +252,11 @@ struct Tally:
 
 func count_item(context: void*?, index: usize):
     let tally = (Tally*)(context else return)
-    discard(tally.hits.add(1, .relaxed))
-    discard(tally.seen.add((u64)1 << (u64)(index % 64), .relaxed))
+    _ = tally.hits.add(1, .relaxed)
+    _ = tally.seen.add((u64)1 << (u64)(index % 64), .relaxed)
 
 func nested_item(context: void*?, index: usize):
-    discard(index)
+    _ = index
     # Each item runs a batch of its own: every worker may be busy in the outer
     # one, so the inner caller must be able to finish it alone.
     run(8, count_item, context)
@@ -297,9 +297,9 @@ struct Chunks:
     var grain: usize = 1
 
 func skip_range(context: void*?, first: usize, end: usize):
-    discard(context)
-    discard(first)
-    discard(end)
+    _ = context
+    _ = first
+    _ = end
 
 func run_chunk(context: void*?, index: usize):
     let chunks = (Chunks*)(context else return)
@@ -328,7 +328,7 @@ func add_range(context: void*?, first: usize, end: usize):
     let sum = (Sum*)(context else return)
     var part: usize = 0
     for index in first..<end: part += index
-    discard(sum.total.add(part, .relaxed))
+    _ = sum.total.add(part, .relaxed)
 
 test "parallel_for covers the range once in chunks":
     var sum = Sum()

@@ -20,7 +20,7 @@ var cache_clock: u64 = 0
 
 func entries() -> CachedGroup[]!:
     if let known = cached: return CachedGroup[](known, cache_size)
-    let made = try alloc CachedGroup[cache_size] in memory.heap
+    let made = try new CachedGroup[cache_size] --- in memory.heap
     for at in 0..<cache_size: made[at] = CachedGroup(0, Column[u64](), GroupReport(), 0)
     cached = made.data
     return made
@@ -74,7 +74,7 @@ pub func clear_group_cache():
     cached = none
 
 func cache_key(mesh: const Mesh*, text: str, target: Domain) -> u64:
-    var key = mix(hash(text), (u64)(u8)target + 1)
+    var key = mix(text.hash(), (u64)(u8)target + 1)
     key = mix(key, mesh.corners_id())
     key = mix(key, mesh.offsets_id())
     key = mix(key, mesh.points_id())

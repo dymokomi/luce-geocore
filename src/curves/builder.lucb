@@ -61,7 +61,7 @@ pub struct CurvesBuilder:
         return self.points.count
 
     ## Start a curve; points follow. `parent` is the source curve (-1: new).
-    pub mutating func begin(kind: CurveType, cyclic: bool = false, resolution: i64 = default_resolution, order: i64 = default_order, mode: KnotMode = KnotMode.endpoint, parent: i32 = -1) -> !:
+    pub func begin(kind: CurveType, cyclic: bool = false, resolution: i64 = default_resolution, order: i64 = default_order, mode: KnotMode = KnotMode.endpoint, parent: i32 = -1) -> !:
         if self.offsets.count == 0:
             try self.offsets.push(0)
             try self.knot_offsets.push(0)
@@ -75,23 +75,23 @@ pub struct CurvesBuilder:
         try self.curve_parents.push(parent)
 
     ## Start a curve evaluated like `source`'s curve `curve`.
-    pub mutating func begin_like(source: const Curves*, curve: usize, parent: i32 = -1) -> !:
+    pub func begin_like(source: const Curves*, curve: usize, parent: i32 = -1) -> !:
         let settings = source.settings(curve)
         try self.begin(settings.kind, settings.cyclic, (i64)settings.resolution, (i64)settings.order, settings.knot_mode, parent)
 
     ## Change the current curve's type or closure.
-    pub mutating func set_type(kind: CurveType):
+    pub func set_type(kind: CurveType):
         self.types.items[self.types.count - 1] = (i8)(u8)kind
 
-    pub mutating func set_cyclic(cyclic: bool):
+    pub func set_cyclic(cyclic: bool):
         self.cyclic.items[self.cyclic.count - 1] = 1 if cyclic else 0
 
     ## A point at `position` (world) copying source point `parent` (-1: new).
-    pub mutating func point(position: Vector3, parent: i32 = -1) -> !:
+    pub func point(position: Vector3, parent: i32 = -1) -> !:
         try self.point_between(position, parent, -1, 0.0)
 
     ## A point between source points `a` and `b`, `t` of the way to `b`.
-    pub mutating func point_between(position: Vector3, a: i32, b: i32, t: f64) -> !:
+    pub func point_between(position: Vector3, a: i32, b: i32, t: f64) -> !:
         try self.points.push(position)
         try self.point_parents.push(a)
         try self.point_others.push(b)
@@ -102,12 +102,12 @@ pub struct CurvesBuilder:
         try self.handle_given.push(0)
 
     ## The last point's NURBS weight.
-    pub mutating func weight(value: f64):
+    pub func weight(value: f64):
         self.weights.items[self.weights.count - 1] = (f32)value
         self.any_weight = self.any_weight or value != 1.0
 
     ## The last point's Bezier handles (world).
-    pub mutating func handles(left: Vector3, right: Vector3):
+    pub func handles(left: Vector3, right: Vector3):
         let at = self.points.count - 1
         self.handles_l.items[at] = left
         self.handles_r.items[at] = right
@@ -115,14 +115,14 @@ pub struct CurvesBuilder:
         self.any_handle = true
 
     ## The current curve's custom knots.
-    pub mutating func custom_knots(values: const f64[]) -> !:
+    pub func custom_knots(values: const f64[]) -> !:
         for value in values: try self.knots.push((f32)value)
         self.modes.items[self.modes.count - 1] = (i8)(u8)KnotMode.custom
         self.any_knots = true
 
     ## Copy curve `curve` of `source` as it is: settings, points, handles,
     ## weights and custom knots, every point its own parent.
-    pub mutating func copy_curve(source: const Curves*, curve: usize) -> !:
+    pub func copy_curve(source: const Curves*, curve: usize) -> !:
         try self.begin_like(source, curve, (i32)curve)
         let (first, count) = source.range(curve)
         let left = float3_span(source, "handle_l")
@@ -138,11 +138,11 @@ pub struct CurvesBuilder:
             for value in knots: try self.knots.push(value)
             self.any_knots = true
 
-    mutating func close_curve() -> !:
+    func close_curve() -> !:
         try self.offsets.push((i32)self.points.count)
         try self.knot_offsets.push((i32)self.knots.count)
 
-    pub mutating func close():
+    pub func close():
         self.points.close()
         self.offsets.close()
         self.types.close()
@@ -163,7 +163,7 @@ pub struct CurvesBuilder:
 
     ## The curves built, carrying `source`'s attributes and groups through
     ## the parents. Curves without points are dropped.
-    pub mutating func finish(source: const Curves*? = none) -> Curves*!:
+    pub func finish(source: const Curves*? = none) -> Curves*!:
         if self.offsets.count == 0:
             try self.offsets.push(0)
             try self.knot_offsets.push(0)
@@ -196,7 +196,7 @@ pub struct CurvesBuilder:
         return try curves_assembled(positions.take(), origin, offsets.take(), knots.take(), knot_offsets.take(), handed)
 
     ## Remove curves that got no points (their knots with them).
-    mutating func drop_empty() -> !:
+    func drop_empty() -> !:
         var kept: usize = 0
         for curve in 0..<self.types.count:
             let first = self.offsets.items[curve]
@@ -223,7 +223,7 @@ pub struct CurvesBuilder:
         self.modes.count = kept
         self.curve_parents.count = kept
 
-    mutating func write_builtins(store: AttributeStore*, origin: Vector3) -> !:
+    func write_builtins(store: AttributeStore*, origin: Vector3) -> !:
         let curves = self.types.count
         var types = try Attribute.create("curve_type", curve_domain, DataType.int8, 1, curves)
         memory.copy(attribute_ops.typed_mut[i8](types.data.span()), self.types.view(), curves)
@@ -264,7 +264,7 @@ pub struct CurvesBuilder:
                 try store.put(handles)
 
     ## Points given no handles get automatic ones.
-    mutating func fill_auto_handles() -> !:
+    func fill_auto_handles() -> !:
         var relative = Growing[Float3]()
         defer relative.close()
         for curve in 0..<self.types.count:
@@ -280,7 +280,7 @@ pub struct CurvesBuilder:
                 self.handles_r.items[first + at] = self.points.items[first + at].add(tangent)
 
     ## Every non-builtin attribute of `source` through the parents.
-    mutating func carry(source: const Curves*, store: AttributeStore*) -> !:
+    func carry(source: const Curves*, store: AttributeStore*) -> !:
         for index in 0..<source.attributes.count():
             let entry = source.attributes.entry(index)
             if is_builtin(entry.name(), entry.domain): continue

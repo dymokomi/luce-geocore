@@ -45,11 +45,11 @@ func verb(name: str, set: const GeometrySet*, numbers: const f64[]) -> interop.R
 ## The n×n quad grid of the verb benchmark (837: 702,244 points, 700,569
 ## faces).
 func quad_grid(n: usize) -> interop.Reference[Mesh]!:
-    let points = try alloc Vector3[(n + 1) * (n + 1)] in memory.heap
+    let points = try new Vector3[(n + 1) * (n + 1)] --- in memory.heap
     defer free(points) in memory.heap
-    let sizes = try alloc i64[n * n] in memory.heap
+    let sizes = try new i64[n * n] --- in memory.heap
     defer free(sizes) in memory.heap
-    let corners = try alloc i64[n * n * 4] in memory.heap
+    let corners = try new i64[n * n * 4] --- in memory.heap
     defer free(corners) in memory.heap
     for z in 0..<n + 1:
         for x in 0..<n + 1: points[z * (n + 1) + x] = Vector3((f64)x - (f64)n * 0.5, 0.0, (f64)z - (f64)n * 0.5)
@@ -98,7 +98,7 @@ pub func main(arguments: str[]) -> i32!:
     defer grid.release()
     let sheet = try GeometrySet.of_mesh(grid)
     defer sheet.release()
-    discard(try grid.value().edge_count())
+    _ = try grid.value().edge_count()
     started = time.now()
     let outline = try verb("Mesh to Curve", sheet.value(), [1.0])
     row("Mesh to Curve: the 837x837 grid's boundary", started, (set_curves(outline.value()) else trap("curves")).point_count())
@@ -161,10 +161,10 @@ func large_faces() -> !:
                     let angle = 6.0 * 3.141592653589793 * (f64)at / (f64)(side - 1)
                     let radius = 1.0 + 0.25 * angle / 3.141592653589793 + (0.2 if wall == 0 else 0.0)
                     try points.push(Vector3(radius * math.cos(angle), radius * math.sin(angle), 0.0))
-        let corners = try alloc i64[points.count] in memory.heap
+        let corners = try new i64[points.count] --- in memory.heap
         defer free(corners) in memory.heap
         for at in 0..<points.count: corners[at] = (i64)at
-        let output = try alloc i64[(points.count - 2) * 3] in memory.heap
+        let output = try new i64[(points.count - 2) * 3] --- in memory.heap
         defer free(output) in memory.heap
         let started = time.now()
         try geocore_kernel.triangulate_polygon(points.view(), corners, 0, points.count, Vector3(0.0, 0.0, 1.0), output)

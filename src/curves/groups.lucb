@@ -45,7 +45,7 @@ struct CurveEvaluation:
     func size(domain: Domain) -> usize:
         return self.curves.point_count() if domain == Domain.point else self.curves.curve_count()
 
-    mutating func terms(first: u32, count: u32, target: Domain) -> BitsBuilder!:
+    func terms(first: u32, count: u32, target: Domain) -> BitsBuilder!:
         var result = try BitsBuilder.zeros(self.size(target))
         errdefer result.close()
         for index in first..<first + count:
@@ -59,7 +59,7 @@ struct CurveEvaluation:
                 _: result.intersect(atom.view())
         return result
 
-    mutating func atom(term: const Term*, target: Domain) -> BitsBuilder!:
+    func atom(term: const Term*, target: Domain) -> BitsBuilder!:
         match term.kind:
             .all: return try BitsBuilder.ones(self.size(target))
             .range: return try self.range(term, target)
@@ -69,7 +69,7 @@ struct CurveEvaluation:
             .point_edges, .face_edge: error(errors.invalid, "group syntax: curves have no edge groups")
             _: return try self.call(term, target)
 
-    mutating func range(term: const Term*, target: Domain) -> BitsBuilder!:
+    func range(term: const Term*, target: Domain) -> BitsBuilder!:
         let size = self.size(target)
         var bits = try BitsBuilder.zeros(size)
         errdefer bits.close()
@@ -89,7 +89,7 @@ struct CurveEvaluation:
 
     ## Groups matching `pattern` on the target, else on the other domain,
     ## converted.
-    mutating func name(pattern: str, target: Domain) -> BitsBuilder!:
+    func name(pattern: str, target: Domain) -> BitsBuilder!:
         let order: Domain[2] = [target, Domain.point if target == curve_domain else curve_domain]
         for domain in order:
             var bits = try BitsBuilder.zeros(self.size(domain))
@@ -111,7 +111,7 @@ struct CurveEvaluation:
 
     ## `@name op values` on the target, else on the attribute's own domain,
     ## converted. `@ptnum`, `@primnum`, `@elemnum` and `@P` are built in.
-    mutating func attribute(term: const Term*, target: Domain) -> BitsBuilder!:
+    func attribute(term: const Term*, target: Domain) -> BitsBuilder!:
         let name = self.program.text(term)
         var kind: u8 = 3
         var domain = target
@@ -141,7 +141,7 @@ struct CurveEvaluation:
         self.report.converted = self.report.converted or kind != 1
         return try convert_curve_bits(self.curves, bits.view(), domain, target)
 
-    mutating func tested(term: const Term*, kind: u8, entry: const Attribute*?, domain: Domain) -> BitsBuilder!:
+    func tested(term: const Term*, kind: u8, entry: const Attribute*?, domain: Domain) -> BitsBuilder!:
         let size = self.size(domain)
         var bits = try BitsBuilder.zeros(size)
         errdefer bits.close()
@@ -174,7 +174,7 @@ struct CurveEvaluation:
             if compared(term.compare, values, value): bits.set(element)
         return bits
 
-    mutating func call(term: const Term*, target: Domain) -> BitsBuilder!:
+    func call(term: const Term*, target: Domain) -> BitsBuilder!:
         let steps = (usize)math.max(0.0, term.argument)
         match term.function:
             .loop, .ring: error(errors.invalid, "group syntax: loop and ring need polygon edges")

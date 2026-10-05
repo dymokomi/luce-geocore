@@ -10,7 +10,7 @@ pub struct Matrix4:
     pub let z: Vector3 = Vector3(0.0, 0.0, 1.0)
     pub let translation: Vector3 = Vector3()
 
-    pub static func compose(position: Vector3, rotation: Vector3, scale: Vector3) -> Matrix4:
+    pub func compose(position: Vector3, rotation: Vector3, scale: Vector3) -> Matrix4:
         return Matrix4(Vector3(scale.x, 0.0, 0.0).rotated(rotation),
                        Vector3(0.0, scale.y, 0.0).rotated(rotation),
                        Vector3(0.0, 0.0, scale.z).rotated(rotation), position)

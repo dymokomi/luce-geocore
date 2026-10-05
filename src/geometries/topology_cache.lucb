@@ -38,7 +38,7 @@ pub struct TopologyCache:
     var extension_dispose: func(void*) -> unit = ignore_extension
 
     ## The face of every corner.
-    pub mutating func faces(offsets: const i32[], corners: usize) -> const i32[]!:
+    pub func faces(offsets: const i32[], corners: usize) -> const i32[]!:
         if self.faces_ready.load(.acquire) == 0:
             self.lock.lock()
             defer self.lock.unlock()
@@ -53,7 +53,7 @@ pub struct TopologyCache:
     ## Two points per edge, and the edge of every corner (its edge to the next
     ## corner). Edges are numbered by their first corner, so ids depend on
     ## connectivity alone.
-    pub mutating func edges(offsets: const i32[], corners: const i32[], points: usize) -> (const i32[], const i32[])!:
+    pub func edges(offsets: const i32[], corners: const i32[], points: usize) -> (const i32[], const i32[])!:
         if self.edges_ready.load(.acquire) == 0:
             self.lock.lock()
             defer self.lock.unlock()
@@ -64,7 +64,7 @@ pub struct TopologyCache:
 
     ## For every point, the faces using it (a face once per corner at it), as
     ## offsets into one array.
-    pub mutating func incidence(offsets: const i32[], corners: const i32[], points: usize) -> (const i32[], const i32[])!:
+    pub func incidence(offsets: const i32[], corners: const i32[], points: usize) -> (const i32[], const i32[])!:
         if self.incidence_ready.load(.acquire) == 0:
             self.lock.lock()
             defer self.lock.unlock()
@@ -74,7 +74,7 @@ pub struct TopologyCache:
         return (self.point_face_offsets.view(), self.point_faces.view())
 
     ## For every edge, the corners whose outgoing edge it is. Needs `edges`.
-    pub mutating func edge_corners(corner_edges: const i32[], edges: usize) -> (const i32[], const i32[])!:
+    pub func edge_corners(corner_edges: const i32[], edges: usize) -> (const i32[], const i32[])!:
         if self.edge_corners_ready.load(.acquire) == 0:
             self.lock.lock()
             defer self.lock.unlock()
@@ -84,7 +84,7 @@ pub struct TopologyCache:
         return (self.edge_corner_offsets.view(), self.edge_corner_list.view())
 
     ## For every point, the edges ending at it. Needs `edges`.
-    pub mutating func point_edges(edge_points: const i32[], points: usize) -> (const i32[], const i32[])!:
+    pub func point_edges(edge_points: const i32[], points: usize) -> (const i32[], const i32[])!:
         if self.point_edges_ready.load(.acquire) == 0:
             self.lock.lock()
             defer self.lock.unlock()
@@ -93,7 +93,7 @@ pub struct TopologyCache:
                 self.point_edges_ready.store(1, .release)
         return (self.point_edge_offsets.view(), self.point_edge_list.view())
 
-    pub mutating func connectivity_hash(offsets: const i32[], corners: const i32[], points: usize) -> u64:
+    pub func connectivity_hash(offsets: const i32[], corners: const i32[], points: usize) -> u64:
         if self.hash_ready.load(.acquire) == 0:
             self.lock.lock()
             defer self.lock.unlock()
@@ -105,22 +105,22 @@ pub struct TopologyCache:
     ## Group each corner's edge by its low point (a counting sort in corner
     ## order), find each group's first corner per high point in parallel, and
     ## number the first corners in corner order.
-    mutating func build_edges(offsets: const i32[], corners: const i32[], points: usize) -> !:
+    func build_edges(offsets: const i32[], corners: const i32[], points: usize) -> !:
         let count = corners.length
-        let high = try alloc i32[count] in memory.heap
+        let high = try new i32[count] --- in memory.heap
         defer free(high) in memory.heap
-        let low = try alloc i32[count] in memory.heap
+        let low = try new i32[count] --- in memory.heap
         defer free(low) in memory.heap
         var ends = EndWork(offsets, corners, low, high)
         parallel.parallel_for(offsets.length - 1, 4096, fill_ends, (void*)&ends)
-        let starts = try alloc i32[points + 1] in memory.heap
+        let starts = try new i32[points + 1] --- in memory.heap
         defer free(starts) in memory.heap
         for at in 0..<starts.length: starts[at] = 0
         for corner in 0..<count: starts[(usize)low[corner] + 1] += 1
         for point in 0..<points: starts[point + 1] += starts[point]
-        let bucket = try alloc i32[count] in memory.heap
+        let bucket = try new i32[count] --- in memory.heap
         defer free(bucket) in memory.heap
-        let cursor = try alloc i32[points] in memory.heap
+        let cursor = try new i32[points] --- in memory.heap
         defer free(cursor) in memory.heap
         memory.copy(cursor, starts[..<points], points)
         for corner in 0..<count:
@@ -130,7 +130,7 @@ pub struct TopologyCache:
         # Reuse `low` for each corner's first corner of its edge.
         var groups = GroupWork(starts, bucket, high, low)
         parallel.parallel_for(points, 4096, first_corners, (void*)&groups)
-        let ids = try alloc i32[count] in memory.heap
+        let ids = try new i32[count] --- in memory.heap
         defer free(ids) in memory.heap
         var next: i32 = 0
         for corner in 0..<count:
@@ -145,7 +145,7 @@ pub struct TopologyCache:
         self.edge_points = edge_points
         self.corner_edges = corner_edges
 
-    mutating func build_incidence(offsets: const i32[], corners: const i32[], points: usize) -> !:
+    func build_incidence(offsets: const i32[], corners: const i32[], points: usize) -> !:
         var starts = try Column[i32].allocate(points + 1)
         errdefer starts.release()
         let first = starts.span()
@@ -154,7 +154,7 @@ pub struct TopologyCache:
         for point in 0..<points: first[point + 1] += first[point]
         var faces = try Column[i32].allocate(corners.length)
         errdefer faces.release()
-        let cursor = try alloc i32[points] in memory.heap
+        let cursor = try new i32[points] --- in memory.heap
         defer free(cursor) in memory.heap
         memory.copy(cursor, first[..<points], points)
         let output = faces.span()
@@ -168,7 +168,7 @@ pub struct TopologyCache:
 
     ## The extension, made by `make` on first use; `dispose` frees it with
     ## the cache. One module owns the slot.
-    pub mutating func extension_of(dispose: func(void*) -> unit, make: func() -> void*!) -> void*!:
+    pub func extension_of(dispose: func(void*) -> unit, make: func() -> void*!) -> void*!:
         self.extension_lock.lock()
         defer self.extension_lock.unlock()
         if let made = self.extension: return made
@@ -178,7 +178,7 @@ pub struct TopologyCache:
         return made
 
     ## Called by the last owner, after every reader.
-    pub mutating func close():
+    pub func close():
         if let made = self.extension:
             let dispose = self.extension_dispose
             dispose(made)
@@ -194,7 +194,7 @@ pub struct TopologyCache:
         self.point_edge_list.release()
 
 func ignore_extension(context: void*):
-    discard(context)
+    _ = context
 
 ## A counting sort: element i of `keys` goes to bucket keys[i], and the
 ## bucket lists `i / per` (so with per = 2, edge endpoints list their edge).
@@ -207,7 +207,7 @@ func bucketed(keys: const i32[], buckets: usize, offsets: Column[i32]*, list: Co
     for at in 0..<buckets: first[at + 1] += first[at]
     var items = try Column[i32].allocate(keys.length)
     errdefer items.release()
-    let cursor = try alloc i32[buckets] in memory.heap
+    let cursor = try new i32[buckets] --- in memory.heap
     defer free(cursor) in memory.heap
     memory.copy(cursor, first[..<buckets], buckets)
     let output = items.span()

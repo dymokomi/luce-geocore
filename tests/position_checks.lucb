@@ -50,11 +50,11 @@ func tagged_move(points: const Vector3[], corners: const i64[], display: const i
     return try tagged.value().moved_points([3, 11], Vector3(0.0, 0.0, 0.05))
 
 pub func exercise() -> !:
-    let points = try alloc Vector3[16] in memory.heap
+    let points = try new Vector3[16] --- in memory.heap
     defer free(points) in memory.heap
-    let corners = try alloc i64[16] in memory.heap
+    let corners = try new i64[16] --- in memory.heap
     defer free(corners) in memory.heap
-    let display = try alloc i64[42] in memory.heap
+    let display = try new i64[42] --- in memory.heap
     defer free(display) in memory.heap
     band(points, corners, display)
     assert(try fanned(points, corners))

@@ -18,9 +18,9 @@ pub func surface_mesh(grid: const SparseGrid*, iso: f64, exact: const Sdf*?) -> 
     let sign = 1.0 if grid.class == GridClass.level_set else -1.0
     var masks = try Column[u64].allocate(leaves * mask_words)
     defer masks.release()
-    let vertex_counts = try alloc usize[leaves + 1] in memory.heap
+    let vertex_counts = try new usize[leaves + 1] --- in memory.heap
     defer free(vertex_counts) in memory.heap
-    let quad_counts = try alloc usize[leaves + 1] in memory.heap
+    let quad_counts = try new usize[leaves + 1] --- in memory.heap
     defer free(quad_counts) in memory.heap
     var cells = NetsWork(grid, iso, sign, masks.span(), vertex_counts, quad_counts, empty_float3(), empty_i32(), 0)
     parallel.parallel_for(leaves, 4, count_leaves, (void*)&cells)

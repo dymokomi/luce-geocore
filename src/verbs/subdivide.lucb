@@ -43,7 +43,7 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
     try builder.begin(mesh)
     try builder.copy_points(mesh)
     # Face points: centroids.
-    let centers = try alloc Vector3[faces] in memory.heap
+    let centers = try new Vector3[faces] --- in memory.heap
     defer free(centers) in memory.heap
     for face in 0..<faces:
         var sum = Vector3()
@@ -69,7 +69,7 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
         parents[1] = b
         weights[0] = 0.5
         weights[1] = 0.5
-        discard(try builder.mixed_point(position, parents[..<2], weights[..<2]))
+        _ = try builder.mixed_point(position, parents[..<2], weights[..<2])
     for face in 0..<faces:
         let start = (usize)offsets[face]
         let size = (usize)offsets[face + 1] - start
@@ -81,7 +81,7 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
         for at in 0..<size:
             face_parents[at] = corners[start + at]
             face_weights[at] = (f32)(1.0 / (f64)size)
-        discard(try builder.mixed_point(centers[face], face_parents, face_weights))
+        _ = try builder.mixed_point(centers[face], face_parents, face_weights)
     if smooth: try catmull_clark_points(&topology, builder, centers)
     # n quads per face.
     let edge_base = (i32)points
@@ -118,9 +118,9 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
 ## over n faces, boundary 3/4 P + 1/8 each boundary neighbour; points on
 ## creases or other irregular boundaries stay.
 func catmull_clark_points(topology: const Topology*, builder: TopologyBuilder*, centers: const Vector3[]) -> !:
-    let point_faces = try alloc Vector3[topology.points] in memory.heap
+    let point_faces = try new Vector3[topology.points] --- in memory.heap
     defer free(point_faces) in memory.heap
-    let face_counts = try alloc u32[topology.points] in memory.heap
+    let face_counts = try new u32[topology.points] --- in memory.heap
     defer free(face_counts) in memory.heap
     for at in 0..<topology.points:
         point_faces[at] = Vector3()
@@ -129,7 +129,7 @@ func catmull_clark_points(topology: const Topology*, builder: TopologyBuilder*, 
         let point = (usize)topology.corners[corner]
         point_faces[point] = point_faces[point].add(centers[(usize)topology.corner_faces[corner]])
         face_counts[point] += 1
-    let moved = try alloc Vector3[topology.points] in memory.heap
+    let moved = try new Vector3[topology.points] --- in memory.heap
     defer free(moved) in memory.heap
     for point in 0..<topology.points:
         let p = builder.position((i32)point)
