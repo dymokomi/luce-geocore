@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-geocore" {
     str owner = "dymokomi"
-    str version = "0.6.0"
+    str version = "0.7.0"
     str kind = "package"
     str language = "luce-base"
     str description = "Shared geometry for Luce: polygon meshes, attributes, modeling kernels and CPU spatial queries, with no GPU or UI dependency."
@@ -10,7 +10,7 @@ def package "luce-geocore" {
 
     def dependency "luce-std" {
         str owner = "dymokomi"
-        str version = "^0.5.0"
+        str version = "^0.6.0"
         str path = "../luce-std"
     }
 }
