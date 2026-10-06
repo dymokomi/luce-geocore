@@ -20,7 +20,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           git clone -q --depth 1 https://github.com/dymokomi/luce-base.git
-          python3 luce-base/tools/checkout_main.py luce-geocore
+          python3 luce-base/tools/checkout_main.py luce-geocore luce
       - name: Select Clang
         run: |
           mkdir -p "$RUNNER_TEMP/luce-bin"
