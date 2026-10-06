@@ -33,8 +33,8 @@ array that keeps its capacity). A mesh's arrays as spans (`point_span()`,
 are methods of `Mesh` that only Base sees: Luce leaves out the methods whose
 signatures it cannot take.
 
-Use the compiler revisions in `bootstrap/PACKAGES`, checked out beside this
-repository, and run `./test.sh`: the Base checks at native optimization levels
+Check out the compilers and packages beside this repository, at main (`python3
+../luce-base/tools/checkout_main.py . ../luce`), and run `./test.sh`: the Base checks at native optimization levels
 0–3 and in both C modes, each with allocation failure injected at every stage.
 
 Licensed under MIT or Apache-2.0, at your option.
