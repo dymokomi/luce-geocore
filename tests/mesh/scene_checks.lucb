@@ -1,5 +1,6 @@
 ## Cameras and lights in a set: created, placed by Transform, joined by
-## Merge, found inside instances, filtered by path and kept by the codec.
+## Merge, found inside instances, filtered by path and kept by the codec,
+## a dome light's texture file with them.
 import interop
 from luce_std import math
 from io import path
@@ -72,12 +73,15 @@ pub func exercise() -> !:
     try file.assign(path.temp().bytes)
     try file.push(47)
     for byte in "luce-geocore-scene.prism".bytes: try file.push(byte)
-    _ = try save_geometry(lit.value(), (str)file.view(), 5, 268435456)
+    let domed = try lit.value().with_light("/sky", Vector3(), Vector3(), 4, Vector3(1.0, 1.0, 1.0), 1.0, 0.0, 0.0, false, 1.0, 1.0, 0.5, 0.53, true, "skies/noon.exr")
+    defer domed.release()
+    _ = try save_geometry(domed.value(), (str)file.view(), 5, 268435456)
     let loaded = try adopt_set(try load_geometry((str)file.view()))
     defer loaded.release()
     let back = try loaded.value().scene()
     defer back.release()
-    assert(back.value().count() == 2 and (try back.value().path(0)) == "/camera1" and (try back.value().path(1)) == "/key")
+    assert(back.value().count() == 3 and (try back.value().path(0)) == "/camera1" and (try back.value().path(1)) == "/key")
+    assert((try back.value().object(2)).light.shape == LightShape.dome and (try back.value().texture(2)) == "skies/noon.exr" and (try back.value().texture(1)) == "")
     let light = (try back.value().object(1)).light
     assert(same(light.color, Vector3(1.0, 0.9, 0.8)) and near(light.intensity, 10.0) and near(light.exposure, 1.0) and not light.visible)
     assert(same((try back.value().object(1)).matrix.translation, Vector3(2.0, 3.0, 0.0)))

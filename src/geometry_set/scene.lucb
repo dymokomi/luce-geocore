@@ -22,6 +22,10 @@ pub enum LightShape as u8:
     disk = 1
     sphere = 2
     distant = 3
+    ## Light from every direction, an image wrapped around the scene
+    ## (UsdLuxDomeLight, lat-long): the texture's center looks down the
+    ## light's -Z, its top is +Y.
+    dome = 4
 
 ## A camera as UsdGeomCamera describes it. Lens and film-back lengths are in
 ## millimetres (USD's tenths of a scene unit are not used); clipping and
@@ -72,6 +76,9 @@ pub struct SceneObject:
     pub let light: Light
     var path_at: usize
     var path_length: usize
+    ## A dome light's texture file (empty: its color alone), in the text.
+    var texture_at: usize
+    var texture_length: usize
 
 pub struct SceneObjects:
     var objects: Growing[SceneObject]
@@ -92,11 +99,19 @@ pub struct SceneObjects:
         let item = &self.objects.items[index]
         return (str)self.text.items[item.path_at..<item.path_at + item.path_length]
 
-    ## Add `object` (its path fields ignored) at `path`, under `matrix`.
-    pub func add(object: SceneObject, path: str, matrix: Matrix4) -> !:
+    ## A dome light's texture file; empty for every other object.
+    pub func texture(index: usize) -> str:
+        let item = &self.objects.items[index]
+        return (str)self.text.items[item.texture_at..<item.texture_at + item.texture_length]
+
+    ## Add `object` (its text fields ignored) at `path`, under `matrix`, with
+    ## a dome light's `texture`.
+    pub func add(object: SceneObject, path: str, matrix: Matrix4, texture: str = "") -> !:
         let at = self.text.count
         try append_text(&self.text, path)
-        try self.objects.push(SceneObject(object.kind, matrix, object.camera, object.light, at, path.length))
+        let texture_at = self.text.count
+        try append_text(&self.text, texture)
+        try self.objects.push(SceneObject(object.kind, matrix, object.camera, object.light, at, path.length, texture_at, texture.length))
 
     ## Add every object of `other`, each under `placement` (none: as it is).
     pub func add_all(other: const SceneObjects*, placement: const Matrix4*?) -> !:
@@ -104,17 +119,17 @@ pub struct SceneObjects:
             let item = other.objects.items[index]
             var matrix = item.matrix
             if let outer = placement: matrix = outer.multiply(item.matrix)
-            try self.add(item, other.path(index), matrix)
+            try self.add(item, other.path(index), matrix, other.texture(index))
 
     pub func close():
         self.objects.close()
         self.text.close()
 
 pub func camera_object(camera: Camera) -> SceneObject:
-    return SceneObject(SceneKind.camera, Matrix4(), camera, default_light(), 0, 0)
+    return SceneObject(SceneKind.camera, Matrix4(), camera, default_light(), 0, 0, 0, 0)
 
 pub func light_object(light: Light) -> SceneObject:
-    return SceneObject(SceneKind.light, Matrix4(), default_camera(), light, 0, 0)
+    return SceneObject(SceneKind.light, Matrix4(), default_camera(), light, 0, 0, 0, 0)
 
 ## A 50 mm lens on a 36 × 24 mm film back, as USD's defaults are in spirit.
 pub func default_camera() -> Camera:
@@ -180,7 +195,7 @@ func filter_scene(data: const void*, filter: const PathFilter*, keep: bool) -> v
     errdefer close_scene((void*)result)
     for index in 0..<source.count():
         let item = source.objects.items[index]
-        if filter.matches(source.path(index)) == keep: try result.add(item, source.path(index), item.matrix)
+        if filter.matches(source.path(index)) == keep: try result.add(item, source.path(index), item.matrix, source.texture(index))
     return (void*)result
 
 func describe_scene(data: const void*, out: Growing[u8]*) -> !:
@@ -241,6 +256,11 @@ pub struct SceneList:
         if index < 0 or index >= self.count(): error(errors.invalid, "scene object index out of range")
         return self.objects.path((usize)index)
 
+    ## A dome light's texture file; empty for every other object.
+    pub func texture(index: i64) -> str!:
+        if index < 0 or index >= self.count(): error(errors.invalid, "scene object index out of range")
+        return self.objects.texture((usize)index)
+
     pub func is_camera(index: i64) -> bool!:
         return (try self.object(index)).kind == SceneKind.camera
 
@@ -294,20 +314,21 @@ extend GeometrySet:
         return try self.with_scene_object(camera_object(camera), path, translation, rotation)
 
     ## This set with a light at `path`. `shape` is 0 rect, 1 disk, 2 sphere,
-    ## 3 distant; `color` is linear; `temperature` 0 is off.
-    pub func with_light(path: str, translation: Vector3, rotation: Vector3, shape: i64, color: Vector3, intensity: f64, exposure: f64, temperature: f64, normalize: bool, width: f64, height: f64, radius: f64, angle: f64, visible: bool) -> interop.Reference[GeometrySet]!:
-        if shape < 0 or shape > 3: error(errors.invalid, "unknown light shape")
+    ## 3 distant, 4 dome; `color` is linear; `temperature` 0 is off; a dome's
+    ## `texture` is an image file (empty: the color alone).
+    pub func with_light(path: str, translation: Vector3, rotation: Vector3, shape: i64, color: Vector3, intensity: f64, exposure: f64, temperature: f64, normalize: bool, width: f64, height: f64, radius: f64, angle: f64, visible: bool, texture: str = "") -> interop.Reference[GeometrySet]!:
+        if shape < 0 or shape > 4: error(errors.invalid, "unknown light shape")
         if intensity < 0.0 or width < 0.0 or height < 0.0 or radius < 0.0 or angle < 0.0: error(errors.invalid, "light intensity and sizes cannot be negative")
         let light = Light((LightShape)(u8)shape, color, intensity, exposure, math.max(temperature, 0.0), normalize, width, height, radius, angle, visible)
-        return try self.with_scene_object(light_object(light), path, translation, rotation)
+        return try self.with_scene_object(light_object(light), path, translation, rotation, texture)
 
-    func with_scene_object(object: SceneObject, path: str, translation: Vector3, rotation: Vector3) -> interop.Reference[GeometrySet]!:
+    func with_scene_object(object: SceneObject, path: str, translation: Vector3, rotation: Vector3, texture: str = "") -> interop.Reference[GeometrySet]!:
         let objects = try new_scene_objects()
         if let existing = self.find(&scene_component):
             objects.add_all((const SceneObjects*)existing, none) catch failure:
                 close_scene((void*)objects)
                 error(failure.code, failure.message)
-        objects.add(object, path, Matrix4.compose(translation, rotation, Vector3(1.0, 1.0, 1.0))) catch failure:
+        objects.add(object, path, Matrix4.compose(translation, rotation, Vector3(1.0, 1.0, 1.0)), texture) catch failure:
             close_scene((void*)objects)
             error(failure.code, failure.message)
         return try adopt_set(try self.with_component(&scene_component, (void*)objects))
