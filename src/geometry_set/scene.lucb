@@ -1,0 +1,313 @@
+## The scene family: cameras and lights, the objects a render reads beside
+## the geometry. They travel in the set like any component, so Transform
+## places them, Merge joins them, Group instances them and Blast filters them
+## by path; there is no separate scene context.
+##
+## Parameters follow USD's schemas (UsdGeomCamera, UsdLux), so every render
+## engine and the USD exporter read one description. Each object looks
+## or emits down its local -Z with +Y up. Objects are few, so a share copies
+## them (a component is immutable once in a set).
+
+pub enum SceneKind as u8:
+    camera = 0
+    light = 1
+
+pub enum Projection as u8:
+    perspective = 0
+    orthographic = 1
+
+## UsdLux's shapes: RectLight, DiskLight, SphereLight and DistantLight.
+pub enum LightShape as u8:
+    rect = 0
+    disk = 1
+    sphere = 2
+    distant = 3
+
+## A camera as UsdGeomCamera describes it. Lens and film-back lengths are in
+## millimetres (USD's tenths of a scene unit are not used); clipping and
+## focus are in scene units.
+pub struct Camera:
+    pub let projection: Projection
+    pub let focal_length: f64
+    pub let horizontal_aperture: f64
+    pub let vertical_aperture: f64
+    pub let near: f64
+    pub let far: f64
+    ## 0 is a pinhole: no depth of field.
+    pub let f_stop: f64
+    pub let focus_distance: f64
+
+    ## The vertical field of view in radians (perspective).
+    pub func vertical_field_of_view() -> f64:
+        return 2.0 * math.atan(self.vertical_aperture / (2.0 * self.focal_length))
+
+## A light as UsdLux describes it: radiance is color × intensity ×
+## 2^exposure, times the blackbody color of `temperature` when it is not 0.
+## `normalize` divides by the emitting area so resizing keeps the power.
+pub struct Light:
+    pub let shape: LightShape
+    pub let color: Vector3
+    pub let intensity: f64
+    pub let exposure: f64
+    ## Kelvin; 0 uses `color` alone.
+    pub let temperature: f64
+    pub let normalize: bool
+    ## Rect: the extent along local X and Y.
+    pub let width: f64
+    pub let height: f64
+    ## Disk and sphere.
+    pub let radius: f64
+    ## Distant: the angular diameter in degrees.
+    pub let angle: f64
+    ## Seen directly by camera rays (lights are invisible to them by default).
+    pub let visible: bool
+
+## One object: a camera or a light, its world placement and its path.
+pub struct SceneObject:
+    pub let kind: SceneKind
+    pub let matrix: Matrix4
+    ## The camera when `kind` is camera, the light when it is light; the
+    ## other is unused.
+    pub let camera: Camera
+    pub let light: Light
+    var path_at: usize
+    var path_length: usize
+
+pub struct SceneObjects:
+    var objects: Growing[SceneObject]
+    ## Every object's path, back to back.
+    var text: Growing[u8]
+
+    pub func init():
+        self.objects = Growing[SceneObject]()
+        self.text = Growing[u8]()
+
+    pub func count() -> usize:
+        return self.objects.count
+
+    pub func object(index: usize) -> SceneObject:
+        return self.objects.items[index]
+
+    pub func path(index: usize) -> str:
+        let item = &self.objects.items[index]
+        return (str)self.text.items[item.path_at..<item.path_at + item.path_length]
+
+    ## Add `object` (its path fields ignored) at `path`, under `matrix`.
+    pub func add(object: SceneObject, path: str, matrix: Matrix4) -> !:
+        let at = self.text.count
+        try append_text(&self.text, path)
+        try self.objects.push(SceneObject(object.kind, matrix, object.camera, object.light, at, path.length))
+
+    ## Add every object of `other`, each under `placement` (none: as it is).
+    pub func add_all(other: const SceneObjects*, placement: const Matrix4*?) -> !:
+        for index in 0..<other.count():
+            let item = other.objects.items[index]
+            var matrix = item.matrix
+            if let outer = placement: matrix = outer.multiply(item.matrix)
+            try self.add(item, other.path(index), matrix)
+
+    pub func close():
+        self.objects.close()
+        self.text.close()
+
+pub func camera_object(camera: Camera) -> SceneObject:
+    return SceneObject(SceneKind.camera, Matrix4(), camera, default_light(), 0, 0)
+
+pub func light_object(light: Light) -> SceneObject:
+    return SceneObject(SceneKind.light, Matrix4(), default_camera(), light, 0, 0)
+
+## A 50 mm lens on a 36 × 24 mm film back, as USD's defaults are in spirit.
+pub func default_camera() -> Camera:
+    return Camera(Projection.perspective, 50.0, 36.0, 24.0, 0.1, 10000.0, 0.0, 10.0)
+
+## A 1 × 1 white rect light of intensity 1, normalized.
+pub func default_light() -> Light:
+    return Light(LightShape.rect, Vector3(1.0, 1.0, 1.0), 1.0, 0.0, 0.0, true, 1.0, 1.0, 0.5, 0.53, false)
+
+pub func new_scene_objects() -> SceneObjects*!:
+    return try new SceneObjects() in memory.heap
+
+pub let scene_component: ComponentType = ComponentType("scene", share_scene, close_scene, scene_size, scene_bytes, scene_bounds, place_scene, join_scene, scene_paths, filter_scene, describe_scene, "", no_trace)
+
+func share_scene(data: const void*) -> void*!:
+    let copy = try new_scene_objects()
+    copy.add_all((const SceneObjects*)data, none) catch failure:
+        close_scene((void*)copy)
+        error(failure.code, failure.message)
+    return (void*)copy
+
+func close_scene(data: void*):
+    let objects = (SceneObjects*)data
+    objects.close()
+    free(SceneObjects[](objects, 1)) in memory.heap
+
+func scene_size(data: const void*) -> usize:
+    return ((const SceneObjects*)data).count()
+
+func scene_bytes(data: const void*, ids: IdSet*) -> usize!:
+    _ = ids
+    let objects = (const SceneObjects*)data
+    return 64 + objects.objects.count * memory.size_of(SceneObject) + objects.text.count
+
+## Cameras and lights have no extent of their own: framing ignores them.
+func scene_bounds(data: const void*, matrix: Matrix4, out: Bounds*) -> bool!:
+    _ = data
+    _ = matrix
+    _ = out
+    return false
+
+func place_scene(data: const void*, placement: const Placement*) -> void*!:
+    let placed = try new_scene_objects()
+    placed.add_all((const SceneObjects*)data, &placement.matrix) catch failure:
+        close_scene((void*)placed)
+        error(failure.code, failure.message)
+    return (void*)placed
+
+func join_scene(first: const void*, second: const void*) -> void*!:
+    let joined = try new_scene_objects()
+    errdefer close_scene((void*)joined)
+    try joined.add_all((const SceneObjects*)first, none)
+    try joined.add_all((const SceneObjects*)second, none)
+    return (void*)joined
+
+func scene_paths(data: const void*, out: TableBuilder*) -> !:
+    let objects = (const SceneObjects*)data
+    for index in 0..<objects.count(): _ = try out.intern(objects.path(index))
+
+func filter_scene(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
+    let source = (const SceneObjects*)data
+    let result = try new_scene_objects()
+    errdefer close_scene((void*)result)
+    for index in 0..<source.count():
+        let item = source.objects.items[index]
+        if filter.matches(source.path(index)) == keep: try result.add(item, source.path(index), item.matrix)
+    return (void*)result
+
+func describe_scene(data: const void*, out: Growing[u8]*) -> !:
+    let objects = (const SceneObjects*)data
+    var cameras: usize = 0
+    for item in objects.objects.view():
+        if item.kind == SceneKind.camera: cameras += 1
+    try append_number(out, cameras)
+    try append_text(out, " cameras / ")
+    try append_number(out, objects.count() - cameras)
+    try append_text(out, " lights")
+
+# mark: Flattening
+
+## Every camera and light of `set` and of its instances, recursively, in
+## world space (under `matrix`), into `out`: what an engine renders.
+## Hidden instances still count; visibility is the viewport's.
+pub func scene_flattened(set: const GeometrySet*, matrix: Matrix4, out: SceneObjects*) -> !:
+    if let data = set.find(&scene_component): try out.add_all((const SceneObjects*)data, &matrix)
+    let found = set.find(&instances_component) else return
+    let instances = (const Instances*)found
+    # Rows are walked only for prototypes that hold scene objects somewhere,
+    # so instancing a mesh many times costs nothing here.
+    var holds = Growing[bool]()
+    defer holds.close()
+    var any = false
+    for index in 0..<instances.prototype_count():
+        let has = set_has_scene(instances.prototype(index))
+        try holds.push(has)
+        any = any or has
+    if not any: return
+    for at in 0..<instances.count():
+        let item = instances.item(at)
+        if not holds.items[(usize)instances.row(at).prototype]: continue
+        try scene_flattened(item.set, matrix.multiply(item.matrix()), out)
+
+## Whether `set` or any of its prototypes holds a camera or light.
+pub func set_has_scene(set: const GeometrySet*) -> bool:
+    if set.find(&scene_component) != none: return true
+    let found = set.find(&instances_component) else return false
+    let instances = (const Instances*)found
+    for index in 0..<instances.prototype_count():
+        if set_has_scene(instances.prototype(index)): return true
+    return false
+
+## Luce's view of a flattened scene: an immutable list read by index.
+pub struct SceneList:
+    var objects: SceneObjects
+
+    pub func count() -> i64:
+        return (i64)self.objects.count()
+
+    pub func object(index: i64) -> SceneObject!:
+        if index < 0 or index >= self.count(): error(errors.invalid, "scene object index out of range")
+        return self.objects.object((usize)index)
+
+    pub func path(index: i64) -> str!:
+        if index < 0 or index >= self.count(): error(errors.invalid, "scene object index out of range")
+        return self.objects.path((usize)index)
+
+    pub func is_camera(index: i64) -> bool!:
+        return (try self.object(index)).kind == SceneKind.camera
+
+    ## The index of the camera at `path`, else the first camera, else -1.
+    pub func camera_index(path: str) -> i64:
+        var first: i64 = -1
+        for index in 0..<self.objects.count():
+            let item = self.objects.objects.items[index]
+            if item.kind != SceneKind.camera: continue
+            if self.objects.path(index) == path: return (i64)index
+            if first < 0: first = (i64)index
+        return first
+
+    ## The base set's own scene list, for Base engines (borrowed while the
+    ## list lives).
+    pub func objects_view() -> const SceneObjects*:
+        return &self.objects
+
+    pub func close():
+        self.objects.close()
+
+pub let scene_list_type: interop.Type[SceneList] = interop.Type[SceneList]("SceneList", SceneList.close, no_trace_list, closeable = true)
+
+func no_trace_list(list: const SceneList*, visit: func(ownership.Object*, void*) -> unit, context: void*):
+    _ = list
+    _ = visit
+    _ = context
+
+extend GeometrySet:
+    ## Every camera and light of the set and its instances, in world space.
+    pub func scene() -> interop.Reference[SceneList]!:
+        let storage = try new SceneList[1] --- in memory.heap
+        storage[0] = SceneList(SceneObjects())
+        scene_flattened(&self, Matrix4(), &storage[0].objects) catch failure:
+            storage[0].close()
+            free(storage) in memory.heap
+            error(failure.code, failure.message)
+        return try interop.Reference[SceneList].adopt(storage.data, scene_list_type, memory.heap)
+
+    ## Whether the set or its instances hold a camera or light.
+    pub func has_scene() -> bool:
+        return set_has_scene(&self)
+
+    ## This set with a camera at `path` placed by translation and XYZ
+    ## rotation (radians), after any cameras and lights it has.
+    ## `projection` is 0 perspective, 1 orthographic.
+    pub func with_camera(path: str, translation: Vector3, rotation: Vector3, projection: i64, focal_length: f64, horizontal_aperture: f64, vertical_aperture: f64, near: f64, far: f64, f_stop: f64, focus_distance: f64) -> interop.Reference[GeometrySet]!:
+        if focal_length <= 0.0 or horizontal_aperture <= 0.0 or vertical_aperture <= 0.0: error(errors.invalid, "a camera needs a positive focal length and film back")
+        if near <= 0.0 or far <= near: error(errors.invalid, "a camera needs 0 < near < far")
+        let camera = Camera(Projection.orthographic if projection == 1 else Projection.perspective, focal_length, horizontal_aperture, vertical_aperture, near, far, math.max(f_stop, 0.0), math.max(focus_distance, near))
+        return try self.with_scene_object(camera_object(camera), path, translation, rotation)
+
+    ## This set with a light at `path`. `shape` is 0 rect, 1 disk, 2 sphere,
+    ## 3 distant; `color` is linear; `temperature` 0 is off.
+    pub func with_light(path: str, translation: Vector3, rotation: Vector3, shape: i64, color: Vector3, intensity: f64, exposure: f64, temperature: f64, normalize: bool, width: f64, height: f64, radius: f64, angle: f64, visible: bool) -> interop.Reference[GeometrySet]!:
+        if shape < 0 or shape > 3: error(errors.invalid, "unknown light shape")
+        if intensity < 0.0 or width < 0.0 or height < 0.0 or radius < 0.0 or angle < 0.0: error(errors.invalid, "light intensity and sizes cannot be negative")
+        let light = Light((LightShape)(u8)shape, color, intensity, exposure, math.max(temperature, 0.0), normalize, width, height, radius, angle, visible)
+        return try self.with_scene_object(light_object(light), path, translation, rotation)
+
+    func with_scene_object(object: SceneObject, path: str, translation: Vector3, rotation: Vector3) -> interop.Reference[GeometrySet]!:
+        let objects = try new_scene_objects()
+        if let existing = self.find(&scene_component):
+            objects.add_all((const SceneObjects*)existing, none) catch failure:
+                close_scene((void*)objects)
+                error(failure.code, failure.message)
+        objects.add(object, path, Matrix4.compose(translation, rotation, Vector3(1.0, 1.0, 1.0))) catch failure:
+            close_scene((void*)objects)
+            error(failure.code, failure.message)
+        return try adopt_set(try self.with_component(&scene_component, (void*)objects))

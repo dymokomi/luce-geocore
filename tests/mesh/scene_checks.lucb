@@ -1,0 +1,87 @@
+## Cameras and lights in a set: created, placed by Transform, joined by
+## Merge, found inside instances, filtered by path and kept by the codec.
+import interop
+from luce_std import math
+from io import path
+from luce_geocore.geocore import Vector3, Mesh, GeometrySet, SceneList, SceneKind, LightShape
+from luce_geocore.kernel import empty_set, adopt_set, save_geometry, load_geometry
+from luce_geocore.core.growing import Growing
+
+func near(a: f64, b: f64) -> bool:
+    return math.abs(a - b) < 0.00001
+
+func same(a: Vector3, b: Vector3) -> bool:
+    return near(a.x, b.x) and near(a.y, b.y) and near(a.z, b.z)
+
+## A zero focal length is refused.
+func rejects_bad_camera(empty: interop.Reference[GeometrySet]) -> bool:
+    let bad = empty.value().with_camera("/bad", Vector3(), Vector3(), 0, 0.0, 36.0, 24.0, 0.1, 10.0, 0.0, 1.0) catch failure:
+        _ = failure
+        return true
+    bad.release()
+    return false
+
+pub func exercise() -> !:
+    let empty = try adopt_set(try empty_set())
+    defer empty.release()
+    let camera = try empty.value().with_camera("/camera1", Vector3(0.0, 1.0, 5.0), Vector3(), 0, 35.0, 36.0, 24.0, 0.1, 1000.0, 2.8, 5.0)
+    defer camera.release()
+    let lit = try camera.value().with_light("/key", Vector3(2.0, 3.0, 0.0), Vector3(-1.5707963267948966, 0.0, 0.0), 0, Vector3(1.0, 0.9, 0.8), 10.0, 1.0, 0.0, true, 2.0, 1.0, 0.5, 0.53, false)
+    defer lit.release()
+    assert(lit.value().has_scene() and lit.value().is_empty() == false and not (try lit.value().has_bounds()))
+    assert(rejects_bad_camera(empty))
+    let scene = try lit.value().scene()
+    defer scene.release()
+    let list = scene.value()
+    assert(list.count() == 2 and (try list.is_camera(0)) and (try list.path(1)) == "/key")
+    let lens = (try list.object(0)).camera
+    assert(near(lens.focal_length, 35.0) and near(lens.f_stop, 2.8))
+    let key = try list.object(1)
+    assert(key.kind == SceneKind.light and key.light.shape == LightShape.rect and near(key.light.width, 2.0) and key.light.normalize)
+    # Rotated -90° about X, the rect emits straight down.
+    assert(same(key.matrix.transform_direction(Vector3(0.0, 0.0, -1.0)), Vector3(0.0, -1.0, 0.0)))
+    assert(list.camera_index("/camera1") == 0 and list.camera_index("/missing") == 0)
+    # Transform places both.
+    let moved = try lit.value().transformed(Vector3(10.0, 0.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer moved.release()
+    let moved_scene = try moved.value().scene()
+    defer moved_scene.release()
+    assert(same((try moved_scene.value().object(0)).matrix.translation, Vector3(10.0, 1.0, 5.0)))
+    # Merge with a mesh keeps both kinds; a Group instance flattens to world space.
+    let cube = try Mesh.cube(1.0)
+    defer cube.release()
+    let meshed = try empty.value().with_mesh(cube)
+    defer meshed.release()
+    let merged = try meshed.value().merged(lit)
+    defer merged.release()
+    assert(merged.value().has_mesh() and merged.value().has_scene())
+    let grouped = try empty.value().with_instance(merged, Vector3(0.0, 0.0, -3.0), Vector3(), Vector3(2.0, 2.0, 2.0), true)
+    defer grouped.release()
+    let flat = try grouped.value().scene()
+    defer flat.release()
+    assert(flat.value().count() == 2 and same((try flat.value().object(0)).matrix.translation, Vector3(0.0, 2.0, 7.0)))
+    # Blast by path.
+    let lights = try lit.value().blasted("/key", true)
+    defer lights.release()
+    let only = try lights.value().scene()
+    defer only.release()
+    assert(only.value().count() == 1 and only.value().camera_index("") == -1)
+    # The codec round trip.
+    var file = Growing[u8]()
+    defer file.close()
+    try file.assign(path.temp().bytes)
+    try file.push(47)
+    for byte in "luce-geocore-scene.prism".bytes: try file.push(byte)
+    _ = try save_geometry(lit.value(), (str)file.view(), 5, 268435456)
+    let loaded = try adopt_set(try load_geometry((str)file.view()))
+    defer loaded.release()
+    let back = try loaded.value().scene()
+    defer back.release()
+    assert(back.value().count() == 2 and (try back.value().path(0)) == "/camera1" and (try back.value().path(1)) == "/key")
+    let light = (try back.value().object(1)).light
+    assert(same(light.color, Vector3(1.0, 0.9, 0.8)) and near(light.intensity, 10.0) and near(light.exposure, 1.0) and not light.visible)
+    assert(same((try back.value().object(1)).matrix.translation, Vector3(2.0, 3.0, 0.0)))
+
+pub func run() -> !:
+    try exercise()
+    print("PASS scene objects: cameras and lights, Transform, Merge, instances, Blast, codec")

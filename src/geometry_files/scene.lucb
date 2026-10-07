@@ -1,0 +1,78 @@
+## Codec of the scene family: every camera and light as one row of
+## `scene_row` numbers, and their paths as one newline-separated text.
+##
+##   row: kind, the 12 matrix numbers (x, y, z, translation), the projection
+##        or shape, then a camera's focal length, apertures (h, v), near,
+##        far, f-stop and focus distance, or a light's color (r, g, b),
+##        intensity, exposure, temperature, normalize, width, height,
+##        radius, angle and visible.
+
+let scene_row: usize = 26
+
+func encode_scene(data: const void*, writer: GeometryWriter*, path: str) -> !:
+    let objects = (const SceneObjects*)data
+    try writer.crate.element(path, "scene")
+    let count = objects.count()
+    var rows = Growing[f64]()
+    defer rows.close()
+    var paths = Growing[u8]()
+    defer paths.close()
+    try rows.reserve(count * scene_row)
+    for index in 0..<count:
+        let item = objects.object(index)
+        let m = item.matrix
+        let start = rows.count
+        for value in [(f64)(u8)item.kind, m.x.x, m.x.y, m.x.z, m.y.x, m.y.y, m.y.z, m.z.x, m.z.y, m.z.z, m.translation.x, m.translation.y, m.translation.z]:
+            try rows.push(value)
+        if item.kind == SceneKind.camera:
+            let lens = item.camera
+            for value in [(f64)(u8)lens.projection, lens.focal_length, lens.horizontal_aperture, lens.vertical_aperture, lens.near, lens.far, lens.f_stop, lens.focus_distance]:
+                try rows.push(value)
+        else:
+            let l = item.light
+            for value in [(f64)(u8)l.shape, l.color.x, l.color.y, l.color.z, l.intensity, l.exposure, l.temperature, 1.0 if l.normalize else 0.0, l.width, l.height, l.radius, l.angle, 1.0 if l.visible else 0.0]:
+                try rows.push(value)
+        try rows.extend(start + scene_row, 0.0)
+        if index > 0: try append_text(&paths, "\n")
+        try append_text(&paths, objects.path(index))
+    try writer.crate.integer("count", (i64)count)
+    try writer.crate.copied_array("rows", dtype_float64, rows.count, u8[]((u8*)rows.items.data, rows.count * 8))
+    try writer.crate.copied_array("paths", dtype_uint8, paths.count, paths.view())
+
+func decode_scene(reader: GeometryReader*, path: str) -> void*!:
+    _ = path
+    var count: i64 = 0
+    var rows = Growing[f64]()
+    defer rows.close()
+    var paths = Growing[u8]()
+    defer paths.close()
+    while let header = try reader.next_property():
+        if header.name == "count": count = try reader.integer(header)
+        elif header.name == "rows":
+            try rows.fill((usize)header.components(), 0.0)
+            try reader.crate.read_payload(u8[]((u8*)rows.items.data, rows.count * 8))
+        elif header.name == "paths":
+            try paths.fill((usize)header.components(), 0)
+            try reader.crate.read_payload(paths.items[..<paths.count])
+    let total = (usize)count
+    if count < 0 or rows.count != total * scene_row: error(errors.invalid, "saved scene objects disagree")
+    let objects = try new_scene_objects()
+    errdefer scene_component.close((void*)objects)
+    var line: usize = 0
+    for index in 0..<total:
+        var end = line
+        while end < paths.count and paths.items[end] != 10: end += 1
+        let text = (str)paths.items[line..<end]
+        line = end + 1
+        let r = rows.items[index * scene_row..<(index + 1) * scene_row]
+        let matrix = Matrix4(Vector3(r[1], r[2], r[3]), Vector3(r[4], r[5], r[6]), Vector3(r[7], r[8], r[9]), Vector3(r[10], r[11], r[12]))
+        if r[0] == 0.0:
+            let camera = Camera(Projection.orthographic if r[13] == 1.0 else Projection.perspective, r[14], r[15], r[16], r[17], r[18], r[19], r[20])
+            try objects.add(camera_object(camera), text, matrix)
+        elif r[0] == 1.0:
+            if r[13] < 0.0 or r[13] > 3.0: error(errors.invalid, "a saved light has an unknown shape")
+            let light = Light((LightShape)(u8)r[13], Vector3(r[14], r[15], r[16]), r[17], r[18], r[19], r[20] != 0.0, r[21], r[22], r[23], r[24], r[25] != 0.0)
+            try objects.add(light_object(light), text, matrix)
+        else:
+            error(errors.invalid, "a saved scene object has an unknown kind")
+    return (void*)objects

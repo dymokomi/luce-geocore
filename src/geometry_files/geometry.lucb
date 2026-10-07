@@ -17,6 +17,7 @@
 ##       .../g0           grid       name, class, background, transform,
 ##                                   keys, values, masks
 ##     /geometry/sdf      sdf        ops, params
+##     /geometry/scene    scene      count, rows, paths (cameras, lights)
 
 ## Each family is a codec (encode, decode) found by its component name;
 ## the built-in families are here, and other packages register theirs
@@ -60,6 +61,7 @@ func codec_of(name: str) -> ComponentCodec?:
     if name == "instances": return ComponentCodec(name, instances_component_type(), encode_instances, decode_instances)
     if name == "volume": return ComponentCodec(name, volume_type(), encode_volume, decode_volume)
     if name == "sdf": return ComponentCodec(name, sdf_type(), encode_sdf, decode_sdf)
+    if name == "scene": return ComponentCodec(name, &scene_component, encode_scene, decode_scene)
     codec_lock.lock()
     defer codec_lock.unlock()
     for at in 0..<codec_count:

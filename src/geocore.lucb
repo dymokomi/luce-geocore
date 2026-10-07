@@ -44,6 +44,14 @@ pub let dissolve_edge = dissolve_workspace.dissolve_edge
 pub type AttributeKernels = attribute_kernels.AttributeKernels
 pub type GeometrySet = geometry_set.GeometrySet
 pub let geometry_set_type = geometry_set.geometry_set_type
+## Cameras and lights in a set, flattened to world space (GeometrySet.scene).
+pub type SceneList = geometry_set.SceneList
+pub type SceneObject = geometry_set.SceneObject
+pub type SceneKind = geometry_set.SceneKind
+pub type Camera = geometry_set.Camera
+pub type Light = geometry_set.Light
+pub type LightShape = geometry_set.LightShape
+pub type Projection = geometry_set.Projection
 pub type Selection = groups.Selection
 ## Selection domains (Domain.point, .corner, .face, .edge) and what a verb's
 ## group names (GroupType); Luce passes them to the i64 parameters with int().

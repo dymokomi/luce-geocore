@@ -31,6 +31,7 @@ import field_checks
 import sdf_edit_checks
 import sketch_checks
 import detail_checks
+import scene_checks
 import polydraw_checks
 import instance_checks
 import g6_checks
@@ -203,6 +204,9 @@ func checks(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 200, detail_checks.exercise)
     try detail_checks.run()
+    settle(&tracker)
+    inject(&tracker, 200, scene_checks.exercise)
+    try scene_checks.run()
     settle(&tracker)
     inject(&tracker, 400, sketch_checks.exercise)
     try sketch_checks.run()
