@@ -1,0 +1,74 @@
+## Materials in a set and their assignment: definitions joined by Merge,
+## found inside instances, filtered by Blast, kept by the codec; the
+## `material` face attribute written for a group and kept elsewhere.
+import interop
+from io import path
+from luce_geocore.geocore import Vector3, Mesh, GeometrySet, MaterialAssignment
+from luce_geocore.kernel import empty_set, adopt_set, save_geometry, load_geometry, Materials, materials_flattened
+from luce_geocore.core.growing import Growing
+
+## Whether `set`'s material paths, one per line, are `expected`.
+func paths_are(set: interop.Reference[GeometrySet], expected: str) -> bool!:
+    var owned = try set.value().material_paths()
+    defer owned.release()
+    return owned.value == expected
+
+pub func exercise() -> !:
+    let empty = try adopt_set(try empty_set())
+    defer empty.release()
+    let red = try empty.value().with_material("materials/red", "openpbr", "base_color\nbase_metalness", [0.8, 0.1, 0.1, 0.0, 1.0, 0.0, 0.0, 0.0])
+    defer red.release()
+    let both = try red.value().with_material("materials/glass", "openpbr", "transmission_weight", [1.0, 0.0, 0.0, 0.0])
+    defer both.release()
+    assert(both.value().has("materials") and (try paths_are(both, "materials/red\nmaterials/glass")))
+    # Inside a Group they are still found.
+    let grouped = try empty.value().with_instance(both, Vector3(), Vector3(), Vector3(1.0, 1.0, 1.0), true)
+    defer grouped.release()
+    var flat = Materials()
+    defer flat.close()
+    try materials_flattened(try grouped.get(), &flat)
+    assert(flat.count() == 2 and flat.index_of("materials/glass") == 1 and flat.shader(0) == "openpbr")
+    let color = flat.find(0, "base_color") else trap("base_color")
+    assert(color.value[0] == 0.8 and color.value[1] == 0.1)
+    assert(flat.find(0, "missing") == none)
+    # Blast by path.
+    let only = try both.value().blasted("materials/red", true)
+    defer only.release()
+    assert(try paths_are(only, "materials/red"))
+    # Assignment: faces 0-2 take the material; a second assignment keeps them.
+    let cube = try Mesh.cube(1.0)
+    defer cube.release()
+    let assigned = try MaterialAssignment.faces(cube, "0-2", "material", "materials/red")
+    defer assigned.release()
+    let again = try MaterialAssignment.faces(assigned, "5", "material", "materials/glass")
+    defer again.release()
+    let index = again.value().find_attribute("material", 2)
+    assert(index >= 0)
+    assert((try again.value().attribute_text(index, 0)) == "materials/red" and (try again.value().attribute_text(index, 3)) == "" and (try again.value().attribute_text(index, 5)) == "materials/glass")
+    let everything = try MaterialAssignment.faces(cube, "", "material", "materials/glass")
+    defer everything.release()
+    assert((try everything.value().attribute_text(everything.value().find_attribute("material", 2), 4)) == "materials/glass")
+    # A library joins a geometry set; the codec keeps both.
+    let meshed = try GeometrySet.of_mesh(again)
+    defer meshed.release()
+    let carried = try meshed.value().with_materials_from(grouped)
+    defer carried.release()
+    assert(try paths_are(carried, "materials/red\nmaterials/glass"))
+    var file = Growing[u8]()
+    defer file.close()
+    try file.assign(path.temp().bytes)
+    try file.push(47)
+    for byte in "luce-geocore-materials.prism".bytes: try file.push(byte)
+    _ = try save_geometry(carried.value(), (str)file.view(), 6, 268435456)
+    let loaded = try adopt_set(try load_geometry((str)file.view()))
+    defer loaded.release()
+    var back = Materials()
+    defer back.close()
+    try materials_flattened(try loaded.get(), &back)
+    assert(back.count() == 2 and back.path(1) == "materials/glass" and back.parameter_count(0) == 2 and back.parameter_name(0, 1) == "base_metalness")
+    let metal = back.find(0, "base_metalness") else trap("base_metalness")
+    assert(metal.value[0] == 1.0)
+
+pub func run() -> !:
+    try exercise()
+    print("PASS materials: definitions, Merge, instances, Blast, assignment by group, codec")

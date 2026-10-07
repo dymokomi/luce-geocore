@@ -1,0 +1,229 @@
+## The materials family: material definitions carried with geometry, as a
+## library. Each has a path (what a face's `material` attribute names), the
+## shader that reads it ("openpbr") and named parameters of one to four numbers
+## (colors are three). Merge joins libraries, Group nests them in instances and
+## Blast filters them by path; renderers flatten them (`materials_flattened`).
+## Geocore does not interpret parameters: shaders own their meaning. Where two
+## definitions share a path, the later one wins.
+
+pub struct MaterialParameter:
+    var name_at: usize
+    var name_length: usize
+    pub var value: f64[4]
+    pub var width: u8
+
+pub struct MaterialRecord:
+    var path_at: usize
+    var path_length: usize
+    var shader_at: usize
+    var shader_length: usize
+    var first: usize
+    var count: usize
+
+pub struct Materials:
+    var records: Growing[MaterialRecord]
+    var parameters: Growing[MaterialParameter]
+    ## Every path, shader and parameter name, back to back.
+    var text: Growing[u8]
+
+    pub func init():
+        self.records = Growing[MaterialRecord]()
+        self.parameters = Growing[MaterialParameter]()
+        self.text = Growing[u8]()
+
+    pub func count() -> usize:
+        return self.records.count
+
+    func slice(at: usize, length: usize) -> str:
+        return (str)self.text.items[at..<at + length]
+
+    pub func path(index: usize) -> str:
+        let record = &self.records.items[index]
+        return self.slice(record.path_at, record.path_length)
+
+    pub func shader(index: usize) -> str:
+        let record = &self.records.items[index]
+        return self.slice(record.shader_at, record.shader_length)
+
+    pub func parameter_count(index: usize) -> usize:
+        return self.records.items[index].count
+
+    pub func parameter_name(index: usize, at: usize) -> str:
+        let parameter = &self.parameters.items[self.records.items[index].first + at]
+        return self.slice(parameter.name_at, parameter.name_length)
+
+    pub func parameter_value(index: usize, at: usize) -> MaterialParameter:
+        return self.parameters.items[self.records.items[index].first + at]
+
+    ## The value of parameter `name` of material `index`, if it has one.
+    pub func find(index: usize, name: str) -> MaterialParameter?:
+        for at in 0..<self.parameter_count(index):
+            if self.parameter_name(index, at) == name: return self.parameter_value(index, at)
+        return none
+
+    ## The last material at `path` (-1 when none is).
+    pub func index_of(path: str) -> i64:
+        var found: i64 = -1
+        for index in 0..<self.count():
+            if self.path(index) == path: found = (i64)index
+        return found
+
+    func intern(value: str) -> (usize, usize)!:
+        let at = self.text.count
+        try append_text(&self.text, value)
+        return (at, value.length)
+
+    ## Add a material: `names` one per line, `values` four numbers per name
+    ## (`widths` how many of them it uses; none: four each).
+    pub func add(path: str, shader: str, names: str, values: const f64[], widths: const u8[]?) -> !:
+        let path_text = try self.intern(path)
+        let shader_text = try self.intern(shader)
+        let first = self.parameters.count
+        var start: usize = 0
+        var index: usize = 0
+        let bytes = names.bytes
+        for at in 0..<bytes.length + 1:
+            if at < bytes.length and bytes[at] != 10: continue
+            if at > start:
+                if index * 4 + 4 > values.length: error(errors.invalid, "a material parameter needs four numbers")
+                let name_text = try self.intern((str)bytes[start..<at])
+                var value: f64[4] = [values[index * 4], values[index * 4 + 1], values[index * 4 + 2], values[index * 4 + 3]]
+                var width: u8 = 4
+                if let given = widths: width = given[index]
+                try self.parameters.push(MaterialParameter(name_text.0, name_text.1, value, width))
+                index += 1
+            start = at + 1
+        try self.records.push(MaterialRecord(path_text.0, path_text.1, shader_text.0, shader_text.1, first, index))
+
+    ## Add material `index` of `other`.
+    pub func add_from(other: const Materials*, index: usize) -> !:
+        var names = Growing[u8]()
+        defer names.close()
+        var values = Growing[f64]()
+        defer values.close()
+        var widths = Growing[u8]()
+        defer widths.close()
+        for at in 0..<other.parameter_count(index):
+            if at > 0: try append_text(&names, "\n")
+            try append_text(&names, other.parameter_name(index, at))
+            let parameter = other.parameter_value(index, at)
+            for k in 0..<(usize)4: try values.push(parameter.value[k])
+            try widths.push(parameter.width)
+        try self.add(other.path(index), other.shader(index), (str)names.view(), values.view(), widths.view())
+
+    pub func add_all(other: const Materials*) -> !:
+        for index in 0..<other.count(): try self.add_from(other, index)
+
+    pub func close():
+        self.records.close()
+        self.parameters.close()
+        self.text.close()
+
+pub func new_materials() -> Materials*!:
+    return try new Materials() in memory.heap
+
+pub let materials_component: ComponentType = ComponentType("materials", share_materials, close_materials, materials_size, materials_bytes, materials_bounds, place_materials, join_materials, materials_paths, filter_materials, describe_materials, "", no_trace)
+
+func share_materials(data: const void*) -> void*!:
+    let copy = try new_materials()
+    copy.add_all((const Materials*)data) catch failure:
+        close_materials((void*)copy)
+        error(failure.code, failure.message)
+    return (void*)copy
+
+func close_materials(data: void*):
+    let materials = (Materials*)data
+    materials.close()
+    free(Materials[](materials, 1)) in memory.heap
+
+func materials_size(data: const void*) -> usize:
+    return ((const Materials*)data).count()
+
+func materials_bytes(data: const void*, ids: IdSet*) -> usize!:
+    _ = ids
+    let materials = (const Materials*)data
+    return 64 + materials.records.count * memory.size_of(MaterialRecord) + materials.parameters.count * memory.size_of(MaterialParameter) + materials.text.count
+
+func materials_bounds(data: const void*, matrix: Matrix4, out: Bounds*) -> bool!:
+    _ = data
+    _ = matrix
+    _ = out
+    return false
+
+## Definitions have no place: placing shares them.
+func place_materials(data: const void*, placement: const Placement*) -> void*!:
+    _ = placement
+    return try share_materials(data)
+
+func join_materials(first: const void*, second: const void*) -> void*!:
+    let joined = try new_materials()
+    errdefer close_materials((void*)joined)
+    try joined.add_all((const Materials*)first)
+    try joined.add_all((const Materials*)second)
+    return (void*)joined
+
+func materials_paths(data: const void*, out: TableBuilder*) -> !:
+    let materials = (const Materials*)data
+    for index in 0..<materials.count(): _ = try out.intern(materials.path(index))
+
+func filter_materials(data: const void*, filter: const PathFilter*, keep: bool) -> void*!:
+    let source = (const Materials*)data
+    let result = try new_materials()
+    errdefer close_materials((void*)result)
+    for index in 0..<source.count():
+        if filter.matches(source.path(index)) == keep: try result.add_from(source, index)
+    return (void*)result
+
+func describe_materials(data: const void*, out: Growing[u8]*) -> !:
+    try append_number(out, ((const Materials*)data).count())
+    try append_text(out, " materials")
+
+## Every material of `set` and its instances (each prototype once), into `out`.
+pub func materials_flattened(set: const GeometrySet*, out: Materials*) -> !:
+    if let data = set.find(&materials_component): try out.add_all((const Materials*)data)
+    let found = set.find(&instances_component) else return
+    let instances = (const Instances*)found
+    for index in 0..<instances.prototype_count(): try materials_flattened(instances.prototype(index), out)
+
+extend GeometrySet:
+    ## This set with a material at `path` read by `shader`: `names` one per
+    ## line, `values` four numbers per name.
+    pub func with_material(path: str, shader: str, names: str, values: const f64[]) -> interop.Reference[GeometrySet]!:
+        let materials = try new_materials()
+        if let existing = self.find(&materials_component):
+            materials.add_all((const Materials*)existing) catch failure:
+                close_materials((void*)materials)
+                error(failure.code, failure.message)
+        materials.add(path, shader, names, values, none) catch failure:
+            close_materials((void*)materials)
+            error(failure.code, failure.message)
+        return try adopt_set(try self.with_component(&materials_component, (void*)materials))
+
+    ## The paths of every material of the set and its instances, one per line,
+    ## in order (later definitions of a path after earlier ones).
+    pub func material_paths() -> interop.Owned[str]!:
+        var all = Materials()
+        defer all.close()
+        try materials_flattened(&self, &all)
+        var text = Growing[u8]()
+        defer text.close()
+        for index in 0..<all.count():
+            if index > 0: try append_text(&text, "\n")
+            try append_text(&text, all.path(index))
+        return try interop.copy_text((str)text.view())
+
+    ## This set with every material of `other` and its instances added after
+    ## its own (later definitions win): how Assign Material passes its library on.
+    pub func with_materials_from(other: interop.Reference[GeometrySet]) -> interop.Reference[GeometrySet]!:
+        let materials = try new_materials()
+        if let existing = self.find(&materials_component):
+            materials.add_all((const Materials*)existing) catch failure:
+                close_materials((void*)materials)
+                error(failure.code, failure.message)
+        let source = other.get() catch failure:
+            close_materials((void*)materials)
+            error(failure.code, failure.message)
+        materials_flattened(source, materials) catch failure:
+            close_materials((void*)materials)
+            error(failure.code, failure.message)
+        return try adopt_set(try self.with_component(&materials_component, (void*)materials))

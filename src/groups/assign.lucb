@@ -1,0 +1,33 @@
+## Material assignment: a text attribute on faces naming each face's material,
+## the binding renderers and the USD writer read (`material`, as luce-usd's
+## material:binding import writes it).
+
+pub struct MaterialAssignment:
+    let reserved: u8 = 0
+
+    ## `mesh` with text attribute `name` on its faces set to `value` for the faces
+    ## group `expression` names (all faces when it is empty); the other faces keep
+    ## their text ("" where the attribute is new).
+    pub static func faces(mesh: interop.Reference[Mesh], expression: str, name: str, value: str) -> interop.Reference[Mesh]!:
+        let geometry = try mesh.get()
+        let count = (usize)geometry.face_count()
+        var result = try group_bits(geometry, expression if expression.length > 0 else "*", Domain.face)
+        defer result.bits.release()
+        let chosen = Bits(result.bits.view(), count)
+        let existing = geometry.find_attribute(name, (i64)(u8)Domain.face)
+        var table = TableBuilder()
+        defer table.close()
+        _ = try table.intern("")
+        let assigned = (i64)(try table.intern(value))
+        let values = try new i64[count] --- in memory.heap
+        defer free(values) in memory.heap
+        for face in 0..<count:
+            if chosen.get(face): values[face] = assigned
+            elif existing >= 0: values[face] = (i64)(try table.intern(try geometry.attribute_text(existing, (i64)face)))
+            else: values[face] = 0
+        var lines = Growing[u8]()
+        defer lines.close()
+        for at in 0..<table.count():
+            if at > 0: try append_text(&lines, "\n")
+            try append_text(&lines, table.text(at))
+        return try geometry.with_text_values(name, (i64)(u8)Domain.face, (str)lines.view(), values)
