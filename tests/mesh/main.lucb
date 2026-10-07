@@ -1,8 +1,12 @@
 ## luce-geocore's Base gate: every mesh check, with allocation failure
 ## injected at each stage and no allocation left live afterwards.
+import c
+import io
 import memory
+import os
 import ownership
 import sync
+from luce_std import process
 from luce_geocore.core import parallel as geocore_parallel
 from luce_geocore.kernel import clear_group_cache
 import polygon_checks
@@ -97,7 +101,34 @@ func small_faces_argument(arguments: const str[]) -> usize?:
         return value
     return none
 
+## Every check once and, unless this is already a variant, again in fresh processes: with
+## nearly every face on the large-face (heap) path, and with pools of one and two workers.
 pub func main(arguments: str[]) -> i32!:
+    let status = try checks(arguments)
+    if status != 0 or arguments.length > 1 or os.env("LUCE_POOL_WORKERS") != none: return status
+    let program = try os.executable()
+    var small: c.str[2] = ["--small-faces", "4"]
+    var none_given: c.str[1] = ["unused"]
+    try again(program, small[..<2], none)
+    var one: c.str[1] = ["LUCE_POOL_WORKERS=1"]
+    try again(program, none_given[..<0], one[..<1])
+    var two: c.str[1] = ["LUCE_POOL_WORKERS=2"]
+    try again(program, none_given[..<0], two[..<1])
+    return 0
+
+## Run this program again with `words` and `environment`, showing what it printed; fail
+## unless it exits 0.
+func again(program: str, words: const c.str[], environment: const c.str[]?) -> !:
+    let ran = try process.run((c.str)program, words, "", environment)
+    defer ran.release()
+    try io.stdout().write(ran.value.output)
+    if ran.value.exit_code != 0:
+        try io.stderr().write(ran.value.error_output)
+        error(failed_variant, "a variant run of the checks failed")
+
+let failed_variant: ErrorCode = ErrorCode.package(9)
+
+func checks(arguments: str[]) -> i32!:
     if let limit = small_faces_argument(arguments):
         set_small_faces(limit)
         print(f"small faces: at most {limit} corners")

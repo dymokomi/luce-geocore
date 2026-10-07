@@ -2,10 +2,10 @@
 def package "luce_geocore_tests" {
     str source = "."
     def dependency "luce-geocore" {
-        str path = ".."
+        str path = "../.."
     }
     def dependency "luce-std" {
         str owner = "dymokomi"
-        str path = "../../luce-std"
+        str path = "../../../luce-std"
     }
 }
