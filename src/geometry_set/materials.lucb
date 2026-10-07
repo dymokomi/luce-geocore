@@ -1,7 +1,7 @@
 ## The materials family: material definitions carried with geometry, as a
 ## library. Each has a path (what a face's `material` attribute names), the
 ## shader that reads it ("openpbr") and named parameters of one to four numbers
-## (colors are three). Merge joins libraries, Group nests them in instances and
+## (colors are three), or of text (an image file a texture reads). Merge joins libraries, Group nests them in instances and
 ## Blast filters them by path; renderers flatten them (`materials_flattened`).
 ## Geocore does not interpret parameters: shaders own their meaning. Where two
 ## definitions share a path, the later one wins.
@@ -11,6 +11,9 @@ pub struct MaterialParameter:
     var name_length: usize
     pub var value: f64[4]
     pub var width: u8
+    ## A text value (empty for numbers): a texture's image file.
+    var text_at: usize
+    var text_length: usize
 
 pub struct MaterialRecord:
     var path_at: usize
@@ -55,6 +58,17 @@ pub struct Materials:
     pub func parameter_value(index: usize, at: usize) -> MaterialParameter:
         return self.parameters.items[self.records.items[index].first + at]
 
+    ## Parameter `at`'s text (empty for numbers).
+    pub func parameter_text(index: usize, at: usize) -> str:
+        let parameter = &self.parameters.items[self.records.items[index].first + at]
+        return self.slice(parameter.text_at, parameter.text_length)
+
+    ## The text of parameter `name` of material `index`; empty when it has none.
+    pub func find_text(index: usize, name: str) -> str:
+        for at in 0..<self.parameter_count(index):
+            if self.parameter_name(index, at) == name: return self.parameter_text(index, at)
+        return ""
+
     ## The value of parameter `name` of material `index`, if it has one.
     pub func find(index: usize, name: str) -> MaterialParameter?:
         for at in 0..<self.parameter_count(index):
@@ -74,13 +88,16 @@ pub struct Materials:
         return (at, value.length)
 
     ## Add a material: `names` one per line, `values` four numbers per name
-    ## (`widths` how many of them it uses; none: four each).
-    pub func add(path: str, shader: str, names: str, values: const f64[], widths: const u8[]?) -> !:
+    ## (`widths` how many of them it uses; none: four each), and `texts` one
+    ## per line beside the names (a parameter with text is text-valued; an
+    ## empty line or none keeps numbers).
+    pub func add(path: str, shader: str, names: str, values: const f64[], widths: const u8[]?, texts: str = "") -> !:
         let path_text = try self.intern(path)
         let shader_text = try self.intern(shader)
         let first = self.parameters.count
         var start: usize = 0
         var index: usize = 0
+        var text_line: usize = 0
         let bytes = names.bytes
         for at in 0..<bytes.length + 1:
             if at < bytes.length and bytes[at] != 10: continue
@@ -90,7 +107,12 @@ pub struct Materials:
                 var value: f64[4] = [values[index * 4], values[index * 4 + 1], values[index * 4 + 2], values[index * 4 + 3]]
                 var width: u8 = 4
                 if let given = widths: width = given[index]
-                try self.parameters.push(MaterialParameter(name_text.0, name_text.1, value, width))
+                var end = text_line
+                while end < texts.length and texts.bytes[end] != 10: end += 1
+                let text = (str)texts.bytes[text_line..<end] if text_line < texts.length else ""
+                text_line = end + 1
+                let text_value = try self.intern(text)
+                try self.parameters.push(MaterialParameter(name_text.0, name_text.1, value, width, text_value.0, text_value.1))
                 index += 1
             start = at + 1
         try self.records.push(MaterialRecord(path_text.0, path_text.1, shader_text.0, shader_text.1, first, index))
@@ -103,13 +125,18 @@ pub struct Materials:
         defer values.close()
         var widths = Growing[u8]()
         defer widths.close()
+        var texts = Growing[u8]()
+        defer texts.close()
         for at in 0..<other.parameter_count(index):
-            if at > 0: try append_text(&names, "\n")
+            if at > 0:
+                try append_text(&names, "\n")
+                try append_text(&texts, "\n")
             try append_text(&names, other.parameter_name(index, at))
+            try append_text(&texts, other.parameter_text(index, at))
             let parameter = other.parameter_value(index, at)
             for k in 0..<(usize)4: try values.push(parameter.value[k])
             try widths.push(parameter.width)
-        try self.add(other.path(index), other.shader(index), (str)names.view(), values.view(), widths.view())
+        try self.add(other.path(index), other.shader(index), (str)names.view(), values.view(), widths.view(), (str)texts.view())
 
     pub func add_all(other: const Materials*) -> !:
         for index in 0..<other.count(): try self.add_from(other, index)
@@ -188,13 +215,15 @@ pub func materials_flattened(set: const GeometrySet*, out: Materials*) -> !:
 extend GeometrySet:
     ## This set with a material at `path` read by `shader`: `names` one per
     ## line, `values` four numbers per name.
-    pub func with_material(path: str, shader: str, names: str, values: const f64[]) -> interop.Reference[GeometrySet]!:
+    ## `texts`: one per line beside the names, for text-valued parameters
+    ## (texture files); empty keeps every parameter numeric.
+    pub func with_material(path: str, shader: str, names: str, values: const f64[], texts: str = "") -> interop.Reference[GeometrySet]!:
         let materials = try new_materials()
         if let existing = self.find(&materials_component):
             materials.add_all((const Materials*)existing) catch failure:
                 close_materials((void*)materials)
                 error(failure.code, failure.message)
-        materials.add(path, shader, names, values, none) catch failure:
+        materials.add(path, shader, names, values, none, texts) catch failure:
             close_materials((void*)materials)
             error(failure.code, failure.message)
         return try adopt_set(try self.with_component(&materials_component, (void*)materials))

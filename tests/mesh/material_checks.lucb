@@ -18,7 +18,7 @@ pub func exercise() -> !:
     defer empty.release()
     let red = try empty.value().with_material("materials/red", "openpbr", "base_color\nbase_metalness", [0.8, 0.1, 0.1, 0.0, 1.0, 0.0, 0.0, 0.0])
     defer red.release()
-    let both = try red.value().with_material("materials/glass", "openpbr", "transmission_weight", [1.0, 0.0, 0.0, 0.0])
+    let both = try red.value().with_material("materials/glass", "openpbr", "transmission_weight\nbase_color_texture", [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "\ntextures/frost.png")
     defer both.release()
     assert(both.value().has("materials") and (try paths_are(both, "materials/red\nmaterials/glass")))
     # Inside a Group they are still found.
@@ -68,7 +68,9 @@ pub func exercise() -> !:
     assert(back.count() == 2 and back.path(1) == "materials/glass" and back.parameter_count(0) == 2 and back.parameter_name(0, 1) == "base_metalness")
     let metal = back.find(0, "base_metalness") else trap("base_metalness")
     assert(metal.value[0] == 1.0)
+    # Text-valued parameters (texture files) survive too.
+    assert(back.find_text(1, "base_color_texture") == "textures/frost.png" and back.find_text(1, "transmission_weight") == "" and back.find_text(0, "base_color") == "")
 
 pub func run() -> !:
     try exercise()
-    print("PASS materials: definitions, Merge, instances, Blast, assignment by group, codec")
+    print("PASS materials: definitions, texture files, Merge, instances, Blast, assignment by group, codec")

@@ -1,6 +1,6 @@
 ## Codec of the materials family: per material its path, shader and parameter
-## count; per parameter its name, four numbers and how many it uses. Texts are
-## newline-separated.
+## count; per parameter its name, four numbers, how many it uses and its text
+## (a texture file, else empty). Texts are newline-separated.
 
 func encode_materials(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let materials = (const Materials*)data
@@ -17,6 +17,9 @@ func encode_materials(data: const void*, writer: GeometryWriter*, path: str) -> 
     defer values.close()
     var widths = Growing[u8]()
     defer widths.close()
+    var texts = Growing[u8]()
+    defer texts.close()
+    var first = true
     for index in 0..<materials.count():
         if index > 0:
             try append_text(&paths, "\n")
@@ -25,8 +28,12 @@ func encode_materials(data: const void*, writer: GeometryWriter*, path: str) -> 
         try append_text(&shaders, materials.shader(index))
         try counts.push((i32)materials.parameter_count(index))
         for at in 0..<materials.parameter_count(index):
-            if names.count > 0: try append_text(&names, "\n")
+            if not first:
+                try append_text(&names, "\n")
+                try append_text(&texts, "\n")
+            first = false
             try append_text(&names, materials.parameter_name(index, at))
+            try append_text(&texts, materials.parameter_text(index, at))
             let parameter = materials.parameter_value(index, at)
             for k in 0..<(usize)4: try values.push(parameter.value[k])
             try widths.push(parameter.width)
@@ -37,6 +44,7 @@ func encode_materials(data: const void*, writer: GeometryWriter*, path: str) -> 
     try writer.crate.copied_array("names", dtype_uint8, names.count, names.view())
     try writer.crate.copied_array("values", dtype_float64, values.count, u8[]((u8*)values.items.data, values.count * 8))
     try writer.crate.copied_array("widths", dtype_uint8, widths.count, widths.view())
+    try writer.crate.copied_array("texts", dtype_uint8, texts.count, texts.view())
 
 ## Line `index` of newline-separated `text`, from `at` (advanced past it).
 func next_line(text: const u8[], at: usize*) -> str:
@@ -61,6 +69,8 @@ func decode_materials(reader: GeometryReader*, path: str) -> void*!:
     defer values.close()
     var widths = Growing[u8]()
     defer widths.close()
+    var texts = Growing[u8]()
+    defer texts.close()
     while let header = try reader.next_property():
         if header.name == "count": count = try reader.integer(header)
         elif header.name == "paths":
@@ -81,22 +91,31 @@ func decode_materials(reader: GeometryReader*, path: str) -> void*!:
         elif header.name == "widths":
             try widths.fill((usize)header.components(), 0)
             try reader.crate.read_payload(widths.items[..<widths.count])
+        elif header.name == "texts":
+            try texts.fill((usize)header.components(), 0)
+            try reader.crate.read_payload(texts.items[..<texts.count])
     if count < 0 or counts.count != (usize)count or values.count != widths.count * 4: error(errors.invalid, "saved materials disagree")
     let materials = try new_materials()
     errdefer materials_component.close((void*)materials)
     var path_at: usize = 0
     var shader_at: usize = 0
     var name_at: usize = 0
+    var text_at: usize = 0
     var parameter: usize = 0
     for index in 0..<(usize)count:
         let parameters = (usize)counts.items[index]
         if parameters > widths.count - parameter: error(errors.invalid, "saved materials disagree")
         var own = Growing[u8]()
         defer own.close()
+        var own_texts = Growing[u8]()
+        defer own_texts.close()
         for at in 0..<parameters:
-            if at > 0: try append_text(&own, "\n")
+            if at > 0:
+                try append_text(&own, "\n")
+                try append_text(&own_texts, "\n")
             try append_text(&own, next_line(names.view(), &name_at))
+            if text_at < texts.count: try append_text(&own_texts, next_line(texts.view(), &text_at))
         try materials.add(next_line(paths.view(), &path_at), next_line(shaders.view(), &shader_at), (str)own.view(),
-                          values.items[parameter * 4..<(parameter + parameters) * 4], widths.items[parameter..<parameter + parameters])
+                          values.items[parameter * 4..<(parameter + parameters) * 4], widths.items[parameter..<parameter + parameters], (str)own_texts.view())
         parameter += parameters
     return (void*)materials
