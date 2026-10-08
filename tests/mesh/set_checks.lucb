@@ -14,9 +14,23 @@ func near(a: f64, b: f64):
 
 pub func exercise() -> !:
     try bit_sets()
+    try growing_insert()
     try groups_and_text()
     try subsets_and_concatenation()
     try sets()
+
+## Growing.insert: at the front, the middle and the end, past a reserve.
+func growing_insert() -> !:
+    var items = Growing[i64]()
+    defer items.close()
+    for at in 0..<(i64)64: try items.push(at * 2)
+    try items.insert(0, -1)
+    try items.insert(33, 1000)
+    try items.insert(items.count, 9999)
+    assert(items.count == 67)
+    assert(items.items[0] == -1 and items.items[1] == 0)
+    assert(items.items[32] == 62 and items.items[33] == 1000 and items.items[34] == 64)
+    assert(items.items[65] == 126 and items.items[66] == 9999)
 
 func bit_sets() -> !:
     var bits = try BitsBuilder.zeros(200)

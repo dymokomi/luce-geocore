@@ -26,6 +26,17 @@ pub struct Growing[T]:
         self.items[self.count] = value
         self.count += 1
 
+    ## `value` put at `at` (0..count), the items from there moved up one.
+    pub func insert(at: usize, value: T) -> !:
+        if at > self.count: trap("Growing.insert past the end")
+        try self.reserve(self.count + 1)
+        var index = self.count
+        while index > at:
+            self.items[index] = self.items[index - 1]
+            index -= 1
+        self.items[at] = value
+        self.count += 1
+
     pub func fill(count: usize, value: T) -> !:
         try self.reserve(count)
         for at in 0..<count: self.items[at] = value
