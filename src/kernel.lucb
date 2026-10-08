@@ -138,6 +138,11 @@ pub let curves_dispose = curves.curves_dispose
 pub let curves_subset = curves.curves_subset
 pub let curves_reordered = curves.curves_reordered
 pub let evaluated_offsets = curves.evaluated_offsets
+## A sketch's plane (the set's detail attributes) and NURBS weights, for
+## kernels that read sketches exactly (luce-cad's profiles).
+pub type SketchPlane = curves.SketchPlane
+pub let sketch_plane_of = curves.sketch_plane_of
+pub let curve_weight_span = curves.weight_span
 pub let evaluated_positions = curves.evaluated_positions
 pub let evaluated_frames = curves.evaluated_frames
 pub let evaluated_id = curves.evaluated_id
