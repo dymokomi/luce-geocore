@@ -1,0 +1,126 @@
+## Editor help for a Script node's script through ScriptHelp: a check package depending on
+## this checkout of luce-geocore, the members of `Cook`, `Geometry`, `VoxelGrid` and `Verb`,
+## hover on a package function, and a diagnostic at its line.
+import c
+import strings
+import time
+from io import path
+from luce_std import collections, files, process
+from luce_geocore.geocore import ScriptHelp, CodeCompletion
+import interop
+
+let not_found: ErrorCode = ErrorCode.package(1)
+
+func expect(condition: bool, what: str):
+    if not condition:
+        print(f"FAIL  {what}")
+        trap("script help checks")
+
+## The script, lines 1 to 9; completions go on line 10.
+let script: str = "from luce_geocore.script import Cook, Geometry, Verb, VolumeClass\n\npub func cook(k: Cook*) -> !:\n    let g = k.geometry()\n    let fog = try g.add_volume(\"density\", VolumeClass.fog, [0.0, 0.0, 0.0, 0.0], [2.0, 2.0, 2.0, 0.0], voxel = 0.5)\n    var verb = try Verb.named(\"Subdivide\")\n    try verb.parm(\"Levels\", 2.0)\n    let positions = try g.positions()\n    positions[0].y = (f32)fog.voxel_size()\n"
+
+pub func run_all() -> !:
+    var kept = collections.List[u8]()
+    defer kept.destroy()
+    try check_package(&kept)
+    let file = (str)kept.view()
+    let started = time.now()
+    let clean = try ScriptHelp.check(file, script)
+    let first = time.now() - started
+    let checked = try clean.get()
+    for at: i64 in 0..<checked.diagnostic_count():
+        print(f"  {checked.diagnostic_line(at)}:{checked.diagnostic_column(at)}: {checked.diagnostic_message(at)}")
+    expect(checked.ok(), "the script checks clean")
+    let again = time.now()
+    _ = try ScriptHelp.check(file, script)
+    let later = time.now() - again
+    print(f"ok    script check: first {(f64)first / 1e6} ms, later {(f64)later / 1e6} ms")
+    # An error underlined at its line, in characters.
+    let broken = try (try ScriptHelp.check(file, "from luce_geocore.script import Cook\n\npub func cook(k: Cook*) -> !:\n    let g = k.geometry()\n    g.no_such_call()\n")).get()
+    expect(not broken.ok() and broken.diagnostic_count() > 0, "an unknown method fails the check")
+    var placed = false
+    for at: i64 in 0..<broken.diagnostic_count():
+        if broken.diagnostic_severity(at) == 0 and broken.diagnostic_line(at) == 5 and broken.diagnostic_column(at) >= 5: placed = true
+    expect(placed, "the error is at line 5")
+    # The API's members.
+    try expect_labels(file, "    k.", 7, ["geometry", "f32", "input", "set_geometry", "warning", "frame"], "k. lists the cook's members")
+    try expect_labels(file, "    g.", 7, ["positions", "add_point", "add_volume", "point_count", "set_point_f32"], "g. lists the geometry's members")
+    try expect_labels(file, "    fog.", 9, ["values", "sample", "voxel_size", "set_look"], "fog. lists a VoxelGrid's members")
+    try expect_labels(file, "    verb.", 10, ["parm", "run", "group"], "verb. lists a Verb's members")
+    try expect_labels(file, "    Verb.", 10, ["named"], "Verb. lists its static functions")
+    try expect_labels(file, "    Geometry.", 14, ["grid", "sphere", "empty"], "Geometry. lists its makers")
+    try expect_labels(file, "    positions[0].", 18, ["x", "y", "z"], "an element of a span")
+    try expect_labels(file, "    k.geometry().", 18, ["positions", "bounds"], "a call's result")
+    # Signatures and docs.
+    let made = try complete(file, "    g.", 7)
+    let items = try made.get()
+    var documented = false
+    for at: i64 in 0..<items.count():
+        if items.label(at) == "positions":
+            documented = items.kind(at) == "method" and strings.starts_with(items.detail(at), "positions()") and items.doc(at).length > 0
+    expect(documented, "positions' signature and doc")
+    # A signature over two lines, joined: set_look's emission color field.
+    let looks = try (try complete(file, "    fog.", 9)).get()
+    var color_field = false
+    for at: i64 in 0..<looks.count():
+        if looks.label(at) == "set_look": color_field = strings.contains(looks.detail(at), "emission_field: str = \"\", density_field: str = \"\", step: f64 = 1.0, emission_color_field: str = \"\") -> !") and strings.contains(looks.doc(at), "emission_color_field")
+    expect(color_field, "set_look's emission_color_field and its doc")
+    # Hover on a package function and on a local.
+    let hovered = try ScriptHelp.hover(file, script, 6, 25)
+    if not strings.starts_with(hovered.value, "named(name: str) -> Verb!"): print(f"  got [{hovered.value}]")
+    expect(strings.starts_with(hovered.value, "named(name: str) -> Verb!\n"), "hovering Verb.named")
+    let local = try ScriptHelp.hover(file, script, 4, 9)
+    if local.value != "g: Geometry": print(f"  got [{local.value}]")
+    expect(local.value == "g: Geometry", "hovering a local")
+    print("ok    script help: Cook, Geometry, VoxelGrid and Verb members, hover, a diagnostic")
+
+## The script with `extra` on line 10, completed there at `column`.
+func complete(file: str, extra: str, column: i64) -> interop.Reference[CodeCompletion]!:
+    var room: u8[4096]
+    let text = try strings.format(room, f"{script}{extra}")
+    return try ScriptHelp.complete(file, text, 10, column)
+
+func expect_labels(file: str, extra: str, column: i64, wanted: const str[], what: str) -> !:
+    let made = try complete(file, extra, column)
+    let items = try made.get()
+    for name in wanted:
+        var found = false
+        for at: i64 in 0..<items.count():
+            if items.label(at) == name: found = true
+        if not found: print(f"  missing {name}")
+        expect(found, what)
+
+## A check package depending on this checkout of luce-geocore (found above the working
+## directory) and its luce-std; the path of its src/script.lucb, kept in `out`.
+func check_package(out: collections.List[u8]*) -> !:
+    let here = try process.current_directory()
+    defer here.release()
+    # The checkout's folder, with forward slashes (the manifest's strings take them).
+    var root = collections.List[u8]()
+    defer root.destroy()
+    for byte in here.value.bytes: try root.append('/' if byte == '\\' else byte)
+    while true:
+        var manifest_room: u8[2100]
+        let manifest = try strings.format(manifest_room, f"{(str)root.view()}/package.prisma")
+        if names_geocore(manifest): break
+        let slash = strings.find_last((str)root.view(), "/") else error(not_found, "luce-geocore's checkout is not above the working directory")
+        root.truncate(slash)
+    let folder = (str)root.view()
+    var base_room: u8[512]
+    let base = try strings.format(base_room, f"{path.temp()}/luce-geocore-script-help")
+    var text_room: u8[8192]
+    let manifest = try strings.format(text_room, f"#prisma 4.0\ndef package \"script-help-check\" {{\n    str owner = \"luced\"\n    str version = \"0.1.0\"\n    str kind = \"tool\"\n    str language = \"luce-base\"\n    str description = \"ScriptHelp's checks.\"\n    str entry = \"src/script.lucb\"\n    def dependency \"luce-geocore\" {{\n        str owner = \"dymokomi\"\n        str path = \"{folder}\"\n    }}\n    def dependency \"luce-std\" {{\n        str owner = \"dymokomi\"\n        str path = \"{folder}/../luce-std\"\n    }}\n}}\n")
+    var folder_room: u8[600]
+    try files.ensure_directory(try strings.format(folder_room, f"{base}/src"))
+    var file_room: u8[600]
+    try files.write_text(try strings.format(file_room, f"{base}/package.prisma"), manifest)
+    let file = try strings.format(file_room, f"{base}/src/script.lucb")
+    try files.write_text(file, script)
+    for byte in file.bytes: try out.append(byte)
+
+## Whether the manifest at `manifest` is luce-geocore's.
+func names_geocore(manifest: str) -> bool:
+    let text = files.read_text(manifest) catch failure:
+        return false
+    defer text.release()
+    return strings.contains(text.value, "def package \"luce-geocore\"")

@@ -84,17 +84,19 @@ pub struct VoxelGrid:
     # mark: How it looks ===============================================================
 
     ## How the viewport draws it: its look's density, smoke, shadow and emission
-    ## numbers, its fields (`density_field()`, `emission_field()`) and emission ramp.
+    ## numbers, its fields (`density_field()`, `emission_field()`,
+    ## `emission_color_field()`) and emission ramp.
     pub func look() -> VolumeLook:
         return self.styled
 
     ## Draw a fog grid as Volume Visualization does: `density` scales its densities,
     ## `smoke` is the scattered color, `shadow` scales its self-shadowing; it emits
-    ## `emission` times grid `emission_field`'s values ("" none) in `emission_color`; it
-    ## shows grid `density_field`'s values as its density ("" its own); `step` is the
-    ## ray-marching step in voxels. The emission ramp stays as it was.
+    ## `emission` times grid `emission_field`'s values ("" none) in `emission_color`, or
+    ## with an emission ramp the ramp at grid `emission_color_field`'s values ("" the
+    ## emission field's); it shows grid `density_field`'s values as its density ("" its
+    ## own); `step` is the ray-marching step in voxels. The emission ramp stays as it was.
     pub func set_look(density: f64 = 1.0, smoke: f32[4] = [1.0, 1.0, 1.0, 0.0], shadow: f64 = 1.0, emission: f64 = 0.0, emission_color: f32[4] = [1.0, 1.0, 1.0, 0.0],
-                      emission_field: str = "", density_field: str = "", step: f64 = 1.0) -> !:
+                      emission_field: str = "", density_field: str = "", step: f64 = 1.0, emission_color_field: str = "") -> !:
         if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
         var look = self.styled
         look.density = density
@@ -105,6 +107,7 @@ pub struct VoxelGrid:
         look.step = step
         try look.set_emission_field(emission_field)
         try look.set_density_field(density_field)
+        try look.set_emission_color_field(emission_color_field)
         self.styled = look
         self.dirty = true
 

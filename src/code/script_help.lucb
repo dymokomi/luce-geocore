@@ -1,0 +1,59 @@
+# Editor help for luced-3d's Script node: its script checked while it is typed, completed
+# and hovered, by luce-kernel's file help (`lower.check_file`, `complete_file`,
+# `hover_file`) over the file `file` of a check package luced-3d keeps for the node's
+# packages. The package's other packages are checked once and kept (about 90 ms); each later
+# check takes about 0.3 ms. Positions are 1-based lines and character columns, as for the
+# Code node.
+
+## Luce's view of a Script node's editor help.
+pub struct ScriptHelp:
+    let reserved: u8 = 0
+
+    ## Check `text` as the file `file` (written there first): its diagnostics, as
+    ## `Code.check` gives a snippet's, in part 0; an error in a package the script imports
+    ## (one that does not check) is in part 2 at line 0, its place in the message. No
+    ## parameters.
+    pub static func check(file: str, text: str) -> interop.Reference[CodeCheck]!:
+        let storage = try new CodeCheck[1] --- in memory.heap
+        storage[0] = CodeCheck(passed = false, lines = collections.List[CheckLine](), parameters = collections.List[CheckParameter](), timeline = false, texts = collections.TextPool())
+        fill_script_check(&storage[0], file, text) catch failure:
+            storage[0].close()
+            free(storage) in memory.heap
+            error(failure.code, failure.message)
+        return try interop.Reference[CodeCheck].adopt(storage.data, code_check_type, memory.heap)
+
+    ## What may come at `line`, `column` of `text`, the file at `file`: after `k.`, `g.`
+    ## or any value's or module's `.` its members with their signatures and docs (those of
+    ## `Cook`, `Geometry`, `VoxelGrid`, `Verb` and of every imported package), else the
+    ## locals in scope, the imports, the script's own functions and the keywords.
+    pub static func complete(file: str, text: str, line: i64, column: i64) -> interop.Reference[CodeCompletion]!:
+        let row = line_of(text, (u32)(line if line > 0 else 1))
+        var completion = try lower.complete_file(file, text, (u32)(line if line > 0 else 1), byte_column(row, column))
+        let storage = new CodeCompletion[1] --- in memory.heap catch failure:
+            completion.destroy()
+            error(failure.code, failure.message)
+        storage[0] = CodeCompletion(completion = completion, start_column = (i64)character_column(row, completion.start))
+        return try interop.Reference[CodeCompletion].adopt(storage.data, code_completion_type, memory.heap)
+
+    ## The signature and doc of the word at `line`, `column` of `text` (a package's
+    ## function or type, a member, a local's type), "" when nothing applies.
+    pub static func hover(file: str, text: str, line: i64, column: i64) -> interop.Owned[str]!:
+        let row = line_of(text, (u32)(line if line > 0 else 1))
+        var said = collections.List[u8]()
+        defer said.destroy()
+        try lower.hover_file(file, text, (u32)(line if line > 0 else 1), byte_column(row, column), &said)
+        return try interop.copy_text((str)said.view())
+
+## The file check's diagnostics into `check`, columns in characters.
+func fill_script_check(check: CodeCheck*, file: str, text: str) -> !:
+    var found = try lower.check_file(file, text)
+    defer found.destroy()
+    check.passed = found.ok()
+    for d in found.diagnostics():
+        let elsewhere = d.part == .wrapper
+        let row = line_of(text, d.line)
+        let severity: i64 = 0 if d.severity == .error else (1 if d.severity == .warning else 2)
+        let message = try check.texts.keep_text(d.message.bytes)
+        let column = 0 if elsewhere else (i64)character_column(row, d.column)
+        let end = 0 if elsewhere else (i64)word_end(row, d.column)
+        try check.lines.append(CheckLine(part = 2 if elsewhere else 0, line = 0 if elsewhere else (i64)d.line, column = column, end = end, severity = severity, message = message))

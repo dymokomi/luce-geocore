@@ -116,7 +116,7 @@ pub func volumes() -> !:
     assert(shell.get(100, -40, 7) == 0.2 and shell.get(4, 3, 3) == 0.05 and shell.active_at(3, 3, 3))
     assert(g.volume_count() == 2)
     # The fog's look, as Volume Visualization sets it: kept through the file.
-    try fog.set_look(density = 8.0, smoke = [0.75, 0.8, 1.0, 0.0], shadow = 0.4, emission = 2.0, emission_field = "surface")
+    try fog.set_look(density = 8.0, smoke = [0.75, 0.8, 1.0, 0.0], shadow = 0.4, emission = 2.0, emission_field = "surface", emission_color_field = "density")
     try fog.set_emission_ramp([1.0, 3.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.5, 0.0, 1.0], 0.0, 0.5)
     var buffer: u8[512]
     let path = try api.scratch("volumes.prism", buffer)
@@ -129,6 +129,7 @@ pub func volumes() -> !:
     let dense = try back.voxel_grid("density")
     let look = dense.look()
     assert(dense.get(0, 0, 0) == 1.0 and look.density == 8.0 and look.shadow == 0.4 and look.emission_field() == "surface" and look.emission_high == 0.5)
+    assert(look.emission_color_field() == "density")
     assert(look.emission_ramp().length == 13 and look.emission_color_at(0.5).y == 0.5)
     try back.remove_volume("density")
     assert(back.volume_count() == 1 and try back.volume_name(0) == "surface")

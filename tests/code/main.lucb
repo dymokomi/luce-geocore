@@ -4,6 +4,7 @@ import array_attributes
 import bench
 import checks
 import help
+import script_help
 import stages
 import voxels
 import splat_code
@@ -40,6 +41,7 @@ pub func main(arguments: str[]) -> i32!:
     try stages.text_groups()
     try array_attributes.run_all()
     try help.run_all()
+    try script_help.run_all()
     try voxels.run_all()
     try splat_code.run_all()
     return 0
