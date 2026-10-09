@@ -1,5 +1,8 @@
-# The version of luce-geocore this module is part of. A Script tool built against the
-# registry names it, so the tool's geometry files and verb catalog match the app's.
+# The luce-geocore releases a Script tool may build against. A tool built from the
+# registry names this requirement, so its geometry files and verb catalog match the
+# app's: patch releases keep both, so any patch from the first with the script module
+# will do. Releases bump only package.prisma's version, so nothing here names it.
 
-## luce-geocore's version (its tests check it against package.prisma).
-pub let geocore_version: str = "0.7.2"
+## A caret requirement on luce-geocore: this minor series, from the first patch with
+## the script module (its tests check package.prisma's version satisfies it).
+pub let geocore_requirement: str = "^0.7.2"

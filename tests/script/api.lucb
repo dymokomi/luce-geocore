@@ -2,7 +2,7 @@
 ## families and whole-set operations, checked against geocore's own builders.
 import strings
 from luce_std import files
-from luce_geocore.script import Geometry, Domain3, AttributeKind, Float3, Cook, geocore_version
+from luce_geocore.script import Geometry, Domain3, AttributeKind, Float3, Cook, geocore_requirement
 from luce_geocore.geocore import MeshBuilder, Vector3
 
 ## Where a test may write files (luc test gives each program a scratch HOME).
@@ -193,10 +193,19 @@ pub func locking() -> !:
     assert(refused)
     print("ok    script: inputs are read-only")
 
-## The version the script module names is the package's.
+## The package's own version satisfies the requirement Script tools name: the
+## same minor series, at or past its first patch. Releases bump only the version.
 pub func version() -> !:
     let manifest = try files.read_text("package.prisma")
     defer manifest.release()
-    var buffer: u8[128]
-    assert(strings.contains(manifest.value, try strings.format(buffer, f"str version = \"{geocore_version}\"")))
-    print("ok    script: geocore_version matches package.prisma")
+    let key = "str version = \""
+    let at = strings.find(manifest.value, key) else trap("package.prisma names no version")
+    let rest = (str)manifest.value.bytes[at + key.length..]
+    let close = strings.find(rest, "\"") else trap("package.prisma's version is unclosed")
+    let own = (str)rest.bytes[0..<close]
+    let floor = (str)geocore_requirement.bytes[1..]
+    let (own_series, own_patch) = strings.split_last(own, ".") else trap("package.prisma's version has no patch")
+    let (series, first) = strings.split_last(floor, ".") else trap("the requirement has no patch")
+    assert(strings.starts_with(geocore_requirement, "^") and own_series == series)
+    assert((strings.parse_u64(own_patch) else 0) >= (strings.parse_u64(first) else 0))
+    print("ok    script: package.prisma's version satisfies geocore_requirement")
