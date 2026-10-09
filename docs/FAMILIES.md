@@ -294,8 +294,12 @@ them, and the design is luced-3d's `docs/research/GAUSSIAN-SPLATS.md`.
   neighbor counts use `PointHash` (`splats/neighbors.lucb`: ring searches over
   cubes sized to the cloud's density). **Reduce GSplats** reaches a count or
   ratio by merging nearest pairs with moment matching (mass and mass-weighted
-  centroid kept) or by dropping the lightest (opacity · σ₁σ₂σ₃) with the
-  others' opacity raised to keep the mass. Every pass runs on the pool: the
+  centroid kept) or by dropping the least visible, with the others' opacity
+  raised to keep the mass. Visibility is opacity × (mean projected area over
+  the median)^0.1 × (1 + 4 × color contrast with the 8 nearest neighbors):
+  dropping the lightest (opacity · σ₁σ₂σ₃) lost a capture's small, opaque,
+  colorful detail first (the bonsai's flowers were gone at 25%; now they stay
+  as crisp as Merge keeps them). Every pass runs on the pool: the
   neighbor search, the candidate pairs (each once), a parallel merge sort of
   their costs, the gathers and the merges; only the greedy matching is
   sequential (halving a 1.16M-splat capture takes about 0.5 s).

@@ -197,11 +197,11 @@ let reduce_parms: ParmSpec[5] = [
     ParmSpec("Target", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Ratio|Count", "Reach a fraction of the splats, or a count."),
     ParmSpec("Ratio", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "The fraction of splats kept."),
     ParmSpec("Count", ParmKind.integer, 100000.0, 0.0, 1000000000.0, 1, "", "The splats kept.", 10000000.0),
-    ParmSpec("Method", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Merge|Importance", "Merge near pairs into one splat each (keeps mass and centroid), or drop the lightest (opacity × volume)."),
+    ParmSpec("Method", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Merge|Importance", "Merge near pairs into one splat each (keeps mass and centroid), or drop the least visible: by opacity, a little by size, and much by color contrast with their neighbors, so small bright detail stays."),
     ParmSpec("Keep Mass", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "After dropping splats, raise the others' opacity (to at most 1) so the total opacity-weighted mass stays as far as it can.")]
 
 func reduce_gsplats_verb() -> SetVerb:
-    return SetVerb("Reduce GSplats", gsplats_category, "Fewer splats with the same total mass and centroid: merge near pairs or drop the lightest", 1, false, false, reduce_parms, cook_reduce_gsplats)
+    return SetVerb("Reduce GSplats", gsplats_category, "Fewer splats with the same total mass and centroid: merge near pairs or drop the least visible", 1, false, false, reduce_parms, cook_reduce_gsplats)
 
 func cook_reduce_gsplats(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     let cloud = input_cloud(input, output) else return

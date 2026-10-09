@@ -18,6 +18,7 @@ pub func run() -> !:
     try clean_thresholds()
     try reduce_keeps_mass(true)
     try reduce_keeps_mass(false)
+    try reduce_keeps_detail()
     try cloud_nodes()
     try bake_mesh_points()
 
@@ -293,12 +294,56 @@ func reduce_keeps_mass(merge: bool) -> !:
         assert(math.abs(few_mass - mass) <= 0.01 * mass, "merging keeps the mass at a count of 300")
         assert(few_centroid.subtract(centroid).length() <= 0.01, "merging keeps the centroid at a count of 300")
     else:
-        # Kept at 15%, even fully opaque splats cannot hold the mass: they go to 1.
-        assert(few_mass <= mass and few_mass >= 0.75 * mass, "pruning to 300 keeps what opacity 1 can hold")
+        # Kept at 15%, even fully opaque splats cannot hold the mass: they go
+        # to 1. Pruning keeps what shows (opacity and color contrast, size
+        # only a little), not the heaviest, so about half the mass stays here.
+        assert(few_mass <= mass and few_mass >= 0.45 * mass, "pruning to 300 keeps what opacity 1 can hold")
     if merge:
         # Merged splats keep a degree-1 SH and a valid restorient.
         var sh: f32[45]
         assert(clouds.sh_of(clouds.points_of(few.value()), 0, sh) == 3, "merged splats keep their SH items")
+
+## Small bright detail in foliage (the bonsai's flowers): 900 large dull
+## green splats on a grid, overlapping, and 100 small opaque pink ones among
+## them. Importance down to 25% keeps every pink splat, which a mass score
+## (opacity × volume) would drop first.
+func reduce_keeps_detail() -> !:
+    let count: usize = 1000
+    var builder = clouds.CloudBuilder(count)
+    defer builder.close()
+    let orient = try new f64[count * 4] in memory.heap
+    defer free(orient) in memory.heap
+    let scale = try new f64[count * 3] in memory.heap
+    defer free(scale) in memory.heap
+    let opacity = try new f64[count] in memory.heap
+    defer free(opacity) in memory.heap
+    let color = try new f64[count * 3] in memory.heap
+    defer free(color) in memory.heap
+    let positions = try new Vector3[count] --- in memory.heap
+    defer free(positions) in memory.heap
+    var state = draws.Draws(7)
+    for p in 0..<count:
+        orient[p * 4 + 3] = 1.0
+        let flower = p >= 900
+        let size = 0.03 if flower else 0.2
+        for k in 0..<(usize)3: scale[p * 3 + k] = size
+        opacity[p] = 0.9 if flower else 0.5
+        let tint: f64[3] = [0.9, 0.3, 0.5] if flower else [0.1, 0.3, 0.1]
+        for k in 0..<(usize)3: color[p * 3 + k] = tint[k]
+        positions[p] = Vector3(state.between(0.0, 4.5), state.between(0.0, 4.5), 0.0) if flower else Vector3((f64)(p % 30) * 0.15, (f64)(p // 30) * 0.15, 0.0)
+    try builder.floats("orient", 4, orient)
+    try builder.floats("scale", 3, scale)
+    try builder.floats("opacity", 1, opacity)
+    try builder.floats("Cd", 3, color)
+    let source = try builder.finish(positions)
+    defer source.release()
+    let quarter = try run_with("Reduce GSplats", source, none, [0.0, 0.25, 0.0, 1.0, 1.0])
+    defer quarter.release()
+    assert(cloud_count(quarter) == 250)
+    var pink = 0
+    for p in 0..<(usize)250:
+        if clouds.vector_of(clouds.points_of(quarter.value()), "Cd", p).x > 0.8: pink += 1
+    assert(pink == 100, "every flower splat survives Importance at 25%")
 
 # mark: Attribute nodes, groups and Blast on clouds
 

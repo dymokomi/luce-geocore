@@ -14,10 +14,16 @@
 ##   frame first. Its other attributes come from the heavier splat. Passes
 ##   repeat, widening the search when pairs run out, until the target is
 ##   met; whatever remains is pruned by importance.
-## - **Importance**: the lightest splats go. With `keep_mass` the kept
-##   opacities are scaled by one factor, each clamped to 1, chosen so the total
-##   mass stays (unless every kept splat reaches opacity 1 first); the
-##   centroid moves only by what the removed splats held.
+## - **Importance**: the least visible splats go. A splat's score is what it
+##   shows rather than what it weighs: its opacity, times its mean projected
+##   area (σ₁σ₂ + σ₂σ₃ + σ₁σ₃)/3 relative to the cloud's median, to the power
+##   0.1 (LightGaussian's volume power: size counts only a little), times
+##   1 + 4·its color's contrast against the opacity-weighted mean Cd of its 8
+##   nearest neighbors. Mass alone (opacity × volume) dropped a capture's
+##   small, opaque, colorful detail first (the bonsai's flowers at 25%). With
+##   `keep_mass` the kept opacities are scaled by one factor, each clamped to
+##   1, chosen so the total mass stays (unless every kept splat reaches
+##   opacity 1 first); the centroid moves only by what the removed splats held.
 
 ## What Reduce GSplats does.
 pub struct ReduceOptions:
@@ -461,7 +467,7 @@ func merge_range(context: void*, first: usize, end: usize, worker: usize):
 
 # mark: Pruning
 
-## A splat's mass and its index, heaviest first.
+## A splat's score and its index, highest first.
 struct Weighed:
     let mass: f64
     let index: u32
@@ -469,18 +475,22 @@ struct Weighed:
 func heavier_first(x: Weighed, y: Weighed) -> bool:
     return x.mass > y.mass or (x.mass == y.mass and x.index < y.index)
 
-## Keep the `target` heaviest splats of `reduced` (in their order), scaling the
-## kept opacities by the lost mass when `keep_mass`.
+## Keep the `target` most important splats of `reduced` (in their order; see
+## the module comment), scaling the kept opacities by the lost mass when
+## `keep_mass`.
 func prune(reduced: Reduced*, target: usize, keep_mass: bool) -> !:
     let count = reduced.positions.count()
     let masses = try new f64[count] --- in memory.heap
     defer free(masses) in memory.heap
     splat_masses(&reduced.store, masses)
+    let scores = try new f64[count] --- in memory.heap
+    defer free(scores) in memory.heap
+    try importance_scores(reduced.positions.view(), &reduced.store, masses, scores)
     let ranked = try new Weighed[count] --- in memory.heap
     defer free(ranked) in memory.heap
     var before: f64 = 0.0
     for at in 0..<count:
-        ranked[at] = Weighed(masses[at], (u32)at)
+        ranked[at] = Weighed(scores[at], (u32)at)
         before += masses[at]
     sort.by(ranked, heavier_first)
     let keep = try new u8[count] in memory.heap
@@ -488,7 +498,7 @@ func prune(reduced: Reduced*, target: usize, keep_mass: bool) -> !:
     var after: f64 = 0.0
     for at in 0..<target:
         keep[(usize)ranked[at].index] = 1
-        after += ranked[at].mass
+        after += masses[(usize)ranked[at].index]
     let parents = try new i32[target + 1] --- in memory.heap
     defer free(parents) in memory.heap
     var next: usize = 0
@@ -526,6 +536,80 @@ func prune(reduced: Reduced*, target: usize, keep_mass: bool) -> !:
     made.pruned = reduced.pruned + count - target
     reduced.close()
     *reduced = made
+
+## Neighbors a splat's color contrast is measured against.
+let contrast_neighbors: usize = 8
+
+## Each point's importance into `scores` (see the module comment). Plain
+## points (no splat attributes) score their mass, which is 1 each; points
+## without Cd have no contrast.
+func importance_scores(points: const Float3[], store: const AttributeStore*, masses: const f64[], scores: f64[]) -> !:
+    let count = points.length
+    if not is_splat_store(store):
+        for at in 0..<count: scores[at] = masses[at]
+        return
+    var work: ScoreWork
+    work.points = points
+    work.scale = Floats.of(store.entry((usize)float_attribute(store, scale_name, 3)))
+    work.alpha = Floats.of(store.entry((usize)float_attribute(store, opacity_name, 1)))
+    let color = float_attribute(store, color_name, 3)
+    work.color = Floats.of(store.entry((usize)color)) if color >= 0 else Floats.empty()
+    work.scores = scores
+    # The median projected area, over a sample (a scale for the power).
+    let sample = count if count < 65536 else 65536
+    let areas = try new f64[sample + 1] --- in memory.heap
+    defer free(areas) in memory.heap
+    for at in 0..<sample: areas[at] = work.area(at * count // sample)
+    work.median_area = selected(areas[..<sample], sample // 2) if sample > 0 else 0.0
+    work.hash = none
+    let radius = 3.0 * (try median_largest(&work.scale, count))
+    work.radius = radius
+    var hash = try PointHash.for_radius(points, radius if radius > 0.0 else 1.0)
+    defer hash.close()
+    if radius > 0.0 and work.color.present(): work.hash = &hash
+    ranges.each_range(count, 2048, (void*)&work, score_range)
+
+struct ScoreWork:
+    var points: const Float3[]
+    var scale: Floats
+    var alpha: Floats
+    var color: Floats
+    var scores: f64[]
+    var median_area: f64
+    var radius: f64
+    var hash: const PointHash*?
+
+    ## Splat `at`'s mean projected area over directions, up to π.
+    func area(at: usize) -> f64:
+        let a = math.abs(self.scale.at(at, 0))
+        let b = math.abs(self.scale.at(at, 1))
+        let c = math.abs(self.scale.at(at, 2))
+        let value = (a * b + b * c + a * c) / 3.0
+        return value if math.is_finite(value) else 0.0
+
+func score_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (ScoreWork*)context
+    var neighbors: u32[16]
+    for at in first..<end:
+        let alpha = math.clamp(work.alpha.at(at, 0), 0.0, 1.0)
+        var size = 1.0
+        if work.median_area > 0.0: size = math.pow(work.area(at) / work.median_area, 0.1)
+        var contrast = 0.0
+        if let hash = work.hash:
+            let found = hash.nearest(at, contrast_neighbors, work.radius, neighbors[..<contrast_neighbors])
+            var weight = 0.0
+            var mean = Vector3()
+            for k in 0..<found:
+                let other = (usize)neighbors[k]
+                let w = math.max(work.alpha.at(other, 0), 0.0)
+                weight += w
+                mean = mean.add(Vector3(work.color.at(other, 0), work.color.at(other, 1), work.color.at(other, 2)).multiply_scalar(w))
+            if weight > 0.0:
+                let own = Vector3(work.color.at(at, 0), work.color.at(at, 1), work.color.at(at, 2))
+                contrast = own.subtract(mean.multiply_scalar(1.0 / weight)).length()
+        let score = alpha * size * (1.0 + 4.0 * contrast)
+        work.scores[at] = score if math.is_finite(score) else 0.0
 
 ## The mass of splats of `masses` (at opacities `alpha`) with every opacity
 ## scaled by `factor` and clamped to 1.
