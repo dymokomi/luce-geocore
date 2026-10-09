@@ -7,6 +7,7 @@ import strings
 from luce_std import files
 from luce_geocore.script import serve
 import api
+import edits
 import calls
 import process
 
@@ -20,6 +21,9 @@ pub func main(arguments: str[]) -> i32!:
     try api.families()
     try api.locking()
     try api.version()
+    try edits.vertices()
+    try edits.arrays()
+    try edits.volumes()
     try calls.verbs()
     try calls.cooking()
     try calls.scanning()

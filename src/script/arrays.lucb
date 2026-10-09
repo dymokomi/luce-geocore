@@ -1,0 +1,73 @@
+# Array attributes, Houdini's f[]@, i[]@ and v[]@: a list of f32, i32 or vector items per
+# point, vertex or primitive, each element's list as long as it likes. They are the
+# attributes a Code node's `set_f32_array`, `set_i32_array` and `set_vec3_array` make, and
+# read back there with `f32_array` and the like.
+
+extend Geometry:
+    ## Give element `element` of `domain` the array `values` in attribute `name` (made
+    ## as an f32 array attribute when missing).
+    pub func set_f32_array(domain: Domain3, element: i64, name: str, values: const f32[]) -> !:
+        let column = try self.array_column(name, domain, element, DataType.float32, 1, true)
+        let first = try column.place((usize)element, values.length)
+        for at in 0..<values.length: column.floats.items[first + at] = values[at]
+        try column.settle_pool()
+
+    ## Give element `element` of `domain` the whole-number array `values`.
+    pub func set_i32_array(domain: Domain3, element: i64, name: str, values: const i32[]) -> !:
+        let column = try self.array_column(name, domain, element, DataType.int32, 1, true)
+        let first = try column.place((usize)element, values.length)
+        for at in 0..<values.length: column.ints.items[first + at] = values[at]
+        try column.settle_pool()
+
+    ## Give element `element` of `domain` the vector array `values` (x, y, z of each).
+    pub func set_vec3_array(domain: Domain3, element: i64, name: str, values: const (f32[4])[]) -> !:
+        let column = try self.array_column(name, domain, element, DataType.float32, 3, true)
+        let first = try column.place((usize)element, values.length)
+        for at in 0..<values.length:
+            let v = point_of(values, at)
+            for k in 0..<(usize)3: column.floats.items[(first + at) * 3 + k] = v[k]
+        try column.settle_pool()
+
+    ## Element `element`'s array in f32 array attribute `name`, to read: valid until the
+    ## attribute is written again.
+    pub func f32_array(domain: Domain3, element: i64, name: str) -> const f32[]!:
+        let column = try self.array_column(name, domain, element, DataType.float32, 1, false)
+        let (first, count) = column.run((usize)element)
+        return column.floats.items[first..<first + count]
+
+    ## Element `element`'s array in i32 array attribute `name`.
+    pub func i32_array(domain: Domain3, element: i64, name: str) -> const i32[]!:
+        let column = try self.array_column(name, domain, element, DataType.int32, 1, false)
+        let (first, count) = column.run((usize)element)
+        return column.ints.items[first..<first + count]
+
+    ## Element `element`'s array in vector array attribute `name` (`.x`, `.y`, `.z`).
+    pub func vec3_array(domain: Domain3, element: i64, name: str) -> const Float3[]!:
+        let column = try self.array_column(name, domain, element, DataType.float32, 3, false)
+        let (first, count) = column.run((usize)element)
+        return Float3[]((Float3*)&column.floats.items[first * 3], count)
+
+    ## How many items element `element` holds in array attribute `name`.
+    pub func array_length(domain: Domain3, element: i64, name: str) -> i64!:
+        if domain == Domain3.detail: error(errors.invalid, "array attributes are on points, vertices or primitives")
+        let edit = try self.readable()
+        let column = (try edit.column(name, domain_of(domain), DataType.float32, 1, false)) else error(errors.invalid, "no such attribute")
+        if not column.ragged: error(errors.invalid, "that is not an array attribute")
+        try check_in(edit, domain, element)
+        return (i64)column.lengths.items[(usize)element]
+
+    ## The array column `name` of `kind` with items of `width`, for element `element`:
+    ## made when `write` and missing; a column of another kind or width fails.
+    func array_column(name: str, domain: Domain3, element: i64, kind: DataType, width: usize, write: bool) -> EditColumn*!:
+        if domain == Domain3.detail: error(errors.invalid, "array attributes are on points, vertices or primitives")
+        let edit = try self.editable() if write else try self.readable()
+        let column = (try edit.column(name, domain_of(domain), kind, width, write, ragged = true)) else error(errors.invalid, "no such attribute")
+        if not column.ragged: error(errors.invalid, "that attribute is not an array attribute")
+        if column.kind != kind or column.width != width:
+            error(errors.invalid, "the array attribute holds other items (f32_array, i32_array and vec3_array name f32, i32 and vector items)")
+        try check_in(edit, domain, element)
+        return column
+
+## Fail unless `element` is one of `domain`'s in `edit`.
+func check_in(edit: const MeshEdit*, domain: Domain3, element: i64) -> !:
+    if element < 0 or (usize)element >= edit.domain_size(domain_of(domain)): error(errors.invalid, "the element does not exist")

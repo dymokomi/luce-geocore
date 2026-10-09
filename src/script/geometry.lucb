@@ -37,11 +37,14 @@ from core.strings import TableBuilder
 from core.attributes import Attribute, Domain, DataType, Storage, group_flag
 import core.geometry as shapes
 import math.vector
+from math.matrix import Matrix4
 from geometries.polygon import Mesh, assembled, mesh_share, mesh_dispose, moved_storage, put_attribute, remove_attribute, transfer_attributes
 from geometries.primitives import MeshPrimitives
 from geometry_set import GeometrySet, Placement, set_mesh, mesh_component, empty_storage, dispose_set, adopt_set, set_joined, set_placed, set_detail, set_put_detail, cloud_of_mesh, set_cloud, cloud_positions, cloud_origin, cloud_store, points_component
 from curves import Curves, CurveType, CurvesBuilder, set_curves, curves_type
 from geometry_files import GeometryFile
+from fields import Volume, SparseGrid, GridClass, box_grid, new_grid, share_grid, release_grid, new_volume, add_grid, release_volume, volume_type, set_volume, key_leaf, leaf_key, leaf_of, local_index, leaf_voxels, mask_words
+from core.bits import popcount
 from set_verbs import GeometryVerbs, VerbCatalog
 from verbs import Verbs
 
@@ -82,6 +85,8 @@ pub struct Geometry:
     var curve_build: CurvesBuilder*? = none
     ## An input: read-only, as Houdini's input geometries are.
     var locked: bool = false
+    ## Grids of the volume opened by voxel_grid or add_volume (volumes.lucb).
+    var grids: Growing[VoxelGrid*] = Growing[VoxelGrid*]()
 
     ## A geometry with nothing in it.
     pub static func empty() -> Geometry!:
@@ -145,6 +150,8 @@ pub struct Geometry:
     ## Give back everything the geometry holds.
     pub func close():
         self.drop_edits()
+        self.close_grids()
+        self.grids.close()
         if let storage = self.storage:
             dispose_set(storage)
         self.storage = none
@@ -171,19 +178,21 @@ pub struct Geometry:
     func set() -> GeometrySet*:
         return self.storage else trap("the geometry is closed")
 
-    ## Assemble open edits: the edit form's mesh and the pending curves go into the set.
-    ## The edit form stays open, so spans a script holds stay valid.
+    ## Assemble open edits: the edit form's mesh, the pending curves and written grids
+    ## go into the set. The edit form and grids stay open, so spans a script holds stay
+    ## valid.
     pub func flush() -> !:
         if let edit = self.edit:
-            if not edit.dirty and not edit.spans: return try self.flush_curves()
-            let made = try edit.finish()
-            edit.dirty = false
-            if made.point_count() == 0 and made.face_count() == 0:
-                mesh_dispose(made)
-                self.set().remove(&mesh_component)
-            else:
-                try self.set().put(&mesh_component, (void*)made)
+            if edit.dirty or edit.spans:
+                let made = try edit.finish()
+                edit.dirty = false
+                if made.point_count() == 0 and made.face_count() == 0:
+                    mesh_dispose(made)
+                    self.set().remove(&mesh_component)
+                else:
+                    try self.set().put(&mesh_component, (void*)made)
         try self.flush_curves()
+        try self.flush_grids()
 
     func flush_curves() -> !:
         if let builder = self.curve_build:
@@ -224,6 +233,7 @@ pub struct Geometry:
     pub func take() -> GeometrySet*!:
         try self.flush()
         self.drop_edits()
+        self.close_grids()
         let storage = self.set()
         self.storage = none
         return storage
@@ -244,7 +254,7 @@ pub struct Geometry:
 
     ## Vertices (polygon corners) of the mesh.
     pub func vertex_count() -> i64:
-        if let edit = self.edit: return (i64)edit.corners.count
+        if let edit = self.edit: return (i64)edit.vertex_total()
         let mesh = set_mesh(self.set()) else return 0
         return mesh.vertex_count()
 

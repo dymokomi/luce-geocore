@@ -1,0 +1,373 @@
+# Volumes, Houdini's Volume and VDB primitives: named sparse grids of f32 voxels in the
+# set's volume, as the Volume node makes them and the Code node's Voxels mode runs over
+# them. A fog grid holds densities; a level set signed distances, negative inside. Voxels
+# sit in 8x8x8 leaves; voxel (i, j, k) is centered at the grid's transform of (i, j, k).
+#
+# `add_volume` is the Volume node: a box of voxels, dense (every voxel in the box active)
+# or sparse (no voxels yet; `set` makes leaves where it writes). `voxel_grid` opens a
+# grid for reading and writing as a `VoxelGrid`: its voxels in leaf order, 512 a leaf, x
+# fastest (the Voxels mode's lanes), by lane or by (i, j, k). A grid is read where it is
+# until the first write copies it; the copy becomes the set's grid at the next flush.
+
+## A grid's class, as the Volume node's Class menu.
+pub enum VolumeClass as u8:
+    fog = 0
+    level_set = 1
+
+## One grid of a geometry's volume, opened for reading and writing.
+pub struct VoxelGrid:
+    var label: str
+    var class: GridClass
+    var background_value: f32
+    var transform: Matrix4
+    var inverse: Matrix4
+    ## The published grid it reads until the first write (none once it owns its voxels).
+    var source: SparseGrid*?
+    ## Its own voxels after the first write: leaf keys in leaf order, 512 values and 8
+    ## active-mask words a leaf, and the leaves' order by key, for finding a leaf.
+    var keys: Growing[u64]
+    var values_owned: Growing[f32]
+    var masks: Growing[u64]
+    var order: Growing[u32]
+    ## Written since the set last took it; part of an input (read-only).
+    var dirty: bool
+    var locked: bool
+    ## The last leaf found, by key.
+    var cached_key: u64
+    var cached_leaf: i64
+
+    ## `grid` (shared) opened for reading.
+    static func open(grid: const SparseGrid*, locked: bool) -> VoxelGrid!:
+        return VoxelGrid(label = try heap_text(grid.name()), class = grid.class, background_value = grid.background, transform = grid.transform,
+                         inverse = grid.inverse, source = share_grid((SparseGrid*)grid), keys = Growing[u64](), values_owned = Growing[f32](),
+                         masks = Growing[u64](), order = Growing[u32](), dirty = false, locked = locked, cached_key = 0xFFFFFFFFFFFFFFFF, cached_leaf = -1)
+
+    # mark: What it is ================================================================
+
+    ## The grid's name.
+    pub func name() -> str:
+        return self.label
+
+    ## Whether it is a level set (else fog).
+    pub func is_level_set() -> bool:
+        return self.class == GridClass.level_set
+
+    ## The value outside its voxels.
+    pub func background() -> f32:
+        return self.background_value
+
+    ## The distance between voxel centers (along x).
+    pub func voxel_size() -> f64:
+        return self.transform.x.length()
+
+    ## Lanes: 512 for every leaf, active or not (`values()`'s length).
+    pub func count() -> i64:
+        return (i64)self.key_view().length * (i64)leaf_voxels
+
+    ## Voxels whose active bit is set.
+    pub func active_count() -> i64:
+        var total: i64 = 0
+        for word in self.mask_view(): total += (i64)popcount(word)
+        return total
+
+    # mark: By lane: the Voxels mode's order ===========================================
+
+    ## Every voxel's value, writable, by lane: valid until `set` adds a leaf.
+    pub func values() -> f32[]!:
+        try self.own()
+        self.dirty = true
+        return self.values_owned.items[..<self.values_owned.count]
+
+    ## Every voxel's value, to read.
+    pub func values_view() -> const f32[]:
+        if let grid = self.source: return grid.values.view()
+        return self.values_owned.view()
+
+    ## Lane `lane`'s voxel index (i, j, k).
+    pub func index(lane: i64) -> (i64, i64, i64):
+        let (x, y, z) = key_leaf(self.key_view()[(usize)lane // leaf_voxels])
+        let local = lane % (i64)leaf_voxels
+        return (x * 8 + (local & 7), y * 8 + ((local >> 3) & 7), z * 8 + (local >> 6))
+
+    ## Lane `lane`'s voxel center in world space.
+    pub func position(lane: i64) -> f32[4]:
+        let (i, j, k) = self.index(lane)
+        return self.index_position(i, j, k)
+
+    ## Whether lane `lane`'s voxel is active.
+    pub func active(lane: i64) -> bool:
+        return (self.mask_view()[(usize)lane >> 6] >> (u64)(lane & 63)) & 1 != 0
+
+    ## Turn lane `lane`'s voxel on or off.
+    pub func set_active(lane: i64, on: bool) -> !:
+        try self.own()
+        self.dirty = true
+        let bit = (u64)1 << (u64)(lane & 63)
+        let word = &self.masks.items[(usize)lane >> 6]
+        *word = (*word | bit) if on else (*word & (bit ^ 0xFFFFFFFFFFFFFFFF))
+
+    # mark: By voxel index ==============================================================
+
+    ## The value at voxel (i, j, k): the background outside the leaves.
+    pub func get(i: i64, j: i64, k: i64) -> f32:
+        let leaf = self.leaf(leaf_key(leaf_of(i), leaf_of(j), leaf_of(k)))
+        if leaf < 0: return self.background_value
+        return self.values_view()[(usize)leaf * leaf_voxels + local_index(i, j, k)]
+
+    ## Whether voxel (i, j, k) is active.
+    pub func active_at(i: i64, j: i64, k: i64) -> bool:
+        let leaf = self.leaf(leaf_key(leaf_of(i), leaf_of(j), leaf_of(k)))
+        if leaf < 0: return false
+        let at = (usize)leaf * leaf_voxels + local_index(i, j, k)
+        return (self.mask_view()[at >> 6] >> (u64)(at & 63)) & 1 != 0
+
+    ## Set voxel (i, j, k) to `value` and make it active; its leaf is made when the
+    ## grid has none there (other voxels of a new leaf are inactive, at the background).
+    pub func set(i: i64, j: i64, k: i64, value: f32) -> !:
+        try self.own()
+        self.dirty = true
+        let key = leaf_key(leaf_of(i), leaf_of(j), leaf_of(k))
+        var leaf = self.leaf(key)
+        if leaf < 0: leaf = (i64)(try self.add_leaf(key))
+        let at = (usize)leaf * leaf_voxels + local_index(i, j, k)
+        self.values_owned.items[at] = value
+        self.masks.items[at >> 6] |= (u64)1 << (u64)(at & 63)
+
+    # mark: World space =================================================================
+
+    ## Voxel (i, j, k)'s center in world space.
+    pub func index_position(i: i64, j: i64, k: i64) -> f32[4]:
+        return vec4(self.transform.transform_point(Vector3((f64)i, (f64)j, (f64)k)))
+
+    ## World point `p` in index space (voxel centers at whole numbers).
+    pub func to_index(p: f32[4]) -> f32[4]:
+        return vec4(self.inverse.transform_point(vec3(p)))
+
+    ## The trilinear value at world point `p` (VEX volumesample).
+    pub func sample(p: f32[4]) -> f32:
+        let at = self.inverse.transform_point(vec3(p))
+        let fx = math.floor(at.x)
+        let fy = math.floor(at.y)
+        let fz = math.floor(at.z)
+        let i = (i64)fx
+        let j = (i64)fy
+        let k = (i64)fz
+        let tx = (f32)(at.x - fx)
+        let ty = (f32)(at.y - fy)
+        let tz = (f32)(at.z - fz)
+        let x00 = lerp(self.get(i, j, k), self.get(i + 1, j, k), tx)
+        let x10 = lerp(self.get(i, j + 1, k), self.get(i + 1, j + 1, k), tx)
+        let x01 = lerp(self.get(i, j, k + 1), self.get(i + 1, j, k + 1), tx)
+        let x11 = lerp(self.get(i, j + 1, k + 1), self.get(i + 1, j + 1, k + 1), tx)
+        return lerp(lerp(x00, x10, ty), lerp(x01, x11, ty), tz)
+
+    # mark: Inside ======================================================================
+
+    func key_view() -> const u64[]:
+        if let grid = self.source: return grid.keys.view()
+        return self.keys.view()
+
+    func mask_view() -> const u64[]:
+        if let grid = self.source: return grid.masks.view()
+        return self.masks.view()
+
+    ## The leaf of `key`, or -1.
+    func leaf(key: u64) -> i64:
+        if key == self.cached_key: return self.cached_leaf
+        var found: i64 = -1
+        if let grid = self.source:
+            found = grid.find(key)
+        else:
+            let at = self.ordered_at(key)
+            if at < self.order.count and self.keys.items[(usize)self.order.items[at]] == key: found = (i64)self.order.items[at]
+        self.cached_key = key
+        self.cached_leaf = found
+        return found
+
+    ## Where `key` is, or would go, in the leaves' order by key.
+    func ordered_at(key: u64) -> usize:
+        var low: usize = 0
+        var high = self.order.count
+        while low < high:
+            let middle = (low + high) // 2
+            if self.keys.items[(usize)self.order.items[middle]] < key: low = middle + 1
+            else: high = middle
+        return low
+
+    ## Copy the published grid's voxels to write them (the first write does it).
+    func own() -> !:
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        let grid = self.source else return
+        try self.keys.assign(grid.keys.view())
+        try self.values_owned.assign(grid.values.view())
+        try self.masks.assign(grid.masks.view())
+        # Published keys are sorted: the order is the leaves' own.
+        try self.order.reserve(self.keys.count)
+        for at in 0..<self.keys.count: self.order.items[at] = (u32)at
+        self.order.count = self.keys.count
+        release_grid(grid)
+        self.source = none
+
+    ## A new leaf of `key`: every voxel inactive at the background. Its number.
+    func add_leaf(key: u64) -> usize!:
+        if self.keys.count >= 4000000: error(errors.limit, "a grid holds at most 4M leaves")
+        let leaf = self.keys.count
+        try self.keys.push(key)
+        try self.values_owned.extend(self.values_owned.count + leaf_voxels, self.background_value)
+        try self.masks.extend(self.masks.count + mask_words, 0)
+        try self.order.insert(self.ordered_at(key), (u32)leaf)
+        self.cached_key = key
+        self.cached_leaf = (i64)leaf
+        return leaf
+
+    ## The grid as a published one, its leaves sorted by key (the caller owns it).
+    func publish() -> SparseGrid*!:
+        if let grid = self.source: return share_grid(grid)
+        let leaves = self.keys.count
+        var keys = try Column[u64].allocate(leaves)
+        errdefer keys.release()
+        var values = try Column[f32].allocate(leaves * leaf_voxels)
+        errdefer values.release()
+        var masks = try Column[u64].allocate(leaves * mask_words)
+        errdefer masks.release()
+        let out_keys = keys.span()
+        let out_values = values.span()
+        let out_masks = masks.span()
+        for at in 0..<leaves:
+            let leaf = (usize)self.order.items[at]
+            out_keys[at] = self.keys.items[leaf]
+            memory.copy(out_values[at * leaf_voxels..<(at + 1) * leaf_voxels], self.values_owned.items[leaf * leaf_voxels..<(leaf + 1) * leaf_voxels], leaf_voxels)
+            memory.copy(out_masks[at * mask_words..<(at + 1) * mask_words], self.masks.items[leaf * mask_words..<(leaf + 1) * mask_words], mask_words)
+        return try new_grid(self.label, self.class, self.background_value, self.transform, keys.take(), values.take(), masks.take())
+
+    func close():
+        if let grid = self.source: release_grid(grid)
+        self.source = none
+        self.keys.close()
+        self.values_owned.close()
+        self.masks.close()
+        self.order.close()
+        release_text(self.label)
+
+func lerp(a: f32, b: f32, t: f32) -> f32:
+    return a + (b - a) * t
+
+extend Geometry:
+    ## A grid of voxels `voxel` apart over the box `size` wide around `center`, named
+    ## `name`, as the Volume node makes it: `dense`, every voxel in the box active at
+    ## `initial`; else none yet (`set` makes them). A grid of that name is replaced.
+    pub func add_volume(name: str, class: VolumeClass, center: f32[4], size: f32[4], voxel: f64 = 0.05, background: f32 = 0.0, initial: f32 = 0.0, dense: bool = true) -> VoxelGrid*!:
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        if name.length == 0 or name.length > 64: error(errors.invalid, "a grid needs a name of 1..64 bytes")
+        let half = Vector3((f64)size[0] * 0.5, (f64)size[1] * 0.5, (f64)size[2] * 0.5)
+        let middle = vec3(center)
+        let grid = try box_grid(name, GridClass.level_set if class == VolumeClass.level_set else GridClass.fog, middle.subtract(half), middle.add(half), voxel, background, initial, dense)
+        self.close_grid(name)
+        try put_grid(self.set(), grid)
+        return try self.voxel_grid(name)
+
+    ## Grid `name` of the volume, opened for reading and writing ("" the first grid,
+    ## "#2" the third). An input's grids read only.
+    pub func voxel_grid(name: str) -> VoxelGrid*!:
+        let volume = set_volume(self.set()) else error(errors.invalid, "the geometry has no volume")
+        let index = grid_index(volume, name) else error(errors.invalid, "the volume has no grid of that name")
+        for open in self.grids.view():
+            if open.name() == volume.grid(index).name(): return open
+        let made = try new VoxelGrid[1] --- in memory.heap
+        made[0] = VoxelGrid.open(volume.grid(index), self.locked) catch failure:
+            free(made) in memory.heap
+            error(failure.code, failure.message)
+        self.grids.push(made.data) catch failure:
+            made[0].close()
+            free(made) in memory.heap
+            error(failure.code, failure.message)
+        return made.data
+
+    ## How many grids the volume holds.
+    pub func volume_count() -> i64:
+        let volume = set_volume(self.set()) else return 0
+        return (i64)volume.grid_count()
+
+    ## Grid `index`'s name.
+    pub func volume_name(index: i64) -> str!:
+        let volume = set_volume(self.set()) else error(errors.invalid, "the geometry has no volume")
+        if index < 0 or index >= (i64)volume.grid_count(): error(errors.invalid, "the volume has no such grid")
+        return volume.grid((usize)index).name()
+
+    ## Remove grid `name` from the volume, if it is there.
+    pub func remove_volume(name: str) -> !:
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        self.close_grid(name)
+        let volume = set_volume(self.set()) else return
+        let index = grid_index(volume, name) else return
+        if volume.grid_count() == 1:
+            self.set().remove(volume_type())
+            return
+        let made = try new_volume()
+        for at in 0..<volume.grid_count():
+            if at == index: continue
+            add_grid(made, share_grid((SparseGrid*)volume.grid(at))) catch failure:
+                release_volume(made)
+                error(failure.code, failure.message)
+        self.set().put(volume_type(), (void*)made) catch failure:
+            release_volume(made)
+            error(failure.code, failure.message)
+
+    ## Put written grids in the set's volume; they stay open.
+    func flush_grids() -> !:
+        for at in 0..<self.grids.count:
+            let open = self.grids.items[at]
+            if not open.dirty: continue
+            try put_grid(self.set(), try open.publish())
+            open.dirty = false
+
+    ## Close the open grid `name` without keeping its writes.
+    func close_grid(name: str):
+        for at in 0..<self.grids.count:
+            let open = self.grids.items[at]
+            if open.name() != name: continue
+            open.close()
+            free(VoxelGrid[](open, 1)) in memory.heap
+            for later in at + 1..<self.grids.count: self.grids.items[later - 1] = self.grids.items[later]
+            self.grids.count -= 1
+            return
+
+    ## Close every open grid without keeping its writes.
+    func close_grids():
+        for open in self.grids.view():
+            open.close()
+            free(VoxelGrid[](open, 1)) in memory.heap
+        self.grids.clear()
+
+## The grid `name` reaches in `volume` ("" the first, "#2" the third), or none.
+func grid_index(volume: const Volume*, name: str) -> usize?:
+    if name.length == 0: return 0 if volume.grid_count() > 0 else none
+    for at in 0..<volume.grid_count():
+        if volume.grid(at).name() == name: return at
+    if name.length > 1 and name.bytes[0] == '#':
+        if let at = strings.parse_i64((str)name.bytes[1..]):
+            if at >= 0 and (usize)at < volume.grid_count(): return (usize)at
+    return none
+
+## `set`'s volume with `grid` (taken) in place of the grid of its name, or after them.
+func put_grid(set: GeometrySet*, grid: SparseGrid*) -> !:
+    let made = new_volume() catch failure:
+        release_grid(grid)
+        error(failure.code, failure.message)
+    var placed = false
+    if let volume = set_volume(set):
+        for at in 0..<volume.grid_count():
+            let other = volume.grid(at)
+            let taken = grid if other.name() == grid.name() else share_grid((SparseGrid*)other)
+            if taken == grid: placed = true
+            add_grid(made, taken) catch failure:
+                if not placed: release_grid(grid)
+                release_volume(made)
+                error(failure.code, failure.message)
+    if not placed:
+        add_grid(made, grid) catch failure:
+            release_volume(made)
+            error(failure.code, failure.message)
+    set.put(volume_type(), (void*)made) catch failure:
+        release_volume(made)
+        error(failure.code, failure.message)

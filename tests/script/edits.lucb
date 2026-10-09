@@ -1,0 +1,128 @@
+## The script API's later calls: a polygon's own vertices, array attributes and volumes,
+## each through assembly and a .prism round trip.
+from luce_geocore.script import Geometry, Domain3, VolumeClass, VoxelGrid
+import api
+
+## Reading, setting, inserting and removing a polygon's vertices; vertex attributes
+## follow their corners and the polygon is triangulated again.
+pub func vertices() -> !:
+    var g = try Geometry.grid(2.0, 2)
+    defer g.close()
+    for v in 0..<g.vertex_count(): try g.set_f32(Domain3.vertex, v, "w", (f32)v)
+    let first = try g.prim_points(0)
+    assert(first.length == 4)
+    let a = (i64)first[0]
+    let b = (i64)first[1]
+    let c = (i64)first[2]
+    # A fifth corner on quad 0, at a new point; quad 1 loses a corner.
+    let extra = try g.add_point([0.0, 1.0, 0.0, 0.0])
+    try g.insert_vertex(0, 2, extra)
+    assert(try g.prim_size(0) == 5 and try g.prim_point(0, 2) == extra and try g.prim_point(0, 3) == c)
+    assert(g.vertex_count() == 17)
+    try g.remove_vertex(1, 0)
+    assert(try g.prim_size(1) == 3 and g.vertex_count() == 16)
+    # Rewritten twice: the lists stack up until they settle.
+    let lifted = try g.add_point([0.5, 1.0, 0.0, 0.0])
+    try g.set_prim_point(0, 0, lifted)
+    assert(try g.prim_point(0, 0) == lifted)
+    # Vertex attributes settle with the corners: quad 0's corner 3 was old corner 2.
+    assert(try g.value_f32(Domain3.vertex, 3, "w") == 2.0)
+    assert(try g.value_f32(Domain3.vertex, 2, "w") == 0.0)
+    # Quad 1 (old corners 4..7) lost its first corner: its corners are old 5, 6, 7.
+    assert(try g.value_f32(Domain3.vertex, 5, "w") == 5.0)
+    # The whole list at once, and too few points refused.
+    let triangle: i64[3] = [a, b, extra]
+    try g.set_prim_points(3, triangle)
+    var refused = false
+    let two: i64[2] = [a, b]
+    g.set_prim_points(2, two) catch failure:
+        refused = true
+    assert(refused)
+    var buffer: u8[512]
+    let path = try api.scratch("vertices.prism", buffer)
+    try g.save(path)
+    var back = try Geometry.load(path)
+    defer back.close()
+    assert(back.prim_count() == 4 and back.vertex_count() == 15)
+    assert(try back.prim_size(0) == 5 and try back.prim_point(0, 2) == extra)
+    assert(try back.prim_size(3) == 3 and try back.prim_point(3, 2) == extra)
+    print("ok    script: a polygon's own vertices")
+
+## Per-element arrays of f32, i32 and vectors, growing, shrinking and surviving reshapes.
+pub func arrays() -> !:
+    var g = try Geometry.grid(2.0, 2)
+    defer g.close()
+    for point in 0..<g.point_count():
+        let ids: i32[3] = [(i32)point, (i32)point * 2, (i32)point * 3]
+        try g.set_i32_array(Domain3.point, point, "ids", ids[..<(usize)(point % 4)])
+    let weights: f32[2] = [0.25, 0.75]
+    try g.set_f32_array(Domain3.prim, 2, "weights", weights)
+    let path_points: f32[2][4] = [[1.0, 2.0, 3.0, 0.0], [4.0, 5.0, 6.0, 0.0]]
+    try g.set_vec3_array(Domain3.vertex, 1, "trail", path_points)
+    assert(try g.array_length(Domain3.point, 3, "ids") == 3)
+    assert((try g.i32_array(Domain3.point, 3, "ids"))[2] == 9)
+    assert(try g.array_length(Domain3.point, 4, "ids") == 0)
+    # Rewrites: shorter in place, longer elsewhere; thousands leave the pool packed.
+    for round in 0..<2000:
+        let many: i32[6] = [1, 2, 3, 4, 5, (i32)round]
+        try g.set_i32_array(Domain3.point, 1, "ids", many[..<(usize)(1 + round % 6)])
+    assert((try g.i32_array(Domain3.point, 1, "ids"))[0] == 1)
+    # Points removed: arrays follow theirs.
+    let gone: i64[1] = [0]
+    try g.remove_points(gone)
+    assert((try g.i32_array(Domain3.point, 2, "ids"))[2] == 9)
+    # Mixing a scalar call with an array is refused.
+    var refused = false
+    g.set_point_f32(2, "ids", 1.0) catch failure:
+        refused = true
+    assert(refused)
+    var buffer: u8[512]
+    let path = try api.scratch("arrays.prism", buffer)
+    try g.save(path)
+    var back = try Geometry.load(path)
+    defer back.close()
+    assert(try back.array_length(Domain3.point, 2, "ids") == 3)
+    assert((try back.i32_array(Domain3.point, 6, "ids"))[1] == 14)
+    let trail = try back.vec3_array(Domain3.vertex, 1, "trail")
+    assert(trail.length == 0)
+    print("ok    script: array attributes")
+
+## A dense fog box and a sparse level set: lanes, indices, writes, new leaves and samples.
+pub func volumes() -> !:
+    var g = try Geometry.empty()
+    defer g.close()
+    let fog = try g.add_volume("density", VolumeClass.fog, [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0], voxel = 0.125, initial = 0.5)
+    assert(not fog.is_level_set() and fog.voxel_size() == 0.125)
+    # Voxel centers -4..4 on each axis: 9 per axis, in leaves -1 and 0.
+    assert(fog.active_count() == 729 and fog.count() == 8 * 512)
+    let values = try fog.values()
+    for lane in 0..<fog.count():
+        if not fog.active(lane): continue
+        let p = fog.position(lane)
+        values[(usize)lane] = 1.0 - (p[0] * p[0] + p[1] * p[1] + p[2] * p[2])
+    assert(fog.get(0, 0, 0) == 1.0)
+    let (i, j, k) = fog.index(0)
+    assert(i == -8 and j == -8 and k == -8)
+    let s = fog.sample([0.0625, 0.0, 0.0, 0.0])
+    assert(s == 0.9921875)
+    # Sparse: no voxels until written; a write far away makes a leaf.
+    let shell = try g.add_volume("surface", VolumeClass.level_set, [0.0, 0.0, 0.0, 0.0], [2.0, 2.0, 2.0, 0.0], voxel = 0.1, background = 0.3, dense = false)
+    assert(shell.count() == 0 and shell.get(3, 3, 3) == 0.3)
+    try shell.set(3, 3, 3, -0.1)
+    try shell.set(100, -40, 7, 0.2)
+    try shell.set(4, 3, 3, 0.05)
+    assert(shell.count() == 2 * 512 and shell.active_count() == 3)
+    assert(shell.get(100, -40, 7) == 0.2 and shell.get(4, 3, 3) == 0.05 and shell.active_at(3, 3, 3))
+    assert(g.volume_count() == 2)
+    var buffer: u8[512]
+    let path = try api.scratch("volumes.prism", buffer)
+    try g.save(path)
+    var back = try Geometry.load(path)
+    defer back.close()
+    assert(back.volume_count() == 2 and try back.volume_name(1) == "surface")
+    let read = try back.voxel_grid("surface")
+    assert(read.is_level_set() and read.get(100, -40, 7) == 0.2 and read.active_count() == 3)
+    assert((try back.voxel_grid("density")).get(0, 0, 0) == 1.0)
+    try back.remove_volume("density")
+    assert(back.volume_count() == 1 and try back.volume_name(0) == "surface")
+    print("ok    script: volumes")

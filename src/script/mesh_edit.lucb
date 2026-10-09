@@ -3,7 +3,8 @@
 # the attributes the script touched. Assembling keeps everything else the source carried:
 # when nothing was added or removed, the source's topology and attributes are shared and
 # only moved positions and edited columns change; otherwise the attributes follow their
-# elements through the parents, new elements taking zero.
+# elements through the parents, new elements taking zero. A polygon whose own point list
+# changes is kept aside until a reshape or the assembly settles them all (vertices.lucb).
 
 ## A mesh being edited.
 struct MeshEdit:
@@ -26,12 +27,14 @@ struct MeshEdit:
     var dirty: bool
     var spans: bool
     var columns: Growing[EditColumn]
+    ## Polygons whose point lists were rewritten (vertices.lucb).
+    var rewrites: Rewrites
 
     ## The edit form of `source` (none: an empty mesh).
     static func open(source: const Mesh*?) -> MeshEdit!:
         var made = MeshEdit(source = none, origin = Vector3(), positions = Growing[Float3](), offsets = Growing[i32](), corners = Growing[i32](),
                             point_parents = Growing[i32](), face_parents = Growing[i32](), corner_parents = Growing[i32](), reshaped = false, moved = false, dirty = false, spans = false,
-                            columns = Growing[EditColumn]())
+                            columns = Growing[EditColumn](), rewrites = Rewrites.empty())
         errdefer made.close()
         try made.offsets.push(0)
         let mesh = source else return made
@@ -52,7 +55,7 @@ struct MeshEdit:
     func domain_size(domain: Domain) -> usize:
         match domain:
             .point: return self.positions.count
-            .corner: return self.corners.count
+            .corner: return self.vertex_total()
             .face: return self.face_count()
             _: return 1
 
@@ -78,6 +81,7 @@ struct MeshEdit:
             try self.corner_parents.push(-1)
         try self.offsets.push((i32)self.corners.count)
         try self.face_parents.push(-1)
+        try self.rewrites.added()
         self.reshaped = true
         return (i64)self.face_count() - 1
 
@@ -91,16 +95,22 @@ struct MeshEdit:
         self.moved = true
 
     func prim_size(prim: i64) -> i64!:
-        try self.check_prim(prim)
-        return (i64)(self.offsets.items[(usize)prim + 1] - self.offsets.items[(usize)prim])
+        return (i64)(try self.prim_points(prim)).length
 
     func prim_point(prim: i64, index: i64) -> i64!:
-        let size = try self.prim_size(prim)
-        if index < 0 or index >= size: error(errors.invalid, "the polygon has no such vertex")
-        return (i64)self.corners.items[(usize)self.offsets.items[(usize)prim] + (usize)index]
+        let points = try self.prim_points(prim)
+        if index < 0 or index >= (i64)points.length: error(errors.invalid, "the polygon has no such vertex")
+        return (i64)points[(usize)index]
+
+    ## Polygon `prim`'s point numbers in order: its rewritten list when it has one.
+    func prim_points(prim: i64) -> const i32[]!:
+        try self.check_prim(prim)
+        if let rewritten = self.rewrites.list(prim): return rewritten
+        return self.corners.items[(usize)self.offsets.items[(usize)prim]..<(usize)self.offsets.items[(usize)prim + 1]]
 
     ## Remove `numbers` of `domain` (points or prims), renumbering what stays.
     func remove(numbers: const i64[], domain: Domain3, points_too: bool) -> !:
+        try self.settle()
         let points = self.positions.count
         let faces = self.face_count()
         let point_map = try new i64[points] in memory.heap
@@ -173,7 +183,10 @@ struct MeshEdit:
 
     ## The column for `name` on `domain`: found, loaded from the source, or (when `make`)
     ## new with `kind` and `width`; none when missing and not made.
-    func column(name: str, domain: Domain, kind: DataType, width: usize, make: bool, group: bool = false) -> EditColumn*?!:
+    ## An array attribute (`ragged`) is made with `width` 1 or 3 for f32 or i32 items.
+    func column(name: str, domain: Domain, kind: DataType, width: usize, make: bool, group: bool = false, ragged: bool = false) -> EditColumn*?!:
+        # Vertex columns follow the corners, so rewritten polygons settle first.
+        if domain == Domain.corner: try self.settle()
         for index in 0..<self.columns.count:
             let found = &self.columns.items[index]
             if found.domain == domain and found.label == name:
@@ -184,7 +197,7 @@ struct MeshEdit:
             let at = mesh.find_attribute(name, (i64)(u8)domain)
             if at >= 0:
                 let entry = try mesh.attribute_entry(at)
-                var loaded = try EditColumn.make(name, domain, edit_kind(entry.kind), entry.width, entry.is_group())
+                var loaded = try EditColumn.make(name, domain, edit_kind(entry.kind), entry.width, entry.is_group(), entry.is_ragged())
                 errdefer loaded.close()
                 try loaded.load(entry, try mesh.domain_size(domain))
                 # Elements added since opening start at zero.
@@ -192,7 +205,7 @@ struct MeshEdit:
                 made = loaded
         if made == none:
             if not make: return none
-            made = try EditColumn.make(name, domain, kind, width, group)
+            made = try EditColumn.make(name, domain, kind, width, group, ragged)
         var column = made else trap("a column was neither found nor made")
         try column.grow(self.domain_size(domain))
         self.columns.push(column) catch failure:
@@ -204,25 +217,11 @@ struct MeshEdit:
     ## parents (the source's numbering is gone once elements were removed).
     func carry(column: EditColumn*, domain: Domain) -> !:
         if not self.reshaped: return
-        let parents = self.point_parents.view() if domain == Domain.point else (self.corner_parents.view() if domain == Domain.corner else self.face_parents.view())
-        var moved = try EditColumn.make(column.label, column.domain, column.kind, column.width, column.group)
-        errdefer moved.close()
-        try moved.grow(parents.length)
-        let w = column.width
-        for at in 0..<parents.length:
-            let parent = parents[at]
-            if parent < 0: continue
-            for k in 0..<w:
-                if column.floating(): moved.floats.items[at * w + k] = column.floats.items[(usize)parent * w + k]
-                else: moved.ints.items[at * w + k] = column.ints.items[(usize)parent * w + k]
-        moved.table.close()
-        moved.table = column.table
-        column.table = TableBuilder()
-        column.close()
-        *column = moved
+        try column.gather(self.point_parents.view() if domain == Domain.point else (self.corner_parents.view() if domain == Domain.corner else self.face_parents.view()))
 
     ## The assembled mesh (the caller owns it).
     func finish() -> Mesh*!:
+        try self.settle()
         let made = try self.assemble()
         errdefer mesh_dispose(made)
         for index in 0..<self.columns.count:
@@ -254,15 +253,17 @@ struct MeshEdit:
         let out = triangles.span()
         var old_offsets: const i32[]
         var old_triangles: const i32[]
+        var source_corners: const i32[]
         if let source = self.source:
             old_offsets = source.offset_span()
             old_triangles = source.triangle_span()
+            source_corners = source.corner_span()
         var at: usize = 0
         for f in 0..<self.face_count():
             let start = (usize)self.offsets.items[f]
             let size = (usize)(self.offsets.items[f + 1] - self.offsets.items[f])
             let parent = self.face_parents.items[f]
-            if parent >= 0:
+            if parent >= 0 and same_corners(old_offsets, source_corners, parent, self.corners.items[start..<start + size]):
                 let old_start = (usize)old_offsets[(usize)parent]
                 let base = (old_start - (usize)parent * 2) * 3
                 for entry in 0..<(size - 2) * 3: out[at + entry] = old_triangles[base + entry] - (i32)old_start + (i32)start
@@ -292,6 +293,16 @@ struct MeshEdit:
         self.corner_parents.close()
         for index in 0..<self.columns.count: self.columns.items[index].close()
         self.columns.close()
+        self.rewrites.close()
+
+## Whether polygon `parent` of the source (its `offsets` and `corners`) runs through
+## `points` in the same order: then its triangles still fit.
+func same_corners(offsets: const i32[], corners: const i32[], parent: i32, points: const i32[]) -> bool:
+    let start = (usize)offsets[(usize)parent]
+    if (usize)offsets[(usize)parent + 1] - start != points.length: return false
+    for at in 0..<points.length:
+        if corners[start + at] != points[at]: return false
+    return true
 
 ## 0..<count into `out`.
 func identity(out: Growing[i32]*, count: usize) -> !:

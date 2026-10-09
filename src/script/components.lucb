@@ -108,9 +108,11 @@ extend Geometry:
     pub func instance_count() -> i64:
         return self.set().instance_count()
 
-    ## Take `storage` as the set, dropping open edits (already flushed by the caller).
+    ## Take `storage` as the set, dropping open edits and grids (already flushed by the
+    ## caller).
     func replace(storage: GeometrySet*):
         self.drop_edits()
+        self.close_grids()
         if let old = self.storage: dispose_set(old)
         self.storage = storage
 

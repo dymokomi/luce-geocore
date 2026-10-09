@@ -194,7 +194,9 @@ extend Geometry:
     func column(name: str, domain: Domain3, kind: DataType, width: usize) -> EditColumn*!:
         if domain == Domain3.detail: error(errors.invalid, "detail attributes are read and written with detail_ calls")
         let edit = try self.editable()
-        return (try edit.column(name, domain_of(domain), kind, width, true)) else trap("a column was not made")
+        let column = (try edit.column(name, domain_of(domain), kind, width, true)) else trap("a column was not made")
+        if column.ragged: error(errors.invalid, "that is an array attribute: write it with set_f32_array, set_i32_array or set_vec3_array")
+        return column
 
     ## A column whose writable span the script keeps: the mesh is then assembled
     ## again at every flush.
@@ -208,6 +210,7 @@ extend Geometry:
         if domain == Domain3.detail: error(errors.invalid, "detail attributes are read with detail_ calls")
         let edit = try self.readable()
         let column = (try edit.column(name, domain_of(domain), DataType.float32, 1, false)) else error(errors.invalid, "no such attribute")
+        if column.ragged: error(errors.invalid, "that is an array attribute: read it with f32_array, i32_array or vec3_array")
         if element < 0 or (usize)element >= edit.domain_size(domain_of(domain)): error(errors.invalid, "the element does not exist")
         return column
 

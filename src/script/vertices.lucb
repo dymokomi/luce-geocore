@@ -1,0 +1,218 @@
+# A polygon's own vertices, Houdini's prim.vertices(), vertex.setPoint, prim.addVertex:
+# read its point list, set it, set one corner's point, insert or remove a corner.
+#
+# Corners are packed polygon after polygon, so a polygon that changes size cannot be
+# rewritten in place without moving every corner after it. A rewritten polygon's list is
+# kept aside instead (`Rewrites`), and reads see it there; the first reshape, vertex
+# attribute access or assembly settles every rewrite in one pass over the corners. A
+# corner keeps its vertex attributes when it stays (by its place in the old list for a
+# `set_prim_points`, by itself for an insert or a removal); a new corner starts at zero.
+# A polygon whose points changed is triangulated again when the mesh is assembled.
+
+## Polygon point lists rewritten since the last settle.
+struct Rewrites:
+    ## Per polygon: where its new list starts in `points` (-1: not rewritten), and its
+    ## size. Empty until the first rewrite.
+    var starts: Growing[i32]
+    var sizes: Growing[i32]
+    ## The new lists' point numbers, and each entry's corner before the rewrite (in the
+    ## settled numbering; -1 for a new corner).
+    var points: Growing[i32]
+    var came: Growing[i32]
+    ## Corners the rewrites add (negative: remove) against the settled corners.
+    var delta: i64
+
+    static func empty() -> Rewrites:
+        return Rewrites(starts = Growing[i32](), sizes = Growing[i32](), points = Growing[i32](), came = Growing[i32](), delta = 0)
+
+    ## Whether any polygon is rewritten.
+    func active() -> bool:
+        return self.starts.count > 0
+
+    ## Polygon `prim`'s rewritten list, or none.
+    func list(prim: i64) -> const i32[]?:
+        if (usize)prim >= self.starts.count: return none
+        let start = self.starts.items[(usize)prim]
+        if start < 0: return none
+        return self.points.items[(usize)start..<(usize)(start + self.sizes.items[(usize)prim])]
+
+    ## A polygon was added after the first rewrite: it has none.
+    func added() -> !:
+        if not self.active(): return
+        try self.starts.push(-1)
+        try self.sizes.push(0)
+
+    func clear():
+        self.starts.clear()
+        self.sizes.clear()
+        self.points.clear()
+        self.came.clear()
+        self.delta = 0
+
+    func close():
+        self.starts.close()
+        self.sizes.close()
+        self.points.close()
+        self.came.close()
+
+extend MeshEdit:
+    ## Corners counting the rewrites (what the mesh will have).
+    func vertex_total() -> usize:
+        return (usize)((i64)self.corners.count + self.rewrites.delta)
+
+    ## Give polygon `prim` the points `points`, each new corner coming from corner
+    ## `came[n]` (settled numbering; -1 new).
+    func rewrite(prim: i64, points: const i32[], came: const i32[]) -> !:
+        if points.length < 3: error(errors.invalid, "a polygon needs at least 3 points; remove_prims removes it")
+        for point in points: try self.check_point((i64)point)
+        let old_size = (i64)(try self.prim_points(prim)).length
+        let rewrites = &self.rewrites
+        if not rewrites.active():
+            try rewrites.starts.extend(self.face_count(), -1)
+            try rewrites.sizes.extend(self.face_count(), 0)
+        let start = rewrites.points.count
+        if start + points.length > 2147483647: error(errors.limit, "too many rewritten corners")
+        # `points` and `came` may be views into the lists being grown: reserve first.
+        try rewrites.points.reserve(start + points.length)
+        try rewrites.came.reserve(start + points.length)
+        for at in 0..<points.length:
+            rewrites.points.items[start + at] = points[at]
+            rewrites.came.items[start + at] = came[at]
+        rewrites.points.count = start + points.length
+        rewrites.came.count = start + points.length
+        rewrites.starts.items[(usize)prim] = (i32)start
+        rewrites.sizes.items[(usize)prim] = (i32)points.length
+        rewrites.delta += (i64)points.length - old_size
+        self.reshaped = true
+
+    ## The settled corner each corner of polygon `prim` is now (its rewritten origin,
+    ## or itself), into `out`.
+    func corner_origins(prim: i64, out: Growing[i32]*) -> !:
+        out.clear()
+        let p = (usize)prim
+        if let rewritten = self.rewrites.list(prim):
+            let start = (usize)self.rewrites.starts.items[p]
+            for at in 0..<rewritten.length: try out.push(self.rewrites.came.items[start + at])
+            return
+        for c in (usize)self.offsets.items[p]..<(usize)self.offsets.items[p + 1]: try out.push((i32)c)
+
+    ## Put every rewritten list in the corners, in one pass: corners, their parents,
+    ## the offsets and the vertex columns.
+    func settle() -> !:
+        if not self.rewrites.active(): return
+        let total = self.vertex_total()
+        let faces = self.face_count()
+        # Where each new corner comes from (-1: new).
+        let origin = try new i32[total] in memory.heap
+        defer free(origin) in memory.heap
+        var corners = Growing[i32]()
+        defer corners.close()
+        try corners.reserve(total)
+        var offsets = Growing[i32]()
+        defer offsets.close()
+        try offsets.reserve(faces + 1)
+        for f in 0..<faces:
+            try offsets.push((i32)corners.count)
+            let start = self.rewrites.starts.items[f]
+            if start < 0:
+                for c in (usize)self.offsets.items[f]..<(usize)self.offsets.items[f + 1]:
+                    origin[corners.count] = (i32)c
+                    try corners.push(self.corners.items[c])
+                continue
+            for at in (usize)start..<(usize)(start + self.rewrites.sizes.items[f]):
+                origin[corners.count] = self.rewrites.came.items[at]
+                try corners.push(self.rewrites.points.items[at])
+        try offsets.push((i32)corners.count)
+        # Parents and vertex columns follow their corners.
+        var parents = Growing[i32]()
+        defer parents.close()
+        try parents.reserve(total)
+        for at in 0..<total: try parents.push(self.corner_parents.items[(usize)origin[at]] if origin[at] >= 0 else -1)
+        for index in 0..<self.columns.count:
+            let column = &self.columns.items[index]
+            if column.domain == Domain.corner: try column.gather(origin[..<total])
+        try self.corners.assign(corners.view())
+        try self.offsets.assign(offsets.view())
+        try self.corner_parents.assign(parents.view())
+        self.rewrites.clear()
+
+extend Geometry:
+    ## Polygon `prim`'s point numbers in order (Houdini's prim.points()), to read; valid
+    ## until the geometry's polygons change.
+    pub func prim_points(prim: i64) -> const i32[]!:
+        if let edit = self.edit: return try edit.prim_points(prim)
+        let mesh = set_mesh(self.set()) else error(errors.invalid, "the geometry has no polygons")
+        if prim < 0 or prim >= mesh.face_count(): error(errors.invalid, "the primitive does not exist")
+        let offsets = mesh.offset_span()
+        return mesh.corner_span()[(usize)offsets[(usize)prim]..<(usize)offsets[(usize)prim + 1]]
+
+    ## Make polygon `prim` run through `points` (3 or more, in order). Corner n keeps
+    ## the vertex attributes of the polygon's old corner n when it had one.
+    pub func set_prim_points(prim: i64, points: const i64[]) -> !:
+        let edit = try self.editable()
+        var origins = Growing[i32]()
+        defer origins.close()
+        try edit.corner_origins(prim, &origins)
+        var list = Growing[i32]()
+        defer list.close()
+        var came = Growing[i32]()
+        defer came.close()
+        for at in 0..<points.length:
+            if points[at] < 0 or points[at] > 2147483647: error(errors.invalid, "the point does not exist")
+            try list.push((i32)points[at])
+            try came.push(origins.items[at] if at < origins.count else -1)
+        try edit.rewrite(prim, list.view(), came.view())
+
+    ## Make corner `index` of polygon `prim` use point `point` (Houdini's
+    ## vertex.setPoint); the corner keeps its vertex attributes.
+    pub func set_prim_point(prim: i64, index: i64, point: i64) -> !:
+        let edit = try self.editable()
+        try edit.check_point(point)
+        let size = try edit.prim_size(prim)
+        if index < 0 or index >= size: error(errors.invalid, "the polygon has no such vertex")
+        if edit.rewrites.list(prim) != none:
+            let start = (usize)edit.rewrites.starts.items[(usize)prim]
+            edit.rewrites.points.items[start + (usize)index] = (i32)point
+        else:
+            edit.corners.items[(usize)edit.offsets.items[(usize)prim] + (usize)index] = (i32)point
+        edit.reshaped = true
+
+    ## Insert a corner at point `point` before corner `index` of polygon `prim` (`index`
+    ## equal to its size appends); the new corner's vertex attributes start at zero.
+    pub func insert_vertex(prim: i64, index: i64, point: i64) -> !:
+        let edit = try self.editable()
+        let points = try edit.prim_points(prim)
+        if index < 0 or index > (i64)points.length: error(errors.invalid, "the polygon has no such vertex")
+        var origins = Growing[i32]()
+        defer origins.close()
+        try edit.corner_origins(prim, &origins)
+        var list = Growing[i32]()
+        defer list.close()
+        var came = Growing[i32]()
+        defer came.close()
+        for at in 0..<points.length + 1:
+            if at == (usize)index:
+                try list.push((i32)point)
+                try came.push(-1)
+            if at < points.length:
+                try list.push(points[at])
+                try came.push(origins.items[at])
+        try edit.rewrite(prim, list.view(), came.view())
+
+    ## Remove corner `index` of polygon `prim` (it must keep 3 corners).
+    pub func remove_vertex(prim: i64, index: i64) -> !:
+        let edit = try self.editable()
+        let points = try edit.prim_points(prim)
+        if index < 0 or index >= (i64)points.length: error(errors.invalid, "the polygon has no such vertex")
+        var origins = Growing[i32]()
+        defer origins.close()
+        try edit.corner_origins(prim, &origins)
+        var list = Growing[i32]()
+        defer list.close()
+        var came = Growing[i32]()
+        defer came.close()
+        for at in 0..<points.length:
+            if at == (usize)index: continue
+            try list.push(points[at])
+            try came.push(origins.items[at])
+        try edit.rewrite(prim, list.view(), came.view())

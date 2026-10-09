@@ -2,6 +2,11 @@
 # for floats, i32 for integers, string-table indices for text and 0/1 for groups. Columns
 # are made when a script first reads or writes an attribute by name, from the mesh's own
 # attribute when it has one, and become attributes again when the mesh is assembled.
+#
+# An array attribute (Houdini's f[]@, i[]@, v[]@; `ragged`) keeps each element's items as a
+# run in the same float or int pool, found by the element's start and length. Writing a
+# longer array appends a new run; the pool is packed when it holds more dead items than
+# live ones, and when the column becomes an attribute.
 
 ## One attribute being edited.
 struct EditColumn:
@@ -9,20 +14,32 @@ struct EditColumn:
     var domain: Domain
     ## float32, int32, text, or boolean (a group, or a plain boolean attribute).
     var kind: DataType
+    ## Components of a tuple (of an item, for an array attribute).
     var width: usize
     var group: bool
+    ## The tuples (an array attribute's item pool).
     var floats: Growing[f32]
     var ints: Growing[i32]
     var table: TableBuilder
+    ## An array attribute: element e's items are the pool's tuples starts[e] ..<
+    ## starts[e] + lengths[e].
+    var ragged: bool
+    var starts: Growing[u32]
+    var lengths: Growing[u32]
+    ## Items of the pool no element uses any more.
+    var dead: usize
 
     ## An empty column (the caller grows it to its domain's size).
-    static func make(name: str, domain: Domain, kind: DataType, width: usize, group: bool) -> EditColumn!:
+    static func make(name: str, domain: Domain, kind: DataType, width: usize, group: bool, ragged: bool = false) -> EditColumn!:
         if name.length == 0 or name.length > 64 or name == "P":
             error(errors.invalid, "an attribute needs a name of 1..64 bytes other than P")
         if width < 1 or width > 4:
             error(errors.invalid, "an attribute has 1 to 4 components")
+        if ragged and ((kind != DataType.float32 and kind != DataType.int32) or (width != 1 and width != 3)):
+            error(errors.invalid, "array attributes hold f32 or i32 items of 1 or 3 components")
         return EditColumn(label = try heap_text(name), domain = domain, kind = kind, width = width, group = group,
-                          floats = Growing[f32](), ints = Growing[i32](), table = TableBuilder())
+                          floats = Growing[f32](), ints = Growing[i32](), table = TableBuilder(),
+                          ragged = ragged, starts = Growing[u32](), lengths = Growing[u32](), dead = 0)
 
     ## Whether its values are floats.
     func floating() -> bool:
@@ -30,15 +47,35 @@ struct EditColumn:
 
     ## Elements it covers.
     func size() -> usize:
+        if self.ragged: return self.starts.count
         return (self.floats.count if self.floating() else self.ints.count) // self.width
 
-    ## Grow to `elements`, the new ones zero (the empty text).
+    ## Tuples in the pool (an array attribute's items, dead ones included).
+    func pooled() -> usize:
+        return (self.floats.count if self.floating() else self.ints.count) // self.width
+
+    ## Grow to `elements`, the new ones zero (the empty text; an empty array).
     func grow(elements: usize) -> !:
+        if self.ragged:
+            try self.starts.extend(elements, 0)
+            try self.lengths.extend(elements, 0)
+            return
         if self.floating(): try self.floats.extend(elements * self.width, 0.0)
         else: try self.ints.extend(elements * self.width, 0 if self.kind != DataType.text else try self.table.intern(""))
 
     ## Keep element `old` at `map[old]` when it is 0 or more; `kept` remain.
     func compact(map: const i64[], kept: usize):
+        if self.ragged:
+            for old in 0..<map.length:
+                let to = map[old]
+                if to < 0:
+                    self.dead += (usize)self.lengths.items[old]
+                    continue
+                self.starts.items[(usize)to] = self.starts.items[old]
+                self.lengths.items[(usize)to] = self.lengths.items[old]
+            self.starts.count = kept
+            self.lengths.count = kept
+            return
         let w = self.width
         for old in 0..<map.length:
             let to = map[old]
@@ -49,11 +86,120 @@ struct EditColumn:
         if self.floating(): self.floats.count = kept * w
         else: self.ints.count = kept * w
 
+    ## Renumber: new element e takes old element `origin[e]`, or zero (an empty array)
+    ## when it is -1. The text table stays.
+    func gather(origin: const i32[]) -> !:
+        if self.ragged:
+            var starts = Growing[u32]()
+            errdefer starts.close()
+            var lengths = Growing[u32]()
+            errdefer lengths.close()
+            try starts.extend(origin.length, 0)
+            try lengths.extend(origin.length, 0)
+            for at in 0..<origin.length:
+                if origin[at] < 0: continue
+                starts.items[at] = self.starts.items[(usize)origin[at]]
+                lengths.items[at] = self.lengths.items[(usize)origin[at]]
+            self.starts.close()
+            self.lengths.close()
+            self.starts = starts
+            self.lengths = lengths
+            # Runs no element points at stay until the next pack.
+            self.dead = 0
+            try self.pack()
+            return
+        let w = self.width
+        let zero: i32 = 0 if self.kind != DataType.text else try self.table.intern("")
+        if self.floating():
+            var moved = Growing[f32]()
+            errdefer moved.close()
+            try moved.extend(origin.length * w, 0.0)
+            for at in 0..<origin.length:
+                if origin[at] < 0: continue
+                for k in 0..<w: moved.items[at * w + k] = self.floats.items[(usize)origin[at] * w + k]
+            self.floats.close()
+            self.floats = moved
+        else:
+            var moved = Growing[i32]()
+            errdefer moved.close()
+            try moved.extend(origin.length * w, zero)
+            for at in 0..<origin.length:
+                if origin[at] < 0: continue
+                for k in 0..<w: moved.items[at * w + k] = self.ints.items[(usize)origin[at] * w + k]
+            self.ints.close()
+            self.ints = moved
+
+    # mark: Array attributes ============================================================
+
+    ## Element `element`'s array as pool tuples: (first, count).
+    func run(element: usize) -> (usize, usize):
+        return ((usize)self.starts.items[element], (usize)self.lengths.items[element])
+
+    ## Room for `count` items of element `element`: its own run when that is long
+    ## enough, else a new one at the end of the pool. The first pool tuple.
+    func place(element: usize, count: usize) -> usize!:
+        let (first, old) = self.run(element)
+        if count <= old:
+            self.lengths.items[element] = (u32)count
+            self.dead += old - count
+            return first
+        let start = self.pooled()
+        if (start + count) * self.width > 2147483647: error(errors.limit, "an array attribute holds at most 2G values")
+        if self.floating(): try self.floats.extend((start + count) * self.width, 0.0)
+        else: try self.ints.extend((start + count) * self.width, 0)
+        self.starts.items[element] = (u32)start
+        self.lengths.items[element] = (u32)count
+        self.dead += old
+        return start
+
+    ## Pack the pool when most of it is dead: every run in element order, the dead
+    ## ones gone. Runs a script holds views of move.
+    func settle_pool() -> !:
+        if self.dead > 1024 and self.dead * 2 > self.pooled(): try self.pack()
+
+    ## Every element's run in order, nothing dead.
+    func pack() -> !:
+        let w = self.width
+        var at: usize = 0
+        if self.floating():
+            var packed = Growing[f32]()
+            errdefer packed.close()
+            for e in 0..<self.starts.count:
+                let (first, count) = self.run(e)
+                for v in first * w..<(first + count) * w: try packed.push(self.floats.items[v])
+                self.starts.items[e] = (u32)at
+                at += count
+            self.floats.close()
+            self.floats = packed
+        else:
+            var packed = Growing[i32]()
+            errdefer packed.close()
+            for e in 0..<self.starts.count:
+                let (first, count) = self.run(e)
+                for v in first * w..<(first + count) * w: try packed.push(self.ints.items[v])
+                self.starts.items[e] = (u32)at
+                at += count
+            self.ints.close()
+            self.ints = packed
+        self.dead = 0
+
+    # mark: To and from attributes ======================================================
+
     ## Fill from `attribute` over `elements` (its values converted to the column's kind).
     func load(attribute: const Attribute*, elements: usize) -> !:
-        if attribute.is_ragged():
-            error(errors.invalid, "array attributes cannot be edited by a script yet")
         try self.grow(elements)
+        if self.ragged:
+            var at: usize = 0
+            for element in 0..<elements:
+                let count = attribute.item_count(element)
+                self.starts.items[element] = (u32)at
+                self.lengths.items[element] = (u32)count
+                for item in 0..<count:
+                    for k in 0..<self.width:
+                        if self.floating(): try self.floats.push((f32)attribute.item(element, item, k))
+                        else: try self.ints.push((i32)attribute.item(element, item, k))
+                at += count
+            return
         for element in 0..<elements:
             for k in 0..<self.width:
                 let at = element * self.width + k
@@ -64,6 +210,7 @@ struct EditColumn:
     ## The column as an attribute of `elements` elements.
     func attribute(elements: usize) -> Attribute!:
         try self.grow(elements)
+        if self.ragged: return try self.ragged_attribute(elements)
         if self.kind == DataType.text:
             var table = try self.table.finish()
             defer table.release()
@@ -82,10 +229,29 @@ struct EditColumn:
         else: memory.copy(bytes, u8[]((u8*)self.ints.items.data, count * 4), count * 4)
         return made
 
+    ## An array attribute: u32 offsets and the items packed in element order.
+    func ragged_attribute(elements: usize) -> Attribute!:
+        try self.pack()
+        let items = self.pooled()
+        var offsets = try Column[u8].allocate((elements + 1) * 4)
+        errdefer offsets.release()
+        let bounds = u32[]((u32*)offsets.span().data, elements + 1)
+        for e in 0..<elements: bounds[e] = self.starts.items[e]
+        bounds[elements] = (u32)items
+        let bytes = items * self.width * 4
+        var values = try Column[u8].allocate(bytes)
+        errdefer values.release()
+        if bytes > 0:
+            let source = (u8*)self.floats.items.data if self.floating() else (u8*)self.ints.items.data
+            memory.copy(values.span(), u8[](source, bytes), bytes)
+        return try Attribute.ragged(self.label, self.domain, self.kind, self.width, offsets.take(), values.take())
+
     func close():
         self.floats.close()
         self.ints.close()
         self.table.close()
+        self.starts.close()
+        self.lengths.close()
         release_text(self.label)
 
 ## The edit kind a stored attribute becomes: float32 for floats, int32 for integers,
