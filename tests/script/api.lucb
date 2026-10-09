@@ -1,0 +1,202 @@
+## The script API's geometry calls: building, editing, attributes, groups, the other
+## families and whole-set operations, checked against geocore's own builders.
+import strings
+from luce_std import files
+from luce_geocore.script import Geometry, Domain3, AttributeKind, Float3, Cook, geocore_version
+from luce_geocore.geocore import MeshBuilder, Vector3
+
+## Where a test may write files (luc test gives each program a scratch HOME).
+pub func scratch(name: str, buffer: u8[]) -> str!:
+    let home = try files.home_directory()
+    defer home.release()
+    return try strings.format(buffer, f"{home.value}/{name}")
+
+## 10k points and quads made by add_point/add_polygon match MeshBuilder's mesh.
+pub func building() -> !:
+    var g = try Geometry.empty()
+    defer g.close()
+    var builder = try MeshBuilder()
+    defer builder.close()
+    let side: i64 = 100
+    for row in 0..<side:
+        for column in 0..<side:
+            let p: f32[4] = [(f32)column * 0.1, 0.0, (f32)row * 0.1, 0.0]
+            assert(try g.add_point(p) == row * side + column)
+            _ = try builder.point(Vector3((f64)p[0], 0.0, (f64)p[2]))
+    for row in 0..<side - 1:
+        for column in 0..<side - 1:
+            let a = row * side + column
+            let quad: i64[4] = [a, a + side, a + side + 1, a + 1]
+            _ = try g.add_polygon(quad)
+            try builder.face(4)
+            for corner in quad: try builder.corner(corner)
+    let expected = try builder.finish()
+    defer expected.release()
+    let mesh = try expected.get()
+    assert(g.point_count() == mesh.point_count())
+    assert(g.prim_count() == mesh.face_count())
+    try g.flush()
+    assert(g.point_count() == 10000)
+    assert(g.prim_count() == 9801)
+    assert(g.vertex_count() == 9801 * 4)
+    assert(try g.prim_point(9800, 2) == mesh.face_point(9800, 2))
+    let p = try g.position(4321)
+    let q = try mesh.point(4321)
+    assert(p[0] == (f32)q.x and p[2] == (f32)q.z)
+    print("ok    script: 10k points and quads match MeshBuilder")
+
+## Attributes of every kind survive assembly and a .prism round trip.
+pub func attributes() -> !:
+    var g = try Geometry.grid(2.0, 4)
+    defer g.close()
+    for point in 0..<g.point_count():
+        try g.set_point_f32(point, "mass", (f32)point * 0.5)
+        try g.set_i32(Domain3.point, point, "id", (i32)point * 3)
+    for prim in 0..<g.prim_count():
+        try g.set_vec3(Domain3.prim, prim, "Cd", [1.0, (f32)prim / 16.0, 0.25, 0.0])
+        try g.set_text(Domain3.prim, prim, "name", "even" if prim % 2 == 0 else "odd")
+    try g.set_f32(Domain3.vertex, 5, "weight", 2.5)
+    try g.set_detail_f64("scale", 4.5)
+    try g.set_detail_vec3("up", [0.0, 1.0, 0.0, 0.0])
+    try g.set_detail_text("source", "a test")
+    try g.add_attribute("empty", Domain3.point, AttributeKind.float32, 2)
+    var buffer: u8[512]
+    let path = try scratch("attributes.prism", buffer)
+    try g.save(path)
+    var back = try Geometry.load(path)
+    defer back.close()
+    assert(back.point_count() == 25 and back.prim_count() == 16)
+    assert(try back.point_f32(7, "mass") == 3.5)
+    assert(try back.value_i32(Domain3.point, 7, "id") == 21)
+    let color = try back.value_vec3(Domain3.prim, 8, "Cd")
+    assert(color[1] == 0.5 and color[2] == 0.25)
+    assert(try back.value_text(Domain3.prim, 3, "name") == "odd")
+    assert(try back.value_f32(Domain3.vertex, 5, "weight") == 2.5)
+    assert(try back.value_f32(Domain3.vertex, 6, "weight") == 0.0)
+    assert(try back.detail_f64("scale") == 4.5)
+    assert((try back.detail_vec3("up"))[1] == 1.0)
+    assert(try back.detail_text("source") == "a test")
+    assert(back.has_attribute("empty", Domain3.point))
+    assert(not back.has_attribute("missing", Domain3.point))
+    # Bulk spans write in place.
+    let positions = try back.positions()
+    for at in 0..<positions.length: positions[at].y = 1.0
+    let masses = try back.point_f32s("mass")
+    masses[0] = 9.0
+    let colors = try back.point_vec3s("Cd")
+    colors[1] = Float3(x = 1.0, y = 0.0, z = 0.0)
+    try back.flush()
+    assert((try back.position(12))[1] == 1.0)
+    assert(try back.point_f32(0, "mass") == 9.0)
+    assert((try back.point_vec3(1, "Cd"))[0] == 1.0)
+    # A span outlives a flush (a verb, bounds, a save): writes through it count.
+    let held = try back.positions()
+    _ = try back.bounds()
+    held[0].y = 7.0
+    try back.flush()
+    assert((try back.bounds()).maximum.y == 7.0)
+    print("ok    script: attributes of every kind round trip")
+
+## Removing points takes their polygons; attributes follow their elements; new
+## elements start at zero.
+pub func reshaping() -> !:
+    var g = try Geometry.grid(2.0, 2)
+    defer g.close()
+    for point in 0..<g.point_count(): try g.set_point_f32(point, "n", (f32)point)
+    try g.flush()
+    # The center point (4) is on every quad.
+    let center: i64[1] = [4]
+    try g.remove_points(center)
+    assert(g.point_count() == 8 and g.prim_count() == 0)
+    assert(try g.point_f32(4, "n") == 5.0)
+    let a = try g.add_point([0.0, 1.0, 0.0, 0.0])
+    let triangle: i64[3] = [0, 1, a]
+    _ = try g.add_polygon(triangle)
+    try g.flush()
+    assert(g.point_count() == 9 and g.prim_count() == 1)
+    assert(try g.point_f32(7, "n") == 8.0)
+    assert(try g.point_f32(8, "n") == 0.0)
+    # Removing a polygon keeps its points unless asked.
+    var h = try Geometry.grid(2.0, 2)
+    defer h.close()
+    let first: i64[1] = [0]
+    try h.remove_prims(first)
+    assert(h.prim_count() == 3 and h.point_count() == 9)
+    try h.remove_prims(first, remove_points = true)
+    assert(h.prim_count() == 2 and h.point_count() == 7)
+    print("ok    script: removals renumber and attributes follow")
+
+## Groups are flagged attributes downstream verbs find by name.
+pub func grouping() -> !:
+    var g = try Geometry.grid(2.0, 4)
+    defer g.close()
+    for prim in 0..<g.prim_count():
+        if prim < 4: try g.add_to_group(Domain3.prim, "top", prim)
+    try g.add_to_group(Domain3.point, "corner", 0)
+    assert(try g.in_group(Domain3.prim, "top", 2))
+    assert(not try g.in_group(Domain3.prim, "top", 5))
+    assert(try g.group_size(Domain3.prim, "top") == 4)
+    var buffer: u8[512]
+    let path = try scratch("groups.prism", buffer)
+    try g.save(path)
+    var back = try Geometry.load(path)
+    defer back.close()
+    assert(try back.group_size(Domain3.prim, "top") == 4)
+    assert(try back.in_group(Domain3.point, "corner", 0))
+    print("ok    script: groups")
+
+## Curves, the point cloud, detail, instances, merge and transform.
+pub func families() -> !:
+    var g = try Geometry.empty()
+    defer g.close()
+    let line: f32[3][4] = [[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [1.0, 1.0, 0.0, 0.0]]
+    assert(try g.add_polyline(line) == 0)
+    let control: f32[6][4] = [[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [2.0, 1.0, 0.0, 0.0], [3.0, 0.0, 0.0, 0.0], [4.0, 1.0, 0.0, 0.0], [5.0, 0.0, 0.0, 0.0]]
+    assert(try g.add_curve(control, degree = 5) == 1)
+    try g.flush()
+    assert(g.curve_count() == 2)
+    _ = try g.add_polyline(line, closed = true)
+    try g.flush()
+    assert(g.curve_count() == 3)
+    var cloud = try Geometry.empty()
+    defer cloud.close()
+    for i in 0..<100:
+        let point = try cloud.add_point([(f32)i, 0.0, 0.0, 0.0])
+        try cloud.set_point_f32(point, "pscale", 0.5)
+    try cloud.make_cloud()
+    assert(cloud.cloud_count() == 100 and cloud.point_count() == 0)
+    assert((try cloud.cloud_position(42))[0] == 42.0)
+    assert(try cloud.cloud_value(3, "pscale") == 0.5)
+    var box = try Geometry.cube(1.0)
+    defer box.close()
+    var scene = try Geometry.empty()
+    defer scene.close()
+    for i in 0..<3: try scene.add_instance(&box, [(f32)i * 2.0, 0.0, 0.0, 0.0], [0.0, 45.0, 0.0, 0.0])
+    assert(scene.instance_count() == 3)
+    var merged = try Geometry.grid(2.0, 2)
+    defer merged.close()
+    try merged.merge(&box)
+    assert(merged.point_count() == 17 and merged.prim_count() == 10)
+    try merged.transform([0.0, 5.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0])
+    assert((try merged.bounds()).minimum.y > 4.0)
+    print("ok    script: curves, clouds, instances, merge and transform")
+
+## Inputs are read-only.
+pub func locking() -> !:
+    var k = try Cook.blank(try Geometry.empty())
+    defer k.close()
+    let input = try k.input(0)
+    var refused = false
+    _ = input.add_point([0.0, 0.0, 0.0, 0.0]) catch failure:
+        refused = true
+        recover 0
+    assert(refused)
+    print("ok    script: inputs are read-only")
+
+## The version the script module names is the package's.
+pub func version() -> !:
+    let manifest = try files.read_text("package.prisma")
+    defer manifest.release()
+    var buffer: u8[128]
+    assert(strings.contains(manifest.value, try strings.format(buffer, f"str version = \"{geocore_version}\"")))
+    print("ok    script: geocore_version matches package.prisma")

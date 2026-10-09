@@ -1,0 +1,130 @@
+# Verbs, Houdini's hou.Geometry.execute and SOP verbs: any node of the menu that geocore
+# runs (PolyExtrude, Subdivide, Boolean, Resample, SDF shapes...), by its name, its
+# parameters set by the labels the node's rows show.
+
+## What a verb's group names, as the node's Group Type menu.
+pub enum GroupKind as u8:
+    guess = 0
+    points = 1
+    edges = 2
+    prims = 3
+    vertices = 4
+
+## One verb with its parameters: every one starts at its default.
+pub struct Verb:
+    var index: i64
+    var numbers: Growing[f64]
+    var group_text: str
+    var group_kind: GroupKind
+
+    ## The verb of the node menu called `name` ("Subdivide", "PolyExtrude", "Resample
+    ## Curve"; case and spaces or underscores do not matter).
+    pub static func named(name: str) -> Verb!:
+        var index: i64 = -1
+        for at in 0..<VerbCatalog.count():
+            if same_label(VerbCatalog.name(at), name): index = at
+        if index < 0: error(errors.invalid, "no verb has that name; verbs are named as the node menu names them: Subdivide, PolyExtrude, Resample Curve...")
+        var verb = Verb(index = index, numbers = Growing[f64](), group_text = "", group_kind = GroupKind.guess)
+        errdefer verb.close()
+        for parm in 0..<VerbCatalog.parm_count(index):
+            for _ in 0..<VerbCatalog.parm_components(index, parm): try verb.numbers.push(VerbCatalog.parm_initial(index, parm))
+        return verb
+
+    ## Set the parameter labeled `label` (as its row shows it; case and spaces or
+    ## underscores do not matter). A vector parameter takes `value` in every component.
+    pub func parm(label: str, value: f64) -> !:
+        let (first, count) = try self.slots(label)
+        for k in 0..<count: self.numbers.items[first + k] = value
+
+    ## Set a vector parameter's three components.
+    pub func parm_vec3(label: str, value: f32[4]) -> !:
+        let (first, count) = try self.slots(label)
+        for k in 0..<count: self.numbers.items[first + k] = (f64)value[k if k < 3 else 2]
+
+    ## Run on the elements group `group` names (Houdini's group syntax), as the node's
+    ## Group and Group Type rows.
+    pub func group(group: str, kind: GroupKind = GroupKind.guess) -> !:
+        release_text(self.group_text)
+        self.group_text = try heap_text(group)
+        self.group_kind = kind
+
+    ## Run on `input` (and `second`, for verbs with two inputs): a new geometry.
+    pub func run(input: Geometry*, second: Geometry*? = none) -> Geometry!:
+        let name = VerbCatalog.name(self.index)
+        let set = try input.adopted()
+        defer set.release()
+        if VerbCatalog.is_set(self.index):
+            var other: interop.Reference[GeometrySet]? = none
+            if let given = second: other = try given.adopted()
+            let result = GeometryVerbs.run(name, set, other, self.group_text, (i64)(u8)self.group_kind, self.numbers.view()) catch failure:
+                if let held = other: held.release()
+                error(failure.code, failure.message)
+            if let held = other: held.release()
+            defer result.release()
+            let made = try (try result.get()).geometry()
+            defer made.release()
+            return try Geometry.of_set(try made.get())
+        let mesh = (try (try set.get()).mesh()) else error(errors.invalid, "the verb needs polygons and the input has none")
+        defer mesh.release()
+        let result = try Verbs.run(name, mesh, self.group_text, (i64)(u8)self.group_kind, self.numbers.view())
+        defer result.release()
+        let made = try (try result.get()).mesh()
+        defer made.release()
+        let out = try (try set.get()).with_mesh(made)
+        defer out.release()
+        return try Geometry.of_set(try out.get())
+
+    pub func close():
+        self.numbers.close()
+        release_text(self.group_text)
+        self.group_text = ""
+
+    ## The first number and count of the parameter labeled `label`.
+    func slots(label: str) -> (usize, usize)!:
+        var first: usize = 0
+        for parm in 0..<VerbCatalog.parm_count(self.index):
+            let count = (usize)VerbCatalog.parm_components(self.index, parm)
+            if same_label(VerbCatalog.parm_label(self.index, parm), label): return (first, count)
+            first += count
+        var buffer: u8[1024]
+        error(errors.invalid, self.labels(buffer))
+
+    ## "no parameter has that label; Subdivide has: Depth, Algorithm" into `buffer`.
+    func labels(buffer: u8[]) -> str:
+        var at = strings.copy_into(buffer, "no parameter has that label; ").length
+        at += strings.copy_into(buffer[at..], VerbCatalog.name(self.index)).length
+        at += strings.copy_into(buffer[at..], " has:").length
+        for parm in 0..<VerbCatalog.parm_count(self.index):
+            at += strings.copy_into(buffer[at..], " " if parm == 0 else ", ").length
+            at += strings.copy_into(buffer[at..], VerbCatalog.parm_label(self.index, parm)).length
+        return (str)buffer[..<at]
+
+extend Geometry:
+    ## Run verb `name` with its defaults on this geometry, in place, so calls chain:
+    ## `geo.apply("Subdivide")`. A Verb sets parameters first.
+    pub func apply(name: str) -> !:
+        var verb = try Verb.named(name)
+        defer verb.close()
+        try self.apply_verb(&verb)
+
+    ## Run `verb` on this geometry, in place.
+    pub func apply_verb(verb: Verb*) -> !:
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        var made = try verb.run(&self)
+        let storage = made.take() catch failure:
+            made.close()
+            error(failure.code, failure.message)
+        try self.flush()
+        self.replace(storage)
+
+## Whether two labels match, ignoring case and treating spaces and underscores alike.
+func same_label(a: str, b: str) -> bool:
+    if a.length != b.length: return false
+    for at in 0..<a.length:
+        if folded(a.bytes[at]) != folded(b.bytes[at]): return false
+    return true
+
+func folded(byte: u8) -> u8:
+    if byte >= 'A' and byte <= 'Z': return byte + 32
+    if byte == '_': return ' '
+    return byte

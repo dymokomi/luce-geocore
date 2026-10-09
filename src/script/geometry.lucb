@@ -1,0 +1,332 @@
+#==============================================================================================
+#
+#   script - The Script node's API: Houdini's Python SOP, in Luce Base
+#
+#   DESCRIPTION:
+#       A Script node's code is a whole Base module with `pub func cook(k: Cook*) -> !`.
+#       luced-3d builds it with the real compiler into a small tool that imports this
+#       module, and runs it in a child process: the generated `main` calls `serve`, which
+#       takes one cook request, loads the inputs, runs `cook` and writes the result.
+#
+#       `Geometry` is a geometry set opened for editing: points, polygons, attributes and
+#       groups through an edit form of its mesh (columns that grow as elements are added),
+#       curves, point clouds, instances and detail attributes through the set. `Verb` runs
+#       any verb of the node menu by name. `Cook` (the `k` of the code) holds the inputs,
+#       the spare parameters, the timeline and the console.
+#
+#       The parent side (`ScriptProcess`, `ScriptText`) is here too: it starts the tool,
+#       sends a request and reads the replies, so both ends of the protocol live together.
+#
+#==============================================================================================
+import interop
+import io
+import luce
+import memory
+import platform
+import strings
+import thread
+import time
+from luce_std import files, math, paths, ramp
+from luce_std.process import Command
+from luce_std.net import Connection, Listener, SocketAddress, Deadline, WaitInterest
+import errors
+import core.float3
+from core.growing import Growing
+from core.shared import Column
+from core.strings import TableBuilder
+from core.attributes import Attribute, Domain, DataType, Storage, group_flag
+import core.geometry as shapes
+import math.vector
+from geometries.polygon import Mesh, assembled, mesh_share, mesh_dispose, moved_storage, put_attribute, remove_attribute, transfer_attributes
+from geometries.primitives import MeshPrimitives
+from geometry_set import GeometrySet, Placement, set_mesh, mesh_component, empty_storage, dispose_set, adopt_set, set_joined, set_placed, set_detail, set_put_detail, cloud_of_mesh, set_cloud, cloud_positions, cloud_origin, cloud_store, points_component
+from curves import Curves, CurveType, CurvesBuilder, set_curves, curves_type
+from geometry_files import GeometryFile
+from set_verbs import GeometryVerbs, VerbCatalog
+from verbs import Verbs
+
+## Three f32 components: what bulk position and vector spans hold (`.x`, `.y`, `.z`).
+pub type Float3 = float3.Float3
+
+## A box: `minimum` and `maximum` corners (f64 vectors with x, y, z).
+pub type Bounds = shapes.Bounds
+## An f64 vector with x, y and z, as geocore's math takes.
+pub type Vector3 = vector.Vector3
+
+## Which elements an attribute or group belongs to (Houdini's attribute classes):
+## points, vertices (a polygon's corners), primitives (polygons) or the detail.
+pub enum Domain3 as u8:
+    point = 0
+    vertex = 1
+    prim = 2
+    detail = 3
+
+## geocore's domain for a script's.
+func domain_of(domain: Domain3) -> Domain:
+    match domain:
+        .point: return Domain.point
+        .vertex: return Domain.corner
+        .prim: return Domain.face
+        _: return Domain.detail
+
+## A geometry set opened for editing: the result a script builds, or an input it reads.
+## Points and polygons go through an edit form of the set's mesh, opened by the first
+## call that needs it and assembled into a mesh again when a verb, a file or the end of
+## the cook needs one. A script that only adds elements and sets attributes pays for one
+## assembly.
+pub struct Geometry:
+    var storage: GeometrySet*?
+    ## The mesh's edit form while it is open.
+    var edit: MeshEdit*? = none
+    ## Curves being added, with the set's own copied in first.
+    var curve_build: CurvesBuilder*? = none
+    ## An input: read-only, as Houdini's input geometries are.
+    var locked: bool = false
+
+    ## A geometry with nothing in it.
+    pub static func empty() -> Geometry!:
+        return Geometry(storage = try empty_storage())
+
+    ## An empty, read-only input.
+    static func input() -> Geometry!:
+        return Geometry(storage = try empty_storage(), locked = true)
+
+    ## A grid of `divisions` by `divisions` quads, `size` wide, on the XZ plane.
+    pub static func grid(size: f64 = 2.0, divisions: i64 = 10) -> Geometry!:
+        let mesh = try MeshPrimitives.grid(size, divisions)
+        defer mesh.release()
+        return try Geometry.of_mesh(try mesh.get())
+
+    ## A UV sphere of `radius` with `segments` around.
+    pub static func sphere(radius: f64 = 1.0, segments: i64 = 16) -> Geometry!:
+        let mesh = try MeshPrimitives.sphere(radius, segments)
+        defer mesh.release()
+        return try Geometry.of_mesh(try mesh.get())
+
+    ## A box `size` wide, centered on the origin.
+    pub static func cube(size: f64 = 2.0) -> Geometry!:
+        let mesh = try Mesh.cube(size)
+        defer mesh.release()
+        return try Geometry.of_mesh(try mesh.get())
+
+    ## A geometry holding `mesh` (shared, not copied).
+    pub static func of_mesh(mesh: const Mesh*) -> Geometry!:
+        let storage = try empty_storage()
+        errdefer dispose_set(storage)
+        let shared = try mesh_share(mesh)
+        try storage.put(&mesh_component, (void*)shared)
+        return Geometry(storage = storage)
+
+    ## A geometry sharing `set`'s components.
+    pub static func of_set(set: const GeometrySet*) -> Geometry!:
+        return Geometry(storage = try set.storage())
+
+    ## A `.prism` file, as the Cache and File nodes write them.
+    pub static func load(path: str) -> Geometry!:
+        let loaded = try GeometryFile.load(path)
+        defer loaded.release()
+        return try Geometry.of_set(try loaded.get())
+
+    ## Write the geometry to a `.prism` file.
+    pub func save(path: str) -> !:
+        let set = try self.adopted()
+        defer set.release()
+        _ = try GeometryFile.save(set, path)
+
+    ## The positions of every point, relative to `origin()`, to read (inputs too).
+    pub func positions_view() -> const Float3[]!:
+        let edit = try self.readable()
+        return edit.positions.view()
+
+    ## An independent copy (columns are shared until either side changes them).
+    pub func copy() -> Geometry!:
+        return Geometry(storage = try (try self.finished()).storage())
+
+    ## Give back everything the geometry holds.
+    pub func close():
+        self.drop_edits()
+        if let storage = self.storage:
+            dispose_set(storage)
+        self.storage = none
+
+    ## Close the edit form and the curve builder without assembling them.
+    func drop_edits():
+        if let edit = self.edit:
+            edit.close()
+            free(edit) in memory.heap
+            self.edit = none
+        if let builder = self.curve_build:
+            builder.close()
+            free(builder) in memory.heap
+            self.curve_build = none
+
+    # mark: The set and its mesh ======================================================
+
+    ## The set, its edits assembled into it first.
+    pub func finished() -> const GeometrySet*!:
+        try self.flush()
+        return self.set()
+
+    ## The set as it is (without open edits); for reading inputs.
+    func set() -> GeometrySet*:
+        return self.storage else trap("the geometry is closed")
+
+    ## Assemble open edits: the edit form's mesh and the pending curves go into the set.
+    ## The edit form stays open, so spans a script holds stay valid.
+    pub func flush() -> !:
+        if let edit = self.edit:
+            if not edit.dirty and not edit.spans: return try self.flush_curves()
+            let made = try edit.finish()
+            edit.dirty = false
+            if made.point_count() == 0 and made.face_count() == 0:
+                mesh_dispose(made)
+                self.set().remove(&mesh_component)
+            else:
+                try self.set().put(&mesh_component, (void*)made)
+        try self.flush_curves()
+
+    func flush_curves() -> !:
+        if let builder = self.curve_build:
+            let made = try builder.finish(set_curves(self.set()))
+            builder.close()
+            free(builder) in memory.heap
+            self.curve_build = none
+            try self.set().put(curves_type(), (void*)made)
+
+    ## The mesh, open for editing (opened on first use); an input refuses.
+    func editable() -> MeshEdit*!:
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        let edit = try self.readable()
+        # Whatever the caller does with it (spans included) may change the mesh.
+        edit.dirty = true
+        return edit
+
+    ## The mesh's edit form for reading, opened on first use (inputs too).
+    func readable() -> MeshEdit*!:
+        if let edit = self.edit: return edit
+        let made = try new MeshEdit[1] --- in memory.heap
+        made[0] = MeshEdit.open(set_mesh(self.set())) catch failure:
+            free(made) in memory.heap
+            error(failure.code, failure.message)
+        self.edit = made.data
+        return made.data
+
+    ## The set's mesh as it is now, assembled when edits are open; none without one.
+    func mesh() -> const Mesh*?!:
+        try self.flush()
+        return set_mesh(self.set())
+
+    ## A Luce-visible reference to the finished set (the caller releases it).
+    pub func adopted() -> interop.Reference[GeometrySet]!:
+        return try adopt_set(try (try self.finished()).storage())
+
+    ## Take the set out (the caller owns it); the geometry is left closed.
+    pub func take() -> GeometrySet*!:
+        try self.flush()
+        self.drop_edits()
+        let storage = self.set()
+        self.storage = none
+        return storage
+
+    # mark: Counts and bounds ==========================================================
+
+    ## Points of the mesh (the point cloud's are `cloud_count`).
+    pub func point_count() -> i64:
+        if let edit = self.edit: return (i64)edit.positions.count
+        let mesh = set_mesh(self.set()) else return 0
+        return mesh.point_count()
+
+    ## Polygons of the mesh.
+    pub func prim_count() -> i64:
+        if let edit = self.edit: return (i64)edit.face_count()
+        let mesh = set_mesh(self.set()) else return 0
+        return mesh.face_count()
+
+    ## Vertices (polygon corners) of the mesh.
+    pub func vertex_count() -> i64:
+        if let edit = self.edit: return (i64)edit.corners.count
+        let mesh = set_mesh(self.set()) else return 0
+        return mesh.vertex_count()
+
+    ## The box around everything the set holds; empty boxes have min > max.
+    pub func bounds() -> Bounds!:
+        let set = try self.finished()
+        if not try set.has_bounds(): return Bounds(Vector3(1.0, 1.0, 1.0), Vector3(-1.0, -1.0, -1.0))
+        return try set.bounds()
+
+    ## The origin positions are kept relative to (zero unless the input set one).
+    pub func origin() -> f32[4]:
+        if let edit = self.edit: return vec4(edit.origin)
+        let mesh = set_mesh(self.set()) else return [0.0, 0.0, 0.0, 0.0]
+        return vec4(mesh.position_origin())
+
+    # mark: Points and polygons ========================================================
+
+    ## A new point at `position` (world space); its number.
+    pub func add_point(position: f32[4]) -> i64!:
+        return try (try self.editable()).add_point(position)
+
+    ## New points at `positions`; the number of the first.
+    pub func add_points(positions: const (f32[4])[]) -> i64!:
+        let edit = try self.editable()
+        let first = (i64)edit.positions.count
+        try edit.positions.reserve(edit.positions.count + positions.length)
+        for at in 0..<positions.length: _ = try edit.add_point(point_of(positions, at))
+        return first
+
+    ## A new polygon through `points` (3 or more, in order); its number.
+    pub func add_polygon(points: const i64[]) -> i64!:
+        return try (try self.editable()).add_polygon(points)
+
+    ## Remove `points`; polygons using any of them go too. Numbers after them move down.
+    pub func remove_points(points: const i64[]) -> !:
+        try (try self.editable()).remove(points, Domain3.point, false)
+
+    ## Remove polygons `prims`; their points stay unless `remove_points` and no other
+    ## polygon uses them.
+    pub func remove_prims(prims: const i64[], remove_points: bool = false) -> !:
+        try (try self.editable()).remove(prims, Domain3.prim, remove_points)
+
+    ## Point `point`'s position in world space.
+    pub func position(point: i64) -> f32[4]!:
+        if let edit = self.edit: return try edit.position(point)
+        let mesh = set_mesh(self.set()) else error(errors.invalid, "the geometry has no points")
+        if point < 0 or point >= mesh.point_count(): error(errors.invalid, "position: the point does not exist")
+        return vec4(mesh.point_span()[(usize)point].vector().add(mesh.position_origin()))
+
+    ## Move point `point` to `position` (world space).
+    pub func set_position(point: i64, position: f32[4]) -> !:
+        try (try self.editable()).set_position(point, position)
+
+    ## The writable positions of every point, relative to `origin()`: Houdini's
+    ## pointFloatAttribValues with no copy. Valid until points are added or removed.
+    pub func positions() -> Float3[]!:
+        let edit = try self.editable()
+        edit.moved = true
+        edit.spans = true
+        return edit.positions.items[..<edit.positions.count]
+
+    ## How many points polygon `prim` has.
+    pub func prim_size(prim: i64) -> i64!:
+        if let edit = self.edit: return try edit.prim_size(prim)
+        let mesh = set_mesh(self.set()) else error(errors.invalid, "the geometry has no polygons")
+        return try mesh.face_size(prim)
+
+    ## Point `index` (0-based, in order) of polygon `prim`.
+    pub func prim_point(prim: i64, index: i64) -> i64!:
+        if let edit = self.edit: return try edit.prim_point(prim, index)
+        let mesh = set_mesh(self.set()) else error(errors.invalid, "the geometry has no polygons")
+        return try mesh.face_point(prim, index)
+
+## `value` as a script vector (the fourth lane 0).
+func vec4(value: Vector3) -> f32[4]:
+    return [(f32)value.x, (f32)value.y, (f32)value.z, 0.0]
+
+## A script vector as geocore's.
+func vec3(value: f32[4]) -> Vector3:
+    return Vector3((f64)value[0], (f64)value[1], (f64)value[2])
+
+## Entry `at` of a list of script vectors, as a value.
+func point_of(points: const (f32[4])[], at: usize) -> f32[4]:
+    let p = points[at]
+    return [p[0], p[1], p[2], 0.0]

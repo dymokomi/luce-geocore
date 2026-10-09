@@ -30,6 +30,12 @@ and `Code.hover` for the editor and `Code.run` for the cook; the API a snippet s
 `src/code/stubs.lucb` (with the `gsplat` helpers for splat clouds in `src/code/gsplat.lucb`),
 and `tests/code` times whole cooks with `--bench`.
 
+The Script node's API is `luce_geocore.script` (Houdini's Python SOP, in Base): a
+script's `cook(k: Cook*)` builds and edits a `Geometry` (points, polygons, attributes,
+groups, curves, the point cloud, instances) and runs any verb by name (`Verb`); luced-3d
+builds it into a tool whose `main` calls `serve`, run in a child process the editor
+drives with `ScriptProcess`. `tests/script` checks the API and the protocol end to end.
+
 Import `geocore` (`from luce_geocore.geocore import Mesh, MeshBuilder,
 Vector3`). Base code in other packages also has `luce_geocore.kernel` (bit
 sets and groups, mesh assembly and its size limits, the geometry set's

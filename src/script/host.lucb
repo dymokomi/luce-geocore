@@ -1,0 +1,113 @@
+# The parent's side of the protocol (serve.lucb has the child's): a Script tool started
+# as a child process that connects back over loopback TCP and waits for its request.
+# Requests and replies are lines on that connection; what the child prints, and the trap
+# line a crash leaves on its standard error, are its console, captured by the command.
+# Stopping a child kills its process group by the child's PID.
+
+## One started Script tool process.
+pub struct ScriptProcess:
+    var listener: Listener?
+    var link: Connection?
+    var command: Command?
+    var pending: Growing[u8]
+    var ended: bool
+
+    ## Start `program` in `directory`, listening for it on a loopback port of our own.
+    pub func init(program: str, directory: str) -> !:
+        var listener = try Listener.bind(SocketAddress.loopback(0))
+        errdefer listener.destroy()
+        var digits: u8[8]
+        let port = try strings.format_u64((u64)(try listener.port()), digits)
+        let arguments: str[2] = ["--l3d", port]
+        let command = try Command(program, arguments, directory = directory, output_limit = 16777216)
+        self.listener = listener
+        self.link = none
+        self.command = command
+        self.pending = Growing[u8]()
+        self.ended = false
+
+    ## Whether the child has connected, waiting up to `wait_ms` for it.
+    pub func connected(wait_ms: i64) -> bool!:
+        if self.link != none: return true
+        var listener = self.listener else return false
+        let ready = listener.wait(WaitInterest.read, try Deadline.after((u64)wait_ms * 1000000)) catch failure:
+            return false
+        if not ready.readable: return false
+        self.link = try listener.accept()
+        listener.destroy()
+        self.listener = none
+        return true
+
+    ## Send `line` (without its newline).
+    pub func send(line: str) -> !:
+        var link = self.link else error(errors.invalid, "the script process has not connected")
+        try link.write_text(line)
+        try link.write_text("\n")
+        self.link = link
+
+    ## The next reply line, waiting up to `wait_ms` for one; "" when none came.
+    pub func next_line(wait_ms: i64) -> interop.Owned[str]!:
+        if let line = try self.take_line(): return line
+        if self.ended: return try interop.copy_text("")
+        var link = self.link else return try interop.copy_text("")
+        let ready = link.wait(WaitInterest.read, try Deadline.after((u64)wait_ms * 1000000)) catch failure:
+            return try interop.copy_text("")
+        if ready.readable or ready.hangup:
+            var buffer: u8[65536]
+            let count = link.read(buffer) catch failure: recover 0
+            if count == 0: self.ended = true
+            for byte in buffer[..<count]: try self.pending.push(byte)
+        if let line = try self.take_line(): return line
+        return try interop.copy_text("")
+
+    ## Whether the connection closed: the child left (or crashed).
+    pub func hung_up() -> bool:
+        return self.ended
+
+    ## Whether the child process has ended.
+    pub func finished() -> bool:
+        let command = self.command else return true
+        return command.is_finished()
+
+    ## The child's exit status (-1 while it runs or when it could not start).
+    pub func exit_code() -> i64:
+        let command = self.command else return -1
+        return command.exit_code() else -1
+
+    ## What the child printed, standard output and error together.
+    pub func console() -> interop.Owned[str]!:
+        let command = self.command else return try interop.copy_text("")
+        return try command.output()
+
+    ## Kill the child (its process group, by its PID).
+    pub func kill():
+        if let command = self.command: command.cancel()
+
+    pub func close():
+        if let listener = self.listener:
+            var held = listener
+            held.destroy()
+        self.listener = none
+        if let link = self.link:
+            var held = link
+            held.destroy()
+        self.link = none
+        if let command = self.command:
+            var held = command
+            held.close()
+        self.command = none
+        self.pending.close()
+
+    ## The first whole line that arrived, as owned text, taken out; none without one.
+    func take_line() -> interop.Owned[str]?!:
+        for at in 0..<self.pending.count:
+            if self.pending.items[at] != '\n': continue
+            let line = try interop.copy_text((str)self.pending.items[..<at])
+            let rest = self.pending.count - at - 1
+            for k in 0..<rest: self.pending.items[k] = self.pending.items[at + 1 + k]
+            self.pending.count = rest
+            return line
+        return none
+
+## ScriptProcess's interop type, for luced-3d.
+pub let script_process_type: interop.Type[ScriptProcess] = interop.Type[ScriptProcess]("ScriptProcess", ScriptProcess.close, closeable = true)

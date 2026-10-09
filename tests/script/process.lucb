@@ -1,0 +1,175 @@
+## The child protocol, end to end: this test program is started again as a Script tool
+## (`--l3d PORT`), and its `child_cook` is the script. One cook per child process; a
+## trap, an error, a runaway loop and a large geometry each get a fresh one.
+import strings
+import thread
+import time
+from luce_std import files
+from luce_geocore.script import Geometry, Cook, ScriptProcess, Domain3
+import api
+
+let failed: ErrorCode = ErrorCode.package(1)
+
+## Cooks a child has run in this process: a module global, so a second cook in the
+## same process would see 2.
+var cooks: i64 = 0
+
+## The test script, by its `mode` parameter.
+pub func child_cook(k: Cook*) -> !:
+    cooks += 1
+    let mode = k.text("mode", "ok")
+    if mode == "ok":
+        let lift = k.f32("lift", 1.0)
+        let out = k.geometry()
+        let positions = try out.positions()
+        for at in 0..<positions.length: positions[at].y += lift
+        print("cooked")
+        k.warning("lifted")
+    elif mode == "trap":
+        let values: i64[3] = [1, 2, 3]
+        let index = (usize)k.i32("index", 5)
+        print(f"{values[index]}")
+    elif mode == "error":
+        try k.error("asked to fail")
+    elif mode == "spin":
+        var spins: u64 = 0
+        while true:
+            spins += 1
+            if spins % 1000000 == 0: thread.sleep(1)
+    elif mode == "missing":
+        var lost = try Geometry.load("no such file.prism")
+        lost.close()
+    elif mode == "state":
+        try k.geometry().set_detail_f64("cooks", (f64)cooks)
+
+## One cook in a fresh child: the request written, the replies read until `done` or the
+## child's end. Answers the `done` line ("" when none came) and the child.
+func cook_in_child(program: str, request: str, folder: str, limit_ms: i64) -> (str, ScriptProcess)!:
+    var child = try ScriptProcess(program, folder)
+    var waited: i64 = 0
+    while not try child.connected(50):
+        waited += 50
+        if waited > 10000: error(failed, "the child never connected")
+    var buffer: u8[1024]
+    try child.send(try strings.format(buffer, f"cook {request}"))
+    let started = time.now()
+    while true:
+        let line = try child.next_line(20)
+        defer line.release()
+        if strings.starts_with(line.value, "done "):
+            return (try heap(line.value), child)
+        if child.hung_up() or (i64)(time.since(started) // 1000000) > limit_ms:
+            return ("", child)
+
+func heap(text: str) -> str!:
+    return try strings.copy(text)
+
+## Write a request file: the input (none: unwired), the result's path, the lines after.
+func write_request(folder: str, name: str, input: str, extra: str, buffer: u8[]) -> str!:
+    var path_room: u8[512]
+    let path = try strings.format(path_room, f"{folder}/{name}.request")
+    var text_room: u8[4096]
+    let text = try strings.format(text_room, f"in0\t{input}\nin1\t\nout\t{folder}/{name}.out.prism\nclock\t12\t0.5\t24\nproject\t{folder}\n{extra}")
+    try files.write_text(path, text)
+    return try strings.format(buffer, f"{path}")
+
+pub func run_all(program: str) -> !:
+    var folder_room: u8[512]
+    let folder = try api.scratch("", folder_room)
+    let input = try api.scratch("input.prism", folder_room[256..])
+    var grid = try Geometry.grid(2.0, 10)
+    defer grid.close()
+    try grid.save(input)
+    var room: u8[1024]
+
+    # A cook: the replies, the console, the result.
+    let (done, child) = try cook_in_child(program, try write_request(folder, "ok", input, "number\tlift\t2.5\ntext\tmode\tok\n", room), folder, 10000)
+    assert(strings.starts_with(done, "done ok "))
+    var finished = child
+    defer finished.close()
+    var spins = 0
+    while not finished.finished() and spins < 500:
+        thread.sleep(2)
+        spins += 1
+    let console = try finished.console()
+    defer console.release()
+    assert(strings.contains(console.value, "cooked"))
+    var out_room: u8[512]
+    var result = try Geometry.load(try strings.format(out_room, f"{folder}/ok.out.prism"))
+    defer result.close()
+    assert((try result.position(0))[1] == 2.5)
+    print("ok    script: a child cooks a request and replies")
+
+    # Fresh state: every cook is a fresh process.
+    for round in 0..<2:
+        let (state_done, state_child) = try cook_in_child(program, try write_request(folder, "state", "", "text\tmode\tstate\n", room), folder, 10000)
+        var held = state_child
+        defer held.close()
+        assert(strings.starts_with(state_done, "done ok"))
+        var state = try Geometry.load(try strings.format(out_room, f"{folder}/state.out.prism"))
+        defer state.close()
+        assert(try state.detail_f64("cooks") == 1.0)
+        _ = round
+    print("ok    script: each cook starts with fresh state")
+
+    # k.error: the node's message, with its line.
+    let (error_done, error_child) = try cook_in_child(program, try write_request(folder, "error", "", "text\tmode\terror\n", room), folder, 10000)
+    var error_held = error_child
+    defer error_held.close()
+    assert(strings.starts_with(error_done, "done error ") and strings.ends_with(error_done, "asked to fail"))
+    assert(not strings.starts_with(error_done, "done error 0 "))
+    # An error a call raised elsewhere: no script line, its origin named.
+    let (missing_done, missing_child) = try cook_in_child(program, try write_request(folder, "missing", "", "text\tmode\tmissing\n", room), folder, 10000)
+    var missing_held = missing_child
+    defer missing_held.close()
+    assert(strings.starts_with(missing_done, "done error 0 0 ") and strings.contains(missing_done, "(raised at "))
+    print("ok    script: k.error fails the cook at its line")
+
+    # A trap ends the child: no done line, status 1, the trap's place on its console.
+    let (trap_done, trap_child) = try cook_in_child(program, try write_request(folder, "trap", "", "text\tmode\ttrap\nnumber\tindex\t7\n", room), folder, 10000)
+    var trapped = trap_child
+    defer trapped.close()
+    assert(trap_done == "")
+    spins = 0
+    while not trapped.finished() and spins < 1000:
+        thread.sleep(2)
+        spins += 1
+    assert(trapped.exit_code() == 1)
+    let trap_console = try trapped.console()
+    defer trap_console.release()
+    assert(strings.contains(trap_console.value, "trap: ") and strings.contains(trap_console.value, "process.lucb:"))
+    print("ok    script: a trap ends the child, not the parent")
+
+    # A runaway script is killed by its PID at the limit.
+    let (spin_done, spin_child) = try cook_in_child(program, try write_request(folder, "spin", "", "text\tmode\tspin\n", room), folder, 300)
+    var spinning = spin_child
+    defer spinning.close()
+    assert(spin_done == "")
+    assert(not spinning.finished())
+    let killed = time.now()
+    spinning.kill()
+    spins = 0
+    while not spinning.finished() and spins < 1000:
+        thread.sleep(2)
+        spins += 1
+    assert(spinning.finished())
+    print(f"ok    script: a runaway child is killed ({(f64)time.since(killed) / 1000000.0} ms)")
+
+    # Large geometry across the boundary: 1M quads in, the same out.
+    var big = try Geometry.grid(2.0, 1000)
+    defer big.close()
+    let big_input = try api.scratch("big.prism", folder_room[256..])
+    let saving = time.now()
+    try big.save(big_input)
+    let saved = (f64)time.since(saving) / 1000000.0
+    let round_trip = time.now()
+    let (big_done, big_child) = try cook_in_child(program, try write_request(folder, "big", big_input, "text\tmode\tcopy\n", room), folder, 30000)
+    var big_held = big_child
+    defer big_held.close()
+    let cooked = (f64)time.since(round_trip) / 1000000.0
+    let loading = time.now()
+    var back = try Geometry.load(try strings.format(out_room, f"{folder}/big.out.prism"))
+    defer back.close()
+    let loaded = (f64)time.since(loading) / 1000000.0
+    assert(back.prim_count() == 1000000)
+    print(f"ok    script: 1M quads round trip: save {saved} ms, child {cooked} ms ({big_done}), load {loaded} ms")

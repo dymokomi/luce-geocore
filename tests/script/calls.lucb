@@ -1,0 +1,96 @@
+## Verbs by name, the cook's parameters and messages, and the editor's text scan.
+import strings
+from luce_geocore.script import Geometry, Verb, Cook, ScriptText, GroupKind, Domain3
+from luce_geocore.geocore import Verbs, MeshPrimitives
+
+## Verb.named with labels matches the node's run; a bad label lists the labels.
+pub func verbs() -> !:
+    var grid = try Geometry.grid(2.0, 4)
+    defer grid.close()
+    var extrude = try Verb.named("PolyExtrude")
+    defer extrude.close()
+    try extrude.parm("Distance", 0.5)
+    try extrude.parm("individual_faces", 1.0)
+    try extrude.group("0-3", GroupKind.prims)
+    var made = try extrude.run(&grid)
+    defer made.close()
+    # The same run as the node makes it: luced-3d's numbers for these rows.
+    let mesh = try MeshPrimitives.grid(2.0, 4)
+    defer mesh.release()
+    let numbers: f64[5] = [0.5, 0.0, 1.0, 1.0, 1.0]
+    let direct = try Verbs.run("PolyExtrude", mesh, "0-3", 3, numbers)
+    defer direct.release()
+    let expected = try (try direct.get()).mesh()
+    defer expected.release()
+    assert(made.point_count() == (try expected.get()).point_count())
+    assert(made.prim_count() == (try expected.get()).face_count())
+    var told = false
+    extrude.parm("Height", 1.0) catch failure:
+        told = strings.contains(failure.message, "Distance, Inset, Divisions")
+    assert(told)
+    var missing = false
+    _ = Verb.named("NoSuchVerb") catch failure:
+        missing = true
+        recover try Verb.named("Subdivide")
+    assert(missing)
+    # In place, chained: a set verb (Resample) and mesh verbs.
+    var sphere = try Geometry.grid(2.0, 4)
+    defer sphere.close()
+    let before = sphere.prim_count()
+    try sphere.apply("Subdivide")
+    assert(sphere.prim_count() == before * 4)
+    var line = try Geometry.empty()
+    defer line.close()
+    let ends: f32[2][4] = [[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0]]
+    _ = try line.add_polyline(ends)
+    try line.apply("resample_curve")
+    assert(line.curve_count() == 1)
+    print("ok    script: verbs by name and label")
+
+## Parameters read the request's values or their defaults; k.error keeps its line;
+## warnings collect.
+pub func cooking() -> !:
+    var k = try Cook.blank(try Geometry.empty())
+    defer k.close()
+    let height: f64[1] = [0.75]
+    try k.put_number("height", height)
+    let at: f64[3] = [1.0, 2.0, 3.0]
+    try k.put_number("at", at)
+    try k.put_text("image", "/tmp/a.jpg")
+    assert(k.f32("height", 0.3) == 0.75)
+    assert(k.f32("other", 0.3) == 0.3)
+    assert(k.i32("count", 7) == 7)
+    assert(not k.toggle("flag", false))
+    assert(k.vec3("at", [0.0, 0.0, 0.0, 0.0])[2] == 3.0)
+    assert(k.file("image", "default.jpg") == "/tmp/a.jpg")
+    assert(k.text("label", "x") == "x")
+    assert(k.menu("mode", "a|b|c", 2) == 2)
+    assert(k.ramp("shape", 0.25) == 0.25)
+    assert(k.frame() == 1.0 and k.fps() == 24.0)
+    k.warning("first")
+    assert(strings.contains(k.warnings(), "first"))
+    var line: u32 = 0
+    k.error("bad") catch failure:
+        line = k.error_line()
+    assert(line == 73)
+    # Writing the output works; it starts empty with nothing wired.
+    _ = try k.geometry().add_point([1.0, 2.0, 3.0, 0.0])
+    assert(k.geometry().point_count() == 1)
+    print("ok    script: cook parameters, warnings and k.error's line")
+
+## The editor's scan: parameter rows with defaults, time use, notes.
+pub func scanning() -> !:
+    let text = "## A test.\nfrom luce_geocore.script import Cook\n\npub func cook(n: Cook*) -> !:\n    let a = n.f32(\"height\", 0.3)  # n.f32(\"commented\", 1.0)\n    let b = n.i32(\"count\", -4)\n    let c = n.vec3(\"at\", [1.0, 2.0, 3.0, 0.0])\n    let d = n.menu(\"mode\", \"Low|High\", 1)\n    let e = n.file(\"image\", \"photo.jpg\")\n    let f = n.toggle(\"flip\", true)\n    let g = n.f32(name, 1.0)\n    let s = \"n.f32(\\\"in a string\\\", 1.0)\"\n    let t = n.frame()\n    let h = n.f32(\"height\", 9.0)\n"
+    let scanned = try ScriptText.scan(text)
+    defer scanned.release()
+    let found = try scanned.get()
+    assert(found.parameter_count() == 6)
+    assert(found.parameter_name(0) == "height" and found.parameter_kind(0) == "f32" and found.parameter_default(0, 0) == 0.3)
+    assert(found.parameter_kind(1) == "i32" and found.parameter_default(1, 0) == -4.0)
+    assert(found.parameter_components(2) == 3 and found.parameter_default(2, 2) == 3.0)
+    assert(found.parameter_choices(3) == "Low|High" and found.parameter_default(3, 0) == 1.0)
+    assert(found.parameter_kind(4) == "file" and found.parameter_text(4) == "photo.jpg")
+    assert(found.parameter_default(5, 0) == 1.0)
+    assert(found.reads_time())
+    assert(found.note_count() == 1 and found.note_line(0) == 11)
+    print("ok    script: the text scan finds rows, time and notes")

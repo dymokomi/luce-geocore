@@ -1,0 +1,110 @@
+# An attribute in edit form: a tuple per element of its domain in a growing array, f32
+# for floats, i32 for integers, string-table indices for text and 0/1 for groups. Columns
+# are made when a script first reads or writes an attribute by name, from the mesh's own
+# attribute when it has one, and become attributes again when the mesh is assembled.
+
+## One attribute being edited.
+struct EditColumn:
+    var label: str
+    var domain: Domain
+    ## float32, int32, text, or boolean (a group, or a plain boolean attribute).
+    var kind: DataType
+    var width: usize
+    var group: bool
+    var floats: Growing[f32]
+    var ints: Growing[i32]
+    var table: TableBuilder
+
+    ## An empty column (the caller grows it to its domain's size).
+    static func make(name: str, domain: Domain, kind: DataType, width: usize, group: bool) -> EditColumn!:
+        if name.length == 0 or name.length > 64 or name == "P":
+            error(errors.invalid, "an attribute needs a name of 1..64 bytes other than P")
+        if width < 1 or width > 4:
+            error(errors.invalid, "an attribute has 1 to 4 components")
+        return EditColumn(label = try heap_text(name), domain = domain, kind = kind, width = width, group = group,
+                          floats = Growing[f32](), ints = Growing[i32](), table = TableBuilder())
+
+    ## Whether its values are floats.
+    func floating() -> bool:
+        return self.kind == DataType.float32
+
+    ## Elements it covers.
+    func size() -> usize:
+        return (self.floats.count if self.floating() else self.ints.count) // self.width
+
+    ## Grow to `elements`, the new ones zero (the empty text).
+    func grow(elements: usize) -> !:
+        if self.floating(): try self.floats.extend(elements * self.width, 0.0)
+        else: try self.ints.extend(elements * self.width, 0 if self.kind != DataType.text else try self.table.intern(""))
+
+    ## Keep element `old` at `map[old]` when it is 0 or more; `kept` remain.
+    func compact(map: const i64[], kept: usize):
+        let w = self.width
+        for old in 0..<map.length:
+            let to = map[old]
+            if to < 0: continue
+            for k in 0..<w:
+                if self.floating(): self.floats.items[(usize)to * w + k] = self.floats.items[old * w + k]
+                else: self.ints.items[(usize)to * w + k] = self.ints.items[old * w + k]
+        if self.floating(): self.floats.count = kept * w
+        else: self.ints.count = kept * w
+
+    ## Fill from `attribute` over `elements` (its values converted to the column's kind).
+    func load(attribute: const Attribute*, elements: usize) -> !:
+        if attribute.is_ragged():
+            error(errors.invalid, "array attributes cannot be edited by a script yet")
+        try self.grow(elements)
+        for element in 0..<elements:
+            for k in 0..<self.width:
+                let at = element * self.width + k
+                if self.kind == DataType.text: self.ints.items[at] = try self.table.intern(attribute.text_at(element))
+                elif self.floating(): self.floats.items[at] = (f32)attribute.number(element, k)
+                else: self.ints.items[at] = (i32)attribute.number(element, k)
+
+    ## The column as an attribute of `elements` elements.
+    func attribute(elements: usize) -> Attribute!:
+        try self.grow(elements)
+        if self.kind == DataType.text:
+            var table = try self.table.finish()
+            defer table.release()
+            return try Attribute.text(self.label, self.domain, elements, table, self.ints.items[..<elements])
+        if self.kind == DataType.boolean:
+            var made = try Attribute.group(self.label, self.domain, elements)
+            if not self.group: made.flags = 0
+            let bits = made.data.span()
+            for element in 0..<elements:
+                if self.ints.items[element] != 0: bits[element // 8] |= (u8)1 << (u8)(element % 8)
+            return made
+        var made = try Attribute.create(self.label, self.domain, self.kind, self.width, elements)
+        let bytes = made.data.span()
+        let count = elements * self.width
+        if self.floating(): memory.copy(bytes, u8[]((u8*)self.floats.items.data, count * 4), count * 4)
+        else: memory.copy(bytes, u8[]((u8*)self.ints.items.data, count * 4), count * 4)
+        return made
+
+    func close():
+        self.floats.close()
+        self.ints.close()
+        self.table.close()
+        release_text(self.label)
+
+## The edit kind a stored attribute becomes: float32 for floats, int32 for integers,
+## text, and boolean for groups and booleans.
+func edit_kind(kind: DataType) -> DataType:
+    match kind:
+        .float32, .float64: return DataType.float32
+        .text: return DataType.text
+        .boolean: return DataType.boolean
+        _: return DataType.int32
+
+## A heap copy of `text` (empty text owns nothing).
+func heap_text(text: str) -> str!:
+    if text.length == 0: return ""
+    with memory.heap:
+        return try strings.copy(text)
+
+## Give back a heap_text copy.
+func release_text(text: str):
+    if text.length == 0: return
+    with memory.heap:
+        strings.release(text)

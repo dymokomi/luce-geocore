@@ -1,0 +1,309 @@
+# A mesh's edit form: its positions, polygon offsets and corners in growing arrays, each
+# element's parent in the mesh it was opened from (-1 for a new one), and the columns of
+# the attributes the script touched. Assembling keeps everything else the source carried:
+# when nothing was added or removed, the source's topology and attributes are shared and
+# only moved positions and edited columns change; otherwise the attributes follow their
+# elements through the parents, new elements taking zero.
+
+## A mesh being edited.
+struct MeshEdit:
+    ## A share of the mesh it was opened from.
+    var source: Mesh*?
+    var origin: Vector3
+    var positions: Growing[Float3]
+    ## Polygon `f` owns corners offsets[f]..<offsets[f + 1].
+    var offsets: Growing[i32]
+    var corners: Growing[i32]
+    var point_parents: Growing[i32]
+    var face_parents: Growing[i32]
+    var corner_parents: Growing[i32]
+    ## Whether elements were added or removed.
+    var reshaped: bool
+    ## Whether positions may have changed.
+    var moved: bool
+    ## Whether it changed since the set's mesh was last assembled from it, and
+    ## whether writable spans of it are out (then it may change at any time).
+    var dirty: bool
+    var spans: bool
+    var columns: Growing[EditColumn]
+
+    ## The edit form of `source` (none: an empty mesh).
+    static func open(source: const Mesh*?) -> MeshEdit!:
+        var made = MeshEdit(source = none, origin = Vector3(), positions = Growing[Float3](), offsets = Growing[i32](), corners = Growing[i32](),
+                            point_parents = Growing[i32](), face_parents = Growing[i32](), corner_parents = Growing[i32](), reshaped = false, moved = false, dirty = false, spans = false,
+                            columns = Growing[EditColumn]())
+        errdefer made.close()
+        try made.offsets.push(0)
+        let mesh = source else return made
+        made.source = try mesh_share(mesh)
+        made.origin = mesh.position_origin()
+        try made.positions.assign(mesh.point_span())
+        try made.offsets.assign(mesh.offset_span())
+        try made.corners.assign(mesh.corner_span())
+        try identity(&made.point_parents, made.positions.count)
+        try identity(&made.face_parents, made.face_count())
+        try identity(&made.corner_parents, made.corners.count)
+        return made
+
+    func face_count() -> usize:
+        return self.offsets.count - 1
+
+    ## Elements of `domain` now.
+    func domain_size(domain: Domain) -> usize:
+        match domain:
+            .point: return self.positions.count
+            .corner: return self.corners.count
+            .face: return self.face_count()
+            _: return 1
+
+    func check_point(point: i64) -> !:
+        if point < 0 or (usize)point >= self.positions.count: error(errors.invalid, "the point does not exist")
+
+    func check_prim(prim: i64) -> !:
+        if prim < 0 or (usize)prim >= self.face_count(): error(errors.invalid, "the primitive does not exist")
+
+    func add_point(position: f32[4]) -> i64!:
+        if self.positions.count >= 8388608: error(errors.limit, "a mesh holds at most 8M points")
+        try self.positions.push(Float3.of(vec3(position).subtract(self.origin)))
+        try self.point_parents.push(-1)
+        self.reshaped = true
+        return (i64)self.positions.count - 1
+
+    func add_polygon(points: const i64[]) -> i64!:
+        if points.length < 3: error(errors.invalid, "a polygon needs at least 3 points")
+        for point in points: try self.check_point(point)
+        try self.corners.reserve(self.corners.count + points.length)
+        for point in points:
+            try self.corners.push((i32)point)
+            try self.corner_parents.push(-1)
+        try self.offsets.push((i32)self.corners.count)
+        try self.face_parents.push(-1)
+        self.reshaped = true
+        return (i64)self.face_count() - 1
+
+    func position(point: i64) -> f32[4]!:
+        try self.check_point(point)
+        return vec4(self.positions.items[(usize)point].vector().add(self.origin))
+
+    func set_position(point: i64, position: f32[4]) -> !:
+        try self.check_point(point)
+        self.positions.items[(usize)point] = Float3.of(vec3(position).subtract(self.origin))
+        self.moved = true
+
+    func prim_size(prim: i64) -> i64!:
+        try self.check_prim(prim)
+        return (i64)(self.offsets.items[(usize)prim + 1] - self.offsets.items[(usize)prim])
+
+    func prim_point(prim: i64, index: i64) -> i64!:
+        let size = try self.prim_size(prim)
+        if index < 0 or index >= size: error(errors.invalid, "the polygon has no such vertex")
+        return (i64)self.corners.items[(usize)self.offsets.items[(usize)prim] + (usize)index]
+
+    ## Remove `numbers` of `domain` (points or prims), renumbering what stays.
+    func remove(numbers: const i64[], domain: Domain3, points_too: bool) -> !:
+        let points = self.positions.count
+        let faces = self.face_count()
+        let point_map = try new i64[points] in memory.heap
+        defer free(point_map) in memory.heap
+        let face_map = try new i64[faces] in memory.heap
+        defer free(face_map) in memory.heap
+        for n in numbers:
+            if domain == Domain3.point:
+                try self.check_point(n)
+                point_map[(usize)n] = -1
+            else:
+                try self.check_prim(n)
+                face_map[(usize)n] = -1
+        # A polygon losing a point goes; with points_too, a removed polygon's points go
+        # unless a kept polygon uses them.
+        for f in 0..<faces:
+            for c in (usize)self.offsets.items[f]..<(usize)self.offsets.items[f + 1]:
+                if point_map[(usize)self.corners.items[c]] < 0: face_map[f] = -1
+        if points_too:
+            for f in 0..<faces:
+                if face_map[f] >= 0: continue
+                for c in (usize)self.offsets.items[f]..<(usize)self.offsets.items[f + 1]: point_map[(usize)self.corners.items[c]] = -1
+            for f in 0..<faces:
+                if face_map[f] < 0: continue
+                for c in (usize)self.offsets.items[f]..<(usize)self.offsets.items[f + 1]: point_map[(usize)self.corners.items[c]] = 0
+        let kept_points = renumber(point_map)
+        let kept_faces = renumber(face_map)
+        # Corners follow their polygons.
+        let corner_map = try new i64[self.corners.count] in memory.heap
+        defer free(corner_map) in memory.heap
+        var corner_at: usize = 0
+        for f in 0..<faces:
+            for c in (usize)self.offsets.items[f]..<(usize)self.offsets.items[f + 1]:
+                corner_map[c] = -1 if face_map[f] < 0 else (i64)corner_at
+                if face_map[f] >= 0: corner_at += 1
+        for index in 0..<self.columns.count:
+            let column = &self.columns.items[index]
+            match column.domain:
+                .point: column.compact(point_map, kept_points)
+                .corner: column.compact(corner_map, corner_at)
+                .face: column.compact(face_map, kept_faces)
+                _: continue
+        # The arrays themselves, in place.
+        for old in 0..<points:
+            let to = point_map[old]
+            if to < 0: continue
+            self.positions.items[(usize)to] = self.positions.items[old]
+            self.point_parents.items[(usize)to] = self.point_parents.items[old]
+        self.positions.count = kept_points
+        self.point_parents.count = kept_points
+        var face_at: usize = 0
+        var written: usize = 0
+        for f in 0..<faces:
+            let start = (usize)self.offsets.items[f]
+            let end = (usize)self.offsets.items[f + 1]
+            if face_map[f] < 0: continue
+            self.face_parents.items[face_at] = self.face_parents.items[f]
+            self.offsets.items[face_at] = (i32)written
+            for c in start..<end:
+                self.corners.items[written] = (i32)point_map[(usize)self.corners.items[c]]
+                self.corner_parents.items[written] = self.corner_parents.items[c]
+                written += 1
+            face_at += 1
+        self.offsets.items[face_at] = (i32)written
+        self.offsets.count = face_at + 1
+        self.face_parents.count = face_at
+        self.corners.count = written
+        self.corner_parents.count = written
+        self.reshaped = true
+
+    ## The column for `name` on `domain`: found, loaded from the source, or (when `make`)
+    ## new with `kind` and `width`; none when missing and not made.
+    func column(name: str, domain: Domain, kind: DataType, width: usize, make: bool, group: bool = false) -> EditColumn*?!:
+        for index in 0..<self.columns.count:
+            let found = &self.columns.items[index]
+            if found.domain == domain and found.label == name:
+                try found.grow(self.domain_size(domain))
+                return found
+        var made: EditColumn? = none
+        if let mesh = self.source:
+            let at = mesh.find_attribute(name, (i64)(u8)domain)
+            if at >= 0:
+                let entry = try mesh.attribute_entry(at)
+                var loaded = try EditColumn.make(name, domain, edit_kind(entry.kind), entry.width, entry.is_group())
+                errdefer loaded.close()
+                try loaded.load(entry, try mesh.domain_size(domain))
+                # Elements added since opening start at zero.
+                try self.carry(&loaded, domain)
+                made = loaded
+        if made == none:
+            if not make: return none
+            made = try EditColumn.make(name, domain, kind, width, group)
+        var column = made else trap("a column was neither found nor made")
+        try column.grow(self.domain_size(domain))
+        self.columns.push(column) catch failure:
+            column.close()
+            error(failure.code, failure.message)
+        return &self.columns.items[self.columns.count - 1]
+
+    ## A column loaded from the source in its order, put in the current one through the
+    ## parents (the source's numbering is gone once elements were removed).
+    func carry(column: EditColumn*, domain: Domain) -> !:
+        if not self.reshaped: return
+        let parents = self.point_parents.view() if domain == Domain.point else (self.corner_parents.view() if domain == Domain.corner else self.face_parents.view())
+        var moved = try EditColumn.make(column.label, column.domain, column.kind, column.width, column.group)
+        errdefer moved.close()
+        try moved.grow(parents.length)
+        let w = column.width
+        for at in 0..<parents.length:
+            let parent = parents[at]
+            if parent < 0: continue
+            for k in 0..<w:
+                if column.floating(): moved.floats.items[at * w + k] = column.floats.items[(usize)parent * w + k]
+                else: moved.ints.items[at * w + k] = column.ints.items[(usize)parent * w + k]
+        moved.table.close()
+        moved.table = column.table
+        column.table = TableBuilder()
+        column.close()
+        *column = moved
+
+    ## The assembled mesh (the caller owns it).
+    func finish() -> Mesh*!:
+        let made = try self.assemble()
+        errdefer mesh_dispose(made)
+        for index in 0..<self.columns.count:
+            let column = &self.columns.items[index]
+            remove_attribute(made, column.label, column.domain)
+            try put_attribute(made, try column.attribute(self.domain_size(column.domain)))
+        return made
+
+    func assemble() -> Mesh*!:
+        if let source = self.source:
+            if not self.reshaped:
+                if not self.moved: return try mesh_share(source)
+                var fresh = try Column[Float3].copy_of(self.positions.view())
+                defer fresh.release()
+                var changed = Growing[u32]()
+                defer changed.close()
+                let old = source.point_span()
+                for at in 0..<old.length:
+                    let a = old[at]
+                    let b = self.positions.items[at]
+                    if a.x != b.x or a.y != b.y or a.z != b.z: try changed.push((u32)at)
+                if changed.count == 0: return try mesh_share(source)
+                return try moved_storage(source, fresh, changed.view())
+        # A polygon kept from the source keeps its triangles; a new one is triangulated.
+        var entries: usize = 0
+        for f in 0..<self.face_count(): entries += ((usize)(self.offsets.items[f + 1] - self.offsets.items[f]) - 2) * 3
+        var triangles = try Column[i32].allocate(entries)
+        errdefer triangles.release()
+        let out = triangles.span()
+        var old_offsets: const i32[]
+        var old_triangles: const i32[]
+        if let source = self.source:
+            old_offsets = source.offset_span()
+            old_triangles = source.triangle_span()
+        var at: usize = 0
+        for f in 0..<self.face_count():
+            let start = (usize)self.offsets.items[f]
+            let size = (usize)(self.offsets.items[f + 1] - self.offsets.items[f])
+            let parent = self.face_parents.items[f]
+            if parent >= 0:
+                let old_start = (usize)old_offsets[(usize)parent]
+                let base = (old_start - (usize)parent * 2) * 3
+                for entry in 0..<(size - 2) * 3: out[at + entry] = old_triangles[base + entry] - (i32)old_start + (i32)start
+            else:
+                for entry in 0..<(size - 2) * 3: out[at + entry] = -1
+            at += (size - 2) * 3
+        var positions = try Column[Float3].copy_of(self.positions.view())
+        errdefer positions.release()
+        var offsets = try Column[i32].copy_of(self.offsets.view())
+        errdefer offsets.release()
+        var corners = try Column[i32].copy_of(self.corners.view())
+        errdefer corners.release()
+        let made = try assembled(positions.take(), self.origin, offsets.take(), corners.take(), triangles.take(), Column[Float3](), Column[Vector3]())
+        errdefer mesh_dispose(made)
+        if let source = self.source:
+            try transfer_attributes(source, made, self.point_parents.view(), self.face_parents.view(), self.corner_parents.view(), true)
+        return made
+
+    func close():
+        if let source = self.source: mesh_dispose(source)
+        self.source = none
+        self.positions.close()
+        self.offsets.close()
+        self.corners.close()
+        self.point_parents.close()
+        self.face_parents.close()
+        self.corner_parents.close()
+        for index in 0..<self.columns.count: self.columns.items[index].close()
+        self.columns.close()
+
+## 0..<count into `out`.
+func identity(out: Growing[i32]*, count: usize) -> !:
+    try out.reserve(count)
+    for at in 0..<count: out.items[at] = (i32)at
+    out.count = count
+
+## Number the entries that are not -1 in order; how many there are.
+func renumber(map: i64[]) -> usize:
+    var next: usize = 0
+    for at in 0..<map.length:
+        if map[at] < 0: continue
+        map[at] = (i64)next
+        next += 1
+    return next

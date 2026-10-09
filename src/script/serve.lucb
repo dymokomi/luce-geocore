@@ -1,0 +1,159 @@
+# The child's side of the protocol: what a Script tool's generated `main` runs.
+#
+#   tool --l3d PORT       connect to the parent on 127.0.0.1:PORT, wait for one request
+#                         line "cook PATH", run it, reply, exit: every cook gets a fresh
+#                         process (the parent keeps the next one started and waiting)
+#   tool --request PATH   run one request with the replies on standard output, prefixed
+#                         "@l3d " (for running a script by hand)
+#
+# A request is a text file of tab-separated lines: `in0 PATH`, `in1 PATH` (empty when not
+# wired), `out PATH`, `clock FRAME TIME FPS`, `project DIR`, then a line per parameter:
+# `number NAME V...` or `text NAME TEXT`. Texts escape backslash, tab and newline. The
+# replies are lines too: `warning LINE TEXT`, `progress FRACTION`, then `done ok LOAD COOK
+# SAVE` (milliseconds) or `done error LINE COLUMN TEXT` (0 0: raised outside the script,
+# its origin named in the text). Anything the script
+# prints goes to standard output as it is: the node's console.
+
+## How long a started child waits for its request before it leaves (ns).
+let idle_limit: u64 = 600000000000
+
+## Run the node's `cook` as the tool `arguments` say; the generated `main` returns this.
+pub func serve(arguments: str[], cook: func(Cook*) -> unit!) -> i32!:
+    if arguments.length == 3 and arguments[1] == "--request":
+        try run_request(arguments[2], none, cook)
+        return 0
+    if arguments.length != 3 or arguments[1] != "--l3d":
+        try io.stderr().write("usage: script --l3d PORT | --request FILE\n")
+        return 2
+    let port = strings.parse_i64(arguments[2]) else error(errors.invalid, "the port is not a number")
+    let address = SocketAddress.loopback((u16)port)
+    var link = try Connection.connect(address, try Deadline.after(10000000000))
+    defer link.destroy()
+    let ready = link.wait(WaitInterest.read, try Deadline.after(idle_limit)) catch failure:
+        return 0
+    if not ready.readable: return 0
+    let line = (try link.read_line()) else return 0
+    if not strings.starts_with(line, "cook "): error(errors.invalid, "the parent sent no cook request")
+    try run_request((str)line.bytes[5..], &link, cook)
+    return 0
+
+## Run the request in file `path`, replying on `link` (none: on standard output).
+func run_request(path: str, link: Connection*?, cook: func(Cook*) -> unit!) -> !:
+    let started = time.now()
+    var k = try read_request(path)
+    defer k.close()
+    k.link = link
+    k.echo = link == none
+    let loaded = time.now()
+    var failed = false
+    cook(&k) catch failure:
+        failed = true
+        let (line, column) = error_place(&k, failure.at)
+        var room: u8[2048]
+        let text = escaped(failure.message, room)
+        var buffer: u8[2400]
+        # Raised outside the script (in a package it called): say where.
+        if line > 0:
+            try k.reply(strings.format(buffer, f"done error {line} {column} {text}") catch ignored: recover "done error 0 0 (a message too long to send)")
+        else:
+            try k.reply(strings.format(buffer, f"done error 0 0 {text} (raised at {failure.at})") catch ignored: recover "done error 0 0 (a message too long to send)")
+    if failed: return
+    let cooked = time.now()
+    let out = k.target
+    k.output.save(out) catch failure:
+        var room: u8[2048]
+        let text = escaped(failure.message, room)
+        var buffer: u8[2100]
+        try k.reply(strings.format(buffer, f"done error 0 0 writing the result: {text}") catch ignored: recover "done error 0 0 (the result could not be written)")
+        return
+    let saved = time.now()
+    var buffer: u8[128]
+    try k.reply(strings.format(buffer, f"done ok {milliseconds(loaded - started)} {milliseconds(cooked - loaded)} {milliseconds(saved - cooked)}") catch ignored: recover "done ok 0 0 0")
+
+## Where in the script an error that left `cook` was raised, as (line, column): its
+## origin (`at`) when that is the script's own statement, the line of `k.error` when
+## that raised it, else (0, 0): raised in a package the script called. The one place
+## errors meet the script's lines.
+func error_place(k: const Cook*, at: str) -> (u32, u32):
+    if let found = strings.find(at, "script.lucb:"):
+        let parts = strings.split_once((str)at.bytes[found + 12..], ":") else return (0, 0)
+        let line = strings.parse_u64(parts.0) else return (0, 0)
+        let column = strings.parse_u64(strings.trim(parts.1)) else return ((u32)line, 1)
+        return ((u32)line, (u32)column)
+    if strings.contains(at, "script/cook.lucb:") and k.error_line() > 0: return (k.error_line(), 1)
+    return (0, 0)
+
+func milliseconds(nanoseconds: u64) -> f64:
+    return (f64)nanoseconds / 1000000.0
+
+## The cook a request file describes, its inputs loaded.
+func read_request(path: str) -> Cook!:
+    let data = try files.read_text(path)
+    defer data.release()
+    var k = try Cook.blank(try Geometry.empty())
+    errdefer k.close()
+    var numbers = Growing[f64]()
+    defer numbers.close()
+    var room: u8[65536]
+    let lines = try strings.split(data.value, '\n')
+    defer free(lines)
+    for line in lines:
+        let parts = try strings.split(line, '\t')
+        defer free(parts)
+        if parts.length < 2: continue
+        let key = parts[0]
+        if key == "in0" or key == "in1":
+            let index: usize = 0 if key == "in0" else 1
+            if parts[1].length == 0: continue
+            k.inputs[index].close()
+            k.inputs[index] = try Geometry.load(parts[1])
+            k.inputs[index].locked = true
+            k.wired[index] = true
+        elif key == "out":
+            k.target = try heap_text(parts[1])
+        elif key == "project":
+            k.folder = try heap_text(unescaped(parts[1], room))
+        elif key == "clock" and parts.length == 4:
+            for at in 0..<(usize)3: k.clock[at] = strings.parse_f64(parts[at + 1]) catch failure: recover k.clock[at]
+        elif key == "number" and parts.length >= 3:
+            numbers.clear()
+            for piece in parts[2..]: try numbers.push(strings.parse_f64(piece) catch failure: recover 0.0)
+            try k.put_number(parts[1], numbers.view())
+        elif key == "text" and parts.length >= 3:
+            try k.put_text(parts[1], unescaped(parts[2], room))
+    if k.target.length == 0: error(errors.invalid, "the request names no result file")
+    # The output starts as a copy of input 0.
+    if k.wired[0]:
+        k.output.close()
+        k.output = try k.inputs[0].copy()
+    return k
+
+## `text` with backslash, tab and newline escaped, into `buffer` (cut when it is full).
+pub func escaped(text: str, buffer: u8[]) -> str:
+    var at: usize = 0
+    for byte in text.bytes:
+        if at + 2 > buffer.length: break
+        if byte == '\\' or byte == '\t' or byte == '\n' or byte == '\r':
+            buffer[at] = '\\'
+            buffer[at + 1] = 'n' if byte == '\n' else ('t' if byte == '\t' else ('r' if byte == '\r' else '\\'))
+            at += 2
+        else:
+            buffer[at] = byte
+            at += 1
+    return (str)buffer[..<at]
+
+## `text` with escapes undone, into `buffer`.
+pub func unescaped(text: str, buffer: u8[]) -> str:
+    var at: usize = 0
+    var index: usize = 0
+    while index < text.length and at < buffer.length:
+        let byte = text.bytes[index]
+        if byte == '\\' and index + 1 < text.length:
+            let next = text.bytes[index + 1]
+            buffer[at] = '\n' if next == 'n' else ('\t' if next == 't' else ('\r' if next == 'r' else next))
+            index += 2
+        else:
+            buffer[at] = byte
+            index += 1
+        at += 1
+    return (str)buffer[..<at]

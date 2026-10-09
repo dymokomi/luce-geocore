@@ -1,0 +1,52 @@
+# Groups, Houdini's createPointGroup and group.add: named sets of points, vertices or
+# primitives, kept as flagged boolean attributes, so group expressions downstream (a
+# Blast's Group row, a verb's) find them by name.
+
+extend Geometry:
+    ## Put element `element` of `domain` in group `name` (made when missing).
+    pub func add_to_group(domain: Domain3, name: str, element: i64) -> !:
+        let column = try self.group_column(name, domain)
+        try self.check_element(domain, element)
+        column.ints.items[(usize)element] = 1
+
+    ## Take element `element` out of group `name`.
+    pub func remove_from_group(domain: Domain3, name: str, element: i64) -> !:
+        let column = try self.group_column(name, domain)
+        try self.check_element(domain, element)
+        column.ints.items[(usize)element] = 0
+
+    ## Whether element `element` of `domain` is in group `name` (false when there is none).
+    pub func in_group(domain: Domain3, name: str, element: i64) -> bool!:
+        if domain == Domain3.detail: error(errors.invalid, "the detail has no groups")
+        let edit = try self.readable()
+        let column = (try edit.column(name, domain_of(domain), DataType.boolean, 1, false)) else return false
+        if element < 0 or (usize)element >= edit.domain_size(domain_of(domain)): error(errors.invalid, "the element does not exist")
+        return column.ints.items[(usize)element] != 0
+
+    ## Group `name` of `domain` as one 0/1 entry per element, writable (made empty when
+    ## missing): the fast path for big groups.
+    pub func group_flags(domain: Domain3, name: str) -> i32[]!:
+        let column = try self.group_column(name, domain)
+        (try self.editable()).spans = true
+        return column.ints.items[..<column.ints.count]
+
+    ## How many elements group `name` holds.
+    pub func group_size(domain: Domain3, name: str) -> i64!:
+        if domain == Domain3.detail: error(errors.invalid, "the detail has no groups")
+        let edit = try self.readable()
+        let column = (try edit.column(name, domain_of(domain), DataType.boolean, 1, false)) else return 0
+        var count: i64 = 0
+        for flag in column.ints.view():
+            if flag != 0: count += 1
+        return count
+
+    func group_column(name: str, domain: Domain3) -> EditColumn*!:
+        if domain == Domain3.detail: error(errors.invalid, "the detail has no groups")
+        let edit = try self.editable()
+        let column = (try edit.column(name, domain_of(domain), DataType.boolean, 1, true, true)) else trap("a group was not made")
+        if column.kind != DataType.boolean: error(errors.invalid, "an attribute of that name is not a group")
+        return column
+
+    func check_element(domain: Domain3, element: i64) -> !:
+        let edit = try self.readable()
+        if element < 0 or (usize)element >= edit.domain_size(domain_of(domain)): error(errors.invalid, "the element does not exist")

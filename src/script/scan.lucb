@@ -1,0 +1,255 @@
+# What the editor reads from a script's text without compiling it: the spare parameters
+# its literal calls name (`k.f32("height", 0.3)` makes a row starting at 0.3, as in the Code
+# node), and whether it reads the timeline. `k` is whatever `cook` calls its parameter.
+# Comments and strings are skipped; a call whose name is not a literal makes a note.
+
+## One spare parameter of a script's text.
+struct Scanned:
+    var label: str
+    ## f32, f64, i32, toggle, vec3, color, menu, text, file, ramp or ramp_color.
+    var kind: str
+    var components: i64
+    var defaults: f64[4]
+    var text: str
+    var choices: str
+
+## A note at a line: a parameter call the scan could not read.
+struct Note:
+    var line: i64
+    var text: str
+
+## The parameters and time use of a script's text, for the node's rows.
+pub struct ScriptText:
+    var found: Growing[Scanned]
+    var notes: Growing[Note]
+    var time_used: bool
+
+    ## Scan `text` (a whole Script node module).
+    pub static func scan(text: str) -> interop.Reference[ScriptText]!:
+        let storage = try new ScriptText[1] --- in memory.heap
+        storage[0] = ScriptText(found = Growing[Scanned](), notes = Growing[Note](), time_used = false)
+        storage[0].read(text) catch failure:
+            storage[0].close()
+            free(storage) in memory.heap
+            error(failure.code, failure.message)
+        return try interop.Reference[ScriptText].adopt(storage.data, script_text_type, memory.heap)
+
+    ## Whether it reads k.frame(), k.time() or k.fps().
+    pub func reads_time() -> bool:
+        return self.time_used
+
+    pub func parameter_count() -> i64:
+        return (i64)self.found.count
+
+    pub func parameter_name(index: i64) -> str:
+        return self.at(index).label
+
+    ## f32, f64, i32, toggle, vec3, color, menu, text, file, ramp or ramp_color.
+    pub func parameter_kind(index: i64) -> str:
+        return self.at(index).kind
+
+    ## Numbers the parameter holds (0 for text and file, 1 or 3 otherwise).
+    pub func parameter_components(index: i64) -> i64:
+        return self.at(index).components
+
+    ## Component `component`'s default.
+    pub func parameter_default(index: i64, component: i64) -> f64:
+        if component < 0 or component > 3: return 0.0
+        return self.at(index).defaults[(usize)component]
+
+    ## A text or file parameter's default.
+    pub func parameter_text(index: i64) -> str:
+        return self.at(index).text
+
+    ## A menu's choices, "Low|Medium|High".
+    pub func parameter_choices(index: i64) -> str:
+        return self.at(index).choices
+
+    pub func note_count() -> i64:
+        return (i64)self.notes.count
+
+    pub func note_line(index: i64) -> i64:
+        return self.notes.items[(usize)index].line
+
+    pub func note(index: i64) -> str:
+        return self.notes.items[(usize)index].text
+
+    pub func close():
+        for scanned in self.found.view():
+            release_text(scanned.label)
+            release_text(scanned.text)
+            release_text(scanned.choices)
+        self.found.close()
+        self.notes.close()
+
+    func at(index: i64) -> const Scanned*:
+        if index < 0 or (usize)index >= self.found.count: trap("parameter index out of range")
+        return &self.found.items[(usize)index]
+
+    func read(text: str) -> !:
+        let k = cook_parameter(text)
+        var reader = Reader(text = text, at = 0, line = 1)
+        while reader.at < text.length:
+            let byte = text.bytes[reader.at]
+            if byte == '#':
+                reader.skip_line()
+            elif byte == '"' or byte == '\'':
+                reader.skip_string()
+            elif is_word_byte(byte):
+                let start = reader.at
+                let word = reader.word()
+                let follows_dot = start > 0 and text.bytes[start - 1] == '.'
+                if word == k and not follows_dot and reader.peek() == '.':
+                    reader.at += 1
+                    let member = reader.word()
+                    reader.spaces()
+                    if reader.peek() == '(':
+                        reader.at += 1
+                        try self.call(&reader, member)
+            else:
+                if byte == '\n': reader.line += 1
+                reader.at += 1
+
+    ## A `k.member(` call, the reader just past its parenthesis.
+    func call(reader: Reader*, member: str) -> !:
+        if member == "frame" or member == "time" or member == "fps":
+            self.time_used = true
+            return
+        let kind = parameter_kind_of(member) else return
+        let line = reader.line
+        reader.spaces()
+        let named = reader.literal_text()
+        if named == none:
+            try self.notes.push(Note(line = line, text = "a parameter's name must be a literal string to make a row"))
+            return
+        let label = named else return
+        var scanned = Scanned(label = try heap_text(label), kind = kind, components = 0, defaults = [0.0, 0.0, 0.0, 0.0], text = "", choices = "")
+        if kind == "vec3" or kind == "color": scanned.components = 3
+        elif kind == "text" or kind == "file": scanned.components = 0
+        else: scanned.components = 1
+        if kind == "ramp" or kind == "ramp_color":
+            scanned.components = 0
+        elif reader.comma():
+            if kind == "menu":
+                if let choices = reader.literal_text(): scanned.choices = try heap_text(choices)
+                if reader.comma(): scanned.defaults[0] = reader.number()
+            elif kind == "text" or kind == "file":
+                if let given = reader.literal_text(): scanned.text = try heap_text(given)
+            elif kind == "vec3" or kind == "color":
+                reader.vector(&scanned.defaults)
+            elif kind == "toggle":
+                scanned.defaults[0] = 1.0 if reader.word() == "true" else 0.0
+            else:
+                scanned.defaults[0] = reader.number()
+        # A name met again keeps its first row.
+        for earlier in self.found.view():
+            if earlier.label == label:
+                release_text(scanned.label)
+                release_text(scanned.text)
+                release_text(scanned.choices)
+                return
+        try self.found.push(scanned)
+
+## script_text_type: ScriptText's interop type, for luced-3d.
+pub let script_text_type: interop.Type[ScriptText] = interop.Type[ScriptText]("ScriptText", ScriptText.close, closeable = true)
+
+## The kind of row `k.member` makes, or none when it makes none.
+func parameter_kind_of(member: str) -> str?:
+    for kind in ["f32", "f64", "i32", "toggle", "vec3", "color", "menu", "text", "file", "ramp", "ramp_color"]:
+        if member == kind: return kind
+    return none
+
+## The name `cook` gives its first parameter ("k" when there is no cook).
+func cook_parameter(text: str) -> str:
+    let at = strings.find(text, "func cook(") else return "k"
+    var end = at + 10
+    while end < text.length and text.bytes[end] == ' ': end += 1
+    let start = end
+    while end < text.length and is_word_byte(text.bytes[end]): end += 1
+    return (str)text.bytes[start..<end] if end > start else "k"
+
+func is_word_byte(byte: u8) -> bool:
+    return (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or (byte >= '0' and byte <= '9') or byte == '_'
+
+## A cursor over a script's text, counting lines.
+struct Reader:
+    var text: str
+    var at: usize
+    var line: i64
+
+    func peek() -> u8:
+        return self.text.bytes[self.at] if self.at < self.text.length else 0
+
+    func spaces():
+        while self.at < self.text.length:
+            let byte = self.text.bytes[self.at]
+            if byte == '\n': self.line += 1
+            elif byte != ' ' and byte != '\t' and byte != '\r': return
+            self.at += 1
+
+    func skip_line():
+        while self.at < self.text.length and self.text.bytes[self.at] != '\n': self.at += 1
+
+    func skip_string():
+        let quote = self.text.bytes[self.at]
+        self.at += 1
+        while self.at < self.text.length:
+            let byte = self.text.bytes[self.at]
+            self.at += 1
+            if byte == '\\': self.at += 1
+            elif byte == quote or byte == '\n': return
+
+    func word() -> str:
+        let start = self.at
+        while self.at < self.text.length and is_word_byte(self.text.bytes[self.at]): self.at += 1
+        return (str)self.text.bytes[start..<self.at]
+
+    ## A plain string literal's contents (no escapes), or none (the cursor left as it was).
+    func literal_text() -> str?:
+        self.spaces()
+        if self.peek() != '"': return none
+        let start = self.at + 1
+        var end = start
+        while end < self.text.length and self.text.bytes[end] != '"':
+            if self.text.bytes[end] == '\\' or self.text.bytes[end] == '\n': return none
+            end += 1
+        if end >= self.text.length: return none
+        self.at = end + 1
+        return (str)self.text.bytes[start..<end]
+
+    ## Past a comma (true), or at something else (false).
+    func comma() -> bool:
+        self.spaces()
+        if self.peek() != ',': return false
+        self.at += 1
+        self.spaces()
+        return true
+
+    ## A number literal, a leading cast such as (f32) and a sign allowed; 0 when there is none.
+    func number() -> f64:
+        self.spaces()
+        if self.peek() == '(':
+            let before = self.at
+            self.at += 1
+            _ = self.word()
+            if self.peek() == ')': self.at += 1
+            else: self.at = before
+        let start = self.at
+        if self.peek() == '-' or self.peek() == '+': self.at += 1
+        while self.at < self.text.length:
+            let byte = self.text.bytes[self.at]
+            let exponent_sign = (byte == '-' or byte == '+') and self.at > start and (self.text.bytes[self.at - 1] == 'e' or self.text.bytes[self.at - 1] == 'E')
+            if not ((byte >= '0' and byte <= '9') or byte == '.' or byte == 'e' or byte == 'E' or byte == '_' or exponent_sign): break
+            self.at += 1
+        return strings.parse_f64((str)self.text.bytes[start..<self.at]) catch failure: recover 0.0
+
+    ## A vector literal [x, y, z(, w)] into `out`.
+    func vector(out: f64[4]*):
+        self.spaces()
+        if self.peek() != '[': return
+        self.at += 1
+        for index in 0..<(usize)4:
+            (*out)[index] = self.number()
+            self.spaces()
+            if self.peek() != ',': break
+            self.at += 1

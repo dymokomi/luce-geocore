@@ -1,0 +1,120 @@
+# The set's other families and whole-set operations: curves (polylines and NURBS), the
+# point cloud, instances (Houdini's packed primitives), merging and transforming.
+
+extend Geometry:
+    # mark: Curves =====================================================================
+
+    ## A polyline through `points` (world space), open or `closed`; its curve number.
+    pub func add_polyline(points: const (f32[4])[], closed: bool = false) -> i64!:
+        return try self.add_curve(points, 1, closed)
+
+    ## A NURBS curve of `degree` (1 to 7; 1 is a polyline) with `points` as its control
+    ## points, open or `closed`; its curve number.
+    pub func add_curve(points: const (f32[4])[], degree: i64 = 5, closed: bool = false) -> i64!:
+        if degree < 1 or degree > 7: error(errors.invalid, "a curve's degree is 1 to 7")
+        if points.length < 2 or (usize)degree >= points.length + (1 if closed else 0):
+            error(errors.invalid, "a curve needs more control points than its degree")
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        let builder = try self.curves_open()
+        try builder.begin(CurveType.poly if degree == 1 else CurveType.nurbs, closed, order = degree + 1)
+        for at in 0..<points.length: try builder.point(vec3(point_of(points, at)))
+        return (i64)builder.curve_count() - 1
+
+    ## How many curves the set holds.
+    pub func curve_count() -> i64:
+        if let builder = self.curve_build: return (i64)builder.curve_count()
+        let curves = set_curves(self.set()) else return 0
+        return (i64)curves.curve_count()
+
+    ## The curve builder, the set's own curves copied in first.
+    func curves_open() -> CurvesBuilder*!:
+        if let builder = self.curve_build: return builder
+        let made = try new CurvesBuilder[1] --- in memory.heap
+        made[0] = CurvesBuilder()
+        if let existing = set_curves(self.set()):
+            for curve in 0..<existing.curve_count():
+                made[0].copy_curve(existing, curve) catch failure:
+                    made[0].close()
+                    free(made) in memory.heap
+                    error(failure.code, failure.message)
+        self.curve_build = made.data
+        return made.data
+
+    # mark: Point cloud =================================================================
+
+    ## Turn the mesh's points, with their point attributes, into the set's point cloud
+    ## (what the viewport draws as dots or splats); the polygons go. A cloud already
+    ## there is replaced.
+    pub func make_cloud() -> !:
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        let mesh = (try self.mesh()) else error(errors.invalid, "make_cloud needs points")
+        let cloud = try cloud_of_mesh(mesh)
+        self.drop_edits()
+        try self.set().put(&points_component, (void*)cloud)
+        self.set().remove(&mesh_component)
+
+    ## How many points the point cloud has.
+    pub func cloud_count() -> i64:
+        let cloud = set_cloud(self.set()) else return 0
+        return (i64)cloud.count()
+
+    ## Point `index` of the point cloud, in world space.
+    pub func cloud_position(index: i64) -> f32[4]!:
+        let cloud = set_cloud(self.set()) else error(errors.invalid, "the geometry has no point cloud")
+        if index < 0 or index >= (i64)cloud.count(): error(errors.invalid, "the cloud point does not exist")
+        return vec4(cloud.point((usize)index))
+
+    ## Point cloud attribute `name`'s component `component` on point `index`.
+    pub func cloud_value(index: i64, name: str, component: i64 = 0) -> f64!:
+        let cloud = set_cloud(self.set()) else error(errors.invalid, "the geometry has no point cloud")
+        let store = cloud_store(cloud)
+        let at = store.find(name, Domain.point)
+        if at < 0: error(errors.invalid, "no such cloud attribute")
+        let entry = store.entry((usize)at)
+        if index < 0 or (usize)index >= cloud.count() or component < 0 or (usize)component >= entry.width:
+            error(errors.invalid, "the cloud point or component does not exist")
+        return entry.number((usize)index, (usize)component)
+
+    # mark: Whole sets ==================================================================
+
+    ## Add everything `other` holds after what this one holds (Houdini's merge).
+    pub func merge(other: Geometry*) -> !:
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        let joined = try set_joined(try self.finished(), try other.finished())
+        self.replace(joined)
+
+    ## Move, turn (XYZ degrees) and scale everything, about the origin.
+    pub func transform(translate: f32[4], rotate: f32[4], scale: f32[4] = [1.0, 1.0, 1.0, 0.0]) -> !:
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        let turn = radians(rotate)
+        let placement = Placement.compose(vec3(translate), turn, vec3(scale))
+        let placed = try set_placed(try self.finished(), &placement)
+        self.replace(placed)
+
+    ## Place `child` as an instance (Houdini's packed primitive): moved, turned (XYZ
+    ## degrees) and scaled. Many instances share one child's data.
+    pub func add_instance(child: Geometry*, translate: f32[4], rotate: f32[4] = [0.0, 0.0, 0.0, 0.0], scale: f32[4] = [1.0, 1.0, 1.0, 0.0]) -> !:
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        let mine = try self.adopted()
+        defer mine.release()
+        let theirs = try child.adopted()
+        defer theirs.release()
+        let turn = radians(rotate)
+        let placed = try (try mine.get()).with_instance(theirs, vec3(translate), turn, vec3(scale))
+        defer placed.release()
+        self.replace(try (try placed.get()).storage())
+
+    ## How many instances the set holds.
+    pub func instance_count() -> i64:
+        return self.set().instance_count()
+
+    ## Take `storage` as the set, dropping open edits (already flushed by the caller).
+    func replace(storage: GeometrySet*):
+        self.drop_edits()
+        if let old = self.storage: dispose_set(old)
+        self.storage = storage
+
+## Degrees to radians, per component.
+func radians(degrees: f32[4]) -> Vector3:
+    let scale = math.pi / 180.0
+    return Vector3((f64)degrees[0] * scale, (f64)degrees[1] * scale, (f64)degrees[2] * scale)

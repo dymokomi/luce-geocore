@@ -1,0 +1,213 @@
+# The cook, `k` in the node's code (Houdini's hou.pwd() during a Python SOP's cook): the
+# output and the inputs, the spare parameters, the timeline, and messages. A cook starts
+# fresh every time: nothing a script kept from the last one survives.
+
+## One parameter value the node sent: numbers, or a text.
+struct Value:
+    var label: str
+    var numbers: Growing[f64]
+    var text: str
+    var textual: bool
+
+## The node during one cook. The entry of the node's code is
+##     pub func cook(k: Cook*) -> !
+## and an error it returns fails the node.
+pub struct Cook:
+    var output: Geometry
+    var inputs: Geometry[2]
+    var wired: bool[2]
+    var values: Growing[Value]
+    var clock: f64[3]
+    var folder: str
+    ## Where replies go: the parent's connection (none: kept for a caller to read).
+    var link: Connection*?
+    var warned: Growing[u8]
+    var last_progress: u64
+    ## The line of the last k.error, for the failure's place.
+    var failed_line: u32
+    ## Where the result goes, and whether replies go to standard output (no parent).
+    var target: str
+    var echo: bool
+
+    ## A cook over `output` (taken) with no inputs or parameters, at frame 1 of 24 fps:
+    ## for tests and for running a cook function directly.
+    pub static func blank(output: Geometry) -> Cook!:
+        return Cook(output = output, inputs = [try Geometry.input(), try Geometry.input()], wired = [false, false], values = Growing[Value](),
+                    clock = [1.0, 0.0, 24.0], folder = "", link = none, warned = Growing[u8](), last_progress = 0, failed_line = 0, target = "", echo = false)
+
+    ## The output, which starts as a copy of input 0 (empty when nothing is wired):
+    ## Houdini's hou.pwd().geometry().
+    pub func geometry() -> Geometry*:
+        return &self.output
+
+    ## Replace the output wholesale (a verb's result, a loaded file); `geometry` is taken.
+    pub func set_geometry(geometry: Geometry) -> !:
+        self.output.close()
+        self.output = geometry
+        self.output.locked = false
+
+    ## Input `index` (0 or 1), read-only and empty when nothing is wired to it.
+    pub func input(index: i64) -> Geometry*!:
+        if index < 0 or index > 1: error(errors.invalid, "a Script node has inputs 0 and 1")
+        return &self.inputs[(usize)index]
+
+    ## Whether input `index` is wired.
+    pub func connected(index: i64) -> bool:
+        return index >= 0 and index <= 1 and self.wired[(usize)index]
+
+    # mark: Spare parameters: a literal call makes a row on the node ===================
+
+    ## A float parameter `name` (its row starts at `default`).
+    pub func f32(name: str, default: f32) -> f32:
+        return (f32)self.number(name, 0, (f64)default)
+
+    ## A double-precision parameter.
+    pub func f64(name: str, default: f64) -> f64:
+        return self.number(name, 0, default)
+
+    ## A whole-number parameter.
+    pub func i32(name: str, default: i32) -> i32:
+        return (i32)self.number(name, 0, (f64)default)
+
+    ## An on/off parameter.
+    pub func toggle(name: str, default: bool) -> bool:
+        return self.number(name, 0, 1.0 if default else 0.0) != 0.0
+
+    ## A three-component parameter.
+    pub func vec3(name: str, default: f32[4]) -> f32[4]:
+        return [(f32)self.number(name, 0, (f64)default[0]), (f32)self.number(name, 1, (f64)default[1]), (f32)self.number(name, 2, (f64)default[2]), 0.0]
+
+    ## A color parameter (linear RGB), shown with a swatch.
+    pub func color(name: str, default: f32[4]) -> f32[4]:
+        return self.vec3(name, default)
+
+    ## A menu parameter of `choices` ("Low|Medium|High"): the chosen index.
+    pub func menu(name: str, choices: str, default: i32) -> i32:
+        _ = choices
+        return (i32)self.number(name, 0, (f64)default)
+
+    ## A text parameter.
+    pub func text(name: str, default: str) -> str:
+        let value = self.find(name) else return default
+        return value.text if value.textual else default
+
+    ## A file parameter, with a picker on its row; the node cooks again when the file
+    ## changes. A relative path is taken from the project's folder.
+    pub func file(name: str, default: str) -> str:
+        return self.text(name, default)
+
+    ## Float ramp `name` at `t` (0 to 1).
+    pub func ramp(name: str, t: f32) -> f32:
+        let value = self.find(name) else return t
+        if value.textual or value.numbers.count < 3: return t
+        return (f32)ramp.lookup(value.numbers.view(), (f64)t)
+
+    ## Color ramp `name` at `t`.
+    pub func ramp_color(name: str, t: f32) -> f32[4]:
+        let value = self.find(name) else return [t, t, t, 0.0]
+        if value.textual or value.numbers.count < 3: return [t, t, t, 0.0]
+        let data = value.numbers.view()
+        return [(f32)ramp.lookup_channel(data, (f64)t, 0), (f32)ramp.lookup_channel(data, (f64)t, 1), (f32)ramp.lookup_channel(data, (f64)t, 2), 0.0]
+
+    # mark: Time, place and messages ====================================================
+
+    ## The timeline's frame; reading it, the time or the rate makes the node follow the
+    ## timeline.
+    pub func frame() -> f64:
+        return self.clock[0]
+
+    ## The time in seconds.
+    pub func time() -> f64:
+        return self.clock[1]
+
+    ## Frames per second.
+    pub func fps() -> f64:
+        return self.clock[2]
+
+    ## The project's folder ("" for an unsaved project).
+    pub func project() -> str:
+        return self.folder
+
+    ## A warning on the node (Houdini's NodeWarning): the cook goes on.
+    pub func warning(message: fmt, line: u32 = luce.line):
+        var buffer: u8[2048]
+        let text = strings.format(buffer, message) catch failure: recover "(a warning too long to show)"
+        self.reply_warning(line, text) catch failure:
+            _ = failure
+
+    ## Fail the node with `message` at this line (Houdini's NodeError); f-strings
+    ## work: `try k.error(f"row {row} has no z")`.
+    pub func error(message: fmt, line: u32 = luce.line) -> !:
+        self.failed_line = line
+        var buffer: u8[2048]
+        let text = strings.format(buffer, message) catch failure: recover "(an error too long to show)"
+        error(errors.invalid, text)
+
+    ## How far the cook is (0 to 1), shown on the node.
+    pub func progress(fraction: f64) -> !:
+        let now = time.now()
+        if now - self.last_progress < 50000000: return
+        self.last_progress = now
+        var buffer: u8[64]
+        try self.reply(strings.format(buffer, f"progress {fraction}") catch failure: recover "progress 0")
+
+    ## The line of the last k.error (0: none yet).
+    pub func error_line() -> u32:
+        return self.failed_line
+
+    ## The warnings sent so far, a line each ("line: message").
+    pub func warnings() -> str:
+        return (str)self.warned.view()
+
+    pub func close():
+        self.output.close()
+        self.inputs[0].close()
+        self.inputs[1].close()
+        for value in self.values.view():
+            release_text(value.label)
+            release_text(value.text)
+            var numbers = value.numbers
+            numbers.close()
+        self.values.close()
+        self.warned.close()
+        release_text(self.folder)
+        release_text(self.target)
+
+    # mark: Inside =====================================================================
+
+    func find(name: str) -> const Value*?:
+        for at in 0..<self.values.count:
+            if self.values.items[at].label == name: return &self.values.items[at]
+        return none
+
+    func number(name: str, component: usize, default: f64) -> f64:
+        let value = self.find(name) else return default
+        if value.textual or component >= value.numbers.count: return default
+        return value.numbers.items[component]
+
+    ## Give a parameter its value (what a request's lines say).
+    pub func put_number(name: str, numbers: const f64[]) -> !:
+        var value = Value(label = try heap_text(name), numbers = Growing[f64](), text = "", textual = false)
+        try value.numbers.assign(numbers)
+        try self.values.push(value)
+
+    pub func put_text(name: str, text: str) -> !:
+        try self.values.push(Value(label = try heap_text(name), numbers = Growing[f64](), text = try heap_text(text), textual = true))
+
+    func reply_warning(line: u32, message: str) -> !:
+        var number: u8[16]
+        let digits = strings.format_u64((u64)line, number) catch failure: recover "0"
+        for piece in [digits, ": ", message, "\n"]:
+            for byte in piece.bytes: try self.warned.push(byte)
+        var room: u8[2048]
+        let text = escaped(message, room)
+        var buffer: u8[2100]
+        try self.reply(strings.format(buffer, f"warning {line} {text}") catch failure: recover "warning 0 (a warning too long to send)")
+
+    ## Send `line` to the parent, when there is one.
+    func reply(line: str) -> !:
+        if let link = self.link:
+            try link.write_text(line)
+            try link.write_text("\n")
+        elif self.echo:
+            try io.stdout().write(f"@l3d {line}\n")

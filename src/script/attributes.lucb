@@ -1,0 +1,217 @@
+# Attributes, Houdini's addAttrib, attribValue and setAttribValue: by name on the points,
+# vertices or primitives of the mesh, one element at a time or as a whole span (the fast
+# path: Houdini's pointFloatAttribValues, here writable and with no copy). Writing an
+# attribute that does not exist makes it; detail attributes live on the set.
+
+## What an attribute holds: f32 numbers, i32 whole numbers, or text.
+pub enum AttributeKind as u8:
+    float32 = 0
+    int32 = 1
+    text = 2
+
+func data_type(kind: AttributeKind) -> DataType:
+    match kind:
+        .float32: return DataType.float32
+        .int32: return DataType.int32
+        _: return DataType.text
+
+extend Geometry:
+    ## Whether `name` is an attribute of `domain`.
+    pub func has_attribute(name: str, domain: Domain3) -> bool:
+        if domain == Domain3.detail: return set_detail(self.set()).find(name, Domain.detail) >= 0
+        if let edit = self.edit:
+            for column in edit.columns.view():
+                if column.domain == domain_of(domain) and column.label == name: return true
+        let mesh = set_mesh(self.set()) else return false
+        return mesh.find_attribute(name, (i64)(u8)domain_of(domain)) >= 0
+
+    ## Make attribute `name` on `domain` with `components` (1 to 4) of `kind`, zero on
+    ## every element; one that exists is left as it is.
+    pub func add_attribute(name: str, domain: Domain3, kind: AttributeKind, components: i64 = 1) -> !:
+        if components < 1 or components > 4: error(errors.invalid, "an attribute has 1 to 4 components")
+        if domain == Domain3.detail:
+            if self.has_attribute(name, domain): return
+            let zeros: f64[4] = [0.0, 0.0, 0.0, 0.0]
+            if kind == AttributeKind.text: try self.set_detail_text(name, "")
+            else: try self.put_detail(name, zeros[..<(usize)components], kind == AttributeKind.int32)
+            return
+        _ = try self.column(name, domain, data_type(kind), (usize)components)
+
+    ## Remove attribute `name` from `domain`, if it is there.
+    pub func remove_attribute(name: str, domain: Domain3) -> !:
+        let edit = try self.editable()
+        for index in 0..<edit.columns.count:
+            if edit.columns.items[index].domain == domain_of(domain) and edit.columns.items[index].label == name:
+                edit.columns.items[index].close()
+                for at in index + 1..<edit.columns.count: edit.columns.items[at - 1] = edit.columns.items[at]
+                edit.columns.count -= 1
+                break
+        try self.flush()
+        # The edit form's source still has it: reopen from the mesh without it.
+        self.drop_edits()
+        if let mesh = set_mesh(self.set()):
+            let storage = try mesh_share(mesh)
+            remove_attribute(storage, name, domain_of(domain))
+            try self.set().put(&mesh_component, (void*)storage)
+
+    # mark: One element ================================================================
+
+    ## Attribute `name`'s value on element `element` of `domain` (its first component).
+    pub func value_f32(domain: Domain3, element: i64, name: str) -> f32!:
+        let column = try self.existing(name, domain, element)
+        let at = (usize)element * column.width
+        return column.floats.items[at] if column.floating() else (f32)column.ints.items[at]
+
+    ## Set attribute `name` of element `element` of `domain` (made as f32 when missing).
+    pub func set_f32(domain: Domain3, element: i64, name: str, value: f32) -> !:
+        let column = try self.writable(name, domain, element, DataType.float32, 1)
+        let at = (usize)element * column.width
+        if column.floating(): column.floats.items[at] = value
+        else: column.ints.items[at] = (i32)value
+
+    ## Attribute `name`'s three components on element `element` of `domain`.
+    pub func value_vec3(domain: Domain3, element: i64, name: str) -> f32[4]!:
+        let column = try self.existing(name, domain, element)
+        if column.width < 3 or not column.floating(): error(errors.invalid, "the attribute is not a float vector")
+        let at = (usize)element * column.width
+        return [column.floats.items[at], column.floats.items[at + 1], column.floats.items[at + 2], 0.0]
+
+    ## Set a three-component attribute (made as f32 x3 when missing).
+    pub func set_vec3(domain: Domain3, element: i64, name: str, value: f32[4]) -> !:
+        let column = try self.writable(name, domain, element, DataType.float32, 3)
+        if column.width < 3 or not column.floating(): error(errors.invalid, "the attribute is not a float vector")
+        let at = (usize)element * column.width
+        for k in 0..<(usize)3: column.floats.items[at + k] = value[k]
+
+    ## Attribute `name`'s whole value on element `element` of `domain`.
+    pub func value_i32(domain: Domain3, element: i64, name: str) -> i32!:
+        let column = try self.existing(name, domain, element)
+        let at = (usize)element * column.width
+        return (i32)column.floats.items[at] if column.floating() else column.ints.items[at]
+
+    ## Set a whole-number attribute (made as i32 when missing).
+    pub func set_i32(domain: Domain3, element: i64, name: str, value: i32) -> !:
+        let column = try self.writable(name, domain, element, DataType.int32, 1)
+        let at = (usize)element * column.width
+        if column.floating(): column.floats.items[at] = (f32)value
+        else: column.ints.items[at] = value
+
+    ## Text attribute `name` of element `element` of `domain`.
+    pub func value_text(domain: Domain3, element: i64, name: str) -> str!:
+        let column = try self.existing(name, domain, element)
+        if column.kind != DataType.text: error(errors.invalid, "the attribute is not text")
+        return column.table.text((usize)column.ints.items[(usize)element])
+
+    ## Set a text attribute (made when missing).
+    pub func set_text(domain: Domain3, element: i64, name: str, value: str) -> !:
+        let column = try self.writable(name, domain, element, DataType.text, 1)
+        if column.kind != DataType.text: error(errors.invalid, "the attribute is not text")
+        column.ints.items[(usize)element] = try column.table.intern(value)
+
+    ## Point shorthands, as Houdini's point.attribValue: a float, and a vector.
+    pub func point_f32(point: i64, name: str) -> f32!:
+        return try self.value_f32(Domain3.point, point, name)
+
+    pub func set_point_f32(point: i64, name: str, value: f32) -> !:
+        try self.set_f32(Domain3.point, point, name, value)
+
+    pub func point_vec3(point: i64, name: str) -> f32[4]!:
+        return try self.value_vec3(Domain3.point, point, name)
+
+    pub func set_point_vec3(point: i64, name: str, value: f32[4]) -> !:
+        try self.set_vec3(Domain3.point, point, name, value)
+
+    # mark: Whole columns ==============================================================
+
+    ## Attribute `name` of every element of `domain` as writable f32s (made with one
+    ## component when missing). Valid until elements are added or removed.
+    pub func f32s(domain: Domain3, name: str) -> f32[]!:
+        let column = try self.span_column(name, domain, DataType.float32, 1)
+        if not column.floating() or column.width != 1: error(errors.invalid, "f32s needs a one-component float attribute")
+        return column.floats.items[..<column.floats.count]
+
+    ## A three-component float attribute of every element (made when missing).
+    pub func vec3s(domain: Domain3, name: str) -> Float3[]!:
+        let column = try self.span_column(name, domain, DataType.float32, 3)
+        if not column.floating() or column.width != 3: error(errors.invalid, "vec3s needs a three-component float attribute")
+        return Float3[]((Float3*)column.floats.items.data, column.floats.count // 3)
+
+    ## A one-component whole-number attribute of every element (made when missing).
+    pub func i32s(domain: Domain3, name: str) -> i32[]!:
+        let column = try self.span_column(name, domain, DataType.int32, 1)
+        if column.floating() or column.kind == DataType.text or column.width != 1: error(errors.invalid, "i32s needs a one-component integer attribute")
+        return column.ints.items[..<column.ints.count]
+
+    pub func point_f32s(name: str) -> f32[]!:
+        return try self.f32s(Domain3.point, name)
+
+    pub func point_vec3s(name: str) -> Float3[]!:
+        return try self.vec3s(Domain3.point, name)
+
+    pub func prim_f32s(name: str) -> f32[]!:
+        return try self.f32s(Domain3.prim, name)
+
+    # mark: Detail ======================================================================
+
+    ## Detail attribute `name`'s first component (Houdini's global attributes).
+    pub func detail_f64(name: str) -> f64!:
+        return (try self.detail_entry(name)).number(0, 0)
+
+    pub func set_detail_f64(name: str, value: f64) -> !:
+        try self.put_detail(name, [value], false)
+
+    pub func detail_vec3(name: str) -> f32[4]!:
+        let entry = try self.detail_entry(name)
+        if entry.width < 3: error(errors.invalid, "the detail attribute is not a vector")
+        return [(f32)entry.number(0, 0), (f32)entry.number(0, 1), (f32)entry.number(0, 2), 0.0]
+
+    pub func set_detail_vec3(name: str, value: f32[4]) -> !:
+        try self.put_detail(name, [(f64)value[0], (f64)value[1], (f64)value[2]], false)
+
+    pub func detail_text(name: str) -> str!:
+        return (try self.detail_entry(name)).text_at(0)
+
+    pub func set_detail_text(name: str, value: str) -> !:
+        var table = TableBuilder()
+        defer table.close()
+        let index: i32[1] = [try table.intern(value)]
+        var column = try table.finish()
+        defer column.release()
+        try set_put_detail(self.set(), try Attribute.text(name, Domain.detail, 1, column, index))
+
+    func detail_entry(name: str) -> const Attribute*!:
+        let store = set_detail(self.set())
+        let at = store.find(name, Domain.detail)
+        if at < 0: error(errors.invalid, "no such detail attribute")
+        return store.entry((usize)at)
+
+    func put_detail(name: str, values: const f64[], integer: bool) -> !:
+        try set_put_detail(self.set(), try Attribute.from_numbers(name, Domain.detail, values.length, values, integer, float32 = not integer))
+
+    # mark: Columns =====================================================================
+
+    ## The column of `name` on `domain`, made with `kind` and `width` when missing.
+    func column(name: str, domain: Domain3, kind: DataType, width: usize) -> EditColumn*!:
+        if domain == Domain3.detail: error(errors.invalid, "detail attributes are read and written with detail_ calls")
+        let edit = try self.editable()
+        return (try edit.column(name, domain_of(domain), kind, width, true)) else trap("a column was not made")
+
+    ## A column whose writable span the script keeps: the mesh is then assembled
+    ## again at every flush.
+    func span_column(name: str, domain: Domain3, kind: DataType, width: usize) -> EditColumn*!:
+        let column = try self.column(name, domain, kind, width)
+        (try self.editable()).spans = true
+        return column
+
+    ## The existing column of `name`, checking `element`.
+    func existing(name: str, domain: Domain3, element: i64) -> EditColumn*!:
+        if domain == Domain3.detail: error(errors.invalid, "detail attributes are read with detail_ calls")
+        let edit = try self.readable()
+        let column = (try edit.column(name, domain_of(domain), DataType.float32, 1, false)) else error(errors.invalid, "no such attribute")
+        if element < 0 or (usize)element >= edit.domain_size(domain_of(domain)): error(errors.invalid, "the element does not exist")
+        return column
+
+    func writable(name: str, domain: Domain3, element: i64, kind: DataType, width: usize) -> EditColumn*!:
+        let column = try self.column(name, domain, kind, width)
+        if element < 0 or (usize)element >= (try self.readable()).domain_size(domain_of(domain)): error(errors.invalid, "the element does not exist")
+        return column
