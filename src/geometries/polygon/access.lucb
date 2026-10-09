@@ -28,6 +28,12 @@ extend Mesh:
     pub func point_count() -> i64:
         return (i64)self.positions.count()
 
+    ## The change id of the positions column: equal ids mean the same
+    ## positions. A mesh sharing a cloud's points (SplatEdits.pick_mesh) has
+    ## the cloud's id, which tells which drawn cloud it picks on.
+    pub func positions_id() -> i64:
+        return (i64)(self.positions.id() >> 1)
+
     ## How many faces the mesh has.
     pub func face_count() -> i64:
         return (i64)self.offsets.count() - 1
