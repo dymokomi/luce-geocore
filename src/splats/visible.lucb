@@ -1,0 +1,235 @@
+## Edit GSplats' "Visible only": of the splats a footprint selection picked,
+## keep those on the surface seen where the region is, not those behind it,
+## as the viewport composites them.
+##
+## The region's box is cut into cells (at most 256 a side, no smaller than a
+## screen unit), and the cells inside the region marked: a polygon's by the
+## even-odd test of their centers, a brush's within its radius of a dab. Every
+## splat whose footprint reaches the box is laid over the cells front to back
+## (by depth along the view), as the viewport's sorted alpha blending does: at
+## each cell its alpha is opacity · exp(-r²/2) at the cell's center, and the
+## light still reaching the cell (its transmittance T, starting at 1) is
+## multiplied by 1 - alpha. Where T first falls below `surface_light` is the
+## cell's surface depth: what is seen there lies in front of it. A picked
+## splat stays picked when, at some cell of the region (grown by a cell, for
+## footprints that meet its edge between cell centers) where its alpha is at
+## least the footprint alpha, its front (its depth less 3 standard deviations
+## along the view, and 0.1% of the depth) reaches that surface. Splats on the
+## surface that overlap each other all count, as coplanar discs do; splats
+## behind an opaque layer do not, and those behind a translucent one
+## (T above `surface_light` through it) do.
+##
+## A splat smaller than a cell counts at its center's cell, its alpha scaled
+## down by the share of the cell it covers (its Gaussian's integral,
+## 2π σ₁σ₂ · opacity, over the cell's area). The splats are projected on the
+## pool; laying them over is sequential, over the splats near the region only.
+
+## The transmittance where a cell's surface is.
+let surface_light: f64 = 0.5
+## The most cells a side of the region's box.
+let most_cells: f64 = 256.0
+
+## Keep, of `work.selected`, the splats seen in the region.
+func keep_visible(work: FootprintWork*) -> !:
+    let view = work.view
+    # The region's box on screen, in cells; half a unit wider, so a click's
+    # empty box still holds its cell.
+    let low_x = math.max(work.low_x - 0.5, 0.0)
+    let low_y = math.max(work.low_y - 0.5, 0.0)
+    let high_x = math.min(work.high_x + 0.5, view.width)
+    let high_y = math.min(work.high_y + 0.5, view.height)
+    if not (high_x > low_x and high_y > low_y):
+        for at in 0..<work.selected.length: work.selected[at] = 0
+        return
+    let cell = math.max(1.0, math.max(high_x - low_x, high_y - low_y) / most_cells)
+    var grid = CellGrid(x = low_x, y = low_y, cell = cell, columns = (usize)math.ceil((high_x - low_x) / cell), rows = (usize)math.ceil((high_y - low_y) / cell))
+    let cells = grid.columns * grid.rows
+    let inside = try new u8[cells] in memory.heap
+    defer free(inside) in memory.heap
+    mark_region_cells(&grid, work.region, inside)
+    # Picked splats are tested over the region grown by a cell: a footprint the
+    # exact test found meeting the region's edge may cover no cell center in it.
+    let near_region = try new u8[cells] in memory.heap
+    defer free(near_region) in memory.heap
+    grow_cells(&grid, inside, near_region)
+    let light = try new f64[cells] --- in memory.heap
+    defer free(light) in memory.heap
+    let surface = try new f64[cells] --- in memory.heap
+    defer free(surface) in memory.heap
+    for at in 0..<cells:
+        light[at] = 1.0
+        surface[at] = math.infinity
+    # The splats whose footprint reaches the box, nearest first.
+    let count = work.cloud.points.length
+    let near = try new u8[count + 1] --- in memory.heap
+    defer free(near) in memory.heap
+    var finding = NearWork(work = work, near = near, low_x = low_x, low_y = low_y, high_x = high_x, high_y = high_y)
+    ranges.each_range(count, 4096, (void*)&finding, near_range)
+    var order = Growing[u32]()
+    defer order.close()
+    for at in 0..<count:
+        if near[at] != 0: try order.push((u32)at)
+    let found = try new Footprint[order.count + 1] --- in memory.heap
+    defer free(found) in memory.heap
+    var projecting = ProjectWork(work = work, order = order.items[..<order.count], found = found)
+    ranges.each_range(order.count, 1024, (void*)&projecting, project_range)
+    let ranked = try new u32[order.count + 1] --- in memory.heap
+    defer free(ranked) in memory.heap
+    for at in 0..<order.count: ranked[at] = (u32)at
+    sort.using(ranked[..<order.count], &projecting, nearer_first)
+    var cover = Cover(grid = grid, cut = work.cut, inside = near_region, light = light, surface = surface, testing = false)
+    for at in ranked[..<order.count]: _ = visit_cells(&cover, &found[(usize)at])
+    # Then each picked splat against the surfaces.
+    cover.testing = true
+    for at in 0..<order.count:
+        let index = (usize)order.items[at]
+        if work.selected[index] != 0 and not visit_cells(&cover, &found[at]): work.selected[index] = 0
+    # Picked splats not near the region (behind the eye, say) stay as picked:
+    # footprint_range only picks what reaches the region, so there are none.
+
+## Cells over the region's box: cell (i, j) spans x + i·cell .. and y + j·cell ...
+struct CellGrid:
+    var x: f64
+    var y: f64
+    var cell: f64
+    var columns: usize
+    var rows: usize
+
+## Mark the cells whose centers are inside the region.
+func mark_region_cells(grid: const CellGrid*, region: const ScreenRegion*, inside: u8[]):
+    for row in 0..<grid.rows:
+        for column in 0..<grid.columns:
+            let x = grid.x + ((f64)column + 0.5) * grid.cell
+            let y = grid.y + ((f64)row + 0.5) * grid.cell
+            var hit = false
+            if region.shape == RegionShape.brush:
+                # A click (radius 0) still covers the cell it is in.
+                let reach = math.max(region.radius, grid.cell * 0.71)
+                var at: usize = 0
+                while at < region.points.length and not hit:
+                    let dx = region.points[at] - x
+                    let dy = region.points[at + 1] - y
+                    hit = dx * dx + dy * dy <= reach * reach
+                    at += 2
+            else:
+                hit = inside_polygon(region.points, x, y)
+            inside[row * grid.columns + column] = 1 if hit else 0
+
+## `grown`: the cells of `inside` and their eight neighbors.
+func grow_cells(grid: const CellGrid*, inside: const u8[], grown: u8[]):
+    for row in 0..<grid.rows:
+        for column in 0..<grid.columns:
+            var hit: u8 = 0
+            for dy in 0..<(usize)3:
+                if row + dy < 1 or row + dy > grid.rows: continue
+                for dx in 0..<(usize)3:
+                    if column + dx < 1 or column + dx > grid.columns: continue
+                    hit |= inside[(row + dy - 1) * grid.columns + column + dx - 1]
+            grown[row * grid.columns + column] = hit
+
+## Whether (x, y) is inside the polygon `points` (even-odd).
+func inside_polygon(points: const f64[], x: f64, y: f64) -> bool:
+    let corners = points.length // 2
+    var inside = false
+    var j = corners - 1
+    for i in 0..<corners:
+        let xi = points[i * 2]
+        let yi = points[i * 2 + 1]
+        let xj = points[j * 2]
+        let yj = points[j * 2 + 1]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi: inside = not inside
+        j = i
+    return inside
+
+## The cells' light and surfaces as splats are laid over them, and whether
+## a pass lays them (front to back) or tests picked ones against them.
+struct Cover:
+    var grid: CellGrid
+    var cut: f64
+    var inside: const u8[]
+    var light: f64[]
+    var surface: f64[]
+    var testing: bool
+
+## The cells `found` covers (alpha at least `cut`): laying it, dim their light
+## and set the surface where it falls below `surface_light`; testing, answer
+## whether it reaches the surface at one of them inside the region.
+func visit_cells(cover: Cover*, found: const Footprint*) -> bool:
+    let grid = &cover.grid
+    let reach = math.max(found.a, found.b)
+    let front = found.depth - 3.0 * found.thick - 0.001 * found.depth
+    let sigma_a = found.a / found.k if found.k > 0.0 else 0.0
+    # A footprint flat to a line still has the low-pass's width: never 0.
+    let sigma_b = math.max(found.b / found.k if found.k > 0.0 else 0.0, 1.0e-6)
+    # Under a cell (or a center alone): its center's cell, alpha by its share of it.
+    if reach < grid.cell * 0.5:
+        let column = cell_of(found.x - grid.x, grid.cell, grid.columns) else return false
+        let row = cell_of(found.y - grid.y, grid.cell, grid.rows) else return false
+        var alpha = found.opacity
+        if sigma_a > 0.0: alpha = math.min(alpha, found.opacity * 2.0 * math.pi * sigma_a * sigma_b / (grid.cell * grid.cell))
+        return cover_cell(cover, row * grid.columns + column, alpha, found.depth, front)
+    let first_column = cell_of(math.max(found.x - reach - grid.x, 0.0), grid.cell, grid.columns) else return false
+    let first_row = cell_of(math.max(found.y - reach - grid.y, 0.0), grid.cell, grid.rows) else return false
+    let last_column = (usize)math.clamp((found.x + reach - grid.x) / grid.cell, 0.0, (f64)(grid.columns - 1))
+    let last_row = (usize)math.clamp((found.y + reach - grid.y) / grid.cell, 0.0, (f64)(grid.rows - 1))
+    for row in first_row..<last_row + 1:
+        let y = grid.y + ((f64)row + 0.5) * grid.cell - found.y
+        for column in first_column..<last_column + 1:
+            let x = grid.x + ((f64)column + 0.5) * grid.cell - found.x
+            let u = (x * found.cos + y * found.sin) / sigma_a
+            let v = (-x * found.sin + y * found.cos) / sigma_b
+            let alpha = found.opacity * math.exp(-0.5 * (u * u + v * v))
+            if alpha < cover.cut: continue
+            if cover_cell(cover, row * grid.columns + column, alpha, found.depth, front): return true
+    return false
+
+## One cell of `visit_cells`: lay (answer false) or test.
+func cover_cell(cover: Cover*, at: usize, alpha: f64, depth: f64, front: f64) -> bool:
+    if cover.testing: return cover.inside[at] != 0 and front <= cover.surface[at]
+    let before = cover.light[at]
+    let after = before * (1.0 - math.clamp(alpha, 0.0, 0.99))
+    cover.light[at] = after
+    if before >= surface_light and after < surface_light: cover.surface[at] = depth
+    return false
+
+## The cell `offset` falls in along an axis of `cells`, or none outside.
+func cell_of(offset: f64, cell: f64, cells: usize) -> usize?:
+    if not (offset >= 0.0): return none
+    let at = (usize)(offset / cell)
+    return at if at < cells else none
+
+struct NearWork:
+    var work: const FootprintWork*
+    var near: u8[]
+    var low_x: f64
+    var low_y: f64
+    var high_x: f64
+    var high_y: f64
+
+## Mark the splats whose footprint box reaches the region's box.
+func near_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let finding = (NearWork*)context
+    for index in first..<end:
+        finding.near[index] = 0
+        let found = footprint_of(finding.work, index) else continue
+        let reach = math.max(found.a, found.b)
+        if found.x + reach < finding.low_x or found.x - reach > finding.high_x or found.y + reach < finding.low_y or found.y - reach > finding.high_y: continue
+        finding.near[index] = 1
+
+struct ProjectWork:
+    var work: const FootprintWork*
+    var order: const u32[]
+    var found: Footprint[]
+
+func project_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let projecting = (ProjectWork*)context
+    for at in first..<end:
+        projecting.found[at] = footprint_of(projecting.work, (usize)projecting.order[at]) else Footprint(x = 0.0, y = 0.0, cos = 1.0, sin = 0.0, a = 0.0, b = 0.0, depth = 1.0e300)
+
+## Nearer first (ties: the lower point number).
+func nearer_first(projecting: const ProjectWork*, a: u32, b: u32) -> bool:
+    let da = projecting.found[(usize)a].depth
+    let db = projecting.found[(usize)b].depth
+    return da < db or (da == db and projecting.order[(usize)a] < projecting.order[(usize)b])

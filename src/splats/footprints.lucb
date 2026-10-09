@@ -6,7 +6,10 @@
 ## The ellipse is the splat's EWA projection, as the viewport draws it: its
 ## 2D covariance J W Σ Wᵀ Jᵀ plus a 0.3 low-pass, out to k standard
 ## deviations, where its Gaussian falls to the footprint alpha `cut`:
-## k = √(2 ln(opacity / cut)), at most 3. A splat fainter than `cut` is
+## k = √(2 ln(opacity / cut)), at most 3. As in luce-3d's splat_project.comp,
+## J is taken with x/z and y/z clamped to 1.3 times the view's half extent,
+## and no half axis is longer than `widest_footprint` (a splat right at the
+## eye draws, and is picked, as a large blob, not as the whole screen). A splat fainter than `cut` is
 ## selected by its center alone. Plain points (no orient, scale and opacity)
 ## are their centers.
 ##
@@ -17,6 +20,9 @@
 ##   circle's center lies inside the ellipse grown by r along both axes.
 ## Each splat's screen box is checked against the region's first. Work runs
 ## on the pool, a byte per splat, then becomes bits.
+##
+## By default selection goes through the depth, as SuperSplat's does.
+## `visible_only` keeps only the splats seen in the region (visible.lucb).
 
 ## The view the footprints are taken in: the camera and the screen, in the
 ## units of the region's coordinates (x right, y down from the top left).
@@ -58,8 +64,9 @@ pub struct FootprintCloud:
     pub let opacity: Floats
 
 ## Into `marked` (a byte per point, 1 selected), the points whose footprint
-## meets `region` in `view`; `cut` is the footprint alpha.
-pub func select_footprints(cloud: const FootprintCloud*, view: const ScreenView*, region: const ScreenRegion*, cut: f64, marked: u8[]) -> !:
+## meets `region` in `view`; `cut` is the footprint alpha. `visible_only`
+## keeps those not hidden behind others there.
+pub func select_footprints(cloud: const FootprintCloud*, view: const ScreenView*, region: const ScreenRegion*, cut: f64, marked: u8[], visible_only: bool = false) -> !:
     let count = cloud.points.length
     if count == 0: return
     if region.points.length < 2 or region.points.length % 2 != 0: error(errors.invalid, "a screen region needs x, y pairs")
@@ -82,6 +89,7 @@ pub func select_footprints(cloud: const FootprintCloud*, view: const ScreenView*
                              splats = cloud.orient.present() and cloud.scale.present() and cloud.opacity.present(),
                              low_x = low_x - grow, low_y = low_y - grow, high_x = high_x + grow, high_y = high_y + grow)
     ranges.each_range(count, 4096, (void*)&work, footprint_range)
+    if visible_only: try keep_visible(&work)
 
 struct FootprintWork:
     let cloud: const FootprintCloud*
@@ -95,8 +103,14 @@ struct FootprintWork:
     let high_x: f64
     let high_y: f64
 
+## The longest half axis of a footprint, as the viewport's SplatLook.max_size.
+let widest_footprint: f64 = 2048.0
+
 ## A footprint on screen: its center, and the ellipse's half axes (axis 1
-## along (cos, sin), axis 2 across it); zero axes for a center alone.
+## along (cos, sin), axis 2 across it); zero axes for a center alone. Also
+## what visibility needs: the splat's opacity (1 for a plain point), how many
+## standard deviations the axes reach, its depth along the view and its
+## standard deviation along the view direction.
 struct Footprint:
     var x: f64
     var y: f64
@@ -104,6 +118,10 @@ struct Footprint:
     var sin: f64
     var a: f64
     var b: f64
+    var opacity: f64 = 1.0
+    var k: f64 = 0.0
+    var depth: f64 = 0.0
+    var thick: f64 = 0.0
 
 func footprint_range(context: void*, first: usize, end: usize, worker: usize):
     _ = worker
@@ -125,18 +143,23 @@ func footprint_of(work: const FootprintWork*, index: usize) -> Footprint?:
     if not (tz > view.near): return none
     let tx = d.dot(view.right)
     let ty = d.dot(view.up)
-    var result = Footprint(x = view.width * 0.5 + view.fx * tx / tz, y = view.height * 0.5 - view.fy * ty / tz, cos = 1.0, sin = 0.0, a = 0.0, b = 0.0)
+    var result = Footprint(x = view.width * 0.5 + view.fx * tx / tz, y = view.height * 0.5 - view.fy * ty / tz, cos = 1.0, sin = 0.0, a = 0.0, b = 0.0, depth = tz)
     if not work.splats: return result
     let opacity = cloud.opacity.at(index, 0)
+    result.opacity = opacity
     if not (opacity > work.cut): return result
     let k = math.min(math.sqrt(2.0 * math.log(opacity / work.cut)), 3.0)
+    result.k = k
     let q = Quat(cloud.orient.at(index, 0), cloud.orient.at(index, 1), cloud.orient.at(index, 2), cloud.orient.at(index, 3))
     if q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w < 1.0e-30: return result
     let sigma = compose_covariance(q.normalized(), Vector3(math.abs(cloud.scale.at(index, 0)), math.abs(cloud.scale.at(index, 1)), math.abs(cloud.scale.at(index, 2))))
     # T = J W: rows in world terms, as splat_project.comp builds them; y
     # grows down the screen, which flips the second row (it changes no size).
-    let t0 = view.right.multiply_scalar(view.fx / tz).subtract(view.forward.multiply_scalar(view.fx * tx / (tz * tz)))
-    let t1 = view.up.multiply_scalar(-view.fy / tz).add(view.forward.multiply_scalar(view.fy * ty / (tz * tz)))
+    let txc = math.clamp(tx / tz, -1.3 * view.width * 0.5 / view.fx, 1.3 * view.width * 0.5 / view.fx) * tz
+    let tyc = math.clamp(ty / tz, -1.3 * view.height * 0.5 / view.fy, 1.3 * view.height * 0.5 / view.fy) * tz
+    let t0 = view.right.multiply_scalar(view.fx / tz).subtract(view.forward.multiply_scalar(view.fx * txc / (tz * tz)))
+    let t1 = view.up.multiply_scalar(-view.fy / tz).add(view.forward.multiply_scalar(view.fy * tyc / (tz * tz)))
+    result.thick = math.sqrt(math.max(view.forward.dot(sigma.transform(view.forward)), 0.0))
     let s0 = sigma.transform(t0)
     let s1 = sigma.transform(t1)
     let a = t0.dot(s0) + 0.3
@@ -150,8 +173,8 @@ func footprint_of(work: const FootprintWork*, index: usize) -> Footprint?:
     if math.abs(b) > 1.0e-12 * math.max(a, c): angle = math.atan2(l1 - a, b)
     result.cos = math.cos(angle)
     result.sin = math.sin(angle)
-    result.a = k * math.sqrt(l1)
-    result.b = k * math.sqrt(l2)
+    result.a = math.min(k * math.sqrt(l1), widest_footprint)
+    result.b = math.min(k * math.sqrt(l2), widest_footprint)
     return result
 
 ## Screen point (x, y) in the footprint's frame scaled to its half axes

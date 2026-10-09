@@ -17,6 +17,7 @@ pub func run() -> !:
     try grid_box()
     try grid_lasso_and_brush()
     try footprint_edges()
+    try visible_only()
     try selection_operations()
     try moves()
     try colors_and_opacity()
@@ -81,13 +82,13 @@ func plain_grid() -> interop.Reference[GeometrySet]!:
     return try grid(none_given, none_given, no_quats, no_numbers)
 
 ## The selection made by one region on an empty selection of `set`'s pick mesh.
-func selected(set: interop.Reference[GeometrySet], shape: i64, points: const f64[], radius: f64 = 0.0, cut: f64 = 0.00392156862745098) -> interop.Reference[Selection]!:
+func selected(set: interop.Reference[GeometrySet], shape: i64, points: const f64[], radius: f64 = 0.0, cut: f64 = 0.00392156862745098, visible: bool = false) -> interop.Reference[Selection]!:
     let pick = try SplatEdits.pick_mesh(set)
     defer pick.release()
     let nothing = try Selection.empty(pick, 0)
     defer nothing.release()
     let v = view()
-    return try SplatEdits.select(pick, nothing, v, shape, points, radius, cut, 0)
+    return try SplatEdits.select(pick, nothing, v, shape, points, radius, cut, 0, visible)
 
 ## A box's corners on screen from world corners (x0, y0)..(x1, y1).
 func box(x0: f64, y0: f64, x1: f64, y1: f64) -> f64[8]:
@@ -108,6 +109,40 @@ func grid_box() -> !:
     assert(chosen.value().count() == 8)
     for i in [(i64)3, 4, 5, 6]:
         for j in [(i64)4, 5]: assert(has(chosen, i, j))
+
+## Visible only: an opaque wall (σ 2.5, opacity 0.99, centered at x = -3.5)
+## floats 2 units in front of the grid's left half and a glass pane (σ 1.5,
+## opacity 0.3) in front of its right half. Through the depth, a box over
+## x -4..4, y -1..1 takes the 16 grid splats and both; visible only, the six
+## grid splats behind the wall's core (x -3.5..-1.5, where it lets through
+## under half the light) go, and those behind the glass stay. A click on a
+## hidden splat takes the wall in front of it alone.
+func visible_only() -> !:
+    let flat = Quat.identity()
+    let extra: Vector3[2] = [Vector3(-3.5, 0.0, 2.0), Vector3(2.5, 0.0, 2.0)]
+    let sizes: Vector3[2] = [Vector3(2.5, 2.5, 0.01), Vector3(1.5, 1.5, 0.01)]
+    let turns: Quat[2] = [flat, flat]
+    let alphas: f64[2] = [0.99, 0.3]
+    let set = try grid(extra, sizes, turns, alphas)
+    defer set.release()
+    # The eye is at z = 10, so the panes at z = 2 project 1.25 times larger:
+    # the box covers the grid's x -4..4 as seen through them all the same.
+    let corners = box(-4.0, -1.0, 4.0, 1.0)
+    let through = try selected(set, 0, corners)
+    defer through.release()
+    assert(through.value().count() == 18 and through.value().contains(100) and through.value().contains(101), "through the depth: everything in the box")
+    let seen = try selected(set, 0, corners, visible = true)
+    defer seen.release()
+    assert(seen.value().contains(100) and seen.value().contains(101), "the wall and the glass are seen")
+    for i in [(i64)1, 2, 3]:
+        for j in [(i64)4, 5]: assert(not has(seen, i, j), "the splats behind the wall are hidden")
+    for i in [(i64)4, 5, 6, 7]:
+        for j in [(i64)4, 5]: assert(has(seen, i, j), "the splats behind the glass and in the open are seen")
+    assert(seen.value().count() == 12)
+    let dab: f64[2] = [sx(-2.5), sy(0.5)]
+    let clicked = try selected(set, 1, dab, 0.0, visible = true)
+    defer clicked.release()
+    assert(clicked.value().count() == 1 and clicked.value().contains(100), "a click on the wall takes the wall, not what it hides")
 
 ## An L-shaped lasso (concave) takes the splats inside the L and none in its
 ## notch; a brush stroke along y = 0.5 from x = -2.8 to 2.8 (radius 3 px,
