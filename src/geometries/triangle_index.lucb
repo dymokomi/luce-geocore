@@ -129,7 +129,7 @@ pub struct TriangleIndex:
         return self.nearest_within(point, 1.0e150)
 
     ## The nearest face closer than `bound`, or face -1: a caller that knows
-    ## a face at `bound` (a neighbouring query's) prunes most of the tree.
+    ## a face at `bound` (a neighboring query's) prunes most of the tree.
     pub func nearest_within(point: Vector3, bound: f64) -> RayHit:
         if self.nodes.length == 0: return RayHit()
         var best: f64 = bound * bound

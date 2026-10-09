@@ -33,7 +33,7 @@ i32 face offsets and corner points, f32 face normals and i32 display
 triangles. The origin is the bounds center when coordinates exceed 4096 or 8×
 the model's size, else zero, so f32 positions keep about 1e-7 of the model's
 size. Construction validates and computes normals and triangles in parallel on
-the `geocore_parallel` pool (`parallel_for`, `run`, `warm`).
+the `luce_geocore.core.parallel` pool (`parallel_for`, `run`, `warm`).
 
 What connectivity alone determines (the face of each corner, the edges, numbered
 by first corner in a deterministic parallel build, point-to-face incidence and
@@ -165,9 +165,9 @@ A group is a boolean attribute flagged as a group, on the point, corner,
 face or edge domain; its bits are the members, 64 to a word. Edges are
 numbered by connectivity, so an edge group is exact while the topology is;
 its durable form is the point pairs of its edges (`edge_pairs`,
-`edge_bits_from_pairs` in `geocore_kernel`). Through topology changes an
+`edge_bits_from_pairs` in `luce_geocore.kernel`). Through topology changes an
 output edge continues an old edge when its two corners' parents are
-neighbours in an old face; wall sides and other new edges start empty.
+neighbors in an old face; wall sides and other new edges start empty.
 
 Text attributes hold an i32 per element into a string table, one shared
 column. CAD tessellation writes each face's B-rep path to the face text
@@ -193,12 +193,12 @@ keep them, and rows added later take zero or "". `realized` concatenates every
 mesh placed by its instance matrices in one parallel pass (`concatenated`);
 a family without polygons (CAD) makes it fail with what to do instead.
 
-Base code in other packages uses `geocore_kernel`: bit sets, string tables,
-path filters, `MeshPart`/`concatenated`, `kept_faces`, groups' edge pairs,
-and the built-in families; the component protocol itself is `GeometrySet`'s
+Base code in other packages uses `luce_geocore.kernel`: bit sets, string
+tables, path filters, mesh assembly and its size limits,
+`MeshPart`/`concatenated`, groups' edge pairs, and the built-in families; the component protocol itself is `GeometrySet`'s
 `find`, `put`, `remove`, `storage` and `component`, which Luce does not see.
-Import its names with `from geocore_kernel import …`, or the module itself
-(`import geocore_kernel as kernel`, `kernel.set_mesh(&set)`).
+Import its names with `from luce_geocore.kernel import …`, or the module
+itself (`from luce_geocore import kernel`, `kernel.set_mesh(&set)`).
 
 ## Group expressions and selections
 
@@ -256,7 +256,7 @@ every group member across the X, Y or Z plane through the origin, and `keep`
 makes the output selection the group carried through the verb instead of what
 it made. Transform Components' Soft radius and Falloff move the points near
 the group by a weight (1 in the group, falling off with the distance to its
-nearest member); `selection_weights` in `geocore_kernel` computes the same
+nearest member); `selection_weights` in `luce_geocore.kernel` computes the same
 weights for a selection, which the Edit viewport tints points by.
 
 The modeling verbs, after Houdini's SOPs and Blender's tools:
@@ -284,7 +284,7 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
 - **Clip** (faces): cut by an axis-aligned plane (optionally through the
   group's centroid) or any plane given by a point and a normal (the editor's
   knife stroke), and keep the side above, below, or both (a knife cut);
-  one cut point per crossed edge, which neighbours outside the group take
+  one cut point per crossed edge, which neighbors outside the group take
   into their boundaries; a face on the plane counts as above, once.
 - **Connect** (edges or points): two of the group's points across a face
   split it along their diagonal; the group's edges get a point each and a

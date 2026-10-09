@@ -20,7 +20,7 @@ extend Mesh:
 
     ## The elements of attribute `index` that may differ from the array it was
     ## edited from (attribute_parent), as points_changed and smooth_changed are
-    ## for the positions and smooth normals: a Move's neighbourhood.
+    ## for the positions and smooth normals: a Move's neighborhood.
     pub func attribute_changed(index: i64) -> (usize, usize)!:
         let entry = try self.attribute_entry(index)
         let bytes = entry.data.changed()
@@ -148,7 +148,7 @@ extend Mesh:
 
     ## The 98th percentile of |value| over the source, where `kind` picks the
     ## value from (k1, k2): 0 mean, 1 Gaussian, 2 k1, 3 k2, 4 the larger |k|.
-    ## The colour map spans it, so a few extreme points do not wash it out.
+    ## The color map spans it, so a few extreme points do not wash it out.
     pub func curvature_range(source: const CurvatureSource*, kind: i64) -> f64!:
         var count: usize = 0
         if source.k1 >= 0: count = (try self.attribute_entry(source.k1)).elements

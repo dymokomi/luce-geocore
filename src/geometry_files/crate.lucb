@@ -29,15 +29,24 @@ from geometry_set import GeometrySet, ComponentType, Component, Placement, Point
 from curves import Curves, curves_type, curves_origin, curves_assembled, curves_knots, curves_knot_offsets
 from fields import Volume, Sdf, GridClass, new_grid, new_volume, add_grid, release_volume, new_sdf, volume_type, sdf_type, leaf_voxels, mask_words, sdf_stride
 
-## Wire dtype codes (luce-prism's DType; never reordered).
+## Wire dtype codes (luce-prism's DType; never reordered): booleans packed as
+## bits, then signed and unsigned integers, floats and strings.
 pub let dtype_bool: u8 = 0
+## 8-bit signed integers.
 pub let dtype_int8: u8 = 2
+## 32-bit signed integers.
 pub let dtype_int32: u8 = 4
+## 64-bit signed integers.
 pub let dtype_int64: u8 = 5
+## 8-bit unsigned integers (raw bytes).
 pub let dtype_uint8: u8 = 6
+## 64-bit unsigned integers (bit words).
 pub let dtype_uint64: u8 = 9
+## 32-bit floats.
 pub let dtype_float32: u8 = 10
+## 64-bit floats.
 pub let dtype_float64: u8 = 11
+## Strings from the crate's string table.
 pub let dtype_str: u8 = 12
 
 ## Bytes per component of a fixed-width dtype (0 for str).
@@ -87,6 +96,7 @@ pub struct CrateWriter:
     var elements: Growing[ElementPlan]
     var properties: Growing[PropertyPlan]
 
+    ## An empty document.
     pub func init():
         self.pool = Growing[u8]()
         self.texts = Growing[Text]()
@@ -95,6 +105,7 @@ pub struct CrateWriter:
         self.elements = Growing[ElementPlan]()
         self.properties = Growing[PropertyPlan]()
 
+    ## Release the document's buffers.
     pub func close():
         self.pool.close()
         self.texts.close()
@@ -158,10 +169,12 @@ pub struct CrateWriter:
         var empty: const u8[]
         try self.add(PropertyPlan(try self.intern(name), dtype, 0, [0, 0, 0], empty, first, bytes.length, true))
 
+    ## A scalar i64 property of the current element.
     pub func integer(name: str, value: i64) -> !:
         var copy = value
         try self.scalar(name, dtype_int64, u8[]((u8*)&copy, 8))
 
+    ## A scalar f64 property of the current element.
     pub func number(name: str, value: f64) -> !:
         var copy = value
         try self.scalar(name, dtype_float64, u8[]((u8*)&copy, 8))
@@ -300,10 +313,15 @@ func write_all(file: files.TemporaryFile*, data: const u8[]) -> !:
 
 ## A property's header: its name, dtype and shape, and its payload's bytes.
 pub struct PropertyHeader:
+    ## The property's name.
     pub let name: str
+    ## Its wire dtype.
     pub let dtype: u8
+    ## How many dimensions its shape has (0: a scalar).
     pub let rank: u8
+    ## The shape's dimensions.
     pub let dims: u64[4]
+    ## Its payload's bytes.
     pub let bytes: usize
 
     ## Components: the product of the dimensions (1 for a scalar).
@@ -328,6 +346,7 @@ pub struct CrateReader:
     var pending: usize = 0
     var in_element: bool = false
 
+    ## Open the crate at `path` and read its string table.
     pub static func open(path: str) -> CrateReader!:
         let native = try strings.copy(path)
         defer strings.release(native)
@@ -352,6 +371,7 @@ pub struct CrateReader:
         reader.elements_left = (usize)(try reader.uint(4))
         return reader
 
+    ## Close the file and release the buffers.
     pub func close():
         self.file.destroy()
         free(self.buffer) in memory.heap

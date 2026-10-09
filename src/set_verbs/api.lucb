@@ -37,9 +37,11 @@ pub func set_verb_at(index: usize) -> SetVerb:
     let make = set_makers[index]
     return make()
 
+## How many set verbs the registry holds.
 pub func set_verb_count() -> usize:
     return set_makers.length
 
+## The set verb called `name`, if any.
 pub func find_set_verb(name: str) -> SetVerb?:
     for index in 0..<set_verb_count():
         let verb = set_verb_at(index)
@@ -50,6 +52,7 @@ pub func find_set_verb(name: str) -> SetVerb?:
 pub struct GeometryVerbs:
     let reserved: u8 = 0
 
+    ## The index of set verb `name`, or -1.
     pub static func index_of(name: str) -> i64:
         for index in 0..<set_verb_count():
             if set_verb_at(index).name == name: return (i64)index
@@ -76,9 +79,11 @@ pub struct SetVerbResult:
     var text: str
     var missed: usize
 
+    ## The output set.
     pub func geometry() -> interop.Reference[GeometrySet]!:
         return try adopt_set(try self.set.storage())
 
+    ## The warning for the node's info line, or "".
     pub func warning() -> str:
         return self.text
 
@@ -86,9 +91,11 @@ pub struct SetVerbResult:
     pub func misses() -> i64:
         return (i64)self.missed
 
+    ## Release the output set.
     pub func close():
         dispose_set(self.set)
 
+## SetVerbResult's interop type.
 pub let set_verb_result_type: interop.Type[SetVerbResult] = interop.Type[SetVerbResult]("SetVerbResult", SetVerbResult.close, closeable = true)
 
 ## Every verb a node can run, mesh verbs first: what the node catalog is
@@ -96,9 +103,11 @@ pub let set_verb_result_type: interop.Type[SetVerbResult] = interop.Type[SetVerb
 pub struct VerbCatalog:
     let reserved: u8 = 0
 
+    ## How many verbs there are, mesh and set verbs.
     pub static func count() -> i64:
         return (i64)(verb_count() + set_verb_count())
 
+    ## The catalog index of verb `name`, or -1.
     pub static func index_of(name: str) -> i64:
         for index in 0..<(usize)VerbCatalog.count():
             if entry(index).name == name: return (i64)index
@@ -108,12 +117,15 @@ pub struct VerbCatalog:
     pub static func is_set(index: i64) -> bool:
         return checked(index) >= verb_count()
 
+    ## Verb `index`'s node kind and recipe name.
     pub static func name(index: i64) -> str:
         return entry(checked(index)).name
 
+    ## Verb `index`'s menu category.
     pub static func category(index: i64) -> str:
         return entry(checked(index)).category
 
+    ## Verb `index`'s one-line description.
     pub static func description(index: i64) -> str:
         return entry(checked(index)).description
 
@@ -121,6 +133,7 @@ pub struct VerbCatalog:
     pub static func inputs(index: i64) -> i64:
         return (i64)entry(checked(index)).inputs
 
+    ## Whether its second input must be connected.
     pub static func second_required(index: i64) -> bool:
         return entry(checked(index)).second_required
 
@@ -128,6 +141,7 @@ pub struct VerbCatalog:
     pub static func grouped(index: i64) -> bool:
         return entry(checked(index)).grouped
 
+    ## How many parameters verb `index` has.
     pub static func parm_count(index: i64) -> i64:
         return (i64)entry(checked(index)).parms.length
 
@@ -142,6 +156,7 @@ pub struct VerbCatalog:
     pub static func trailing(index: i64) -> bool:
         return entry(checked(index)).trailing
 
+    ## Parameter `parm`'s label.
     pub static func parm_label(index: i64, parm: i64) -> str:
         return parm_of(index, parm).label
 
@@ -149,24 +164,31 @@ pub struct VerbCatalog:
     pub static func parm_kind(index: i64, parm: i64) -> i64:
         return (i64)(u8)parm_of(index, parm).kind
 
+    ## Parameter `parm`'s initial value (each component's, for a vector).
     pub static func parm_initial(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).initial
 
+    ## Parameter `parm`'s lower bound.
     pub static func parm_minimum(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).minimum
 
+    ## Parameter `parm`'s upper bound.
     pub static func parm_maximum(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).maximum
 
+    ## Parameter `parm`'s slider maximum (0: its maximum).
     pub static func parm_soft(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).soft
 
+    ## How many numbers parameter `parm` takes (3 for a vector).
     pub static func parm_components(index: i64, parm: i64) -> i64:
         return (i64)parm_of(index, parm).components
 
+    ## A menu parameter's choices, `Label|Label`.
     pub static func parm_choices(index: i64, parm: i64) -> str:
         return parm_of(index, parm).choices
 
+    ## Parameter `parm`'s tooltip.
     pub static func parm_doc(index: i64, parm: i64) -> str:
         return parm_of(index, parm).doc
 

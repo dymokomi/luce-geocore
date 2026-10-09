@@ -8,7 +8,7 @@
 let edge_slide_parms: ParmSpec[1] = [
     ParmSpec("Amount", ParmKind.number, 0.5, -1.0, 1.0, 1, "", "How far along the rails, as a fraction of each rail; the sign picks the side.")]
 
-pub func edge_slide_verb() -> Verb:
+func edge_slide_verb() -> Verb:
     return Verb("Edge Slide", "Deform", "Slide the group's edges along the faces beside them", Domain.edge, true, edge_slide_parms, false, cook_edge_slide)
 
 func cook_edge_slide(input: const VerbInput*, output: VerbOutput*) -> !:
@@ -32,7 +32,7 @@ func cook_edge_slide(input: const VerbInput*, output: VerbOutput*) -> !:
         let closed = chains.closed.items[index] != 0
         for at in 0..<chain.length:
             let point = (usize)chain[at]
-            # The chain's direction here, from its neighbours.
+            # The chain's direction here, from its neighbors.
             let before = chain[at - 1] if at > 0 else (chain[chain.length - 1] if closed else chain[at])
             let after = chain[at + 1] if at + 1 < chain.length else (chain[0] if closed else chain[at])
             let tangent = original[(usize)after].vector().subtract(original[(usize)before].vector())

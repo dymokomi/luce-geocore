@@ -52,12 +52,15 @@ from core.limits import max_points, max_corners
 let max_curve_points: usize = 33554432
 let max_curves: usize = 16777216
 
+## How a curve's points make it: a polyline, cubic Bezier segments with
+## handles, a NURBS curve, or a Catmull-Rom spline through its points.
 pub enum CurveType as u8:
     poly = 0
     bezier = 1
     nurbs = 2
     catmull_rom = 3
 
+## Where a NURBS curve's knots come from.
 pub enum KnotMode as u8:
     ## Evenly spaced knots: a B-spline that does not reach its end points.
     uniform = 0
@@ -70,8 +73,11 @@ pub enum KnotMode as u8:
 ## The primitive domain of curves.
 pub let curve_domain: Domain = Domain.face
 
+## Evaluated points per segment when a curve sets none.
 pub let default_resolution: i64 = 12
+## NURBS order when a curve sets none (cubic).
 pub let default_order: i64 = 4
+## The highest NURBS order evaluated.
 pub let most_order: usize = 8
 let most_resolution: i64 = 1024
 
@@ -79,6 +85,9 @@ let most_resolution: i64 = 1024
 ## origin at the bounds center (as meshes do).
 let origin_limit: f64 = 4096.0
 
+## Curves sharing one point column, each a run of points with its
+## settings in curve attributes (curve_type, cyclic, resolution, order,
+## knot_mode); evaluated points are cached and shared like a mesh's caches.
 pub struct Curves:
     var positions: Column[Float3]
     var origin: Vector3
@@ -91,9 +100,11 @@ pub struct Curves:
     var attributes: AttributeStore
     var cache: CurveCache*
 
+    ## How many control points there are.
     pub func point_count() -> usize:
         return self.positions.count()
 
+    ## How many curves there are.
     pub func curve_count() -> usize:
         let count = self.offsets.count()
         return count - 1 if count > 0 else 0
@@ -108,12 +119,15 @@ pub struct Curves:
     pub func point(index: usize) -> Vector3:
         return self.positions.view()[index].vector().add(self.origin)
 
+    ## Curve c's points are offsets[c]..<offsets[c + 1].
     pub func offset_span() -> const i32[]:
         return self.offsets.view()
 
+    ## Control points relative to the origin.
     pub func position_span() -> const Float3[]:
         return self.positions.view()
 
+    ## The point and curve attributes.
     pub func store() -> const AttributeStore*:
         return &self.attributes
 
@@ -126,6 +140,7 @@ pub struct Curves:
         _ = self.cache.users.add(1, .relaxed)
         return storage.data
 
+    ## Release this owner's columns, attributes and cache.
     pub func close():
         self.positions.release()
         self.offsets.release()
@@ -158,11 +173,15 @@ pub struct Curves:
 ## How one curve evaluates. Values out of range are clamped where they are
 ## read, so any integer attribute a user writes is safe.
 pub struct CurveSettings:
+    ## Poly, Bezier, NURBS or Catmull-Rom.
     pub let kind: CurveType
+    ## Whether the curve closes.
     pub let cyclic: bool
+    ## Evaluated points per segment.
     pub let resolution: usize
     ## NURBS order, at most the point count.
     pub let order: usize
+    ## Where NURBS knots come from.
     pub let knot_mode: KnotMode
 
 func read_settings(store: const AttributeStore*, curve: usize, points: usize) -> CurveSettings:
@@ -195,6 +214,7 @@ func clamp_integer(value: i64, low: i64, high: i64) -> i64:
 pub func curves_knots(curves: const Curves*) -> const f32[]:
     return curves.knots.view()
 
+## Where each curve's custom knots start (see curves_knots).
 pub func curves_knot_offsets(curves: const Curves*) -> const i32[]:
     return curves.knot_offsets.view()
 
@@ -231,9 +251,11 @@ pub func is_builtin(name: str, domain: Domain) -> bool:
 
 # mark: Heap storage
 
+## Heap storage sharing every column of `curves`.
 pub func curves_share(curves: const Curves*) -> Curves*!:
     return try curves.shared_storage()
 
+## Release heap curves storage.
 pub func curves_dispose(curves: Curves*):
     curves.close()
     free(Curves[](curves, 1)) in memory.heap

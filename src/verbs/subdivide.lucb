@@ -8,7 +8,7 @@ let subdivide_parms: ParmSpec[2] = [
     ParmSpec("Levels", ParmKind.integer, 1.0, 1.0, 4.0, 1, "", "Each level splits every face into quads."),
     ParmSpec("Method", ParmKind.menu, 1.0, 0.0, 1.0, 1, "Linear|Catmull-Clark", "Catmull-Clark smooths as it splits; Linear keeps the shape.")]
 
-pub func subdivide_verb() -> Verb:
+func subdivide_verb() -> Verb:
     return Verb("Subdivide", "Modeling", "Split faces into quads, optionally with Catmull-Clark smoothing", Domain.face, true, subdivide_parms, true, cook_subdivide)
 
 func cook_subdivide(input: const VerbInput*, output: VerbOutput*) -> !:
@@ -115,7 +115,7 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
             try builder.end_face()
 
 ## Catmull-Clark positions of the original points: interior (F + 2R + (n-3)P)/n
-## over n faces, boundary 3/4 P + 1/8 each boundary neighbour; points on
+## over n faces, boundary 3/4 P + 1/8 each boundary neighbor; points on
 ## creases or other irregular boundaries stay.
 func catmull_clark_points(topology: const Topology*, builder: TopologyBuilder*, centers: const Vector3[]) -> !:
     let point_faces = try new Vector3[topology.points] --- in memory.heap

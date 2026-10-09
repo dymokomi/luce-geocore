@@ -8,10 +8,12 @@
 ## or emits down its local -Z with +Y up. Objects are few, so a share copies
 ## them (a component is immutable once in a set).
 
+## What a scene object is.
 pub enum SceneKind as u8:
     camera = 0
     light = 1
 
+## A camera's projection.
 pub enum Projection as u8:
     perspective = 0
     orthographic = 1
@@ -28,17 +30,24 @@ pub enum LightShape as u8:
     dome = 4
 
 ## A camera as UsdGeomCamera describes it. Lens and film-back lengths are in
-## millimetres (USD's tenths of a scene unit are not used); clipping and
+## millimeters (USD's tenths of a scene unit are not used); clipping and
 ## focus are in scene units.
 pub struct Camera:
+    ## Perspective or orthographic.
     pub let projection: Projection
+    ## The lens's focal length, in millimeters.
     pub let focal_length: f64
+    ## The film back's width, in millimeters.
     pub let horizontal_aperture: f64
+    ## The film back's height, in millimeters.
     pub let vertical_aperture: f64
+    ## The near clipping distance, in scene units.
     pub let near: f64
+    ## The far clipping distance, in scene units.
     pub let far: f64
     ## 0 is a pinhole: no depth of field.
     pub let f_stop: f64
+    ## The distance in focus, in scene units.
     pub let focus_distance: f64
 
     ## The vertical field of view in radians (perspective).
@@ -49,15 +58,21 @@ pub struct Camera:
 ## 2^exposure, times the blackbody color of `temperature` when it is not 0.
 ## `normalize` divides by the emitting area so resizing keeps the power.
 pub struct Light:
+    ## Which UsdLux light it is.
     pub let shape: LightShape
+    ## Linear RGB.
     pub let color: Vector3
+    ## A multiplier on the color.
     pub let intensity: f64
+    ## Stops: the radiance doubles per unit.
     pub let exposure: f64
     ## Kelvin; 0 uses `color` alone.
     pub let temperature: f64
+    ## Whether radiance divides by the emitting area.
     pub let normalize: bool
-    ## Rect: the extent along local X and Y.
+    ## Rect: the extent along local X.
     pub let width: f64
+    ## Rect: the extent along local Y.
     pub let height: f64
     ## Disk and sphere.
     pub let radius: f64
@@ -68,11 +83,14 @@ pub struct Light:
 
 ## One object: a camera or a light, its world placement and its path.
 pub struct SceneObject:
+    ## A camera or a light.
     pub let kind: SceneKind
+    ## The object's placement in the world.
     pub let matrix: Matrix4
     ## The camera when `kind` is camera, the light when it is light; the
     ## other is unused.
     pub let camera: Camera
+    ## The light when `kind` is light.
     pub let light: Light
     var path_at: usize
     var path_length: usize
@@ -80,21 +98,27 @@ pub struct SceneObject:
     var texture_at: usize
     var texture_length: usize
 
+## Scene objects and their paths and texture files: a set's scene
+## component, and what flattening a set gathers.
 pub struct SceneObjects:
     var objects: Growing[SceneObject]
     ## Every object's path, back to back.
     var text: Growing[u8]
 
+    ## No objects.
     pub func init():
         self.objects = Growing[SceneObject]()
         self.text = Growing[u8]()
 
+    ## How many objects there are.
     pub func count() -> usize:
         return self.objects.count
 
+    ## Object `index`.
     pub func object(index: usize) -> SceneObject:
         return self.objects.items[index]
 
+    ## Object `index`'s path in the scene it came from.
     pub func path(index: usize) -> str:
         let item = &self.objects.items[index]
         return (str)self.text.items[item.path_at..<item.path_at + item.path_length]
@@ -121,13 +145,16 @@ pub struct SceneObjects:
             if let outer = placement: matrix = outer.multiply(item.matrix)
             try self.add(item, other.path(index), matrix, other.texture(index))
 
+    ## Release the objects and their text.
     pub func close():
         self.objects.close()
         self.text.close()
 
+## A camera object at the origin, to `add` with its path and matrix.
 pub func camera_object(camera: Camera) -> SceneObject:
     return SceneObject(SceneKind.camera, Matrix4(), camera, default_light(), 0, 0, 0, 0)
 
+## A light object at the origin, to `add` with its path and matrix.
 pub func light_object(light: Light) -> SceneObject:
     return SceneObject(SceneKind.light, Matrix4(), default_camera(), light, 0, 0, 0, 0)
 
@@ -139,9 +166,11 @@ pub func default_camera() -> Camera:
 pub func default_light() -> Light:
     return Light(LightShape.rect, Vector3(1.0, 1.0, 1.0), 1.0, 0.0, 0.0, true, 1.0, 1.0, 0.5, 0.53, false)
 
+## Heap storage for a scene component, empty.
 pub func new_scene_objects() -> SceneObjects*!:
     return try new SceneObjects() in memory.heap
 
+## The scene family.
 pub let scene_component: ComponentType = ComponentType("scene", share_scene, close_scene, scene_size, scene_bytes, scene_bounds, place_scene, join_scene, scene_paths, filter_scene, describe_scene, "", no_trace)
 
 func share_scene(data: const void*) -> void*!:
@@ -245,13 +274,16 @@ pub func set_has_scene(set: const GeometrySet*) -> bool:
 pub struct SceneList:
     var objects: SceneObjects
 
+    ## How many objects the list holds.
     pub func count() -> i64:
         return (i64)self.objects.count()
 
+    ## Object `index`.
     pub func object(index: i64) -> SceneObject!:
         if index < 0 or index >= self.count(): error(errors.invalid, "scene object index out of range")
         return self.objects.object((usize)index)
 
+    ## Object `index`'s path.
     pub func path(index: i64) -> str!:
         if index < 0 or index >= self.count(): error(errors.invalid, "scene object index out of range")
         return self.objects.path((usize)index)
@@ -261,6 +293,7 @@ pub struct SceneList:
         if index < 0 or index >= self.count(): error(errors.invalid, "scene object index out of range")
         return self.objects.texture((usize)index)
 
+    ## Whether object `index` is a camera.
     pub func is_camera(index: i64) -> bool!:
         return (try self.object(index)).kind == SceneKind.camera
 
@@ -279,9 +312,11 @@ pub struct SceneList:
     pub func objects_view() -> const SceneObjects*:
         return &self.objects
 
+    ## Release the list.
     pub func close():
         self.objects.close()
 
+## SceneList's interop type.
 pub let scene_list_type: interop.Type[SceneList] = interop.Type[SceneList]("SceneList", SceneList.close, no_trace_list, closeable = true)
 
 func no_trace_list(list: const SceneList*, visit: func(ownership.Object*, void*) -> unit, context: void*):

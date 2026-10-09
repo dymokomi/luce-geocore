@@ -11,7 +11,7 @@ let bridge_parms: ParmSpec[2] = [
     ParmSpec("Divisions", ParmKind.integer, 1.0, 1.0, 64.0, 1, "", "Rows of faces across each bridge (chains with as many edges)."),
     ParmSpec("Twist", ParmKind.integer, 0.0, -1000.0, 1000.0, 1, "", "Turn where a closed pair's second loop starts, by this many points.")]
 
-pub func bridge_verb() -> Verb:
+func bridge_verb() -> Verb:
     return Verb("Bridge", "Modeling", "Join pairs of boundary loops or runs among the group's edges with faces", Domain.edge, true, bridge_parms, true, cook_bridge)
 
 ## The group's boundary chains: corners (each the one face corner of a

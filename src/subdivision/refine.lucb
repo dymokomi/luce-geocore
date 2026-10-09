@@ -78,7 +78,7 @@ func edge_points(context: void*?, first: usize, end: usize):
 func mix(a: Vector3, b: Vector3, t: f64) -> Vector3:
     return a.add(b.subtract(a).multiply_scalar(t))
 
-## Loop's vertex weight for n neighbours.
+## Loop's vertex weight for n neighbors.
 pub func loop_beta(n: f64) -> f64:
     let c = 0.375 + 0.25 * math.cos(2.0 * math.pi / n)
     return (0.625 - c * c) / n
@@ -96,7 +96,7 @@ func vertex_points(context: void*?, first: usize, end: usize):
         let start = (usize)topology.point_edge_offsets[point]
         let stop = (usize)topology.point_edge_offsets[point + 1]
         let n = (f64)(stop - start)
-        var neighbours = Vector3()
+        var neighbors = Vector3()
         var faces = Vector3()
         var sharp_count: usize = 0
         var sharp_sum = 0.0
@@ -105,7 +105,7 @@ func vertex_points(context: void*?, first: usize, end: usize):
             let edge = (usize)topology.point_edges[slot]
             let a = (usize)topology.edge_points[edge * 2]
             let other = level.positions[(usize)topology.edge_points[edge * 2 + 1] if a == point else a]
-            neighbours = neighbours.add(other)
+            neighbors = neighbors.add(other)
             let sharpness = (f64)sharpness_of(level, edge)
             if sharpness > 0.0:
                 sharp_count += 1
@@ -121,11 +121,11 @@ func vertex_points(context: void*?, first: usize, end: usize):
         var smooth = here
         if level.scheme == Scheme.loop:
             let beta = loop_beta(n)
-            smooth = here.multiply_scalar(1.0 - n * beta).add(neighbours.multiply_scalar(beta))
+            smooth = here.multiply_scalar(1.0 - n * beta).add(neighbors.multiply_scalar(beta))
         else:
             # Q (face points, each face met twice) + 2R (edge midpoints) + (n - 3)v.
             let q = faces.multiply_scalar(1.0 / (2.0 * n))
-            let r = here.add(neighbours.multiply_scalar(1.0 / n)).multiply_scalar(0.5)
+            let r = here.add(neighbors.multiply_scalar(1.0 / n)).multiply_scalar(0.5)
             smooth = q.add(r.multiply_scalar(2.0)).add(here.multiply_scalar(n - 3.0)).multiply_scalar(1.0 / n)
         let corner = (f64)level.point_sharpness[point]
         var rule = smooth

@@ -20,7 +20,7 @@ let extrude_parms: ParmSpec[5] = [
     ParmSpec("Individual faces", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Extrude each face on its own instead of each connected region."),
     ParmSpec("Clamp inset", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep each inset within half of the boundary edges beside it.")]
 
-pub func extrude_verb() -> Verb:
+func extrude_verb() -> Verb:
     return Verb("PolyExtrude", "Modeling", "Extrude faces (as regions or one by one) or edges", Domain.face, true, extrude_parms, true, cook_extrude, false, Domain.edge)
 
 let inset_parms: ParmSpec[4] = [
@@ -29,7 +29,7 @@ let inset_parms: ParmSpec[4] = [
     ParmSpec("Individual faces", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Inset each face on its own instead of each connected region."),
     ParmSpec("Clamp", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep each inset within half of the boundary edges beside it.")]
 
-pub func inset_verb() -> Verb:
+func inset_verb() -> Verb:
     return Verb("Inset", "Modeling", "Inset faces by a distance, as regions or one by one", Domain.face, true, inset_parms, true, cook_inset)
 
 ## One extrusion's settings.
@@ -254,7 +254,7 @@ func wall_corner(topology: const Topology*, fronts: const Fronts*, builder: Topo
     let point = (i32)(first_front + side.front) if row == rows else (i32)(first_row + (row - 1) * fronts.points.count + side.front)
     try front_corner(topology, builder, point, side.corner, side.shift.multiply_scalar(t), mesh)
 
-## A front corner: the face's own corner, blended with its neighbours by how
+## A front corner: the face's own corner, blended with its neighbors by how
 ## far the inset moved the point along the face's two edges (exact for
 ## values linear across a flat face, like projected UVs).
 func front_corner(topology: const Topology*, builder: TopologyBuilder*, point: i32, corner: usize, shift: Vector3, mesh: const Mesh*) -> !:

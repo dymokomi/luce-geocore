@@ -1,6 +1,9 @@
+## The renderer's view of geometry: per-vertex records (`Vertex`) and the
+## `Geometry` interface luce-3d draws through, plus axis-aligned `Bounds`.
 import interop
 from math.vector import Vector3
 
+## One drawn vertex: position, normal, uv and color.
 pub struct Vertex:
     pub let position: Vector3
     pub let normal: Vector3
@@ -9,6 +12,7 @@ pub struct Vertex:
     ## Optional linear RGB multiplier; white preserves existing materials.
     pub let color: Vector3 = Vector3(1.0, 1.0, 1.0)
 
+## An axis-aligned box.
 pub struct Bounds:
     pub let minimum: Vector3
     pub let maximum: Vector3

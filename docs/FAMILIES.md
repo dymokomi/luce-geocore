@@ -33,7 +33,7 @@ its default:
 
 Custom knots are one f32 column for every curve, split by `knot_offsets`.
 
-Missing Bezier handles are automatic: one sixth of the neighbours'
+Missing Bezier handles are automatic: one sixth of the neighbors'
 difference, with open ends mirrored. A Bezier curve without handles
 therefore draws the same curve as a Catmull-Rom curve through the same
 points.
@@ -205,7 +205,7 @@ program primitive by primitive for luced-3d's Edit SDF.
     (Bærentzen and Aanæs). It is exact for closed, consistently oriented
     meshes, concave edges and saddle vertices included; an L-shaped prism in
     `tests/field_checks.lucb` checks every band voxel.
-  - Voxels beyond the band take a neighbour's side. A region no band voxel
+  - Voxels beyond the band take a neighbor's side. A region no band voxel
     reaches asks the BVH once.
   - A mesh with more triangles than band voxels (a dense, finely tessellated
     one) is answered by a BVH query per voxel instead. Leaves and 4×4×4
@@ -215,7 +215,7 @@ program primitive by primitive for luced-3d's Edit SDF.
 - **Points to level set** (`points_level_set`): a union of spheres. Each
   point writes only the voxels within its reach.
 - **Surface nets** (`surface_mesh`):
-  - Three parallel passes over leaves, each reading a 9×9×9 neighbourhood
+  - Three parallel passes over leaves, each reading a 9×9×9 neighborhood
     block: crossing cells, then quads, then filling.
   - Cells touching a level set's missing leaves make no surface. Those
     leaves have no known side, and the band keeps every cell the real
@@ -225,7 +225,7 @@ program primitive by primitive for luced-3d's Edit SDF.
 - **Slices** (`slice_mesh`): a plane of quads across a field. Each point
   carries `value` and a color `Cd`:
   - distances: blue inside, orange outside, with contour bands;
-  - densities: grey.
+  - densities: gray.
 
 ### Previews and files
 

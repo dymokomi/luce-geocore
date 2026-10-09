@@ -12,7 +12,7 @@ let spin_parms: ParmSpec[4] = [
     ParmSpec("Angle", ParmKind.number, 360.0, -360.0, 360.0, 1, "", "How far the profile turns, in degrees; 360 closes it."),
     ParmSpec("Steps", ParmKind.integer, 12.0, 1.0, 512.0, 1, "", "Copies of the profile along the turn.")]
 
-pub func spin_verb() -> Verb:
+func spin_verb() -> Verb:
     return Verb("Spin", "Modeling", "Sweep the group's edges around an axis into a surface of revolution", Domain.edge, true, spin_parms, true, cook_spin)
 
 func cook_spin(input: const VerbInput*, output: VerbOutput*) -> !:

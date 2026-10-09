@@ -131,7 +131,7 @@ pub func points_level_set(points: const Vector3[], radius: f64, voxel: f64, band
     if points.length == 0: error(errors.invalid, "there are no points")
     let reach = radius + band * voxel
     let size = voxel * 8.0
-    # Points bucketed by leaf, so a leaf finds its neighbours.
+    # Points bucketed by leaf, so a leaf finds its neighbors.
     var buckets = Growing[u64]()
     defer buckets.close()
     for at in 0..<points.length:
@@ -153,7 +153,7 @@ pub func points_level_set(points: const Vector3[], radius: f64, voxel: f64, band
                 for dx in -span..=span:
                     try keys.push(leaf_key(x + dx, y + dy, z + dz))
         if keys.count > 200000000: error(errors.limit, "the voxels are too small for these spheres")
-    # Each point once per leaf key it sits in, sorted, for neighbour search.
+    # Each point once per leaf key it sits in, sorted, for neighbor search.
     var order = Growing[u64]()
     defer order.close()
     for at in 0..<points.length: try order.push((u64)at)
@@ -209,9 +209,9 @@ func fill_point_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mask
     for dz in -work.span..=work.span:
         for dy in -work.span..=work.span:
             for dx in -work.span..=work.span:
-                let neighbour = leaf_key(lx + dx, ly + dy, lz + dz)
-                var at = first_of(work, neighbour)
-                while at < work.order.length and work.keys[(usize)work.order[at]] == neighbour:
+                let neighbor = leaf_key(lx + dx, ly + dy, lz + dz)
+                var at = first_of(work, neighbor)
+                while at < work.order.length and work.keys[(usize)work.order[at]] == neighbor:
                     let sphere = work.points[(usize)work.order[at]]
                     at += 1
                     # Only the leaf's voxels within reach of this sphere.

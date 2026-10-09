@@ -226,8 +226,8 @@ pub func convert_curve_bits(curves: const Curves*, bits: Bits, source: Domain, d
         result.set_range(first, first + size)
     return result
 
-## One step of grow (members' neighbours along the curve join) or shrink
-## (members with a non-member or missing neighbour leave).
+## One step of grow (members' neighbors along the curve join) or shrink
+## (members with a non-member or missing neighbor leave).
 func step_along(curves: const Curves*, bits: BitsBuilder*, grow: bool) -> !:
     var before = try BitsBuilder.copy_of(bits.view())
     defer before.close()
@@ -243,7 +243,7 @@ func step_along(curves: const Curves*, bits: BitsBuilder*, grow: bool) -> !:
             if grow and not here and (left or right): bits.set(first + at)
             if not grow and here and not (left and right): bits.clear(first + at)
 
-## Members with a non-member or missing neighbour: the ends of each run.
+## Members with a non-member or missing neighbor: the ends of each run.
 func border_points(curves: const Curves*, bits: BitsBuilder*) -> !:
     var inner = try BitsBuilder.copy_of(bits.view())
     defer inner.close()

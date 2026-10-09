@@ -10,12 +10,15 @@ from core.shared import Column
 ## Words above this count split across the pool.
 let parallel_words: usize = 16384
 
+## Words that hold `count` bits.
 pub func word_count(count: usize) -> usize:
     return (count + 63) // 64
 
 ## A read-only view of a bit set; valid while its column is.
 pub struct Bits:
+    ## The bits, 64 to a word.
     pub let words: const u64[]
+    ## How many bits there are.
     pub let count: usize
 
     ## A view of a column of `count` bits (a boolean attribute's bytes or a
@@ -23,6 +26,7 @@ pub struct Bits:
     pub static func of_bytes(bytes: const u8[], count: usize) -> Bits:
         return Bits(u64[]((u64*)bytes.data, word_count(count)), count)
 
+    ## Whether bit `at` is set.
     pub func get(at: usize) -> bool:
         return (self.words[at >> 6] >> (u64)(at & 63)) & 1 != 0
 
@@ -32,6 +36,7 @@ pub struct Bits:
         for word in self.words: total += (usize)popcount(word)
         return total
 
+    ## Whether any bit is set.
     pub func any() -> bool:
         for word in self.words:
             if word != 0: return true
@@ -50,15 +55,19 @@ pub struct Bits:
 
 ## Bits being built: a private column until `finish` publishes it.
 pub struct BitsBuilder:
+    ## The words, private until `finish`.
     pub var column: Column[u64]
+    ## How many bits there are.
     pub var count: usize
 
+    ## `count` bits, none set.
     pub static func zeros(count: usize) -> BitsBuilder!:
         var column = try Column[u64].allocate(word_count(count))
         let words = column.span()
         if words.length > 0: memory.set(u8[]((u8*)words.data, words.length * 8), 0)
         return BitsBuilder(column, count)
 
+    ## `count` bits, all set.
     pub static func ones(count: usize) -> BitsBuilder!:
         var built = try BitsBuilder.zeros(count)
         built.set_range(0, count)
@@ -69,16 +78,20 @@ pub struct BitsBuilder:
         var column = try Column[u64].copy_of(bits.words)
         return BitsBuilder(column, bits.count)
 
+    ## The words, writable.
     pub func words() -> u64[]:
         return self.column.span()
 
+    ## A read-only view of the bits so far.
     pub func view() -> Bits:
         return Bits(self.column.view(), self.count)
 
+    ## Set bit `at`.
     pub func set(at: usize):
         let words = self.column.span()
         words[at >> 6] = words[at >> 6] | ((u64)1 << (u64)(at & 63))
 
+    ## Clear bit `at`.
     pub func clear(at: usize):
         let words = self.column.span()
         words[at >> 6] = words[at >> 6] & ~((u64)1 << (u64)(at & 63))
@@ -111,12 +124,15 @@ pub struct BitsBuilder:
             if end - at <= step: return
             at += step
 
+    ## This = this ∪ other.
     pub func unite(other: Bits):
         self.combine(other, 0)
 
+    ## This = this minus other.
     pub func subtract(other: Bits):
         self.combine(other, 1)
 
+    ## This = this ∩ other.
     pub func intersect(other: Bits):
         self.combine(other, 2)
 
@@ -124,6 +140,7 @@ pub struct BitsBuilder:
     pub func unite_complement(other: Bits):
         self.combine(other, 3)
 
+    ## Flip every bit below `count`.
     pub func invert():
         var nothing: u64[1]
         self.combine(Bits(nothing[..<0], self.count), 4)
@@ -139,6 +156,7 @@ pub struct BitsBuilder:
         self.column = empty
         return column
 
+    ## Release the column (unless finished).
     pub func close():
         self.column.release()
 

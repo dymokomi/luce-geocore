@@ -26,7 +26,7 @@ let bevel_parms: ParmSpec[4] = [
     ParmSpec("Profile", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "Shape across the strip: 0.5 round, toward 1 the original corner, 0 flat."),
     ParmSpec("Clamp overlap", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep each offset within half of the edges it slides along, so strips cannot cross.")]
 
-pub func bevel_verb() -> Verb:
+func bevel_verb() -> Verb:
     return Verb("PolyBevel", "Modeling", "Bevel the group's edges into strips of faces", Domain.edge, true, bevel_parms, true, cook_bevel)
 
 ## A new corner of a face: its point, and (for a slide) the face's corner at

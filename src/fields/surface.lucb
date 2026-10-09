@@ -2,7 +2,7 @@
 ## (eight voxels) the surface crosses, at the mean of its edge crossings, and
 ## one quad around every voxel edge it crosses, joining the four cells that
 ## share the edge. Three parallel passes over leaves: crossing cells (a
-## 512-bit mask per leaf), then quads (which read neighbour leaves' masks,
+## 512-bit mask per leaf), then quads (which read neighbor leaves' masks,
 ## complete by then), then filling both. A cell's vertex number is its
 ## leaf's first plus its rank among the leaf's crossing cells. An analytic
 ## SDF can pull the vertices onto its exact surface afterwards.
@@ -82,26 +82,26 @@ func fill_leaves_mesh(context: void*?, first: usize, end: usize):
 ## -1 where none), the 9×9×9 voxels from its origin (made negative inside,
 ## and whether each is stored), and in the fill pass the crossing-cell rank
 ## before each mask word of the 8 leaves at or below it.
-struct Neighbourhood:
+struct Neighborhood:
     var leaves: i64[27]
     var values: f64[729]
     var stored: bool[729]
     var ranks: usize[64]
 
-func neighbour_slot(dx: i64, dy: i64, dz: i64) -> usize:
+func neighbor_slot(dx: i64, dy: i64, dz: i64) -> usize:
     return (usize)((dx + 1) + (dy + 1) * 3 + (dz + 1) * 9)
 
-func gather(work: const NetsWork*, lx: i64, ly: i64, lz: i64, near: Neighbourhood*):
+func gather(work: const NetsWork*, lx: i64, ly: i64, lz: i64, near: Neighborhood*):
     for dz in -1..=(i64)1:
         for dy in -1..=(i64)1:
             for dx in -1..=(i64)1:
-                near.leaves[neighbour_slot(dx, dy, dz)] = work.grid.find(leaf_key(lx + dx, ly + dy, lz + dz))
+                near.leaves[neighbor_slot(dx, dy, dz)] = work.grid.find(leaf_key(lx + dx, ly + dy, lz + dz))
     let values = work.grid.values.view()
     let fog = work.grid.class == GridClass.fog
     for z in 0..<(usize)9:
         for y in 0..<(usize)9:
             for x in 0..<(usize)9:
-                let leaf = near.leaves[neighbour_slot((i64)(x >> 3), (i64)(y >> 3), (i64)(z >> 3))]
+                let leaf = near.leaves[neighbor_slot((i64)(x >> 3), (i64)(y >> 3), (i64)(z >> 3))]
                 let at = x + y * 9 + z * 81
                 var value = (f64)work.grid.background
                 if leaf >= 0: value = (f64)values[(usize)leaf * leaf_voxels + (x & 7) + (y & 7) * 8 + (z & 7) * 64]
@@ -110,7 +110,7 @@ func gather(work: const NetsWork*, lx: i64, ly: i64, lz: i64, near: Neighbourhoo
     if work.pass != 2: return
     # Ranks of crossing cells in the leaves cells around an edge can be in.
     for corner in 0..<(usize)8:
-        let leaf = near.leaves[neighbour_slot(-(i64)(corner & 1), -(i64)((corner >> 1) & 1), -(i64)(corner >> 2))]
+        let leaf = near.leaves[neighbor_slot(-(i64)(corner & 1), -(i64)((corner >> 1) & 1), -(i64)(corner >> 2))]
         var total: usize = 0
         for word in 0..<mask_words:
             near.ranks[corner * 8 + word] = total
@@ -119,7 +119,7 @@ func gather(work: const NetsWork*, lx: i64, ly: i64, lz: i64, near: Neighbourhoo
 func net_leaf(work: NetsWork*, leaf: usize):
     let key = work.grid.keys.view()[leaf]
     let (lx, ly, lz) = key_leaf(key)
-    var near = Neighbourhood()
+    var near = Neighborhood()
     gather(work, lx, ly, lz, &near)
     let words = work.masks[leaf * mask_words..<(leaf + 1) * mask_words]
     var vertex = work.vertex_counts[leaf]
@@ -202,7 +202,7 @@ func cell_edge(edge: usize) -> (usize, usize):
 ## The vertex numbers of the four cells around the edge along `axis` of
 ## voxel (x, y, z) of the leaf (local, 0..7), counterclockwise seen from
 ## that axis; false when one of those cells is not a crossing cell.
-func quad_cells(work: const NetsWork*, near: const Neighbourhood*, x: i64, y: i64, z: i64, axis: usize, out: i64[4]*) -> bool:
+func quad_cells(work: const NetsWork*, near: const Neighborhood*, x: i64, y: i64, z: i64, axis: usize, out: i64[4]*) -> bool:
     var offsets: i64[12] = ---
     if axis == 0:
         offsets = [0, 0, 0, 0, -1, 0, 0, -1, -1, 0, 0, -1]
@@ -218,7 +218,7 @@ func quad_cells(work: const NetsWork*, near: const Neighbourhood*, x: i64, y: i6
         let dx = -1 if cx < 0 else 0
         let dy = -1 if cy < 0 else 0
         let dz = -1 if cz < 0 else 0
-        let leaf = near.leaves[neighbour_slot(dx, dy, dz)]
+        let leaf = near.leaves[neighbor_slot(dx, dy, dz)]
         if leaf < 0: return false
         let cell = (usize)(cx & 7) + (usize)(cy & 7) * 8 + (usize)(cz & 7) * 64
         let words = work.masks[(usize)leaf * mask_words..<((usize)leaf + 1) * mask_words]

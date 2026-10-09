@@ -1,4 +1,4 @@
-## Frames of evaluated curves: tangents from the neighbours' directions,
+## Frames of evaluated curves: tangents from the neighbors' directions,
 ## minimum-twist normals (Blender's poly tangents and normals) and arc
 ## lengths, built in parallel over curves.
 
@@ -48,7 +48,7 @@ func frame_curves(context: void*?, first: usize, end: usize):
         if cyclic and points.length > 1: length += points[0].vector().subtract(points[points.length - 1].vector()).length()
         work.totals[curve] = (f32)length
 
-## Tangents from the normalized sum of the directions to the neighbours
+## Tangents from the normalized sum of the directions to the neighbors
 ## (Blender's poly tangents, including its sharp-corner cross product).
 func curve_tangents(points: const Float3[], cyclic: bool, out: Float3[]):
     let count = points.length

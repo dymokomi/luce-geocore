@@ -172,7 +172,7 @@ pub func trimmed(curves: const Curves*, selected: Bits, mode: i64, start: f64, e
 
 ## Selected curves' corners rounded with arcs of `radius` in `segments`
 ## segments, as poly curves; with `limit`, a radius too large for its
-## neighbouring edges shrinks to fit half of the shorter.
+## neighboring edges shrinks to fit half of the shorter.
 pub func filleted(curves: const Curves*, selected: Bits, radius: f64, segments: i64, limit: bool) -> Curves*!:
     if not (radius >= 0.0 and math.is_finite(radius)) or segments < 1 or segments > 1024: error(errors.invalid, "fillet needs a radius of 0 or more and 1..1024 segments")
     var builder = CurvesBuilder()

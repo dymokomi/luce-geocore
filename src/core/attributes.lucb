@@ -25,6 +25,7 @@ pub enum Domain as u8:
     detail = 3
     edge = 4
 
+## How many domains there are.
 pub let domain_count: usize = 5
 
 ## Scalar component types. Booleans are packed bits, 64 per u64 word.
@@ -64,10 +65,12 @@ pub func role_of(name: str) -> Role:
     if name == "id" or name == "class": return Role.index
     return Role.generic
 
+## An element per tuple (array), or one tuple for the whole domain (single).
 pub enum Storage as u8:
     array = 0
     single = 1
 
+## Bytes of one scalar of `kind`; 0 for packed booleans.
 pub func scalar_bytes(kind: DataType) -> usize:
     match kind:
         .int8: return 1
@@ -75,6 +78,7 @@ pub func scalar_bytes(kind: DataType) -> usize:
         .int64, .float64: return 8
         _: return 0
 
+## Whether `kind` holds whole numbers (booleans included).
 pub func is_integer(kind: DataType) -> bool:
     return kind == DataType.boolean or kind == DataType.int8 or kind == DataType.int32 or kind == DataType.int64
 
@@ -83,18 +87,26 @@ pub func check_name(name: str) -> !:
     if name.length == 0 or name.length > 64 or name == "P":
         error(errors.invalid, "attribute needs a nonreserved name of 1..64 bytes")
 
+## One named attribute on a domain: tuples of 1..4 scalars in a shared
+## column (bits for booleans), or one tuple with single storage.
 pub struct Attribute:
     var label: u8[64]
     var label_length: usize
+    ## The domain its elements belong to.
     pub var domain: Domain
+    ## The scalar type.
     pub var kind: DataType
+    ## Scalars per tuple, 1..4.
     pub var width: usize
+    ## A tuple per element, or one for all.
     pub var storage: Storage
     ## Elements covered: the domain's size (1 for single storage).
     pub var elements: usize
+    ## The tuples, packed.
     pub var data: Column[u8]
     ## `group_flag` marks a group (a boolean attribute).
     pub var flags: u8 = 0
+    ## How operations transform its values.
     pub var role: Role = Role.generic
     ## The string table of a text attribute; empty otherwise.
     pub var table: Column[u8]
@@ -173,9 +185,11 @@ pub struct Attribute:
             _: memory.copy(f64[]((f64*)stored.data, count), values[..<count], count)
         return attribute
 
+    ## The attribute's name.
     pub func name() -> str:
         return (str)self.label[..<self.label_length]
 
+    ## Whether it is a group (a flagged boolean attribute).
     pub func is_group() -> bool:
         return self.flags & group_flag != 0
 
@@ -185,6 +199,7 @@ pub struct Attribute:
         let index = memory.read[i32]((void*)&self.data.view()[(0 if self.storage == Storage.single else element) * 4])
         return table_text(self.table.view(), (usize)index) if index >= 0 else ""
 
+    ## Whether its scalars are whole numbers.
     pub func integer() -> bool:
         return is_integer(self.kind)
 
@@ -220,6 +235,7 @@ pub struct Attribute:
         copy.label_length = name.length
         return copy
 
+    ## Release this owner's share of the columns.
     pub func release():
         self.data.release()
         self.table.release()
@@ -232,20 +248,25 @@ func typed_mut_i32(bytes: u8[]) -> i32[]:
 ## are found once per change, not per element.
 pub struct AttributeStore:
     var entries: Growing[Attribute]
-    ## Index of Cd, uv and N per domain, or -1.
+    ## Index of Cd per domain, or -1.
     pub var colors: i64[5]
+    ## Index of uv per domain, or -1.
     pub var uvs: i64[5]
+    ## Index of N per domain, or -1.
     pub var normals: i64[5]
 
+    ## An empty store.
     pub func init():
         self.entries = Growing[Attribute]()
         self.colors = [-1, -1, -1, -1, -1]
         self.uvs = [-1, -1, -1, -1, -1]
         self.normals = [-1, -1, -1, -1, -1]
 
+    ## How many attributes there are.
     pub func count() -> usize:
         return self.entries.count
 
+    ## Attribute `index`, valid until the store changes.
     pub func entry(index: usize) -> const Attribute*:
         return &self.entries.items[index]
 
@@ -282,6 +303,7 @@ pub struct AttributeStore:
         let tuple = self.entries.items[index].tuple_bytes()
         self.entries.items[index].data.set_changed(first * tuple, end * tuple)
 
+    ## Remove attribute `index`, releasing its share.
     pub func remove(index: usize):
         self.entries.items[index].release()
         for at in index + 1..<self.entries.count:
@@ -318,6 +340,7 @@ pub struct AttributeStore:
         for entry in self.entries.view(): total += entry.data.bytes() + entry.table.bytes()
         return total
 
+    ## Release every attribute.
     pub func close():
         for index in 0..<self.entries.count: self.entries.items[index].release()
         self.entries.close()

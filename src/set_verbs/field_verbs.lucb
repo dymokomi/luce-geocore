@@ -40,7 +40,7 @@ let sphere_parms: ParmSpec[2] = [
     ParmSpec("Radius", ParmKind.number, 1.0, 0.000001, 100000.0, 1, "", "Distance from the center to the surface.", 10.0),
     ParmSpec("Center", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", center_doc)]
 
-pub func sdf_sphere_verb() -> SetVerb:
+func sdf_sphere_verb() -> SetVerb:
     return SetVerb("SDF Sphere", "Volumes", "A sphere as a signed distance field", 0, false, false, sphere_parms, cook_sphere)
 
 func cook_sphere(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -52,7 +52,7 @@ let box_parms: ParmSpec[3] = [
     ParmSpec("Rounding", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "Radius of the rounded edges.", 1.0),
     ParmSpec("Center", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", center_doc)]
 
-pub func sdf_box_verb() -> SetVerb:
+func sdf_box_verb() -> SetVerb:
     return SetVerb("SDF Box", "Volumes", "A box with rounded edges as a signed distance field", 0, false, false, box_parms, cook_box)
 
 func cook_box(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -65,7 +65,7 @@ let torus_parms: ParmSpec[3] = [
     ParmSpec("Minor radius", ParmKind.number, 0.25, 0.000001, 100000.0, 1, "", "Radius of the tube.", 2.0),
     ParmSpec("Center", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", center_doc)]
 
-pub func sdf_torus_verb() -> SetVerb:
+func sdf_torus_verb() -> SetVerb:
     return SetVerb("SDF Torus", "Volumes", "A torus around Y as a signed distance field", 0, false, false, torus_parms, cook_torus)
 
 func cook_torus(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -77,7 +77,7 @@ let capsule_parms: ParmSpec[3] = [
     ParmSpec("Height", ParmKind.number, 1.0, 0.0, 100000.0, 1, "", "Length of the straight part along Y.", 10.0),
     ParmSpec("Center", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", center_doc)]
 
-pub func sdf_capsule_verb() -> SetVerb:
+func sdf_capsule_verb() -> SetVerb:
     return SetVerb("SDF Capsule", "Volumes", "A capsule along Y as a signed distance field", 0, false, false, capsule_parms, cook_capsule)
 
 func cook_capsule(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -89,7 +89,7 @@ let cylinder_parms: ParmSpec[3] = [
     ParmSpec("Height", ParmKind.number, 1.0, 0.000001, 100000.0, 1, "", "Length along Y.", 10.0),
     ParmSpec("Center", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", center_doc)]
 
-pub func sdf_cylinder_verb() -> SetVerb:
+func sdf_cylinder_verb() -> SetVerb:
     return SetVerb("SDF Cylinder", "Volumes", "A capped cylinder along Y as a signed distance field", 0, false, false, cylinder_parms, cook_cylinder)
 
 func cook_cylinder(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -102,7 +102,7 @@ let boolean_parms: ParmSpec[2] = [
     ParmSpec("Operation", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Union|Subtract|Intersect", "Both shapes, the first without the second, or where they overlap."),
     ParmSpec("Smoothness", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "Blend width of the seam; 0 is a sharp edge.", 1.0)]
 
-pub func sdf_boolean_verb() -> SetVerb:
+func sdf_boolean_verb() -> SetVerb:
     return SetVerb("SDF Boolean", "Volumes", "Combine two SDFs: union, subtract or intersect, sharp or smooth", 2, true, false, boolean_parms, cook_boolean)
 
 func cook_boolean(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -126,7 +126,7 @@ let modify_parms: ParmSpec[2] = [
     ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Round|Shell", "Grow the surface outward (negative: inward), or keep only a shell around it."),
     ParmSpec("Amount", ParmKind.number, 0.05, -100000.0, 100000.0, 1, "", "How far the surface moves, or half the shell's thickness.", 1.0)]
 
-pub func sdf_modify_verb() -> SetVerb:
+func sdf_modify_verb() -> SetVerb:
     return SetVerb("SDF Modify", "Volumes", "Round an SDF's surface outward or hollow it into a shell", 1, false, false, modify_parms, cook_modify)
 
 func cook_modify(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -143,7 +143,7 @@ let sample_parms: ParmSpec[3] = [
     ParmSpec("Band", ParmKind.number, 3.0, 1.0, 64.0, 1, "", band_doc, 8.0),
     ParmSpec("Keep input", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep what the volume was made from beside it.")]
 
-pub func sdf_to_volume_verb() -> SetVerb:
+func sdf_to_volume_verb() -> SetVerb:
     return SetVerb("SDF to Volume", "Volumes", "Sample an SDF into a narrow-band level set volume", 1, false, false, sample_parms, cook_sdf_to_volume)
 
 func cook_sdf_to_volume(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -153,7 +153,7 @@ func cook_sdf_to_volume(input: const SetVerbInput*, output: SetVerbOutput*) -> !
     let p = input.parms
     try with_grid(input, try sampled_sdf(sdf, p.at(0), p.at(1), "surface"), output, sdf_type() if p.at(2) == 0.0 else none)
 
-pub func mesh_to_sdf_verb() -> SetVerb:
+func mesh_to_sdf_verb() -> SetVerb:
     return SetVerb("Mesh to SDF", "Volumes", "The signed distance of a closed mesh as a level set volume", 1, false, false, sample_parms, cook_mesh_to_sdf)
 
 func cook_mesh_to_sdf(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -169,7 +169,7 @@ let points_parms: ParmSpec[4] = [
     ParmSpec("Band", ParmKind.number, 3.0, 1.0, 64.0, 1, "", band_doc, 8.0),
     ParmSpec("Keep input", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep the points beside the volume.")]
 
-pub func volume_from_points_verb() -> SetVerb:
+func volume_from_points_verb() -> SetVerb:
     return SetVerb("Volume from Points", "Volumes", "A level set of spheres around the input's points (mesh, cloud and curve points)", 1, false, false, points_parms, cook_volume_from_points)
 
 func cook_volume_from_points(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -210,7 +210,7 @@ let convert_parms: ParmSpec[4] = [
     ParmSpec("Exact", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Move an SDF's surface points onto its exact surface."),
     ParmSpec("Keep input", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep the SDF and volume beside the mesh.")]
 
-pub func convert_to_mesh_verb() -> SetVerb:
+func convert_to_mesh_verb() -> SetVerb:
     return SetVerb("Convert to Mesh", "Volumes", "The surface of the input's SDF and volume grids as a mesh (surface nets)", 1, false, false, convert_parms, cook_convert)
 
 func cook_convert(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -253,7 +253,7 @@ let slice_parms: ParmSpec[4] = [
     ParmSpec("Resolution", ParmKind.integer, 128.0, 1.0, 4096.0, 1, "", "Quads along the plane's longer side.", 512.0),
     ParmSpec("Keep input", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep the field beside its slice.")]
 
-pub func volume_slice_verb() -> SetVerb:
+func volume_slice_verb() -> SetVerb:
     return SetVerb("Volume Slice", "Volumes", "A colored plane through an SDF or volume: blue inside, orange outside, contour bands", 1, false, false, slice_parms, cook_slice)
 
 func cook_slice(input: const SetVerbInput*, output: SetVerbOutput*) -> !:

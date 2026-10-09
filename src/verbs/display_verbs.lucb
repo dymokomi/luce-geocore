@@ -9,14 +9,14 @@ let subdivision_parms: ParmSpec[4] = [
     ParmSpec("Render level", ParmKind.integer, 3.0, 0.0, 6.0, 1, "", "Refinement levels for renders and exports."),
     ParmSpec("Boundary", ParmKind.menu, 1.0, 0.0, 1.0, 1, "Sharp edges|Sharp edges and corners", "Open boundaries stay sharp; with corners, a boundary point on one face stays put too.")]
 
-pub func subdivision_verb() -> Verb:
+func subdivision_verb() -> Verb:
     return Verb("Subdivision", "Subdivide", "Display the mesh as a subdivision surface; downstream nodes read the cage", Domain.face, true, subdivision_parms, false, cook_subdivision)
 
 let crease_parms: ParmSpec[2] = [
     ParmSpec("Sharpness", ParmKind.number, 10.0, 0.0, 10.0, 1, "", "USD crease sharpness: 0 smooth, 10 infinitely sharp; s stays sharp for s levels.", 5.0),
     ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Set|Clear", "Give the group's edges this sharpness, or make them smooth.")]
 
-pub func crease_verb() -> Verb:
+func crease_verb() -> Verb:
     return Verb("Crease", "Subdivide", "Set the crease sharpness of the group's edges for subdivision", Domain.edge, true, crease_parms, false, cook_crease)
 
 func cook_subdivision(input: const VerbInput*, output: VerbOutput*) -> !:

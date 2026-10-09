@@ -19,19 +19,20 @@ files](docs/FAMILIES.md), [mesh modeling](docs/MESH_MODELING.md) and
 ```prisma
 def dependency "luce-geocore" {
     str owner = "dymokomi"
-    str version = "^0.1.0"
+    str version = "^0.7.1"
 }
 ```
 
-Import `geocore` (`from geocore import Mesh, MeshBuilder, Vector3`). Base
-code in other packages also has `geocore_kernel` (bit sets, groups and
-selections, mesh assembly, the geometry set's component protocol, the codec
-registry, curves), `geocore_parallel` (the shared worker pool),
-`geocore_shared` (shared columns) and `geocore_growing` (`Growing`, a heap
-array that keeps its capacity). A mesh's arrays as spans (`point_span()`,
-`corner_span()`, …) and their packing into GPU layouts (`pack_positions`, …)
-are methods of `Mesh` that only Base sees: Luce leaves out the methods whose
-signatures it cannot take.
+Import `geocore` (`from luce_geocore.geocore import Mesh, MeshBuilder,
+Vector3`). Base code in other packages also has `luce_geocore.kernel` (bit
+sets and groups, mesh assembly and its size limits, the geometry set's
+component protocol, the codec registry, curves and fields),
+`luce_geocore.core.parallel` (the shared worker pool),
+`luce_geocore.core.shared` (shared columns) and `luce_geocore.core.growing`
+(`Growing`, a heap array that keeps its capacity). A mesh's arrays as spans
+(`point_span()`, `corner_span()`, …) and their packing into GPU layouts
+(`pack_positions`, …) are methods of `Mesh` that only Base sees: Luce leaves
+out the methods whose signatures it cannot take.
 
 Check out the compilers and packages beside this repository, at main (`python3
 ../luce-base/tools/checkout_main.py . ../luce`), and run `luc test`: the module tests and the Base mesh checks

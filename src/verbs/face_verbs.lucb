@@ -5,24 +5,24 @@
 
 let delete_parms: ParmSpec[1] = [ParmSpec("Keep group", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "On: keep only the group. Off: delete it.")]
 
-pub func delete_verb() -> Verb:
+func delete_verb() -> Verb:
     return Verb("Delete", "Modeling", "Remove the group's faces (points delete every face using them) and the points left unused", Domain.face, true, delete_parms, true, cook_delete, true)
 
 ## Verbs without parameters take an empty slice of this.
 let placeholder_parms: ParmSpec[1] = [ParmSpec("", ParmKind.number, 0.0, 0.0, 0.0)]
 
-pub func reverse_verb() -> Verb:
+func reverse_verb() -> Verb:
     return Verb("Reverse", "Modeling", "Flip the winding of the group's faces", Domain.face, true, placeholder_parms[..<0], true, cook_reverse)
 
-pub func triangulate_verb() -> Verb:
+func triangulate_verb() -> Verb:
     return Verb("Triangulate", "Modeling", "Split the group's faces into their triangles", Domain.face, true, placeholder_parms[..<0], true, cook_triangulate)
 
 let duplicate_parms: ParmSpec[1] = [ParmSpec("Offset", ParmKind.number, 0.2, -100000.0, 100000.0, 1, "", "Distance of the copies along their face normals.", 2.0)]
 
-pub func duplicate_verb() -> Verb:
+func duplicate_verb() -> Verb:
     return Verb("Duplicate", "Modeling", "Copy the group's faces, offset along their normals", Domain.face, true, duplicate_parms, true, cook_duplicate)
 
-pub func split_verb() -> Verb:
+func split_verb() -> Verb:
     return Verb("Split", "Modeling", "Detach the group's faces: they get their own points", Domain.face, true, placeholder_parms[..<0], true, cook_split)
 
 func cook_delete(input: const VerbInput*, output: VerbOutput*) -> !:

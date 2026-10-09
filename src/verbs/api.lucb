@@ -42,9 +42,11 @@ pub func verb_at(index: usize) -> Verb:
     let make = makers[index]
     return make()
 
+## How many mesh verbs the registry holds.
 pub func verb_count() -> usize:
     return makers.length
 
+## The mesh verb called `name`, if any.
 pub func find_verb(name: str) -> Verb?:
     for index in 0..<verb_count():
         let verb = verb_at(index)
@@ -56,20 +58,25 @@ pub func find_verb(name: str) -> Verb?:
 pub struct Verbs:
     let reserved: u8 = 0
 
+    ## How many mesh verbs there are.
     pub static func count() -> i64:
         return (i64)verb_count()
 
+    ## The index of verb `name`, or -1.
     pub static func index_of(name: str) -> i64:
         for index in 0..<verb_count():
             if verb_at(index).name == name: return (i64)index
         return -1
 
+    ## Verb `index`'s node kind and recipe name.
     pub static func name(index: i64) -> str:
         return verb_at(checked(index)).name
 
+    ## Verb `index`'s menu category.
     pub static func category(index: i64) -> str:
         return verb_at(checked(index)).category
 
+    ## Verb `index`'s one-line description.
     pub static func description(index: i64) -> str:
         return verb_at(checked(index)).description
 
@@ -77,12 +84,16 @@ pub struct Verbs:
     pub static func domain(index: i64) -> i64:
         return (i64)(u8)verb_at(checked(index)).domain
 
+    ## Whether verb `index` changes the topology (else positions and
+    ## attributes only).
     pub static func changes_topology(index: i64) -> bool:
         return verb_at(checked(index)).changes_topology
 
+    ## How many parameters verb `index` has.
     pub static func parm_count(index: i64) -> i64:
         return (i64)verb_at(checked(index)).parms.length
 
+    ## Parameter `parm`'s label.
     pub static func parm_label(index: i64, parm: i64) -> str:
         return parm_of(index, parm).label
 
@@ -90,24 +101,31 @@ pub struct Verbs:
     pub static func parm_kind(index: i64, parm: i64) -> i64:
         return (i64)(u8)parm_of(index, parm).kind
 
+    ## Parameter `parm`'s initial value (each component's, for a vector).
     pub static func parm_initial(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).initial
 
+    ## Parameter `parm`'s lower bound.
     pub static func parm_minimum(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).minimum
 
+    ## Parameter `parm`'s upper bound.
     pub static func parm_maximum(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).maximum
 
+    ## Parameter `parm`'s slider maximum (0: its maximum).
     pub static func parm_soft(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).soft
 
+    ## How many numbers parameter `parm` takes (3 for a vector).
     pub static func parm_components(index: i64, parm: i64) -> i64:
         return (i64)parm_of(index, parm).components
 
+    ## A menu parameter's choices, `Label|Label`.
     pub static func parm_choices(index: i64, parm: i64) -> str:
         return parm_of(index, parm).choices
 
+    ## Parameter `parm`'s tooltip.
     pub static func parm_doc(index: i64, parm: i64) -> str:
         return parm_of(index, parm).doc
 
@@ -138,6 +156,7 @@ func parm_of(index: i64, parm: i64) -> ParmSpec:
 pub struct VerbResult:
     var run: VerbRun
 
+    ## The output mesh.
     pub func mesh() -> interop.Reference[Mesh]!:
         return try mesh_adopt(try mesh_share(self.run.mesh))
 
@@ -146,6 +165,7 @@ pub struct VerbResult:
         let guard = (u64)self.run.mesh.topology_hash()
         return try adopt_selection(self.run.selection.share(), self.run.selection_count, self.run.selection_domain, guard, GroupReport())
 
+    ## The warning for the node's info line, or "".
     pub func warning() -> str:
         return self.run.warning
 
@@ -153,7 +173,9 @@ pub struct VerbResult:
     pub func misses() -> i64:
         return (i64)self.run.misses
 
+    ## Release the run's mesh and selection.
     pub func close():
         self.run.close()
 
+## VerbResult's interop type.
 pub let verb_result_type: interop.Type[VerbResult] = interop.Type[VerbResult]("VerbResult", VerbResult.close, closeable = true)

@@ -7,21 +7,21 @@
 
 let fuse_parms: ParmSpec[1] = [ParmSpec("Distance", ParmKind.number, 0.001, 0.000001, 100000.0, 1, "", "Points of the group closer than this merge into the first of them.")]
 
-pub func fuse_verb() -> Verb:
+func fuse_verb() -> Verb:
     return Verb("Fuse", "Modeling", "Merge nearby points of the group", Domain.point, true, fuse_parms, true, cook_fuse)
 
 let merge_parms: ParmSpec[2] = [
     ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 4.0, 1, "At center|At first|At last|Collapse islands|By distance", "Where the group's points merge: all at their center, the first or the last point; each connected island at its center; or those within the distance."),
     ParmSpec("Distance", ParmKind.number, 0.001, 0.000001, 100000.0, 1, "", "By distance: points of the group closer than this merge.")]
 
-pub func merge_verb() -> Verb:
+func merge_verb() -> Verb:
     return Verb("Merge Points", "Modeling", "Merge the group's points: at their center, first, last, per island or by distance", Domain.point, true, merge_parms, true, cook_merge)
 
-pub func clean_verb() -> Verb:
+func clean_verb() -> Verb:
     return Verb("Clean", "Modeling", "Remove points no face uses", Domain.point, true, placeholder_parms[..<0], true, cook_clean)
 
 ## Spatial hash of cells `distance` wide: each group point joins the lowest
-## numbered earlier point within `distance` in its cell or a neighbour.
+## numbered earlier point within `distance` in its cell or a neighbor.
 func cook_fuse(input: const VerbInput*, output: VerbOutput*) -> !:
     let distance = input.parms.at(0)
     if not (distance >= 0.000001 and distance <= 100000.0): error(errors.invalid, "Fuse distance must be in 1e-6..1e5")

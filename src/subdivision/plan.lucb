@@ -1,7 +1,7 @@
 ## The refinement plan: what connectivity, creases and attributes determine,
 ## built once and reused for every position change (a Move re-evaluates
 ## positions only). For each level it keeps the refined mesh, whose
-## attributes (uv, colours, groups) were carried from the cage through their
+## attributes (uv, colors, groups) were carried from the cage through their
 ## parents, and each level's edge and point sharpness. Level l + 1 numbers
 ## its points: level l's points (vertex points), then one per edge (edge
 ## points), then (Catmull-Clark, bilinear) one per face (face points). Each

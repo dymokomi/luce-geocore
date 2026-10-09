@@ -14,7 +14,7 @@ let clip_parms: ParmSpec[6] = [
     ParmSpec("Plane point", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "Custom: a point on the plane."),
     ParmSpec("Plane normal", ParmKind.vector, 0.0, -1.0, 1.0, 3, "", "Custom: the plane's normal; above is the side it points to.")]
 
-pub func clip_verb() -> Verb:
+func clip_verb() -> Verb:
     return Verb("Clip", "Modeling", "Cut the group's faces with a plane; keep one side, or both", Domain.face, true, clip_parms, true, cook_clip)
 
 ## The plane's signed distance at each point and the cut points on edges.

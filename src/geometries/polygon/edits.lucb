@@ -56,7 +56,7 @@ extend Mesh:
 
     ## The old edge each of `output`'s edges continues, or -1 for a new edge.
     ## An output corner and the next one in its face continue an old edge when
-    ## their parents are neighbours in an old face (in either direction): the
+    ## their parents are neighbors in an old face (in either direction): the
     ## bottom of an extrusion wall continues its old edge, while the wall's
     ## sides, whose ends share one parent, are new.
     func edge_parents_of(output: const Mesh*, corner_parents: const i32[]) -> i32[]!:

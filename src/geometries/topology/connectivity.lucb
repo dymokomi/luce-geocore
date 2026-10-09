@@ -45,7 +45,7 @@ pub struct Topology:
         let face = (usize)self.corner_faces[corner]
         return corner - 1 if corner > (usize)self.offsets[face] else (usize)self.offsets[face + 1] - 1
 
-    ## The corner of the same edge in the neighbouring face, or -1.
+    ## The corner of the same edge in the neighboring face, or -1.
     pub func twin(corner: usize) -> i64:
         let edge = (usize)self.corner_edges[corner]
         for at in (usize)self.edge_corner_offsets[edge]..<(usize)self.edge_corner_offsets[edge + 1]:

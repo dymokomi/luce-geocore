@@ -39,36 +39,36 @@ pub struct ComponentTransform:
         let moved = translation.add(self.pivot).subtract(self.linear.transform_point(self.pivot))
         return Matrix4(self.linear.x, self.linear.y, self.linear.z, moved)
 
-pub func transform_verb() -> Verb:
+func transform_verb() -> Verb:
     return Verb("Transform Components", "Deform", "Move, rotate and scale components about a pivot", Domain.point, true, transform_parms, false, cook_transform)
 
 let smooth_parms: ParmSpec[2] = [
-    ParmSpec("Amount", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "How far each point moves toward the average of its neighbours."),
+    ParmSpec("Amount", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "How far each point moves toward the average of its neighbors."),
     ParmSpec("Iterations", ParmKind.integer, 1.0, 1.0, 100.0, 1, "", "Rounds of smoothing.")]
 
-pub func smooth_verb() -> Verb:
+func smooth_verb() -> Verb:
     return Verb("Smooth", "Deform", "Laplacian relaxation of the group's points", Domain.point, true, smooth_parms, false, cook_smooth)
 
 let mountain_parms: ParmSpec[2] = [
     ParmSpec("Height", ParmKind.number, 0.2, 0.0, 100000.0, 1, "", "Largest displacement of the noise.", 2.0),
     ParmSpec("Seed", ParmKind.integer, 0.0, 0.0, 100000.0, 1, "", "Another seed gives other noise.")]
 
-pub func mountain_verb() -> Verb:
+func mountain_verb() -> Verb:
     return Verb("Mountain", "Deform", "Deterministic noise displacement", Domain.point, true, mountain_parms, false, cook_mountain)
 
 let peak_parms: ParmSpec[1] = [ParmSpec("Distance", ParmKind.number, 0.2, -100000.0, 100000.0, 1, "", "Distance along the averaged normals.", 2.0)]
 
-pub func peak_verb() -> Verb:
+func peak_verb() -> Verb:
     return Verb("Peak", "Deform", "Move points along their normals", Domain.point, true, peak_parms, false, cook_peak)
 
 let flatten_parms: ParmSpec[1] = [ParmSpec("Axis", ParmKind.menu, 1.0, 0.0, 2.0, 1, "X|Y|Z", "The axis flattened to the group's centroid.")]
 
-pub func flatten_verb() -> Verb:
+func flatten_verb() -> Verb:
     return Verb("Flatten", "Deform", "Flatten the group onto a plane through its centroid", Domain.point, true, flatten_parms, false, cook_flatten)
 
 let snap_parms: ParmSpec[1] = [ParmSpec("Spacing", ParmKind.number, 0.1, 0.000001, 100000.0, 1, "", "Grid spacing points snap to.")]
 
-pub func snap_verb() -> Verb:
+func snap_verb() -> Verb:
     return Verb("Snap", "Deform", "Snap points to a grid", Domain.point, true, snap_parms, false, cook_snap)
 
 ## Positions of the input (relative to its origin), written copy-on-write,
@@ -181,7 +181,7 @@ func mirror_points(mesh: const Mesh*, positions: Float3[], affected: const u32[]
         let partner = positions[(usize)mirror].vector().add(origin)
         positions[(usize)point] = Float3.of(partner.reflected((usize)(axis - 1)).subtract(origin))
 
-## Neighbour averages over the edges, `iterations` rounds.
+## Neighbor averages over the edges, `iterations` rounds.
 func cook_smooth(input: const VerbInput*, output: VerbOutput*) -> !:
     let moved = try begin_points(input, output)
     let amount = input.parms.at(0)

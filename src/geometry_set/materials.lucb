@@ -1,21 +1,26 @@
 ## The materials family: material definitions carried with geometry, as a
 ## library. Each has a path (what a face's `material` attribute names), the
-## shader that reads it ("openpbr") and named parameters of one to four numbers
-## (colors are three), or of text (an image file a texture reads). Merge joins libraries, Group nests them in instances and
-## Blast filters them by path; renderers flatten them (`materials_flattened`).
+## shader that reads it ("openpbr") and named parameters of one to four
+## numbers (colors are three), or of text (an image file a texture reads).
+## Merge joins libraries, Group nests them in instances and Blast filters
+## them by path; renderers flatten them (`materials_flattened`).
 ## Geocore does not interpret parameters: shaders own their meaning. Where two
 ## definitions share a path, the later one wins.
 
+## One named parameter: up to four numbers, or a text value.
 pub struct MaterialParameter:
     var name_at: usize
     var name_length: usize
+    ## The numbers; `width` of them are used.
     pub var value: f64[4]
+    ## How many of the numbers it uses, 1..4.
     pub var width: u8
     ## A text value (empty for numbers): a texture's image file.
     var text_at: usize
     var text_length: usize
 
-pub struct MaterialRecord:
+## Where one material's path, shader and parameters sit.
+struct MaterialRecord:
     var path_at: usize
     var path_length: usize
     var shader_at: usize
@@ -23,38 +28,47 @@ pub struct MaterialRecord:
     var first: usize
     var count: usize
 
+## Material definitions with their paths, shaders and parameters: a set's
+## materials component, and what flattening a set gathers.
 pub struct Materials:
     var records: Growing[MaterialRecord]
     var parameters: Growing[MaterialParameter]
     ## Every path, shader and parameter name, back to back.
     var text: Growing[u8]
 
+    ## No materials.
     pub func init():
         self.records = Growing[MaterialRecord]()
         self.parameters = Growing[MaterialParameter]()
         self.text = Growing[u8]()
 
+    ## How many materials there are.
     pub func count() -> usize:
         return self.records.count
 
     func slice(at: usize, length: usize) -> str:
         return (str)self.text.items[at..<at + length]
 
+    ## Material `index`'s path, which a face's `material` names.
     pub func path(index: usize) -> str:
         let record = &self.records.items[index]
         return self.slice(record.path_at, record.path_length)
 
+    ## The shader material `index` is for.
     pub func shader(index: usize) -> str:
         let record = &self.records.items[index]
         return self.slice(record.shader_at, record.shader_length)
 
+    ## How many parameters material `index` has.
     pub func parameter_count(index: usize) -> usize:
         return self.records.items[index].count
 
+    ## Parameter `at`'s name.
     pub func parameter_name(index: usize, at: usize) -> str:
         let parameter = &self.parameters.items[self.records.items[index].first + at]
         return self.slice(parameter.name_at, parameter.name_length)
 
+    ## Parameter `at`'s value.
     pub func parameter_value(index: usize, at: usize) -> MaterialParameter:
         return self.parameters.items[self.records.items[index].first + at]
 
@@ -138,17 +152,21 @@ pub struct Materials:
             try widths.push(parameter.width)
         try self.add(other.path(index), other.shader(index), (str)names.view(), values.view(), widths.view(), (str)texts.view())
 
+    ## Add every material of `other`.
     pub func add_all(other: const Materials*) -> !:
         for index in 0..<other.count(): try self.add_from(other, index)
 
+    ## Release the materials.
     pub func close():
         self.records.close()
         self.parameters.close()
         self.text.close()
 
+## Heap storage for a materials component, empty.
 pub func new_materials() -> Materials*!:
     return try new Materials() in memory.heap
 
+## The materials family.
 pub let materials_component: ComponentType = ComponentType("materials", share_materials, close_materials, materials_size, materials_bytes, materials_bounds, place_materials, join_materials, materials_paths, filter_materials, describe_materials, "", no_trace)
 
 func share_materials(data: const void*) -> void*!:

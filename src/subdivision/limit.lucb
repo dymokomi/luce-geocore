@@ -2,8 +2,8 @@
 ## point converges and its limit normal, which zebra and curvature shading
 ## read. A smooth interior point takes the scheme's limit position and the
 ## cross product of its two limit tangents (Catmull-Clark: Halstead et al.'s
-## masks over the ring of edge and diagonal neighbours; Loop: cosine and
-## sine masks over the neighbours). A crease point converges to
+## masks over the ring of edge and diagonal neighbors; Loop: cosine and
+## sine masks over the neighbors). A crease point converges to
 ## (e1 + 4v + e2) / 6, a corner stays; their normals, and bilinear ones,
 ## average the faces around them.
 
@@ -130,7 +130,7 @@ func limit_points(context: void*?, first: usize, end: usize):
         if normal.dot(facing) < 0.0: normal = normal.multiply_scalar(-1.0)
         work.out_normals[out] = direction_of(normal) if normal.length() > 0.0 else direction_of(face_average(work, point))
 
-## The closed fan of `point`: `ring[i]` the neighbour along edge i and
+## The closed fan of `point`: `ring[i]` the neighbor along edge i and
 ## `diagonals[i]` the point across the face between edges i and i + 1
 ## (quads; triangles have none). False when the faces around it are not one
 ## closed fan of quads (triangles for Loop).

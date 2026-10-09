@@ -78,6 +78,8 @@ pub type Fields = fields.Fields
 pub type SdfEdits = fields.SdfEdits
 ## Edit Sketch: planar sketches as curves, picked on point clouds.
 pub type Sketches = curves.Sketches
+## geocore's error codes: invalid input, reentered work, and sizes past the
+## mesh limits. luce-3d raises the same codes.
 pub let invalid: ErrorCode = errors.invalid
 pub let busy: ErrorCode = errors.busy
 pub let limit: ErrorCode = errors.limit

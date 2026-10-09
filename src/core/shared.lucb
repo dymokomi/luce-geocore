@@ -39,7 +39,7 @@ assert(memory.size_of(Block) <= 64, "the block header must fit before the elemen
 pub struct Column[T]:
     var block: Block*?
 
-    ## `count` uninitialised elements, owned by the caller alone.
+    ## `count` uninitialized elements, owned by the caller alone.
     pub static func allocate(count: usize) -> Column[T]!:
         let bytes = count * memory.size_of(T)
         let storage = memory.heap.allocate(header_bytes + bytes, 64) else error(memory.exhausted, "no memory for a column")

@@ -19,7 +19,7 @@ let polydraw_parms: ParmSpec[2] = [
     ParmSpec("Snap distance", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "Drawn corners this close to an existing point use it (0: only where they coincide).", 1.0),
     ParmSpec("Corners", ParmKind.integer, 0.0, 0.0, 8388608.0, 1, "", "How many drawn positions follow (x, y, z each); 0 makes the face through the group's points.")]
 
-pub func polydraw_verb() -> Verb:
+func polydraw_verb() -> Verb:
     return Verb("PolyDraw", "Modeling", "Add a polygon through drawn positions, or through the group's points", Domain.point, true, polydraw_parms, true, cook_polydraw, trailing = true)
 
 func cook_polydraw(input: const VerbInput*, output: VerbOutput*) -> !:
@@ -209,7 +209,7 @@ func least_spread(builder: const TopologyBuilder*, points: const i32[], center: 
     return normal
 
 ## Whether the ring, as ordered, winds the wrong way: an existing face uses
-## one of its edges in the same direction (a consistent neighbour uses it
+## one of its edges in the same direction (a consistent neighbor uses it
 ## the other way), else its normal opposes the faces around its points.
 func winds_backwards(topology: const Topology*, builder: const TopologyBuilder*, ring: const i32[]) -> bool!:
     var agree: i64 = 0

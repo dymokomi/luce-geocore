@@ -15,7 +15,7 @@
 ## consistently oriented meshes, including at saddle vertices and concave
 ## edges, where the nearest face's own normal is not.
 ##
-## Voxels of a touched leaf beyond the band take the sign of a neighbour
+## Voxels of a touched leaf beyond the band take the sign of a neighbor
 ## (a flood inside the leaf; no surface lies between them), and a region
 ## no band voxel reaches asks the mesh's BVH once.
 ##
@@ -122,7 +122,7 @@ func queried_level_set(mesh: const Mesh*, shape: const MeshShape*, voxel: f64, b
     let reach = band * voxel
     let size = voxel * 8.0
     let triangles = shape.corners.count // 3
-    # The leaves the triangles' grown boxes touch. Neighbouring triangles
+    # The leaves the triangles' grown boxes touch. Neighboring triangles
     # of a dense mesh touch the same leaves: a triangle whose leaf box is its
     # predecessor's lists none.
     let counts = try new usize[triangles + 1] --- in memory.heap
@@ -394,7 +394,7 @@ func fill_raster_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mas
                     best[at] = d
                     let normal = feature_normal(work.shape, triangle, found.feature)
                     side[at] = 2 if p.subtract(found.point).dot(normal) < 0.0 else 1
-    # Beyond the band: a neighbour's side; a region no band voxel reaches
+    # Beyond the band: a neighbor's side; a region no band voxel reaches
     # asks the BVH.
     flood_sides(&side)
     for at in 0..<leaf_voxels:
@@ -458,7 +458,7 @@ func query_leaf(work: const RasterWork*, lx: i64, ly: i64, lz: i64, limit: f64, 
         values[at] = (f32)math.clamp(d, -limit, limit)
         if math.abs(d) < limit: mask[at >> 6] = mask[at >> 6] | ((u64)1 << (u64)(at & 63))
 
-## Spread known sides to unknown 6-neighbours until nothing changes.
+## Spread known sides to unknown 6-neighbors until nothing changes.
 func flood_sides(side: u8[512]*):
     var changed = true
     while changed:

@@ -17,7 +17,7 @@ let line_parms: ParmSpec[5] = [
     ParmSpec("Points", ParmKind.integer, 2.0, 2.0, 100000.0, 1, "", "Points along the line, both ends included.", 64.0),
     ParmSpec("Type", ParmKind.menu, 0.0, 0.0, 3.0, 1, type_choices, type_doc)]
 
-pub func line_verb() -> SetVerb:
+func line_verb() -> SetVerb:
     return SetVerb("Curve Line", "Curves", "A straight curve of evenly spaced points", 0, false, false, line_parms, cook_line)
 
 func cook_line(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -33,7 +33,7 @@ let circle_parms: ParmSpec[5] = [
     ParmSpec("Plane", ParmKind.menu, 2.0, 0.0, 2.0, 1, plane_choices, "The plane the circle lies in; ZX is the ground."),
     ParmSpec("Resolution", ParmKind.integer, 12.0, 1.0, 1024.0, 1, "", resolution_doc, 64.0)]
 
-pub func circle_verb() -> SetVerb:
+func circle_verb() -> SetVerb:
     return SetVerb("Curve Circle", "Curves", "A closed circle; the NURBS type is exact", 0, false, false, circle_parms, cook_circle)
 
 func cook_circle(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -49,7 +49,7 @@ let arc_parms: ParmSpec[7] = [
     ParmSpec("Plane", ParmKind.menu, 2.0, 0.0, 2.0, 1, plane_choices, "The plane the arc lies in; ZX is the ground."),
     ParmSpec("Resolution", ParmKind.integer, 12.0, 1.0, 1024.0, 1, "", resolution_doc, 64.0)]
 
-pub func arc_verb() -> SetVerb:
+func arc_verb() -> SetVerb:
     return SetVerb("Curve Arc", "Curves", "An open arc between two angles", 0, false, false, arc_parms, cook_arc)
 
 func cook_arc(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -66,7 +66,7 @@ let spiral_parms: ParmSpec[8] = [
     ParmSpec("Type", ParmKind.menu, 0.0, 0.0, 3.0, 1, type_choices, type_doc),
     ParmSpec("Resolution", ParmKind.integer, 12.0, 1.0, 1024.0, 1, "", resolution_doc, 64.0)]
 
-pub func spiral_verb() -> SetVerb:
+func spiral_verb() -> SetVerb:
     return SetVerb("Curve Spiral", "Curves", "A helix or flat spiral around Y", 0, false, false, spiral_parms, cook_spiral)
 
 func cook_spiral(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -80,7 +80,7 @@ let resample_parms: ParmSpec[3] = [
     ParmSpec("Count", ParmKind.integer, 16.0, 1.0, 10000000.0, 1, "", "Points on each curve (Count mode).", 256.0),
     ParmSpec("Length", ParmKind.number, 0.1, 0.000001, 100000.0, 1, "", "Spacing between points (Length mode).", 1.0)]
 
-pub func resample_verb() -> SetVerb:
+func resample_verb() -> SetVerb:
     return SetVerb("Resample Curve", "Curves", "Evenly spaced points along the group's curves, as poly curves", 1, false, true, resample_parms, cook_resample)
 
 func cook_resample(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -95,7 +95,7 @@ let trim_parms: ParmSpec[3] = [
     ParmSpec("Start", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "Where the kept part begins.", 1.0),
     ParmSpec("End", ParmKind.number, 1.0, -100000.0, 100000.0, 1, "", "Where the kept part ends.", 1.0)]
 
-pub func trim_verb() -> SetVerb:
+func trim_verb() -> SetVerb:
     return SetVerb("Trim Curve", "Curves", "Keep part of each of the group's curves, by length", 1, false, true, trim_parms, cook_trim)
 
 func cook_trim(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -110,7 +110,7 @@ let fillet_parms: ParmSpec[3] = [
     ParmSpec("Segments", ParmKind.integer, 4.0, 1.0, 1024.0, 1, "", "Segments per arc.", 32.0),
     ParmSpec("Limit radius", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Shrink arcs that would not fit in half their edges.")]
 
-pub func fillet_verb() -> SetVerb:
+func fillet_verb() -> SetVerb:
     return SetVerb("Fillet Curve", "Curves", "Round the corners of the group's curves with arcs", 1, false, true, fillet_parms, cook_fillet)
 
 func cook_fillet(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -120,7 +120,7 @@ func cook_fillet(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     let p = input.parms
     try replaced_curves(input, try curves.filleted(source, chosen.view(), p.at(0), (i64)p.at(1), p.at(2) != 0.0), output)
 
-pub func reverse_curve_verb() -> SetVerb:
+func reverse_curve_verb() -> SetVerb:
     return SetVerb("Reverse Curve", "Curves", "Run the group's curves the other way", 1, false, true, no_parms[..<0], cook_reverse)
 
 func cook_reverse(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -131,7 +131,7 @@ func cook_reverse(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
 
 let type_parms: ParmSpec[1] = [ParmSpec("Type", ParmKind.menu, 1.0, 0.0, 3.0, 1, type_choices, type_doc)]
 
-pub func set_type_verb() -> SetVerb:
+func set_type_verb() -> SetVerb:
     return SetVerb("Set Curve Type", "Curves", "Change how the group's curves run through their points", 1, false, true, type_parms, cook_set_type)
 
 func cook_set_type(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -150,7 +150,7 @@ let sweep_parms: ParmSpec[6] = [
     ParmSpec("Fill caps", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Close the ends of open curves when the profile is closed."),
     ParmSpec("Keep curves", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep the curves beside the new mesh.")]
 
-pub func curve_to_mesh_verb() -> SetVerb:
+func curve_to_mesh_verb() -> SetVerb:
     return SetVerb("Curve to Mesh", "Curves", "Sweep a profile along the group's curves into a mesh", 2, false, true, sweep_parms, cook_sweep)
 
 func cook_sweep(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
@@ -171,7 +171,7 @@ func cook_sweep(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
 
 let mesh_curve_parms: ParmSpec[1] = [ParmSpec("Edges", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Group|Boundary of group", "Every edge of the group, or only its boundary edges.")]
 
-pub func mesh_to_curve_verb() -> SetVerb:
+func mesh_to_curve_verb() -> SetVerb:
     return SetVerb("Mesh to Curve", "Curves", "Chains of the group's mesh edges as poly curves, in place of the mesh", 1, false, true, mesh_curve_parms, cook_mesh_to_curve)
 
 func cook_mesh_to_curve(input: const SetVerbInput*, output: SetVerbOutput*) -> !:

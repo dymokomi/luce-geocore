@@ -60,7 +60,7 @@ func element_of(topology: const Topology*, corner: usize, domain: Domain) -> usi
         .edge: return (usize)topology.corner_edges[corner]
         _: return corner
 
-## Neighbours across the domain's connector: faces through edges, points and
+## Neighbors across the domain's connector: faces through edges, points and
 ## edges through points, corners through points.
 func connector(domain: Domain) -> Domain:
     return Domain.edge if domain == Domain.face else Domain.point

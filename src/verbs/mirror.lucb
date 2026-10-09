@@ -12,7 +12,7 @@ let mirror_parms: ParmSpec[5] = [
     ParmSpec("Keep original", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep the group beside its reflection."),
     ParmSpec("Weld", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Join the reflection to the original at points on the plane.")]
 
-pub func mirror_verb() -> Verb:
+func mirror_verb() -> Verb:
     return Verb("PolyMirror", "Modeling", "Reflect the group's faces across a plane, joined along it", Domain.face, true, mirror_parms, true, cook_mirror)
 
 func cook_mirror(input: const VerbInput*, output: VerbOutput*) -> !:
