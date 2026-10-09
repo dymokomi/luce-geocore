@@ -10,8 +10,9 @@
 # wired), `out PATH`, `clock FRAME TIME FPS`, `project DIR`, then a line per parameter:
 # `number NAME V...` or `text NAME TEXT`. Texts escape backslash, tab and newline. The
 # replies are lines too: `warning LINE TEXT`, `progress FRACTION`, then `done ok LOAD COOK
-# SAVE` (milliseconds) or `done error LINE COLUMN TEXT` (0 0: raised outside the script,
-# its origin named in the text). Anything the script
+# SAVE` (milliseconds) or `done error LINE COLUMN TEXT`. An error a package raised names
+# the script's line that called into it, with its origin in the text; 0 0 when no line
+# of the script is known. Anything the script
 # prints goes to standard output as it is: the node's console.
 
 ## How long a started child waits for its request before it leaves (ns).
@@ -46,17 +47,20 @@ func run_request(path: str, link: Connection*?, cook: func(Cook*) -> unit!) -> !
     k.echo = link == none
     let loaded = time.now()
     var failed = false
+    # `cook` is a function value, so this call is no crossing: `called_at` still names
+    # the script's outermost call into a package (luce-base 1d794e4). Read it here, not
+    # after `serve` returns: the generated main's `try serve(...)` is a crossing too.
     cook(&k) catch failure:
         failed = true
-        let (line, column) = error_place(&k, failure.at)
+        let (line, column, own) = error_place(&k, failure.at, failure.called_at)
         var room: u8[2048]
         let text = escaped(failure.message, room)
         var buffer: u8[2400]
-        # Raised outside the script (in a package it called): say where.
-        if line > 0:
+        if own:
             try k.reply(strings.format(buffer, f"done error {line} {column} {text}") catch ignored: recover "done error 0 0 (a message too long to send)")
         else:
-            try k.reply(strings.format(buffer, f"done error 0 0 {text} (raised at {failure.at})") catch ignored: recover "done error 0 0 (a message too long to send)")
+            # Raised in a package the script called: underline the call, say where.
+            try k.reply(strings.format(buffer, f"done error {line} {column} {text} (raised at {failure.at})") catch ignored: recover "done error 0 0 (a message too long to send)")
     if failed: return
     let cooked = time.now()
     let out = k.target
@@ -70,18 +74,25 @@ func run_request(path: str, link: Connection*?, cook: func(Cook*) -> unit!) -> !
     var buffer: u8[128]
     try k.reply(strings.format(buffer, f"done ok {milliseconds(loaded - started)} {milliseconds(cooked - loaded)} {milliseconds(saved - cooked)}") catch ignored: recover "done ok 0 0 0")
 
-## Where in the script an error that left `cook` was raised, as (line, column): its
+## Where in the script an error that left `cook` belongs, as (line, column, own): its
 ## origin (`at`) when that is the script's own statement, the line of `k.error` when
-## that raised it, else (0, 0): raised in a package the script called. The one place
-## errors meet the script's lines.
-func error_place(k: const Cook*, at: str) -> (u32, u32):
-    if let found = strings.find(at, "script.lucb:"):
-        let parts = strings.split_once((str)at.bytes[found + 12..], ":") else return (0, 0)
-        let line = strings.parse_u64(parts.0) else return (0, 0)
-        let column = strings.parse_u64(strings.trim(parts.1)) else return ((u32)line, 1)
-        return ((u32)line, (u32)column)
-    if strings.contains(at, "script/cook.lucb:") and k.error_line() > 0: return (k.error_line(), 1)
-    return (0, 0)
+## that raised it (own: the script raised both), else the script's call into the
+## package that raised it (`called_at`), else (0, 0). The one place errors meet the
+## script's lines.
+func error_place(k: const Cook*, at: str, called_at: str) -> (u32, u32, bool):
+    if let own = script_place(at): return (own.0, own.1, true)
+    if strings.contains(at, "script/cook.lucb:") and k.error_line() > 0: return (k.error_line(), 1, true)
+    if let call = script_place(called_at): return (call.0, call.1, false)
+    return (0, 0, false)
+
+## The line and column a position `file:line:column` names in the script's module
+## (`script.lucb`), or none for another file.
+func script_place(at: str) -> (u32, u32)?:
+    let found = strings.find(at, "script.lucb:") else return none
+    let parts = strings.split_once((str)at.bytes[found + 12..], ":") else return none
+    let line = strings.parse_u64(parts.0) else return none
+    let column = strings.parse_u64(strings.trim(parts.1)) else return ((u32)line, 1)
+    return ((u32)line, (u32)column)
 
 func milliseconds(nanoseconds: u64) -> f64:
     return (f64)nanoseconds / 1000000.0
