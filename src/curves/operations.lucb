@@ -64,7 +64,7 @@ func resampled_all(curves: const Curves*, mode: i64, count: i64, length: f64) ->
         starts[curve] = (i32)total
         if cyclic and samples > 2: closed.set(curve)
         total += samples
-        if total > 33554432: error(errors.limit, "curves exceed 32M points")
+        if total > max_curve_points: error(errors.limit, "curves exceed 32M points")
     starts[curve_total] = (i32)total
     var positions = try Column[Float3].allocate(total)
     errdefer positions.release()

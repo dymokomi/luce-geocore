@@ -66,8 +66,7 @@ func concatenated_storage(parts: const MeshPart[]) -> Mesh*!:
                 bounded = true
             minimum = Vector3(math.min(minimum.x, world.x), math.min(minimum.y, world.y), math.min(minimum.z, world.z))
             maximum = Vector3(math.max(maximum.x, world.x), math.max(maximum.y, world.y), math.max(maximum.z, world.z))
-    if points > 8388608 or faces > 8388608 or corners > 33554432:
-        error(errors.limit, "merged mesh exceeds geometry limits")
+    try check_mesh_size(points, faces, corners)
     let size = maximum.subtract(minimum)
     let reach = math.max(math.max(math.max(math.abs(minimum.x), math.abs(maximum.x)), math.max(math.abs(minimum.y), math.abs(maximum.y))), math.max(math.abs(minimum.z), math.abs(maximum.z)))
     let span = math.max(size.x, math.max(size.y, size.z))

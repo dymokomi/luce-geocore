@@ -39,7 +39,7 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
     let points = topology.points
     let edges = topology.edges()
     let faces = topology.faces()
-    if points + edges + faces > 8388608: error(errors.limit, "subdivision would exceed 8M points")
+    if points + edges + faces > max_points: error(errors.limit, "subdivision would exceed 8M points")
     try builder.begin(mesh)
     try builder.copy_points(mesh)
     # Face points: centroids.

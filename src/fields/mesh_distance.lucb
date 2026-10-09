@@ -508,14 +508,17 @@ func face_signed(work: const RasterWork*, face: usize, p: Vector3) -> f64:
 
 ## The nearest point of triangle abc to `p` and the feature it lies on:
 ## 0..2 the vertices a, b, c; 3..5 the edges ab, bc, ca; 6 the face
-## (Ericson, Real-Time Collision Detection 5.1.5).
-struct Feature:
-    let point: Vector3
-    let feature: u8
+## (Ericson, Real-Time Collision Detection 5.1.5). A triangle without area
+## (meshes keep such faces) is its three edges.
+pub struct Feature:
+    pub let point: Vector3
+    pub let feature: u8
 
 pub func closest_feature(p: Vector3, a: Vector3, b: Vector3, c: Vector3) -> Feature:
     let ab = b.subtract(a)
     let ac = c.subtract(a)
+    let normal = ab.cross(ac)
+    if not (normal.dot(normal) > 0.0): return closest_edge(p, a, b, c)
     let ap = p.subtract(a)
     let d1 = ab.dot(ap)
     let d2 = ac.dot(ap)
@@ -537,6 +540,23 @@ pub func closest_feature(p: Vector3, a: Vector3, b: Vector3, c: Vector3) -> Feat
         return Feature(b.add(c.subtract(b).multiply_scalar((d4 - d3) / ((d4 - d3) + (d5 - d6)))), 4)
     let denominator = 1.0 / (va + vb + vc)
     return Feature(a.add(ab.multiply_scalar(vb * denominator)).add(ac.multiply_scalar(vc * denominator)), 6)
+
+## The nearest point to `p` on the edges of a triangle without area.
+func closest_edge(p: Vector3, a: Vector3, b: Vector3, c: Vector3) -> Feature:
+    var best = Feature(on_segment(p, a, b), 3)
+    let bc = Feature(on_segment(p, b, c), 4)
+    if bc.point.subtract(p).length() < best.point.subtract(p).length(): best = bc
+    let ca = Feature(on_segment(p, c, a), 5)
+    if ca.point.subtract(p).length() < best.point.subtract(p).length(): best = ca
+    return best
+
+## The nearest point to `p` on segment ab (a when it has no length).
+func on_segment(p: Vector3, a: Vector3, b: Vector3) -> Vector3:
+    let ab = b.subtract(a)
+    let length2 = ab.dot(ab)
+    if not (length2 > 0.0): return a
+    let t = math.max(0.0, math.min(1.0, p.subtract(a).dot(ab) / length2))
+    return a.add(ab.multiply_scalar(t))
 
 ## The pseudo-normal of `feature` of `triangle`.
 func feature_normal(shape: const MeshShape*, triangle: usize, feature: u8) -> Vector3:

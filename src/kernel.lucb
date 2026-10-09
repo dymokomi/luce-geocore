@@ -8,6 +8,7 @@ import core.strings
 import core.paths
 import core.idset
 import core.attributes
+import core.limits
 import geometries.polygon
 import geometry_set
 import groups
@@ -195,7 +196,11 @@ pub let curves_knots = curves.curves_knots
 pub let curves_knot_offsets = curves.curves_knot_offsets
 ## Assembly from columns an importer filled (luce-usd): a mesh taking its
 ## columns, attributes put on it, curves and detail attributes likewise.
+## `assembled` refuses meshes past the size limits.
 pub let assembled = polygon.assembled
+pub let max_points = limits.max_points
+pub let max_faces = limits.max_faces
+pub let max_corners = limits.max_corners
 pub let put_attribute = polygon.put_attribute
 pub let curves_assembled = curves.curves_assembled
 pub let set_detail = geometry_set.set_detail

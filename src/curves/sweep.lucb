@@ -70,7 +70,7 @@ pub func swept(curves: const Curves*, selected: Bits, profile: const Profile*, c
             faces += 2
             corners += 2 * ring
             triangles += 2 * (ring - 2) * 3
-        if corners > 33554432 or points > 8388608: error(errors.limit, "the swept mesh exceeds 8M points or 32M corners")
+        if corners > max_corners or points > max_points: error(errors.limit, "the swept mesh exceeds 8M points or 32M corners")
     starts[count] = SweepStart(points, faces, corners, triangles)
     var positions = try Column[Float3].allocate(points)
     errdefer positions.release()

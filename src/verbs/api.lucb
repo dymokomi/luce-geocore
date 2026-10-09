@@ -2,45 +2,48 @@
 ## from it: each verb is a node kind whose parameters are the verb's, plus
 ## Group and Group Type.
 
-let verb_total: usize = 30
+## Every verb's constructor, in menu order: the array's length is the
+## registry's size, so a verb added here is counted.
+let makers: (func() -> Verb)[30] = [
+    transform_verb,
+    smooth_verb,
+    mountain_verb,
+    peak_verb,
+    flatten_verb,
+    snap_verb,
+    delete_verb,
+    reverse_verb,
+    triangulate_verb,
+    duplicate_verb,
+    split_verb,
+    inset_verb,
+    extrude_verb,
+    subdivide_verb,
+    fuse_verb,
+    clean_verb,
+    bevel_verb,
+    fill_verb,
+    dissolve_verb,
+    loop_cut_verb,
+    bridge_verb,
+    merge_verb,
+    subdivision_verb,
+    crease_verb,
+    clip_verb,
+    connect_verb,
+    edge_slide_verb,
+    mirror_verb,
+    spin_verb,
+    polydraw_verb]
 
 ## Verb `index` in menu order.
 pub func verb_at(index: usize) -> Verb:
-    match index:
-        0: return transform_verb()
-        1: return smooth_verb()
-        2: return mountain_verb()
-        3: return peak_verb()
-        4: return flatten_verb()
-        5: return snap_verb()
-        6: return delete_verb()
-        7: return reverse_verb()
-        8: return triangulate_verb()
-        9: return duplicate_verb()
-        10: return split_verb()
-        11: return inset_verb()
-        12: return extrude_verb()
-        13: return subdivide_verb()
-        14: return fuse_verb()
-        15: return clean_verb()
-        16: return bevel_verb()
-        17: return fill_verb()
-        18: return dissolve_verb()
-        19: return loop_cut_verb()
-        20: return bridge_verb()
-        21: return merge_verb()
-        22: return subdivision_verb()
-        23: return crease_verb()
-        24: return clip_verb()
-        25: return connect_verb()
-        26: return edge_slide_verb()
-        27: return mirror_verb()
-        28: return spin_verb()
-        29: return polydraw_verb()
-        _: return transform_verb()
+    if index >= makers.length: trap("verb index out of range")
+    let make = makers[index]
+    return make()
 
 pub func verb_count() -> usize:
-    return verb_total
+    return makers.length
 
 pub func find_verb(name: str) -> Verb?:
     for index in 0..<verb_count():

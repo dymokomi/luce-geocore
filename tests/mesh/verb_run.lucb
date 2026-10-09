@@ -11,3 +11,8 @@ pub func verb_mesh(name: str, mesh: interop.Reference[Mesh], group: str, group_t
     let result = try Verbs.run(name, mesh, group, group_type, numbers)
     defer result.release()
     return try result.value().mesh()
+
+## The parameter values of a verb that takes none.
+pub func no_numbers() -> const f64[]:
+    var empty: f64[]
+    return empty

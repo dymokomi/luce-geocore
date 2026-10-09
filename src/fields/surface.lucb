@@ -38,7 +38,7 @@ pub func surface_mesh(grid: const SparseGrid*, iso: f64, exact: const Sdf*?) -> 
         quads += q
     vertex_counts[leaves] = vertices
     quad_counts[leaves] = quads
-    if vertices > 8388608 or quads * 4 > 33554432: error(errors.limit, "the surface exceeds 8M points or 32M corners; use larger voxels")
+    if vertices > max_points or quads * 4 > max_corners: error(errors.limit, "the surface exceeds 8M points or 32M corners; use larger voxels")
     var positions = try Column[Float3].allocate(vertices)
     errdefer positions.release()
     var corners = try Column[i32].allocate(quads * 4)

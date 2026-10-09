@@ -1,64 +1,15 @@
 ## Positional symmetry and soft falloff for the Edit engine. A mirror map
 ## pairs each element with the one at its reflection across an axis plane
 ## through the origin (within a tolerance scaled to the model), found through
-## a hash of quantized positions; a group becomes symmetric by adding the
+## a PointHash; a group becomes symmetric by adding the
 ## mirrors of its members. Soft weights fall off with the distance to the
-## nearest group point, found through a grid of cells one radius wide.
+## nearest group point, found through a PointHash of cells one radius wide.
 
 ## Reflection across the plane normal to `axis` (1 X, 2 Y, 3 Z).
 pub func reflect(point: Vector3, axis: i64) -> Vector3:
     if axis == 1: return Vector3(-point.x, point.y, point.z)
     if axis == 2: return Vector3(point.x, -point.y, point.z)
     return Vector3(point.x, point.y, -point.z)
-
-## Points bucketed by position quantized to `size`: nearest-position lookups.
-struct PointHash:
-    var size: f64
-    var heads: Growing[i32]
-    var next: Growing[i32]
-
-    static func build(positions: const Vector3[], size: f64) -> PointHash!:
-        var grid = PointHash(size, Growing[i32](), Growing[i32]())
-        errdefer grid.close()
-        var buckets: usize = 1024
-        while buckets < positions.length * 2: buckets *= 2
-        try grid.heads.fill(buckets, -1)
-        try grid.next.fill(positions.length, -1)
-        for at in 0..<positions.length:
-            let bucket = grid.bucket_of(positions[at])
-            grid.next.items[at] = grid.heads.items[bucket]
-            grid.heads.items[bucket] = (i32)at
-        return grid
-
-    func bucket_at(x: i64, y: i64, z: i64) -> usize:
-        let value = (x *% 73856093) ^ (y *% 19349663) ^ (z *% 83492791)
-        return (usize)(value & 0x7FFFFFFFFFFF) & (self.heads.count - 1)
-
-    func bucket_of(point: Vector3) -> usize:
-        return self.bucket_at((i64)math.floor(point.x / self.size), (i64)math.floor(point.y / self.size), (i64)math.floor(point.z / self.size))
-
-    ## The element nearest `point` within `reach` (<= size), or -1.
-    func nearest(positions: const Vector3[], point: Vector3, reach: f64) -> i32:
-        let x = (i64)math.floor(point.x / self.size)
-        let y = (i64)math.floor(point.y / self.size)
-        let z = (i64)math.floor(point.z / self.size)
-        var found: i32 = -1
-        var best = reach
-        for dx in (i64)-1..<(i64)2:
-            for dy in (i64)-1..<(i64)2:
-                for dz in (i64)-1..<(i64)2:
-                    var candidate = self.heads.items[self.bucket_at(x + dx, y + dy, z + dz)]
-                    while candidate >= 0:
-                        let distance = positions[(usize)candidate].subtract(point).length()
-                        if distance <= best:
-                            best = distance
-                            found = candidate
-                        candidate = self.next.items[(usize)candidate]
-        return found
-
-    func close():
-        self.heads.close()
-        self.next.close()
 
 ## The tolerance mirrors are matched within: a ten-thousandth of the
 ## model's size.

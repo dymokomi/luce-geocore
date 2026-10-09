@@ -1,0 +1,136 @@
+## Contracts of the verb framework and mesh assembly: parameters left out
+## take their initial values and extra ones are refused, every registered
+## verb runs on its defaults, the group cache tells meshes apart, assembly
+## refuses meshes past the limits, Fuse merges a large grid of loose quads, and
+## distances to faces without area stay finite.
+import interop
+import memory
+from luce_std import math
+from luce_geocore import geocore
+from luce_geocore.geocore import Mesh, MeshPrimitives, GeometrySet, Verbs, VerbCatalog, Vector3
+from luce_geocore.kernel import Domain, Float3, group_bits_of, assembled, max_faces, mesh_level_set, release_grid, clear_group_cache, run_set_verb, find_set_verb
+from luce_geocore.core.shared import Column
+from luce_geocore.core.growing import Growing
+from verb_run import verb_mesh, no_numbers
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try short_parameters()
+    try registry_sweep()
+    try group_cache_keys()
+    try flat_triangle_distance()
+
+pub func run() -> !:
+    try exercise()
+    try assembly_limits()
+    try fuse_loose_grid(400)
+    print("PASS contracts: parameter defaults, the verb registry, group cache keys, assembly limits, Fuse at scale, distances to flat faces")
+
+## Transform Components with only its translation equals the run with all
+## fifteen numbers; a sixteenth is refused.
+func short_parameters() -> !:
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    let full = try verb_mesh("Transform Components", cube, "", 0, [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0])
+    defer full.release()
+    let short = try verb_mesh("Transform Components", cube, "", 0, [0.0, 1.0, 0.0])
+    defer short.release()
+    let a = full.value().point_span()
+    let b = short.value().point_span()
+    assert(a.length == 8 and a.length == b.length)
+    for at in 0..<a.length: assert(a[at] == b[at])
+    assert(math.abs(full.value().bounds().minimum.y - cube.value().bounds().minimum.y - 1.0) < 0.000001)
+    let long: f64[16] = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0]
+    assert(try refused(cube, "Transform Components", long))
+
+## Whether verb `name` refuses `numbers` as invalid (memory propagates).
+func refused(mesh: interop.Reference[Mesh], name: str, numbers: const f64[]) -> bool!:
+    defer clear_group_cache()
+    let result = Verbs.run(name, mesh, "", 0, numbers) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
+        return failure.code == geocore.invalid
+    result.release()
+    return false
+
+## Every verb's name is unique and each runs on a cube with its initial
+## values: it succeeds or refuses the input as invalid, nothing else.
+func registry_sweep() -> !:
+    let count = VerbCatalog.count()
+    assert(count > Verbs.count())
+    for index in 0..<count:
+        for other in 0..<index: assert(VerbCatalog.name(index) != VerbCatalog.name(other))
+        assert(VerbCatalog.number_count(index) >= VerbCatalog.parm_count(index))
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    for index in 0..<Verbs.count():
+        _ = try refused(cube, Verbs.name(index), no_numbers())
+    let set = try GeometrySet.of_mesh(cube)
+    defer set.release()
+    for index in Verbs.count()..<count:
+        let verb = find_set_verb(VerbCatalog.name(index)) else trap("a catalog verb is registered")
+        var output = run_set_verb(&verb, set.value(), set.value(), "", 0, no_numbers()) catch failure:
+            if failure.code == memory.exhausted: error(failure.code, failure.message)
+            assert(failure.code == geocore.invalid)
+            continue
+        output.close()
+
+## One expression on two meshes whose `top` groups differ gives each its own
+## bits, however often the cache is asked.
+func group_cache_keys() -> !:
+    defer clear_group_cache()
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let high = try grid.value().with_group("top", 2, [12, 13, 14, 15])
+    defer high.release()
+    let low = try grid.value().with_group("top", 2, [0, 1])
+    defer low.release()
+    for _ in 0..<2:
+        var first = try group_bits_of(high.value(), "top", Domain.face)
+        defer first.bits.release()
+        var second = try group_bits_of(low.value(), "top", Domain.face)
+        defer second.bits.release()
+        assert(first.bits.view()[0] == 0xF000 and second.bits.view()[0] == 0x3)
+
+## A closed tetrahedron with a triangle of three collinear points beside it:
+## every sampled distance is finite.
+func flat_triangle_distance() -> !:
+    let points: Vector3[7] = [Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0), Vector3(2.0, 0.0, 0.0), Vector3(2.5, 0.0, 0.0), Vector3(3.0, 0.0, 0.0)]
+    let sizes: i64[5] = [3, 3, 3, 3, 3]
+    let corners: i64[15] = [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3, 4, 5, 6]
+    let mesh = try interop.Reference[Mesh].adopt(try new Mesh(points, sizes, corners) in memory.heap, geocore.mesh_type, memory.heap)
+    defer mesh.release()
+    let grid = try mesh_level_set(mesh.value(), 0.25, 2.0, "surface")
+    defer release_grid(grid)
+    assert(grid.values.count() > 0)
+    for value in grid.values.view(): assert(math.is_finite((f64)value))
+
+## Offsets claiming one face more than the limit are refused before their
+## contents are read.
+func assembly_limits() -> !:
+    var offsets = try Column[i32].allocate(max_faces + 2)
+    _ = assembled(Column[Float3](), Vector3(), offsets, Column[i32](), Column[i32](), Column[Float3](), Column[Vector3]()) catch failure:
+        assert(failure.code == geocore.limit)
+        return
+    trap("assembled took a mesh past the face limit")
+
+## A grid of `cells` by `cells` loose quads (four points each) fuses into
+## the grid's points: the spatial hash grows with the mesh.
+func fuse_loose_grid(cells: usize) -> !:
+    var points = Growing[Vector3]()
+    defer points.close()
+    var sizes = Growing[i64]()
+    defer sizes.close()
+    var corners = Growing[i64]()
+    defer corners.close()
+    let steps: usize[4] = [0, 1, 3, 2]
+    for row in 0..<cells:
+        for column in 0..<cells:
+            try sizes.push(4)
+            for step in steps:
+                try corners.push((i64)points.count)
+                try points.push(Vector3((f64)(column + step % 2) * 0.01, 0.0, (f64)(row + step // 2) * 0.01))
+    let loose = try interop.Reference[Mesh].adopt(try new Mesh(points.view(), sizes.view(), corners.view()) in memory.heap, geocore.mesh_type, memory.heap)
+    defer loose.release()
+    let fused = try verb_mesh("Fuse", loose, "", 0, [0.001])
+    defer fused.release()
+    assert(fused.value().point_count() == (i64)((cells + 1) * (cells + 1)) and fused.value().face_count() == (i64)(cells * cells))

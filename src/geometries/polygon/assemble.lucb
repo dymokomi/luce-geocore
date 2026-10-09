@@ -6,7 +6,7 @@
 
 ## A mesh owning these columns (taken even on failure). `triangles` has
 ## 3*(size-2) entries per face; `normals` may be empty to compute them. The
-## caller puts the attributes.
+## caller puts the attributes. The sizes must be within core.limits.
 pub func assembled(positions: Column[Float3], origin: Vector3, offsets: Column[i32], corners: Column[i32], triangles: Column[i32], normals: Column[Float3], precise: Column[Vector3]) -> Mesh*!:
     var owned_positions = positions
     errdefer owned_positions.release()
@@ -20,7 +20,9 @@ pub func assembled(positions: Column[Float3], origin: Vector3, offsets: Column[i
     errdefer owned_normals.release()
     var owned_precise = precise
     errdefer owned_precise.release()
+    if owned_offsets.is_empty(): error(errors.invalid, "a mesh's offsets end with the corner count")
     let faces = owned_offsets.count() - 1
+    try check_mesh_size(owned_positions.count(), faces, owned_corners.count())
     if owned_normals.is_empty() or owned_normals.count() != faces:
         owned_normals.release()
         owned_normals = try Column[Float3].allocate(faces)

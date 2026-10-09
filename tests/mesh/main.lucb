@@ -37,6 +37,7 @@ import polydraw_checks
 import instance_checks
 import g6_checks
 import large_face_checks
+import contract_checks
 from luce_geocore.kernel import set_small_faces
 
 ## Counts live blocks and fails the allocation after `remaining` more.
@@ -217,6 +218,9 @@ func checks(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 300, large_face_checks.exercise)
     try large_face_checks.run()
+    settle(&tracker)
+    inject(&tracker, 300, contract_checks.exercise)
+    try contract_checks.run()
     settle(&tracker)
     print("ok polygon meshes, operators, queries and allocation failures")
     return 0

@@ -7,7 +7,7 @@ import interop
 from luce_std import math
 from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Subdivision, Vector3
 from luce_geocore.kernel import clear_group_cache
-from verb_run import verb_mesh
+from verb_run import verb_mesh, no_numbers
 
 pub func exercise() -> !:
     defer clear_group_cache()
@@ -103,7 +103,7 @@ func crease_checks(cube: interop.Reference[Mesh]) -> !:
     try closed(flat)
 
 func loop_checks(cube: interop.Reference[Mesh]) -> !:
-    let triangles = try verb_mesh("Triangulate", cube, "", 0, [0.0])
+    let triangles = try verb_mesh("Triangulate", cube, "", 0, no_numbers())
     defer triangles.release()
     let one = try subdivided(triangles, 2.0, 1.0)
     defer one.release()
@@ -153,7 +153,7 @@ func cache_checks(cube: interop.Reference[Mesh]) -> !:
     defer lifted.release()
     let updated = try Subdivision.display(lifted)
     defer updated.release()
-    let rebuilt = try verb_mesh("Clean", lifted, "", 0, [0.0])
+    let rebuilt = try verb_mesh("Clean", lifted, "", 0, no_numbers())
     defer rebuilt.release()
     let fresh = try Subdivision.display(rebuilt)
     defer fresh.release()

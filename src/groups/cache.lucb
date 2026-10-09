@@ -1,17 +1,23 @@
 ## Evaluated groups, cached by what they read: the expression, the target
-## domain and the change ids of the topology, the positions and every
-## attribute. Equal ids are equal bytes, so a cached result is valid exactly
-## while all of those are; a Move leaves `top` and `0-99` valid, and anything
-## sharing the columns (snapshots, worker results) shares the entries. A few
-## recent results are kept, process-wide.
+## domain, the change ids of the topology and positions, and every
+## attribute's name, domain and ids. Equal ids are equal bytes, so a cached
+## result is valid exactly while all of those are; a Move leaves `top` and
+## `0-99` valid, and anything sharing the columns (snapshots, worker results)
+## shares the entries. A few recent results are kept, process-wide.
 
 let cache_size: usize = 16
 
 struct CachedGroup:
     var key: u64 = 0
+    ## Everything the group read (`signature`), compared in full on lookup.
+    var signature: Growing[u8]
     var bits: Column[u64]
     var report: GroupReport
     var used: u64 = 0
+
+    func close():
+        self.signature.close()
+        self.bits.release()
 
 var cache_lock: sync.Mutex
 ## `cache_size` entries, allocated on first use; under the lock.
@@ -21,7 +27,7 @@ var cache_clock: u64 = 0
 func entries() -> CachedGroup[]!:
     if let known = cached: return CachedGroup[](known, cache_size)
     let made = try new CachedGroup[cache_size] --- in memory.heap
-    for at in 0..<cache_size: made[at] = CachedGroup(0, Column[u64](), GroupReport(), 0)
+    for at in 0..<cache_size: made[at] = CachedGroup(0, Growing[u8](), Column[u64](), GroupReport(), 0)
     cached = made.data
     return made
 
@@ -33,13 +39,16 @@ pub struct GroupResult:
 
 ## The bits of `text` on `target`, evaluated or cached.
 pub func group_bits(mesh: const Mesh*, text: str, target: Domain) -> GroupResult!:
-    let key = cache_key(mesh, text, target)
+    var wanted = Growing[u8]()
+    defer wanted.close()
+    try signature(mesh, text, target, &wanted)
+    let key = signature_hash(wanted.view())
     cache_lock.lock()
     let slots = entries() catch failure:
         cache_lock.unlock()
         error(failure.code, failure.message)
     for at in 0..<cache_size:
-        if slots[at].key == key and slots[at].key != 0:
+        if slots[at].key == key and (str)slots[at].signature.view() == (str)wanted.view():
             cache_clock += 1
             slots[at].used = cache_clock
             let found = GroupResult(slots[at].bits.share(), slots[at].report)
@@ -58,9 +67,10 @@ pub func group_bits(mesh: const Mesh*, text: str, target: Domain) -> GroupResult
     var slot: usize = 0
     for at in 1..<cache_size:
         if table[at].used < table[slot].used: slot = at
-    table[slot].bits.release()
+    table[slot].close()
     cache_clock += 1
-    table[slot] = CachedGroup(key, column.share(), report, cache_clock)
+    table[slot] = CachedGroup(key, wanted, column.share(), report, cache_clock)
+    wanted = Growing[u8]()
     return GroupResult(column, report)
 
 ## Drop every cached group (tests with allocation trackers).
@@ -69,21 +79,39 @@ pub func clear_group_cache():
     defer cache_lock.unlock()
     let known = cached else return
     let slots = CachedGroup[](known, cache_size)
-    for at in 0..<cache_size: slots[at].bits.release()
+    for at in 0..<cache_size: slots[at].close()
     free(slots) in memory.heap
     cached = none
 
-func cache_key(mesh: const Mesh*, text: str, target: Domain) -> u64:
-    var key = mix(text.hash(), (u64)(u8)target + 1)
-    key = mix(key, mesh.corners_id())
-    key = mix(key, mesh.offsets_id())
-    key = mix(key, mesh.points_id())
-    key = mix(key, mesh.normals_id())
+## What evaluating `text` on `target` reads, as bytes: the text, the target,
+## the ids of the topology, positions and normals, and each attribute's name,
+## domain and column ids (a renamed attribute keeps its column).
+func signature(mesh: const Mesh*, text: str, target: Domain, into: Growing[u8]*) -> !:
+    try put_text(into, text)
+    try put_word(into, (u64)(u8)target)
+    try put_word(into, mesh.corners_id())
+    try put_word(into, mesh.offsets_id())
+    try put_word(into, mesh.points_id())
+    try put_word(into, mesh.normals_id())
     for index in 0..<(usize)mesh.attribute_count():
-        let id = mesh.attribute_id((i64)index) catch failure: recover 0
-        key = mix(key, id)
-    return key if key != 0 else 1
+        let entry = try mesh.attribute_entry((i64)index)
+        try put_text(into, entry.name())
+        try put_word(into, (u64)(u8)entry.domain)
+        try put_word(into, entry.data.id())
+        try put_word(into, entry.table.id())
 
-func mix(state: u64, value: u64) -> u64:
-    let scrambled = state ^ (value *% 0x9E3779B97F4A7C15)
-    return ((scrambled << 27) | (scrambled >> 37)) *% 5 +% 0x52DCE729
+func put_word(into: Growing[u8]*, value: u64) -> !:
+    try into.reserve(into.count + 8)
+    memory.write[u64]((void*)&into.items[into.count], value)
+    into.count += 8
+
+## `text` after its length, so consecutive texts cannot run together.
+func put_text(into: Growing[u8]*, text: str) -> !:
+    try put_word(into, (u64)text.length)
+    try into.reserve(into.count + text.length)
+    if text.length > 0: memory.copy(into.items[into.count..<into.count + text.length], text.bytes, text.length)
+    into.count += text.length
+
+func signature_hash(bytes: const u8[]) -> u64:
+    let key = ((str)bytes).hash()
+    return key if key != 0 else 1

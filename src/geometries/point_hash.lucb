@@ -1,0 +1,82 @@
+## A spatial hash of points: each point sits in the cell of its position
+## quantized to `size`, and cells hash into a power-of-two bucket table at
+## least twice the points, so lookups stay constant time at any mesh size.
+## Neighbor queries walk the 27 cells around a position. Fuse, mirror maps
+## and soft selection share it.
+from luce_std import math
+from core.growing import Growing
+from math.vector import Vector3
+
+## A cell of the hash's grid, in whole cell units.
+pub struct Cell:
+    pub let x: i64
+    pub let y: i64
+    pub let z: i64
+
+    ## The cell `dx`, `dy`, `dz` cells away.
+    pub func moved(dx: i64, dy: i64, dz: i64) -> Cell:
+        return Cell(self.x + dx, self.y + dy, self.z + dz)
+
+pub struct PointHash:
+    pub let size: f64
+    var heads: Growing[i32]
+    var next: Growing[i32]
+
+    ## An empty hash for points 0..<`capacity`, in cells `size` wide.
+    pub static func empty(capacity: usize, size: f64) -> PointHash!:
+        var grid = PointHash(size, Growing[i32](), Growing[i32]())
+        errdefer grid.close()
+        var buckets: usize = 1024
+        while buckets < capacity * 2: buckets *= 2
+        try grid.heads.fill(buckets, -1)
+        try grid.next.fill(capacity, -1)
+        return grid
+
+    ## A hash holding every one of `positions`.
+    pub static func build(positions: const Vector3[], size: f64) -> PointHash!:
+        var grid = try PointHash.empty(positions.length, size)
+        for at in 0..<positions.length: grid.insert(at, positions[at])
+        return grid
+
+    ## Add point `index` (below the capacity) at `point`.
+    pub func insert(index: usize, point: Vector3):
+        let bucket = self.bucket(self.cell_of(point))
+        self.next.items[index] = self.heads.items[bucket]
+        self.heads.items[bucket] = (i32)index
+
+    pub func cell_of(point: Vector3) -> Cell:
+        return Cell((i64)math.floor(point.x / self.size), (i64)math.floor(point.y / self.size), (i64)math.floor(point.z / self.size))
+
+    ## The last point added to `cell`'s bucket, or -1; `after` walks the rest.
+    ## A bucket also holds points of other cells that hash alike.
+    pub func first(cell: Cell) -> i32:
+        return self.heads.items[self.bucket(cell)]
+
+    pub func after(point: i32) -> i32:
+        return self.next.items[(usize)point]
+
+    ## The point of `positions` nearest `point` within `reach` (at most the
+    ## cell size), or -1.
+    pub func nearest(positions: const Vector3[], point: Vector3, reach: f64) -> i32:
+        let home = self.cell_of(point)
+        var found: i32 = -1
+        var best = reach
+        for dx in (i64)-1..<(i64)2:
+            for dy in (i64)-1..<(i64)2:
+                for dz in (i64)-1..<(i64)2:
+                    var candidate = self.first(home.moved(dx, dy, dz))
+                    while candidate >= 0:
+                        let distance = positions[(usize)candidate].subtract(point).length()
+                        if distance <= best:
+                            best = distance
+                            found = candidate
+                        candidate = self.after(candidate)
+        return found
+
+    pub func close():
+        self.heads.close()
+        self.next.close()
+
+    func bucket(cell: Cell) -> usize:
+        let value = (cell.x *% 73856093) ^ (cell.y *% 19349663) ^ (cell.z *% 83492791)
+        return (usize)(value & 0x7FFFFFFFFFFF) & (self.heads.count - 1)

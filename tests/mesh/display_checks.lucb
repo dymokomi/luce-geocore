@@ -4,7 +4,7 @@ import memory
 from luce_std import math
 from luce_geocore import geocore
 from luce_geocore.geocore import Vector3, Matrix4, Mesh, MeshBuilder, detached_mesh, dissolve_edge
-from verb_run import verb_mesh
+from verb_run import verb_mesh, no_numbers
 
 func index(mesh: const Mesh*, at: i64) -> i64!:
     let value = mesh.index(at)
@@ -77,7 +77,7 @@ pub func exercise() -> !:
     defer compact.release()
     try indices(compact.value(), display)
     assert(compact.value().point_count() == 5 and (try compact.value().edge_count()) == 5)
-    let reversed = try verb_mesh("Reverse", mesh, "0", 3, [0.0])
+    let reversed = try verb_mesh("Reverse", mesh, "0", 3, no_numbers())
     defer reversed.release()
     var reversed_indices: i64[9]
     for at in 0..<reversed_indices.length: reversed_indices[at] = 4 - display[at // 3 * 3 + 2 - at % 3]

@@ -8,6 +8,7 @@ import interop
 from luce_std import math
 from luce_geocore.geocore import Mesh, MeshPrimitives, AttributeKernels, Verbs, VerbResult, Vector3
 from luce_geocore.kernel import clear_group_cache
+from verb_run import no_numbers
 
 pub func exercise() -> !:
     defer clear_group_cache()
@@ -330,7 +331,7 @@ func merge_fill_dissolve_checks(grid: interop.Reference[Mesh], cube: interop.Ref
     counts(islands, 23, 16)
     near((try islands.value().point(0)).x, -0.75)
     # By distance: split faces fuse back.
-    let split = try made(grid, "Split", "0", 3, [0.0], 1)
+    let split = try made(grid, "Split", "0", 3, no_numbers(), 1)
     defer split.release()
     let fused = try made(split, "Merge Points", "*", 1, [4.0, 0.001], 4)
     defer fused.release()
@@ -347,21 +348,21 @@ func merge_fill_dissolve_checks(grid: interop.Reference[Mesh], cube: interop.Ref
     near((try fan.value().point(25)).x, -0.25)
     # Dissolve points: an inner point's faces join into one and the point
     # goes; a border point between two edges leaves its faces.
-    let inner = try made(grid, "Dissolve", "12", 1, [0.0], 1)
+    let inner = try made(grid, "Dissolve", "12", 1, no_numbers(), 1)
     defer inner.release()
     counts(inner, 24, 13)
     try carried(inner)
-    try stable(grid, "Dissolve", "12", 1, [0.0])
+    try stable(grid, "Dissolve", "12", 1, no_numbers())
     # A face group dissolves only the edges between its faces: the first
     # two columns join into one face, their inner points gone.
-    let pairs = try made(grid, "Dissolve", "0-15:2,4", 3, [0.0], 1)
+    let pairs = try made(grid, "Dissolve", "0-15:2,4", 3, no_numbers(), 1)
     defer pairs.release()
     counts(pairs, 22, 9)
-    let border = try made(grid, "Dissolve", "2", 1, [0.0], 1)
+    let border = try made(grid, "Dissolve", "2", 1, no_numbers(), 1)
     defer border.release()
     counts(border, 24, 15)
     # Cube corner: its three faces join into one face without it.
-    let corner = try made(cube, "Dissolve", "0", 1, [0.0], 1)
+    let corner = try made(cube, "Dissolve", "0", 1, no_numbers(), 1)
     defer corner.release()
     counts(corner, 7, 4)
     print("PASS Merge Points (center, first, last, islands, distance), Fill fan, Dissolve points and face groups; uv, groups and ids carried; runs repeat exactly")

@@ -4,38 +4,41 @@
 ## VerbCatalog alone, so both kinds get the same rows, Group handling,
 ## categories and descriptions.
 
-let set_verb_total: usize = 23
+## Every set verb's constructor, in menu order: the array's length is the
+## registry's size, so a set verb added here is counted.
+let set_makers: (func() -> SetVerb)[23] = [
+    line_verb,
+    circle_verb,
+    arc_verb,
+    spiral_verb,
+    resample_verb,
+    trim_verb,
+    fillet_verb,
+    reverse_curve_verb,
+    set_type_verb,
+    curve_to_mesh_verb,
+    mesh_to_curve_verb,
+    sdf_sphere_verb,
+    sdf_box_verb,
+    sdf_torus_verb,
+    sdf_capsule_verb,
+    sdf_cylinder_verb,
+    sdf_boolean_verb,
+    sdf_modify_verb,
+    sdf_to_volume_verb,
+    mesh_to_sdf_verb,
+    volume_from_points_verb,
+    convert_to_mesh_verb,
+    volume_slice_verb]
 
-## Set verb `index` in menu order.
+## SetVerb `index` in menu order.
 pub func set_verb_at(index: usize) -> SetVerb:
-    match index:
-        0: return line_verb()
-        1: return circle_verb()
-        2: return arc_verb()
-        3: return spiral_verb()
-        4: return resample_verb()
-        5: return trim_verb()
-        6: return fillet_verb()
-        7: return reverse_curve_verb()
-        8: return set_type_verb()
-        9: return curve_to_mesh_verb()
-        10: return mesh_to_curve_verb()
-        11: return sdf_sphere_verb()
-        12: return sdf_box_verb()
-        13: return sdf_torus_verb()
-        14: return sdf_capsule_verb()
-        15: return sdf_cylinder_verb()
-        16: return sdf_boolean_verb()
-        17: return sdf_modify_verb()
-        18: return sdf_to_volume_verb()
-        19: return mesh_to_sdf_verb()
-        20: return volume_from_points_verb()
-        21: return convert_to_mesh_verb()
-        22: return volume_slice_verb()
-        _: return line_verb()
+    if index >= set_makers.length: trap("set verb index out of range")
+    let make = set_makers[index]
+    return make()
 
 pub func set_verb_count() -> usize:
-    return set_verb_total
+    return set_makers.length
 
 pub func find_set_verb(name: str) -> SetVerb?:
     for index in 0..<set_verb_count():
@@ -128,6 +131,17 @@ pub struct VerbCatalog:
     pub static func parm_count(index: i64) -> i64:
         return (i64)entry(checked(index)).parms.length
 
+    ## How many numbers its parameters take (a vector one per component): a
+    ## run takes at most these, unless `trailing`.
+    pub static func number_count(index: i64) -> i64:
+        var total: usize = 0
+        for spec in entry(checked(index)).parms: total += spec.components
+        return (i64)total
+
+    ## Whether numbers may follow its parameters (PolyDraw's drawn corners).
+    pub static func trailing(index: i64) -> bool:
+        return entry(checked(index)).trailing
+
     pub static func parm_label(index: i64, parm: i64) -> str:
         return parm_of(index, parm).label
 
@@ -165,13 +179,14 @@ struct Entry:
     let second_required: bool
     let grouped: bool
     let parms: const ParmSpec[]
+    let trailing: bool
 
 func entry(index: usize) -> Entry:
     if index < verb_count():
         let verb = verb_at(index)
-        return Entry(verb.name, verb.category, verb.description, 1, false, true, verb.parms)
+        return Entry(verb.name, verb.category, verb.description, 1, false, true, verb.parms, verb.trailing)
     let verb = set_verb_at(index - verb_count())
-    return Entry(verb.name, verb.category, verb.description, verb.inputs, verb.second_required, verb.grouped, verb.parms)
+    return Entry(verb.name, verb.category, verb.description, verb.inputs, verb.second_required, verb.grouped, verb.parms, false)
 
 func checked(index: i64) -> usize:
     if index < 0 or index >= VerbCatalog.count(): trap("verb index out of range")

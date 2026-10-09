@@ -1,0 +1,13 @@
+## Mesh size limits. Offsets and corner indices fit i32 with room to spare,
+## and scratch sized from them (topology_hash's chunk table) cannot overflow.
+## Every mesh constructor checks them.
+import errors
+
+pub let max_points: usize = 8388608
+pub let max_faces: usize = 8388608
+pub let max_corners: usize = 33554432
+
+## An error when a mesh this large would pass the limits.
+pub func check_mesh_size(points: usize, faces: usize, corners: usize) -> !:
+    if points > max_points or faces > max_faces or corners > max_corners:
+        error(errors.limit, "a mesh is limited to 8M points, 8M faces and 32M corners")

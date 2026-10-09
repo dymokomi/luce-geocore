@@ -15,6 +15,7 @@ import errors
 from core.shared import Column
 from core.growing import Growing
 from core.strings import table_text
+from core.limits import max_corners
 
 ## Element domains. The numbers are the ones callers pass as integers.
 pub enum Domain as u8:
@@ -142,8 +143,8 @@ pub struct Attribute:
     pub static func from_numbers(name: str, domain: Domain, width: usize, values: const f64[], integer: bool, storage: Storage = Storage.array, float32: bool = false) -> Attribute!:
         if width < 1 or width > 4 or values.length % width != 0:
             error(errors.invalid, "attribute needs a tuple size of 1..4 dividing its values")
-        if values.length // width > 33554432:
-            error(errors.limit, "attribute exceeds 33554432 tuples")
+        if values.length // width > max_corners:
+            error(errors.limit, "an attribute is limited to 32M tuples, the largest domain")
         var wide = false
         if integer:
             for value in values:

@@ -17,7 +17,7 @@ from math.matrix import Matrix4
 from geometries.polygon import Mesh, MeshPart, concatenated, mesh_share, mesh_dispose
 from geometry_set import GeometrySet, ComponentType, PointCloud, points_component, cloud_origin, cloud_positions, cloud_store, cloud_with_store, set_mesh, empty_storage, dispose_set, adopt_set, geometry_set_type, mesh_component
 from groups import GroupReport, group_bits, guess_domain
-from verbs import ParmSpec, ParmKind, Parms, Verbs, group_domain, verb_at, verb_count
+from verbs import ParmSpec, ParmKind, Parms, filled_parms, Verbs, group_domain, verb_at, verb_count
 import curves
 from curves import Curves, curves_with_store, curve_domain, set_curves, with_curves, curves_dispose, curves_type, curve_group_bits, guess_curve_domain, convert_curve_bits
 from fields import Sdf, SdfOp, SparseGrid, primitive_sdf, combined_sdf, modified_sdf, release_sdf, sdf_type, set_sdf, release_grid, new_volume, add_grid, release_volume, volume_type, set_volume, sampled_sdf, mesh_level_set, points_level_set, surface_mesh, slice_mesh, push_mesh
@@ -60,9 +60,11 @@ pub struct SetVerb:
 ## Run `verb` on `set` (and `second`), returning the output and its report.
 pub func run_set_verb(verb: const SetVerb*, set: const GeometrySet*, second: const GeometrySet*?, group: str, group_type: i64, numbers: const f64[]) -> SetVerbOutput!:
     if verb.inputs > 1 and verb.second_required and second == none: error(errors.invalid, "connect the second geometry input")
+    var values = try filled_parms(verb.parms, numbers)
+    defer values.close()
     var output = SetVerbOutput()
     errdefer output.close()
-    let input = SetVerbInput(set, second, group, group_type, Parms(numbers))
+    let input = SetVerbInput(set, second, group, group_type, Parms(values.view()))
     let cook = verb.cook
     try cook(&input, &output)
     if output.set == none: output.set = try set.storage()

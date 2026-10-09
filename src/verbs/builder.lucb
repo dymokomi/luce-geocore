@@ -199,7 +199,7 @@ pub struct TopologyBuilder:
         let points = self.positions.count
         let faces = self.face_parents.count
         let corner_total = self.corners.count
-        if points > 8388608 or faces > 8388608 or corner_total > 33554432: error(errors.limit, "an operation exceeds 8M points or faces or 32M corners")
+        try check_mesh_size(points, faces, corner_total)
         var positions = try Column[Float3].allocate(points)
         defer positions.release()
         let placed = positions.span()

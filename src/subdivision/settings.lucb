@@ -30,6 +30,7 @@ from geometries.polygon import Mesh, mesh_share, mesh_dispose, mesh_adopt, preci
 from groups import Topology
 from verbs import TopologyBuilder
 import geometries.face_scratch
+from core.limits import max_points, max_faces
 
 pub enum Scheme as u8:
     off = 0
@@ -71,7 +72,7 @@ pub func settings_of(mesh: const Mesh*) -> Settings:
     var faces = corners if scheme != Scheme.loop else (f64)mesh.face_count() * 4.0
     var points = (f64)mesh.point_count() + corners + (f64)mesh.face_count()
     var level: usize = 0
-    while level < wanted and faces <= 8388608.0 and points <= 8388608.0:
+    while level < wanted and faces <= (f64)max_faces and points <= (f64)max_points:
         level += 1
         faces *= 4.0
         points *= 4.0

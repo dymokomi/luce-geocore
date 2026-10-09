@@ -171,7 +171,7 @@ pub struct CurvesBuilder:
             try self.close_curve()
         try self.drop_empty()
         let curves = self.types.count
-        if self.points.count > 33554432 or curves > 16777216: error(errors.limit, "curves exceed 32M points or 16M curves")
+        if self.points.count > max_curve_points or curves > max_curves: error(errors.limit, "curves exceed 32M points or 16M curves")
         let origin = origin_for(self.points.view())
         var positions = try Column[Float3].allocate(self.points.count)
         errdefer positions.release()

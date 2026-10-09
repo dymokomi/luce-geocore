@@ -22,7 +22,9 @@ from math.matrix import Matrix4
 from geometries.polygon import with_group_bits, Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute, edge_bits_from_pairs
 from geometries.polygon_triangulation import area_normal
 import geometries.face_scratch
+from geometries.point_hash import PointHash
 from groups import guess_domain, GroupResult, GroupReport, group_bits, converted, Topology, Selection, adopt_selection, strict_conversion, selection_bits
+from core.limits import max_points, check_mesh_size
 
 ## What a Group Type menu names: 0 guess (from the expression, else the
 ## verb's own domain), then points, edges, faces, corners.
@@ -50,7 +52,7 @@ pub struct ParmSpec:
     pub let initial: f64
     pub let minimum: f64
     pub let maximum: f64
-    ## Vectors: components (their defaults all `initial` unless `rest`).
+    ## Vectors: components (each defaults to `initial`).
     pub let components: usize = 1
     ## Menus: `Label|Label` (values 0, 1, …).
     pub let choices: str = ""
@@ -59,12 +61,32 @@ pub struct ParmSpec:
     pub let soft: f64 = 0.0
 
 ## The values of one run: numbers in parameter order (a vector takes its
-## components), plus text.
+## components), one per component of the verb's parameters (`filled_parms`).
 pub struct Parms:
     pub let numbers: const f64[]
 
     pub func at(index: usize) -> f64:
-        return self.numbers[index] if index < self.numbers.length else 0.0
+        if index >= self.numbers.length: trap("a verb read past its parameters")
+        return self.numbers[index]
+
+## `numbers` completed with the initial values of the parameters they leave
+## out, one per component. More numbers than `specs` take is an error unless
+## the verb takes `trailing` numbers, which are kept after the parameters.
+pub func filled_parms(specs: const ParmSpec[], numbers: const f64[], trailing: bool = false) -> Growing[f64]!:
+    var total: usize = 0
+    for spec in specs: total += spec.components
+    if numbers.length > total and not trailing: error(errors.invalid, "more parameter values than the operation takes")
+    let length = numbers.length if numbers.length > total else total
+    var values = Growing[f64]()
+    try values.reserve(length)
+    var at: usize = 0
+    for spec in specs:
+        for _ in 0..<spec.components:
+            values.items[at] = numbers[at] if at < numbers.length else spec.initial
+            at += 1
+    for extra in total..<length: values.items[extra] = numbers[extra]
+    values.count = length
+    return values
 
 ## Weighted parents of interpolated elements (a new point on an edge, a new
 ## corner inside a face): element e takes entries offsets[e]..<offsets[e+1].
@@ -155,6 +177,8 @@ pub struct Verb:
     ## Groups of other domains convert with "all" related elements (Dissolve:
     ## a face group dissolves only the edges between its faces).
     pub let strict: bool = false
+    ## Whether numbers may follow the parameters (PolyDraw's drawn corners).
+    pub let trailing: bool = false
 
 ## A run's product: the output mesh, its selection and the warning.
 pub struct VerbRun:
@@ -205,9 +229,11 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
         var moved = try converted(&topology, bits.view(), domain, target, (strict_conversion(domain, target) or verb.strict) and not verb.loose)
         bits.close()
         bits = moved
+    var values = try filled_parms(verb.parms, numbers, verb.trailing)
+    defer values.close()
     var output = VerbOutput()
     defer output.close()
-    let input = VerbInput(source, bits.view(), Parms(numbers), symmetry, target)
+    let input = VerbInput(source, bits.view(), Parms(values.view()), symmetry, target)
     let cook = verb.cook
     try cook(&input, &output)
     let product = try finish(source, &output)
@@ -286,15 +312,18 @@ func select_edges(product: const Mesh*, output: VerbOutput*) -> !:
     output.selection = bits
     output.selection_domain = Domain.edge
 
-## Replace any `.selection` group of `mesh` with `bits` on `domain`.
+## Replace any `.selection` group of `mesh` with `bits` on `domain`. No
+## bits at all is a kernel that selected nothing; any other length must be
+## the domain's.
 func mark_selection(mesh: Mesh*, bits: Column[u64]*, domain: Domain) -> !:
     let domains: Domain[4] = [Domain.point, Domain.corner, Domain.face, Domain.edge]
     for other in domains: remove_attribute(mesh, ".selection", other)
     let count = (usize)(try mesh.domain_count((i64)(u8)domain))
-    if bits.count() < (count + 63) // 64:
+    if bits.count() == 0:
         var empty = try BitsBuilder.zeros(count)
         bits.release()
         *bits = empty.finish()
+    if bits.count() != (count + 63) // 64: trap("a verb's selection does not cover its domain")
     try put_attribute(mesh, try Attribute.group_of(".selection", domain, count, bits.view()))
 
 func blank(text: str) -> bool:

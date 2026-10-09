@@ -43,6 +43,7 @@ from geometries.polygon_triangulation import triangulate, unit_or_zero, is_degen
 import geometries.display_triangulation as display_triangles
 import geometries.position_edit
 import geometries.face_scratch
+from core.limits import max_corners, check_mesh_size
 
 ## Coordinates beyond this, or beyond `origin_ratio` times the model's
 ## size, keep an origin at the bounds center, so f32 positions stay precise
@@ -75,8 +76,7 @@ pub struct Mesh: PolygonTopology:
     ## A wholly -1 face requests ordinary triangulation. Explicit triangles are
     ## validated and affect rendering/picking, never the polygon edge topology.
     pub func init(points: const Vector3[], sizes: const i64[], corners: const i64[], display: const i64[]? = none, precise: bool = false) -> !:
-        if points.length > 8388608 or sizes.length > 8388608 or corners.length > 33554432:
-            error(errors.limit, "polygon mesh exceeds 8M points/faces or 32M corners")
+        try check_mesh_size(points.length, sizes.length, corners.length)
         var used: usize = 0
         var triangle_count: usize = 0
         for size in sizes:
@@ -84,7 +84,7 @@ pub struct Mesh: PolygonTopology:
                 error(errors.invalid, "a polygon needs at least 3 corners")
             used += (usize)size
             triangle_count += (usize)(size - 2)
-        if used != corners.length or triangle_count > 33554432:
+        if used != corners.length or triangle_count > max_corners:
             error(errors.invalid, "polygon sizes must describe every corner")
         var supplied: const i64[]
         if let given = display:

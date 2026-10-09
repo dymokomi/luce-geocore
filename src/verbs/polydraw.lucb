@@ -20,7 +20,7 @@ let polydraw_parms: ParmSpec[2] = [
     ParmSpec("Corners", ParmKind.integer, 0.0, 0.0, 8388608.0, 1, "", "How many drawn positions follow (x, y, z each); 0 makes the face through the group's points.")]
 
 pub func polydraw_verb() -> Verb:
-    return Verb("PolyDraw", "Modeling", "Add a polygon through drawn positions, or through the group's points", Domain.point, true, polydraw_parms, true, cook_polydraw)
+    return Verb("PolyDraw", "Modeling", "Add a polygon through drawn positions, or through the group's points", Domain.point, true, polydraw_parms, true, cook_polydraw, trailing = true)
 
 func cook_polydraw(input: const VerbInput*, output: VerbOutput*) -> !:
     let snap = input.parms.at(0)
@@ -36,7 +36,7 @@ func cook_polydraw(input: const VerbInput*, output: VerbOutput*) -> !:
     defer ring.close()
     let drawn = input.parms.at(1)
     # Any number of corners, up to the point budget.
-    if not (drawn >= 0.0 and drawn <= 8388608.0) or (drawn > 0.0 and 2 + (usize)drawn * 3 > input.parms.numbers.length):
+    if not (drawn >= 0.0 and drawn <= (f64)max_points) or (drawn > 0.0 and 2 + (usize)drawn * 3 > input.parms.numbers.length):
         error(errors.invalid, "PolyDraw needs 0 or more corners, and three numbers after its parameters for each")
     if drawn > 0.0:
         try drawn_corners(input, builder, snap, (usize)drawn, &ring)

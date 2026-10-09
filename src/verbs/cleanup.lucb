@@ -34,40 +34,30 @@ func cook_fuse(input: const VerbInput*, output: VerbOutput*) -> !:
     output.selection_domain = Domain.point
 
 ## Each group point's target: the lowest numbered earlier point within
-## `distance` (a spatial hash of cells that wide), else itself.
+## `distance` (a PointHash of cells that wide), else itself.
 func fuse_targets(input: const VerbInput*, distance: f64, target: i32[]) -> !:
-    let mesh = input.mesh
     let points = target.length
-    let positions = mesh.point_span()
-    let buckets: usize = 65536
-    let heads = try new i32[buckets] --- in memory.heap
-    defer free(heads) in memory.heap
-    let next = try new i32[points] --- in memory.heap
-    defer free(next) in memory.heap
-    for at in 0..<buckets: heads[at] = -1
+    let positions = input.mesh.point_span()
+    var grid = try PointHash.empty(points, distance)
+    defer grid.close()
     for point in 0..<points:
         target[point] = (i32)point
-        next[point] = -1
         if not input.group.get(point): continue
         let p = positions[point].vector()
-        let x = (i64)math.floor(p.x / distance)
-        let y = (i64)math.floor(p.y / distance)
-        let z = (i64)math.floor(p.z / distance)
+        let home = grid.cell_of(p)
         var found: i32 = -1
         for dx in (i64)-1..<(i64)2:
             for dy in (i64)-1..<(i64)2:
                 for dz in (i64)-1..<(i64)2:
-                    var candidate = heads[cell(x + dx, y + dy, z + dz, buckets)]
+                    var candidate = grid.first(home.moved(dx, dy, dz))
                     while candidate >= 0:
                         if positions[(usize)candidate].vector().subtract(p).length() <= distance and (found < 0 or candidate < found):
                             found = candidate
-                        candidate = next[(usize)candidate]
+                        candidate = grid.after(candidate)
         if found >= 0:
             target[point] = found
         else:
-            let bucket = cell(x, y, z, buckets)
-            next[point] = heads[bucket]
-            heads[bucket] = (i32)point
+            grid.insert(point, p)
 
 func cook_merge(input: const VerbInput*, output: VerbOutput*) -> !:
     let mode = input.parms.at(0)
@@ -141,10 +131,6 @@ func root(parent: i32[], point: i32) -> i32:
         parent[(usize)at] = parent[(usize)parent[(usize)at]]
         at = parent[(usize)at]
     return at
-
-func cell(x: i64, y: i64, z: i64, buckets: usize) -> usize:
-    let value = (x *% 73856093) ^ (y *% 19349663) ^ (z *% 83492791)
-    return (usize)(value & 0x7FFFFFFF) % buckets
 
 func cook_clean(input: const VerbInput*, output: VerbOutput*) -> !:
     let points = (usize)input.mesh.point_count()

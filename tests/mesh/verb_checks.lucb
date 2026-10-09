@@ -5,6 +5,7 @@
 import interop
 from luce_std import math
 import memory
+from verb_run import no_numbers
 from luce_geocore.geocore import Mesh, MeshPrimitives, AttributeKernels, Verbs, VerbResult, Vector3, Selection
 from luce_geocore.kernel import clear_group_cache, selection_weights
 
@@ -95,7 +96,7 @@ func face_verbs(mesh: interop.Reference[Mesh]) -> !:
     let two = try kept.value().mesh()
     defer two.release()
     assert(two.value().face_count() == 2 and two.value().point_count() == 6)
-    let reversed = try run(mesh, "Reverse", "0", [0.0])
+    let reversed = try run(mesh, "Reverse", "0", no_numbers())
     defer reversed.release()
     let flipped = try reversed.value().mesh()
     defer flipped.release()
@@ -103,7 +104,7 @@ func face_verbs(mesh: interop.Reference[Mesh]) -> !:
     near((try flipped.value().face_normal(0)).y, -(try mesh.value().face_normal(0)).y)
     let uv = flipped.value().find_attribute("uv", 1)
     near(try flipped.value().attribute_value(uv, 1, 1), try mesh.value().attribute_value(mesh.value().find_attribute("uv", 1), 2, 1))
-    let triangles = try run(mesh, "Triangulate", "0-3", [0.0])
+    let triangles = try run(mesh, "Triangulate", "0-3", no_numbers())
     defer triangles.release()
     let split_faces = try triangles.value().mesh()
     defer split_faces.release()
@@ -116,7 +117,7 @@ func face_verbs(mesh: interop.Reference[Mesh]) -> !:
     defer doubled.release()
     assert(doubled.value().face_count() == 17 and doubled.value().point_count() == 29)
     near((try doubled.value().point(25)).y, 0.5)
-    let split = try run(mesh, "Split", "0", [0.0])
+    let split = try run(mesh, "Split", "0", no_numbers())
     defer split.release()
     let apart = try split.value().mesh()
     defer apart.release()
@@ -194,12 +195,12 @@ func topology_verbs(mesh: interop.Reference[Mesh]) -> !:
     let capped = try filled.value().mesh()
     defer capped.release()
     assert(capped.value().face_count() == 16)
-    let dissolved = try run(mesh, "Dissolve", "p1-6", [0.0], 2)
+    let dissolved = try run(mesh, "Dissolve", "p1-6", no_numbers(), 2)
     defer dissolved.release()
     let joined = try dissolved.value().mesh()
     defer joined.release()
     assert(joined.value().face_count() == 15)
-    let block = try run(mesh, "Dissolve", "p1-6 p5-6 p6-7 p6-11", [0.0], 2)
+    let block = try run(mesh, "Dissolve", "p1-6 p5-6 p6-7 p6-11", no_numbers(), 2)
     defer block.release()
     let quad = try block.value().mesh()
     defer quad.release()
@@ -212,7 +213,7 @@ func topology_verbs(mesh: interop.Reference[Mesh]) -> !:
     let unfilled = try closed.value().mesh()
     defer unfilled.release()
     assert(unfilled.value().face_count() == 6 and closed.value().warning() != "")
-    let everything = try run(cube, "Dissolve", "", [0.0])
+    let everything = try run(cube, "Dissolve", "", no_numbers())
     defer everything.release()
     let whole = try everything.value().mesh()
     defer whole.release()
@@ -222,7 +223,7 @@ func topology_verbs(mesh: interop.Reference[Mesh]) -> !:
     let unflattened = try flat.value().mesh()
     defer unflattened.release()
     assert(unflattened.value().points_id() == cube.value().points_id() and flat.value().warning() != "")
-    let cleaned = try run(mesh, "Clean", "", [0.0])
+    let cleaned = try run(mesh, "Clean", "", no_numbers())
     defer cleaned.release()
     let same = try cleaned.value().mesh()
     defer same.release()
