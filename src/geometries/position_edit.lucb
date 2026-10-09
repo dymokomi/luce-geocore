@@ -166,18 +166,17 @@ func face_normals(context: void*, first: usize, end: usize, worker: usize):
         if not work.rigid and folded(work.shape, face):
             work.folded.store(1, .relaxed)
 
-## `face_normal`'s value without its error: the same sums in the same order, as
-## plain numbers read from the positions as flat floats, or none for a face without
-## an area.
+## The face's unit area normal from its positions, or none for a face without an area.
+## Points are read as `Float3` values, which stay in registers.
 func quick_normal(shape: const Shape*, face: usize) -> Float3?:
     let start = (usize)shape.offsets[face]
     let count = (usize)shape.offsets[face + 1] - start
     let corners = shape.corners[start..<start + count]
-    let xyz = flat(shape.positions)
-    let first = (usize)corners[0] * 3
-    let ox = (f64)xyz[first]
-    let oy = (f64)xyz[first + 1]
-    let oz = (f64)xyz[first + 2]
+    let positions = shape.positions
+    let o = positions[(usize)corners[0]]
+    let ox = (f64)o.x
+    let oy = (f64)o.y
+    let oz = (f64)o.z
     var ax: f64 = 0.0
     var ay: f64 = 0.0
     var az: f64 = 0.0
@@ -186,10 +185,10 @@ func quick_normal(shape: const Shape*, face: usize) -> Float3?:
     var dy: f64 = 0.0
     var dz: f64 = 0.0
     for at in 0..<count:
-        let next = (usize)corners[at + 1 if at + 1 < count else 0] * 3
-        let ex = (f64)xyz[next] - ox
-        let ey = (f64)xyz[next + 1] - oy
-        let ez = (f64)xyz[next + 2] - oz
+        let next = positions[(usize)corners[at + 1 if at + 1 < count else 0]]
+        let ex = (f64)next.x - ox
+        let ey = (f64)next.y - oy
+        let ez = (f64)next.z - oz
         extent2 = math.max(extent2, dx * dx + dy * dy + dz * dz)
         ax = ax + (dy * ez - dz * ey)
         ay = ay + (dz * ex - dx * ez)
@@ -203,35 +202,37 @@ func quick_normal(shape: const Shape*, face: usize) -> Float3?:
     let scale = 1.0 / length
     return Float3((f32)(ax * scale), (f32)(ay * scale), (f32)(az * scale))
 
-## Positions as flat floats, three to a point.
-func flat(positions: const Float3[]) -> const f32[]:
-    return f32[]((f32*)positions.data, positions.length * 3)
-
 ## A kept triangle folds when it degenerates or turns against its old facing
 ## (lengths compared squared).
 func folded(shape: const Shape*, face: usize) -> bool:
     let start = (usize)shape.offsets[face]
     let count = (usize)shape.offsets[face + 1] - start
     let first = (start - face * 2) * 3
-    let before_xyz = flat(shape.previous)
-    let after_xyz = flat(shape.positions)
+    let before = shape.previous
+    let after = shape.positions
     let triangles = shape.triangles[first..<first + (count - 2) * 3]
     for at in 0..<count - 2:
-        let a = (usize)shape.corners[(usize)triangles[at * 3]] * 3
-        let b = (usize)shape.corners[(usize)triangles[at * 3 + 1]] * 3
-        let c = (usize)shape.corners[(usize)triangles[at * 3 + 2]] * 3
-        let bx = (f64)before_xyz[b] - (f64)before_xyz[a]
-        let by = (f64)before_xyz[b + 1] - (f64)before_xyz[a + 1]
-        let bz = (f64)before_xyz[b + 2] - (f64)before_xyz[a + 2]
-        let cx = (f64)before_xyz[c] - (f64)before_xyz[a]
-        let cy = (f64)before_xyz[c + 1] - (f64)before_xyz[a + 1]
-        let cz = (f64)before_xyz[c + 2] - (f64)before_xyz[a + 2]
-        let ux = (f64)after_xyz[b] - (f64)after_xyz[a]
-        let uy = (f64)after_xyz[b + 1] - (f64)after_xyz[a + 1]
-        let uz = (f64)after_xyz[b + 2] - (f64)after_xyz[a + 2]
-        let vx = (f64)after_xyz[c] - (f64)after_xyz[a]
-        let vy = (f64)after_xyz[c + 1] - (f64)after_xyz[a + 1]
-        let vz = (f64)after_xyz[c + 2] - (f64)after_xyz[a + 2]
+        let a = (usize)shape.corners[(usize)triangles[at * 3]]
+        let b = (usize)shape.corners[(usize)triangles[at * 3 + 1]]
+        let c = (usize)shape.corners[(usize)triangles[at * 3 + 2]]
+        let pa = before[a]
+        let pb = before[b]
+        let pc = before[c]
+        let qa = after[a]
+        let qb = after[b]
+        let qc = after[c]
+        let bx = (f64)pb.x - (f64)pa.x
+        let by = (f64)pb.y - (f64)pa.y
+        let bz = (f64)pb.z - (f64)pa.z
+        let cx = (f64)pc.x - (f64)pa.x
+        let cy = (f64)pc.y - (f64)pa.y
+        let cz = (f64)pc.z - (f64)pa.z
+        let ux = (f64)qb.x - (f64)qa.x
+        let uy = (f64)qb.y - (f64)qa.y
+        let uz = (f64)qb.z - (f64)qa.z
+        let vx = (f64)qc.x - (f64)qa.x
+        let vy = (f64)qc.y - (f64)qa.y
+        let vz = (f64)qc.z - (f64)qa.z
         let wx = uy * vz - uz * vy
         let wy = uz * vx - ux * vz
         let wz = ux * vy - uy * vx
