@@ -9,7 +9,7 @@ from luce_std import math
 import memory
 from io import path
 from luce_geocore.geocore import Vector3, Matrix4, Mesh, MeshPrimitives, GeometrySet
-from luce_geocore.kernel import Sdf, SdfOp, SparseGrid, GridClass, GridSampler, Volume, Domain, primitive_sdf, combined_sdf, modified_sdf, placed_sdf, release_sdf, sampled_sdf, mesh_level_set, points_level_set, surface_mesh, release_grid, new_volume, add_grid, release_volume, volume_type, sdf_type, set_volume, set_sdf, empty_set, dispose_set, adopt_set, set_mesh, save_geometry, load_geometry, run_set_verb, find_set_verb, leaf_key, key_leaf, sdf_preview, mesh_adopt
+from luce_geocore.kernel import Sdf, SdfOp, SparseGrid, GridClass, GridSampler, Volume, Domain, primitive_sdf, combined_sdf, modified_sdf, placed_sdf, release_sdf, sampled_sdf, mesh_level_set, points_level_set, surface_mesh, release_grid, new_volume, add_grid, release_volume, volume_type, sdf_type, set_volume, set_sdf, empty_set, dispose_set, adopt_set, set_mesh, save_geometry, load_geometry, run_set_verb, find_set_verb, leaf_key, key_leaf, sdf_preview, mesh_adopt, volume_look
 from luce_geocore.core.growing import Growing
 
 func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
@@ -23,6 +23,7 @@ pub func exercise() -> !:
     try surfaces()
     try sets_and_files()
     try verbs()
+    try looks()
 
 ## A small, coarse pass over every kernel and verb, for allocation-failure
 ## injection (each stage reruns it): SDF programs, sampling, surface nets,
@@ -377,3 +378,27 @@ pub func verbs() -> !:
     assert(values >= 0 and plane.value().find_attribute("Cd", 0) >= 0)
     # The plane's middle point is the ball's center: one inside.
     assert(near(try plane.value().attribute_value(values, 8 * 17 + 8), -1.0, 0.001))
+
+## Volume Visualization: the look goes on as volvis_* detail attributes and
+## reads back, the grids shared untouched; a set without one reads the
+## defaults.
+pub func looks() -> !:
+    let empty = try adopt_set(try empty_set())
+    defer empty.release()
+    let fog = try apply("Volume", empty.value(), [0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 0.1, 0.0, 1.0, 1.0])
+    defer fog.release()
+    let plain = volume_look(fog.value())
+    assert(plain.density == 1.0 and plain.shadow == 1.0 and plain.emission == 0.0 and plain.step == 1.0 and plain.emission_field == "")
+    let verb = find_set_verb("Volume Visualization") else trap("no such verb")
+    var output = try run_set_verb(&verb, fog.value(), none, " heat ", 0, [4.0, 0.5, 0.6, 0.7, 2.0, 3.0, 1.0, 0.5, 0.0, 0.5])
+    defer output.close()
+    let made = output.set else trap("no set")
+    output.set = none
+    let shown = try adopt_set(made)
+    defer shown.release()
+    let look = volume_look(shown.value())
+    assert(look.density == 4.0 and look.smoke == Vector3(0.5, 0.6, 0.7) and look.shadow == 2.0 and look.emission == 3.0)
+    assert(look.emission_color == Vector3(1.0, 0.5, 0.0) and look.step == 0.5 and look.emission_field == "heat")
+    let before = set_volume(fog.value()) else trap("volume")
+    let after = set_volume(shown.value()) else trap("volume")
+    assert(after.grid_count() == 1 and after.grid(0) == before.grid(0))

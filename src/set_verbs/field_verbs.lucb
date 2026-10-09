@@ -330,3 +330,28 @@ func with_added_grid(input: const SetVerbInput*, grid: SparseGrid*, output: SetV
         dispose_set(storage)
         error(failure.code, failure.message)
     output.set = storage
+
+# mark: Volume Visualization
+
+let look_parms: ParmSpec[6] = [
+    ParmSpec("Density scale", ParmKind.number, 1.0, 0.0, 1000000.0, 1, "", "Multiplies every density: how thick the smoke looks.", 10.0),
+    ParmSpec("Smoke color", ParmKind.vector, 1.0, 0.0, 1.0, 3, "", "The color light scatters off the smoke with."),
+    ParmSpec("Shadow scale", ParmKind.number, 1.0, 0.0, 100.0, 1, "", "Multiplies the smoke's shadowing of itself: 0 lit throughout.", 4.0),
+    ParmSpec("Emission scale", ParmKind.number, 0.0, 0.0, 1000000.0, 1, "", "Light emitted per unit at an emission field value of 1.", 10.0),
+    ParmSpec("Emission color", ParmKind.vector, 1.0, 0.0, 1.0, 3, "", "The color of the emitted light."),
+    ParmSpec("Step", ParmKind.number, 1.0, 0.25, 8.0, 1, "", "The viewport's ray-marching step, in voxels: smaller is finer and slower.")]
+
+func volume_visualization_verb() -> SetVerb:
+    return SetVerb("Volume Visualization", "Volumes", "How the viewport draws fog volumes: density scale, smoke and emission colors, shadows", 1, false, false, look_parms, cook_visualization, "Emission field")
+
+## The input with its look as volvis_* detail attributes; the grids are
+## shared untouched. The text row names the emission field.
+func cook_visualization(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let p = input.parms
+    let look = VolumeLook(density = p.at(0), smoke = Vector3(p.at(1), p.at(2), p.at(3)), shadow = p.at(4), emission = p.at(5),
+                          emission_color = Vector3(p.at(6), p.at(7), p.at(8)), emission_field = strings.trim(input.group), step = p.at(9))
+    let storage = try input.set.storage()
+    errdefer dispose_set(storage)
+    try put_volume_look(storage, &look)
+    output.set = storage
+    if set_volume(input.set) == none: output.warning = "The input has no volume; the look waits for one"

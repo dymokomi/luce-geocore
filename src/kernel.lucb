@@ -275,6 +275,12 @@ pub type Volume = fields.Volume
 pub let volume_type = fields.volume_type
 ## A set's volume, borrowed while the set lives.
 pub let set_volume = fields.set_volume
+## How a set's fog volumes look (Volume Visualization's volvis_* details).
+pub type VolumeLook = fields.VolumeLook
+## A set's volume look, the defaults where it sets none.
+pub let volume_look = fields.volume_look
+## Put a volume look on a set as detail attributes.
+pub let put_volume_look = fields.put_volume_look
 ## A new volume of no grids.
 pub let new_volume = fields.new_volume
 ## Add a grid (taken) to a volume being built.

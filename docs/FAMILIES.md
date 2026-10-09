@@ -235,7 +235,13 @@ The viewport draws an SDF or a level set by its surface preview:
 - a level set's zero set.
 
 A fog volume has no surface preview: viewports ray-march its densities
-(luce-3d's `FogVolume`).
+(luce-3d's `FogVolume`). How it looks is Houdini's Volume Visualization:
+the **Volume Visualization** verb puts volvis_* detail attributes on the set
+(`volvis_densityscale`, `volvis_smokecolor`, `volvis_shadowscale`,
+`volvis_emitscale`, `volvis_emitcolor`, `volvis_emitfield`,
+`volvis_stepsize`) and leaves the grids shared and untouched; `volume_look`
+reads them back over the defaults. The emission field names a grid whose
+values emit light; it is not drawn as smoke itself.
 
 The preview is built once and kept with the component. A drag's frames may
 ask for a quick SDF preview instead (1/40 of the extent), kept apart, so the

@@ -1,0 +1,75 @@
+## How a set's fog volumes look in a viewport, Houdini's Volume Visualization:
+## detail attributes the display reads (volvis_*), set by the Volume
+## Visualization verb and leaving the grids alone. Detail attributes suit a
+## look: they exist on a volume-only set, travel with it through other verbs
+## (joins keep the first set's), and a changed look shares every grid, so a
+## display keyed by grid contents keeps its uploaded texels.
+
+let look_density: str = "volvis_densityscale"
+let look_smoke: str = "volvis_smokecolor"
+let look_shadow: str = "volvis_shadowscale"
+let look_emission: str = "volvis_emitscale"
+let look_emission_color: str = "volvis_emitcolor"
+let look_emission_field: str = "volvis_emitfield"
+let look_step: str = "volvis_stepsize"
+
+## A set's volume look; the defaults where it sets none.
+pub struct VolumeLook:
+    ## Multiplies every density (extinction per world unit at density 1).
+    pub var density: f64 = 1.0
+    ## The smoke's scattering color.
+    pub var smoke: Vector3 = Vector3(1.0, 1.0, 1.0)
+    ## Multiplies the optical depth toward the light: 0 unshadowed.
+    pub var shadow: f64 = 1.0
+    ## Light emitted per world unit at field value 1, and its color.
+    pub var emission: f64 = 0.0
+    pub var emission_color: Vector3 = Vector3(1.0, 1.0, 1.0)
+    ## The grid whose values emit ("" none); it is not drawn as smoke. It
+    ## borrows the set's storage.
+    pub var emission_field: str = ""
+    ## The ray-marching step, in voxels.
+    pub var step: f64 = 1.0
+
+## `set`'s volume look: its volvis_* detail attributes over the defaults.
+pub func volume_look(set: const GeometrySet*) -> VolumeLook:
+    let store = set_detail(set)
+    var look = VolumeLook()
+    look.density = look_number(store, look_density, look.density)
+    look.smoke = look_vector(store, look_smoke, look.smoke)
+    look.shadow = look_number(store, look_shadow, look.shadow)
+    look.emission = look_number(store, look_emission, look.emission)
+    look.emission_color = look_vector(store, look_emission_color, look.emission_color)
+    look.step = look_number(store, look_step, look.step)
+    let field = store.find(look_emission_field, Domain.detail)
+    if field >= 0: look.emission_field = store.entry((usize)field).text_at(0)
+    return look
+
+## Put `look` on `set` as volvis_* detail attributes.
+pub func put_volume_look(set: GeometrySet*, look: const VolumeLook*) -> !:
+    try put_numbers(set, look_density, [look.density])
+    try put_numbers(set, look_smoke, [look.smoke.x, look.smoke.y, look.smoke.z])
+    try put_numbers(set, look_shadow, [look.shadow])
+    try put_numbers(set, look_emission, [look.emission])
+    try put_numbers(set, look_emission_color, [look.emission_color.x, look.emission_color.y, look.emission_color.z])
+    try put_numbers(set, look_step, [look.step])
+    var table = TableBuilder()
+    defer table.close()
+    let index: i32[1] = [try table.intern(look.emission_field)]
+    var column = try table.finish()
+    defer column.release()
+    try set_put_detail(set, try Attribute.text(look_emission_field, Domain.detail, 1, column, index, Storage.single))
+
+func put_numbers(set: GeometrySet*, name: str, values: const f64[]) -> !:
+    try set_put_detail(set, try Attribute.from_numbers(name, Domain.detail, values.length, values, false))
+
+func look_number(store: const AttributeStore*, name: str, fallback: f64) -> f64:
+    let index = store.find(name, Domain.detail)
+    if index < 0: return fallback
+    return store.entry((usize)index).number(0, 0)
+
+func look_vector(store: const AttributeStore*, name: str, fallback: Vector3) -> Vector3:
+    let index = store.find(name, Domain.detail)
+    if index < 0: return fallback
+    let entry = store.entry((usize)index)
+    if entry.width < 3: return fallback
+    return Vector3(entry.number(0, 0), entry.number(0, 1), entry.number(0, 2))
