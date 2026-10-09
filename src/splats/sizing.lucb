@@ -1,0 +1,36 @@
+## Default sizes for splat conversions. A trained capture's median splat is
+## far finer than the capture: a voxel that small makes a grid, and a mesh
+## after it, of tens of millions of elements. capture_voxel sizes a voxel
+## from the capture's extent instead, its floaters left out, so the dense
+## box it spans holds about `budget` voxels; never finer than the median
+## splat (a small, sharp cloud keeps its detail).
+
+## Share of the points cut from each end of every axis as floaters when
+## measuring a capture's extent.
+let floater_share: f64 = 0.01
+
+## The voxel size for `points` (relative to any origin) whose splats have
+## standard deviations `scale`: the larger of the median splat size and the
+## edge of `budget` cubes filling the box between the 1st and 99th
+## percentile of each axis (a flat side counts at 1/64 of the longest).
+pub func capture_voxel(points: const Float3[], scale: const Floats*, budget: f64) -> f64!:
+    let count = points.length
+    if count == 0: return 0.0
+    let median = try median_largest(scale, count)
+    let values = try new f64[count] --- in memory.heap
+    defer free(values) in memory.heap
+    let cut = (usize)((f64)count * floater_share)
+    var sides: f64[3] = [0.0, 0.0, 0.0]
+    for axis in 0..<(usize)3:
+        for at in 0..<count:
+            let p = points[at]
+            let value = (f64)(p.x if axis == 0 else (p.y if axis == 1 else p.z))
+            values[at] = value if math.is_finite(value) else 0.0
+        let low = selected(values, cut)
+        let high = selected(values, count - 1 - cut)
+        sides[axis] = math.max(high - low, 0.0)
+    let longest = math.max(sides[0], math.max(sides[1], sides[2]))
+    if not (longest > 0.0) or not (budget >= 1.0): return median
+    var volume: f64 = 1.0
+    for side in sides: volume *= math.max(side, longest / 64.0)
+    return math.max(median, math.cbrt(volume / budget))

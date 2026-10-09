@@ -59,10 +59,14 @@ func cook_from_polygons(input: const SetVerbInput*, output: SetVerbOutput*) -> !
 # mark: GSplats to Volume
 
 let to_volume_parms: ParmSpec[4] = [
-    ParmSpec("Voxel Size", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "Distance between voxels; 0 is the splats' median size (largest σ).", 1.0),
+    ParmSpec("Voxel Size", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "Distance between voxels; 0 sizes them to the capture: about 16 million voxels (256³) across its extent, floaters left out, but never finer than the median splat.", 1.0),
     ParmSpec("Density Scale", ParmKind.number, 1.0, 0.0, 1000000.0, 1, "", "Multiplies every density. At 1 a splat a few voxels wide peaks near its opacity, and the grid's integral is the splats' mass.", 10.0),
     ParmSpec("Cutoff", ParmKind.number, 3.0, 2.0, 8.0, 1, "", "How many standard deviations each splat reaches."),
     ParmSpec("Keep Input", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep the splats beside the volume.")]
+
+## The dense voxels a Voxel Size of 0 spans the capture with (256³): its
+## surface then meshes to well under Convert to Mesh's point limit.
+let auto_voxel_budget: f64 = 16777216.0
 
 func gsplats_to_volume_verb() -> SetVerb:
     return SetVerb("GSplats to Volume", gsplats_category, "The splats' density as a fog volume; Convert to Mesh after it makes a surface", 1, false, false, to_volume_parms, cook_to_volume, "Name")
@@ -77,7 +81,7 @@ func cook_to_volume(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     var voxel = p.at(0)
     if not (voxel > 0.0):
         var sizes = Floats.of(store.entry((usize)float_attribute(store, scale_name, 3)))
-        voxel = try median_largest(&sizes, cloud.count())
+        voxel = try capture_voxel(cloud_positions(cloud), &sizes, auto_voxel_budget)
     if not (voxel > 0.0): error(errors.invalid, "the splats have no size: set a Voxel Size")
     var name = strings.trim(input.group)
     if name.length == 0: name = "density"

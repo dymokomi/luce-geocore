@@ -1,120 +1,182 @@
-## Consistent sides for unsigned axes over a neighbor graph, Hoppe et al.'s
-## (1992) propagation: in each connected part of the graph, start anywhere
-## and grow a minimum spanning tree by edge cost 1 - |aᵤ·aᵥ| (Prim's, with a
-## binary heap), each new node taking its tree parent's side. Nearly parallel
-## neighbors are joined first, so the side crosses creases and saddles last
-## and seldom wrong. Each part then keeps or flips its sides as a whole, by
-## the sum of the nodes' own votes for their axis (positive: as it points).
-## Normals from GSplats uses it so concave regions, whose local votes point
-## inward, still follow the rest of the surface.
+## Consistent sides for unsigned axes over a neighbor graph, after Hoppe et
+## al. (1992): in each connected part of the graph, a minimum spanning tree
+## by edge cost 1 - |aᵤ·aᵥ| carries one side from node to node, each node
+## taking its tree neighbor's side (flipped when their axes point apart).
+## Nearly parallel neighbors are joined first, so the side crosses creases
+## and saddles last and seldom wrong. Each part then keeps or flips its sides
+## as a whole, by the sum of the nodes' own votes for their axis (positive:
+## as it points). Normals from GSplats uses it so concave regions, whose
+## local votes point inward, still follow the rest of the surface.
 ##
-## The k-NN lists are not symmetric, so the graph takes every listed pair
-## both ways.
+## The tree is Borůvka's, so the costly part runs on the pool: each round,
+## every node finds its cheapest edge to another part in parallel, each part
+## keeps its nodes' cheapest, and the parts join along those edges. Parts at
+## least halve each round. Edges are ordered by cost, then by their two
+## nodes, a strict order that both ends see alike, so no round makes a
+## cycle. A node's k-NN list is not symmetric: each node scans only its own
+## list, and a part reached only through others' lists is joined by them.
 from core.growing import Growing
+
+## No edge: a node or part without a candidate this round.
+let no_edge: u64 = 0xFFFFFFFFFFFFFFFF
 
 ## Into `signs` (±1 per node), the side of each axis in `axes`; `neighbors`
 ## holds `k` slots per node, the first `found[i]` used; `votes` are the
 ## nodes' own preferences.
 pub func propagated_sides(axes: const Vector3[], neighbors: const u32[], found: const u8[], k: usize, votes: const f64[], signs: f64[]) -> !:
     let count = axes.length
-    # The symmetric graph as compressed rows.
+    if count == 0: return
+    var work: TreeWork
+    work.axes = axes
+    work.neighbors = neighbors
+    work.found = found
+    work.k = k
+    # Union-find parents, and each node's part (its root) as of this round.
+    work.parents = try new u32[count] --- in memory.heap
+    defer free(work.parents) in memory.heap
+    work.parts = try new u32[count] --- in memory.heap
+    defer free(work.parts) in memory.heap
+    # Each node's cheapest edge out of its part: the key (cost, then the
+    # lower node), and the other end.
+    work.best = try new u64[count] --- in memory.heap
+    defer free(work.best) in memory.heap
+    work.other = try new u32[count] --- in memory.heap
+    defer free(work.other) in memory.heap
+    # Per root: its part's cheapest edge this round.
+    let part_best = try new u64[count] --- in memory.heap
+    defer free(part_best) in memory.heap
+    let part_from = try new u32[count] --- in memory.heap
+    defer free(part_from) in memory.heap
+    let part_to = try new u32[count] --- in memory.heap
+    defer free(part_to) in memory.heap
+    for node in 0..<count:
+        work.parents[node] = (u32)node
+        work.parts[node] = (u32)node
+    # The tree's edges, as node pairs.
+    var tree = Growing[u32]()
+    defer tree.close()
+    var joined = true
+    while joined:
+        joined = false
+        ranges.each_range(count, 4096, (void*)&work, cheapest_range)
+        for node in 0..<count: part_best[node] = no_edge
+        for node in 0..<count:
+            let key = work.best[node]
+            if key == no_edge: continue
+            let root = (usize)work.parts[node]
+            if key < part_best[root] or (key == part_best[root] and tie_below(node, (usize)work.other[node], (usize)part_from[root], (usize)part_to[root])):
+                part_best[root] = key
+                part_from[root] = (u32)node
+                part_to[root] = work.other[node]
+        for root in 0..<count:
+            if part_best[root] == no_edge: continue
+            let a = root_of(work.parents, (usize)part_from[root])
+            let b = root_of(work.parents, (usize)part_to[root])
+            if a == b: continue
+            # The higher root joins the lower, so labels stay deterministic.
+            if a < b: work.parents[b] = (u32)a
+            else: work.parents[a] = (u32)b
+            try tree.push(part_from[root])
+            try tree.push(part_to[root])
+            joined = true
+        for node in 0..<count: work.parts[node] = (u32)root_of(work.parents, node)
+    try tree_sides(axes, tree.items[..<tree.count], votes, signs)
+
+## Whether edge (a, b) orders before (c, d) among equal keys: by the higher node.
+func tie_below(a: usize, b: usize, c: usize, d: usize) -> bool:
+    let first = a if a > b else b
+    let second = c if c > d else d
+    return first < second
+
+## The root of `node`, halving the path on the way.
+func root_of(parents: u32[], node: usize) -> usize:
+    var at = node
+    while (usize)parents[at] != at:
+        let up = (usize)parents[at]
+        parents[at] = parents[up]
+        at = up
+    return at
+
+struct TreeWork:
+    var axes: const Vector3[]
+    var neighbors: const u32[]
+    var found: const u8[]
+    var k: usize
+    var parents: u32[]
+    var parts: u32[]
+    var best: u64[]
+    var other: u32[]
+
+## Each node's cheapest listed edge to another part: the key is the cost in
+## the high half and the lower node in the low, so equal costs order alike
+## from both ends (tie_below breaks what remains).
+func cheapest_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (TreeWork*)context
+    for node in first..<end:
+        let part = work.parts[node]
+        let axis = work.axes[node]
+        var best = no_edge
+        var best_other: u32 = 0
+        for slot in 0..<(usize)work.found[node]:
+            let other = work.neighbors[node * work.k + slot]
+            if work.parts[(usize)other] == part: continue
+            let cost = math.clamp(1.0 - math.abs(axis.dot(work.axes[(usize)other])), 0.0, 1.0)
+            let low = node if node < (usize)other else (usize)other
+            let key = ((u64)(cost * 2147483647.0) << 32) | (u64)low
+            if key < best or (key == best and tie_below(node, (usize)other, node, (usize)best_other)):
+                best = key
+                best_other = other
+        work.best[node] = best
+        work.other[node] = best_other
+
+## Signs from the spanning forest `pairs` (node pairs): each part, walked from
+## its first node, carries the side over every tree edge, then faces the way
+## its votes say.
+func tree_sides(axes: const Vector3[], pairs: const u32[], votes: const f64[], signs: f64[]) -> !:
+    let count = axes.length
+    # The forest as compressed rows.
     let starts = try new usize[count + 1] in memory.heap
     defer free(starts) in memory.heap
-    for node in 0..<count:
-        starts[node + 1] += (usize)found[node]
-        for slot in 0..<(usize)found[node]: starts[(usize)neighbors[node * k + slot] + 1] += 1
+    for at in 0..<pairs.length: starts[(usize)pairs[at] + 1] += 1
     for node in 0..<count: starts[node + 1] += starts[node]
-    let edges = try new u32[starts[count] + 1] --- in memory.heap
+    let edges = try new u32[pairs.length + 1] --- in memory.heap
     defer free(edges) in memory.heap
     let filled = try new usize[count + 1] in memory.heap
     defer free(filled) in memory.heap
-    for node in 0..<count:
-        for slot in 0..<(usize)found[node]:
-            let other = (usize)neighbors[node * k + slot]
-            edges[starts[node] + filled[node]] = (u32)other
-            filled[node] += 1
-            edges[starts[other] + filled[other]] = (u32)node
-            filled[other] += 1
-    # Prim's growth, part by part; `order` lists the nodes as they join.
-    let best = try new f64[count + 1] --- in memory.heap
-    defer free(best) in memory.heap
-    for node in 0..<count:
-        best[node] = 2.0
-        signs[node] = 0.0
+    var at: usize = 0
+    while at + 1 < pairs.length:
+        let a = (usize)pairs[at]
+        let b = (usize)pairs[at + 1]
+        edges[starts[a] + filled[a]] = (u32)b
+        filled[a] += 1
+        edges[starts[b] + filled[b]] = (u32)a
+        filled[b] += 1
+        at += 2
+    for node in 0..<count: signs[node] = 0.0
+    # A breadth-first walk per part; `order` lists the nodes as they are reached.
     let order = try new u32[count + 1] --- in memory.heap
     defer free(order) in memory.heap
-    var heap = Growing[u64]()
-    defer heap.close()
-    var joined: usize = 0
+    var reached: usize = 0
     for seed in 0..<count:
         if signs[seed] != 0.0: continue
-        let first = joined
+        let first = reached
         signs[seed] = 1.0
-        order[joined] = (u32)seed
-        joined += 1
-        try offer(&heap, best, signs, axes, edges[starts[seed]..<starts[seed + 1]], seed)
-        while heap.count > 0:
-            let node = (usize)(heap_pop(&heap) & 0xFFFFFFFF)
-            if signs[node] != 0.0: continue
-            # The parent: the joined neighbor whose axis is most nearly parallel.
+        order[reached] = (u32)seed
+        reached += 1
+        var next = first
+        while next < reached:
+            let node = (usize)order[next]
+            next += 1
             let axis = axes[node]
-            var parent_dot: f64 = 0.0
-            var side: f64 = 1.0
             for other in edges[starts[node]..<starts[node + 1]]:
-                let s = signs[(usize)other]
-                if s == 0.0: continue
-                let d = axis.dot(axes[(usize)other])
-                if math.abs(d) > math.abs(parent_dot):
-                    parent_dot = d
-                    side = s if d >= 0.0 else -s
-            signs[node] = side
-            order[joined] = (u32)node
-            joined += 1
-            try offer(&heap, best, signs, axes, edges[starts[node]..<starts[node + 1]], node)
+                let to = (usize)other
+                if signs[to] != 0.0: continue
+                signs[to] = signs[node] if axis.dot(axes[to]) >= 0.0 else -signs[node]
+                order[reached] = other
+                reached += 1
         # The part's own votes decide which way it faces.
         var total: f64 = 0.0
-        for at in first..<joined: total += votes[(usize)order[at]] * signs[(usize)order[at]]
+        for index in first..<reached: total += votes[(usize)order[index]] * signs[(usize)order[index]]
         if total < 0.0:
-            for at in first..<joined: signs[(usize)order[at]] = -signs[(usize)order[at]]
-
-## Push the not yet joined neighbors `others` of `node` whose edge is cheaper
-## than any seen for them. A key is the cost in its high half, the node in its low.
-func offer(heap: Growing[u64]*, best: f64[], signs: const f64[], axes: const Vector3[], others: const u32[], node: usize) -> !:
-    let axis = axes[node]
-    for other in others:
-        let at = (usize)other
-        if signs[at] != 0.0: continue
-        let cost = math.clamp(1.0 - math.abs(axis.dot(axes[at])), 0.0, 1.0)
-        if cost >= best[at]: continue
-        best[at] = cost
-        try heap_push(heap, ((u64)(cost * 2147483647.0) << 32) | (u64)other)
-
-## A binary min-heap over `heap.items[..<heap.count]`.
-func heap_push(heap: Growing[u64]*, key: u64) -> !:
-    try heap.push(key)
-    let items = heap.items
-    var at = heap.count - 1
-    while at > 0:
-        let up = (at - 1) // 2
-        if items[up] <= key: break
-        items[at] = items[up]
-        at = up
-    items[at] = key
-
-func heap_pop(heap: Growing[u64]*) -> u64:
-    let items = heap.items
-    let top = items[0]
-    heap.count -= 1
-    let count = heap.count
-    if count == 0: return top
-    let last = items[count]
-    var at: usize = 0
-    while true:
-        var child = at * 2 + 1
-        if child >= count: break
-        if child + 1 < count and items[child + 1] < items[child]: child += 1
-        if items[child] >= last: break
-        items[at] = items[child]
-        at = child
-    items[at] = last
-    return top
+            for index in first..<reached: signs[(usize)order[index]] = -signs[(usize)order[index]]
