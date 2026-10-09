@@ -235,16 +235,21 @@ The viewport draws an SDF or a level set by its surface preview:
 - a level set's zero set.
 
 A fog volume has no surface preview: viewports ray-march its densities
-(luce-3d's `FogVolume`). How it looks is Houdini's Volume Visualization.
+(luce-3d's `FogVolume`, drawn by a `FogScene`). How it looks is Houdini's Volume Visualization.
 Houdini keeps a look in volvis_* attributes on each volume primitive; here
 each grid carries its own `VolumeLook` (fields/look.lucb), as a VDB grid
 carries metadata, so two fog grids of one set can show two smoke colors:
 
 - density scale, smoke color, shadow scale and the ray-marching step;
 - emission: a scale, the **emission field** (a grid whose values emit
-  light), and its color, either one color or an **emission color ramp**
-  (luce-std ramp numbers) spanning the field's values from the emission
-  min to the emission max;
+  light: the scale times the value per world unit, nothing where the value
+  is 0 or below), and its color, either one color or an **emission color
+  ramp** (luce-std ramp numbers) spanning the emission min to the emission
+  max; the ramp is read at the value of the **emission color field** when
+  the look names one (Houdini's Emission Color Field: temperature picks the
+  color while another field sets the strength), else at the emission
+  field's. Values outside the range, negative ones included, take the
+  ramp's nearer end;
 - the **density field**: a grid whose values show as this grid's density.
 
 The **Volume Visualization** verb puts a look on the grids its Group row
@@ -255,7 +260,8 @@ that rewrites a grid keeps it, and files save it.
 
 What draws is `fog_show`: every fog grid with voxels, with its own look,
 except a grid another grid's look names as its emission or density field,
-which lends its values instead. A grid naming a density field shows that
+or as its emission color field beside an emission field, which lends its
+values instead. A grid naming a density field shows that
 grid's values (nothing when the volume lacks it). A name reaches the grid of
 that name with the same voxels as the grid naming it, else the first one.
 

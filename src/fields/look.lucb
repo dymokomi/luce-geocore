@@ -7,9 +7,17 @@
 ## changes. A look travels with its grid through joins and placements, a Voxels
 ## run that rewrites a grid keeps it, and geometry files save it.
 ##
-## Which grids draw, and from which values, is `fog_shows`: a grid a look names
-## as its density or emission field lends its values to that grid's drawing and
-## is not drawn as smoke itself.
+## Which grids draw, and from which values, is `fog_show`: a grid a look names
+## as its density, emission or emission color field lends its values to that
+## grid's drawing and is not drawn as smoke itself.
+##
+## Emission, as Houdini's: the emission field's value times the emission scale
+## is the light emitted per world unit, never negative (a value below zero
+## emits nothing). Its color is the emission color, or with a ramp the ramp at
+## the place of a value in the emission range: the emission color field's value
+## when the look names one (Houdini's Emission Color Field, distinct from the
+## field giving the strength), else the emission field's. Values below the range
+## (negative ones too) take the ramp's left end, above it its right end.
 import strings
 from luce_std import ramp
 from core.paths import glob
@@ -39,11 +47,14 @@ pub struct VolumeLook:
     pub var emission_high: f64 = 1.0
     ## The ray-marching step, in voxels.
     pub var step: f64 = 1.0
-    ## The density and emission field names ("" none), kept in place.
+    ## The density, emission and emission color field names ("" none), kept
+    ## in place.
     var density_label: u8[64]
     var density_length: usize
     var emission_label: u8[64]
     var emission_length: usize
+    var color_label: u8[64]
+    var color_length: usize
     ## The emission color ramp: luce-std ramp numbers, none when empty.
     var ramp_numbers: f64[163]
     var ramp_length: usize
@@ -57,6 +68,11 @@ pub struct VolumeLook:
     pub func emission_field() -> str:
         return (str)self.emission_label[..<self.emission_length]
 
+    ## The grid whose values pick the emitted color along the emission range
+    ## ("" the emission field's): Houdini's emission color field.
+    pub func emission_color_field() -> str:
+        return (str)self.color_label[..<self.color_length]
+
     pub func set_density_field(name: str) -> !:
         if name.length > name_room: error(errors.invalid, "a field name is at most 64 bytes")
         memory.copy(self.density_label[..<name.length], name.bytes, name.length)
@@ -66,6 +82,11 @@ pub struct VolumeLook:
         if name.length > name_room: error(errors.invalid, "a field name is at most 64 bytes")
         memory.copy(self.emission_label[..<name.length], name.bytes, name.length)
         self.emission_length = name.length
+
+    pub func set_emission_color_field(name: str) -> !:
+        if name.length > name_room: error(errors.invalid, "a field name is at most 64 bytes")
+        memory.copy(self.color_label[..<name.length], name.bytes, name.length)
+        self.color_length = name.length
 
     ## The emission color ramp's numbers (luce-std ramp's form); empty when
     ## the emission color is used throughout.
@@ -82,9 +103,10 @@ pub struct VolumeLook:
             memory.copy(self.ramp_numbers[..<data.length], data, data.length)
         self.ramp_length = data.length
 
-    ## The color emitted at emission field value `value`, before the
-    ## emission scale and the value itself weight it: the ramp at the value's
-    ## place in the emission range, or the emission color.
+    ## The color emitted where the color's field (the emission color field,
+    ## else the emission field) holds `value`, before the emission scale and
+    ## the emission field weight it: the ramp at the value's place in the
+    ## emission range (clamped to its ends), or the emission color.
     pub func emission_color_at(value: f64) -> Vector3:
         if self.ramp_length == 0: return self.emission_color
         let span = self.emission_high - self.emission_low
@@ -97,6 +119,7 @@ pub struct VolumeLook:
         if self.density != other.density or self.smoke != other.smoke or self.shadow != other.shadow or self.emission != other.emission: return false
         if self.emission_color != other.emission_color or self.emission_low != other.emission_low or self.emission_high != other.emission_high: return false
         if self.step != other.step or self.density_field() != other.density_field() or self.emission_field() != other.emission_field(): return false
+        if self.emission_color_field() != other.emission_color_field(): return false
         if self.ramp_length != other.ramp_length: return false
         for at in 0..<self.ramp_length:
             if self.ramp_numbers[at] != other.ramp_numbers[at]: return false
@@ -111,17 +134,18 @@ pub func restyled(grid: const SparseGrid*, look: const VolumeLook*) -> SparseGri
 # mark: What draws
 
 ## One fog drawing of a volume: the grid whose look it takes, the grid whose
-## values show as its density (itself, or its density field) and its emission
-## field's grid, if any. They borrow the volume.
+## values show as its density (itself, or its density field), its emission
+## field's grid and its emission color field's, if any. They borrow the volume.
 pub struct FogShow:
     pub let styled: const SparseGrid*
     pub let density: const SparseGrid*
     pub let emission: const SparseGrid*?
+    pub let emission_color: const SparseGrid*?
 
 ## Fog drawing `index` of `volume` (see `fog_show_count`), or none past them.
 ## A fog grid with leaves draws with its own look unless a drawn grid's look
-## names it as its density or emission field, or another grid's look names it
-## as an emission field; it shows its density field's values when its look
+## names it as its density field, or another grid's look names it as an
+## emission field, or as an emission color field beside one; it shows its density field's values when its look
 ## names one (nothing when the volume lacks it), else its own. A name reaches
 ## the grid of that name with the same voxels as the grid naming it, else the
 ## first of that name.
@@ -129,7 +153,7 @@ pub func fog_show(volume: const Volume*, index: usize) -> FogShow?:
     var seen: usize = 0
     for at in 0..<volume.grid_count():
         let grid = volume.grid(at)
-        if not drawable(grid) or is_emission_field(volume, grid) or is_lent_density(volume, grid): continue
+        if not drawable(grid) or is_light_field(volume, grid) or is_lent_density(volume, grid): continue
         let look = &grid.look
         var density = grid
         if look.density_field().length > 0 and look.density_field() != grid.name():
@@ -137,7 +161,9 @@ pub func fog_show(volume: const Volume*, index: usize) -> FogShow?:
         if seen == index:
             var emission: const SparseGrid*? = none
             if look.emission_field().length > 0: emission = field_of(volume, look.emission_field(), density)
-            return FogShow(grid, density, emission)
+            var color: const SparseGrid*? = none
+            if emission != none and look.emission_color_field().length > 0: color = field_of(volume, look.emission_color_field(), density)
+            return FogShow(grid, density, emission, color)
         seen += 1
     return none
 
@@ -151,13 +177,18 @@ pub func fog_show_count(volume: const Volume*) -> usize:
 func drawable(grid: const SparseGrid*) -> bool:
     return grid.class == GridClass.fog and grid.leaf_count() > 0
 
-## Whether a fog grid's look in `volume` names `grid` as its emission field.
-func is_emission_field(volume: const Volume*, grid: const SparseGrid*) -> bool:
+## Whether a fog grid's look in `volume` names `grid` as its emission field,
+## or as its emission color field beside an emission field (alone it colors
+## nothing).
+func is_light_field(volume: const Volume*, grid: const SparseGrid*) -> bool:
     for at in 0..<volume.grid_count():
         let other = volume.grid(at)
         if other == grid or not drawable(other): continue
-        let name = other.look.emission_field()
-        if name.length > 0 and field_of(volume, name, other) == grid: return true
+        let emission = other.look.emission_field()
+        if emission.length == 0: continue
+        if field_of(volume, emission, other) == grid: return true
+        let color = other.look.emission_color_field()
+        if color.length > 0 and field_of(volume, color, other) == grid: return true
     return false
 
 ## Whether another fog grid, itself no emission field, shows `grid`'s values
@@ -165,7 +196,7 @@ func is_emission_field(volume: const Volume*, grid: const SparseGrid*) -> bool:
 func is_lent_density(volume: const Volume*, grid: const SparseGrid*) -> bool:
     for at in 0..<volume.grid_count():
         let other = volume.grid(at)
-        if other == grid or not drawable(other) or is_emission_field(volume, other): continue
+        if other == grid or not drawable(other) or is_light_field(volume, other): continue
         let name = other.look.density_field()
         if name.length > 0 and field_of(volume, name, other) == grid: return true
     return false

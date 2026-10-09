@@ -381,8 +381,8 @@ pub func verbs() -> !:
 
 ## Volume Visualization: a look goes on the grids its group names, each grid
 ## its own (Houdini's per-primitive volvis attributes), their voxels shared; a
-## grid named as an emission or density field lends its values and is not
-## drawn as smoke; a look survives a file.
+## grid named as an emission, emission color or density field lends its values
+## and is not drawn as smoke; a look survives a file.
 pub func looks() -> !:
     let empty = try adopt_set(try empty_set())
     defer empty.release()
@@ -438,6 +438,18 @@ pub func looks() -> !:
     let missing = try apply("Volume Visualization", fog.value(), [1.0], none, ["smoke", "nothing"])
     defer missing.release()
     assert(fog_show_count(set_volume(missing.value()) else trap("volume")) == 2)
+    # Heat gives density's emission its strength and smoke its color: one
+    # drawing, both fields lent; without an emission field no color field.
+    let colored = try apply("Volume Visualization", fog.value(), [1.0, 1.0, 1.0, 1.0, 1.0, 2.0], none, ["density", "", "heat", "", "smoke"])
+    defer colored.release()
+    let hued = set_volume(colored.value()) else trap("volume")
+    let lit = fog_show(hued, 0) else trap("show")
+    assert(fog_show_count(hued) == 1 and lit.emission == hued.grid(1) and lit.emission_color == hued.grid(2))
+    assert(hued.grid(0).look.emission_color_field() == "smoke" and not hued.grid(0).look.same(&density.look))
+    let unlit = try apply("Volume Visualization", fog.value(), [1.0], none, ["density", "", "", "", "smoke"])
+    defer unlit.release()
+    let dark = set_volume(unlit.value()) else trap("volume")
+    assert(fog_show_count(dark) == 3 and (fog_show(dark, 0) else trap("show")).emission_color == none)
     # A group naming no grid warns and changes nothing.
     let verb = find_set_verb("Volume Visualization") else trap("no such verb")
     var output = try run_set_verb(&verb, fog.value(), none, "", 0, [1.0], ["#7"])
@@ -454,3 +466,7 @@ pub func looks() -> !:
     let back = set_volume(loaded.value()) else trap("volume")
     let default_look = VolumeLook()
     assert(back.grid(0).look.same(&density.look) and back.grid(2).look.same(&volume.grid(2).look) and back.grid(1).look.same(&default_look))
+    _ = try save_geometry(colored.value(), (str)file.view(), 1, 1024)
+    let colored_back = try adopt_set(try load_geometry((str)file.view()))
+    defer colored_back.release()
+    assert((set_volume(colored_back.value()) else trap("volume")).grid(0).look.same(&hued.grid(0).look))

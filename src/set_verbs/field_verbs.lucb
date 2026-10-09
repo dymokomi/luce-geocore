@@ -340,21 +340,22 @@ func with_added_grid(input: const SetVerbInput*, grid: SparseGrid*, output: SetV
 ## then pale yellow (luce-std ramp numbers, linear between points).
 let flame_ramp: str = "1,3,4,0,0.2,0.01,0,1,0.35,1,0.18,0.01,1,0.7,1,0.55,0.08,1,1,1,0.85,0.4,1"
 
-let look_rows: TextRow[4] = [
+let look_rows: TextRow[5] = [
     TextRow("Group", "The grids the look goes on, by name: names and globs apart by spaces (smoke*), #2 the third grid. Empty: every grid."),
     TextRow("Density field", "The grid whose values show as the density, as Houdini's density field; it is not drawn as smoke itself. Empty: each grid shows its own."),
     TextRow("Emission field", "The grid whose values emit light (heat, temperature); it is not drawn as smoke itself. Empty: no emission."),
-    TextRow("Emission color ramp", "With Emission ramp on, the emitted color along the emission range: its left end at Emission min, its right at Emission max.", true, flame_ramp)]
+    TextRow("Emission color ramp", "With Emission ramp on, the emitted color along the emission range: its left end at Emission min, its right at Emission max.", true, flame_ramp),
+    TextRow("Emission color field", "The grid whose values pick the emitted color along the emission range (temperature, while the emission field gives the strength); it is not drawn as smoke itself. Empty: the emission field picks it.")]
 
 let look_parms: ParmSpec[9] = [
     ParmSpec("Density scale", ParmKind.number, 1.0, 0.0, 1000000.0, 1, "", "Multiplies every density: how thick the smoke looks.", 10.0),
     ParmSpec("Smoke color", ParmKind.vector, 1.0, 0.0, 1.0, 3, "", "The color light scatters off the smoke with."),
     ParmSpec("Shadow scale", ParmKind.number, 1.0, 0.0, 100.0, 1, "", "Multiplies the smoke's shadowing of itself: 0 lit throughout.", 4.0),
-    ParmSpec("Emission scale", ParmKind.number, 0.0, 0.0, 1000000.0, 1, "", "Light emitted per unit at an emission field value of 1.", 10.0),
+    ParmSpec("Emission scale", ParmKind.number, 0.0, 0.0, 1000000.0, 1, "", "Light emitted per unit at an emission field value of 1; where the field is 0 or below, none.", 10.0),
     ParmSpec("Emission color", ParmKind.vector, 1.0, 0.0, 1.0, 3, "", "The color of the emitted light, without the ramp."),
     ParmSpec("Emission ramp", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Color the emission by the emission color ramp along the emission range (Houdini's Emission Color Ramp); off, the emission color throughout."),
-    ParmSpec("Emission min", ParmKind.number, 0.0, -1000000.0, 1000000.0, 1, "", "The emission field value at the ramp's left end.", 1.0),
-    ParmSpec("Emission max", ParmKind.number, 1.0, -1000000.0, 1000000.0, 1, "", "The emission field value at the ramp's right end.", 1.0),
+    ParmSpec("Emission min", ParmKind.number, 0.0, -1000000.0, 1000000.0, 1, "", "The value at the ramp's left end (of the emission color field, else the emission field); values below it take that end.", 1.0),
+    ParmSpec("Emission max", ParmKind.number, 1.0, -1000000.0, 1000000.0, 1, "", "The value at the ramp's right end; values above it take that end.", 1.0),
     ParmSpec("Step", ParmKind.number, 1.0, 0.25, 8.0, 1, "", "The viewport's ray-marching step, in voxels: smaller is finer and slower.")]
 
 func volume_visualization_verb() -> SetVerb:
@@ -369,6 +370,7 @@ func cook_visualization(input: const SetVerbInput*, output: SetVerbOutput*) -> !
                           emission_color = Vector3(p.at(6), p.at(7), p.at(8)), emission_low = p.at(10), emission_high = p.at(11), step = p.at(12))
     try look.set_density_field(input.text(1))
     try look.set_emission_field(input.text(2))
+    try look.set_emission_color_field(input.text(4))
     if p.at(9) != 0.0:
         var numbers = try ramp_numbers(input.text(3) if input.text(3).length > 0 else flame_ramp)
         defer numbers.close()

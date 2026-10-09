@@ -40,6 +40,7 @@ func encode_look(writer: GeometryWriter*, look: const VolumeLook*) -> !:
     try writer.crate.copied_array("look", dtype_float64, 12, u8[]((u8*)&numbers[0], 96))
     if look.density_field().length > 0: try writer.crate.text("density_field", look.density_field())
     if look.emission_field().length > 0: try writer.crate.text("emission_field", look.emission_field())
+    if look.emission_color_field().length > 0: try writer.crate.text("emission_color_field", look.emission_color_field())
     let ramp = look.emission_ramp()
     if ramp.length > 0: try writer.crate.copied_array("emission_ramp", dtype_float64, ramp.length, u8[]((u8*)ramp.data, ramp.length * 8))
 
@@ -88,12 +89,13 @@ func decode_volume(reader: GeometryReader*, path: str) -> void*!:
                 look.emission_low = parts[9]
                 look.emission_high = parts[10]
                 look.step = parts[11]
-            elif label == "density_field" or label == "emission_field":
+            elif label == "density_field" or label == "emission_field" or label == "emission_color_field":
                 var text = Growing[u8]()
                 defer text.close()
                 try reader.text(header, &text)
                 if label == "density_field": try look.set_density_field((str)text.view())
-                else: try look.set_emission_field((str)text.view())
+                elif label == "emission_field": try look.set_emission_field((str)text.view())
+                else: try look.set_emission_color_field((str)text.view())
             elif label == "emission_ramp":
                 var ramp: f64[163]
                 if header.dtype != dtype_float64 or header.bytes % 8 != 0 or header.bytes > 163 * 8: error(errors.invalid, "a grid's emission ramp is at most 163 float64s")

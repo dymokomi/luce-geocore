@@ -20,7 +20,7 @@ pub func run_all() -> !:
     let node = VerbCatalog.index_of("Volume")
     expect(VerbCatalog.text_row_count(node) == 1 and VerbCatalog.text_row_label(node, 0) == "Name" and VerbCatalog.text_row_count(0) == 0 and not VerbCatalog.grouped(node), "the Volume node's Name row")
     let look = VerbCatalog.index_of("Volume Visualization")
-    expect(VerbCatalog.text_row_count(look) == 4 and VerbCatalog.text_row_ramp(look, 3) and not VerbCatalog.text_row_ramp(look, 2) and VerbCatalog.text_row_initial(look, 3) != "", "Volume Visualization's text and ramp rows")
+    expect(VerbCatalog.text_row_count(look) == 5 and VerbCatalog.text_row_ramp(look, 3) and not VerbCatalog.text_row_ramp(look, 2) and not VerbCatalog.text_row_ramp(look, 4) and VerbCatalog.text_row_initial(look, 3) != "", "Volume Visualization's text and ramp rows")
     try noise_density()
     try sdf_union()
     try gradient()
