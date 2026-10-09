@@ -4,8 +4,8 @@
 ## (grids side by side; SDF programs as a union), describe themselves and
 ## have no polygons. Their display is a surface preview built once and kept
 ## with the component: an SDF's zero set sampled at 1/128 of its extent and
-## pulled onto the exact surface; a level set's zero set; a fog volume's
-## half-maximum density.
+## pulled onto the exact surface, and a level set's zero set. A fog volume has
+## no surface: viewports ray-march its densities (luce-3d's FogVolume).
 
 pub struct Volume:
     pub var users: @usize
@@ -187,7 +187,8 @@ pub func sdf_preview(sdf: const Sdf*, quick: bool = false) -> const Mesh*?!:
     cache.preview_voxel = voxel
     return mesh
 
-## The volume's surface preview, built on first use and kept.
+## The surface preview of the volume's level sets, built on first use and
+## kept; fog grids have none.
 pub func volume_preview(volume: const Volume*) -> const Mesh*?!:
     let cache = (Volume*)volume
     cache.lock.lock()
@@ -198,14 +199,8 @@ pub func volume_preview(volume: const Volume*) -> const Mesh*?!:
         for part in parts.view(): mesh_dispose(part)
         parts.close()
     for grid in volume.grids.view():
-        if grid.leaf_count() == 0: continue
-        var iso = 0.0
-        if grid.class == GridClass.fog:
-            var highest = 0.0
-            for value in grid.values.view(): highest = math.max(highest, (f64)value)
-            if highest <= 0.0: continue
-            iso = highest * 0.5
-        try push_mesh(&parts, try surface_mesh(grid, iso, none))
+        if grid.leaf_count() == 0 or grid.class == GridClass.fog: continue
+        try push_mesh(&parts, try surface_mesh(grid, 0.0, none))
     if parts.count == 1:
         cache.preview = parts.items[0]
         parts.count = 0

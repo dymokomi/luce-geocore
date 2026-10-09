@@ -1,12 +1,12 @@
 ## Luce's view of fields: the preview surface the viewport draws for a set's
-## SDF and volume.
+## SDF and level sets (fog grids are ray-marched instead).
 
 pub struct Fields:
     let reserved: u8 = 0
 
-    ## The surface preview of the set's own SDF and volume (not its
-    ## instances'), one mesh; none when it has neither. Built once per
-    ## component and kept with it.
+    ## The surface preview of the set's own SDF and level sets (not its
+    ## instances'), one mesh; none when it has neither (fog grids have no
+    ## surface). Built once per component and kept with it.
     ## `quick` asks for a coarse SDF surface (a drag's frames); a full
     ## request later builds the full one.
     pub static func preview(geometry: interop.Reference[GeometrySet], quick: bool = false) -> interop.Reference[Mesh]?!:
