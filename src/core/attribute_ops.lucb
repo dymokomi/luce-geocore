@@ -60,15 +60,31 @@ func remapped_ragged(source: const Attribute*, parents: const i32[], elements: u
     let item = source.width * 4
     var values = try Column[u8].allocate((usize)total * item)
     errdefer values.release()
-    let output = values.span()
-    let input = source.data.view()
-    for at in 0..<elements:
-        let parent = parents[at]
-        if parent < 0: continue
-        let count = source.item_count((usize)parent)
-        let from_item = source.first_item((usize)parent)
-        memory.copy(output[(usize)bounds[at] * item..<((usize)bounds[at] + count) * item], input[from_item * item..<(from_item + count) * item], count * item)
+    var work = RaggedWork(source, parents, bounds, values.span(), item)
+    try parallel.for_each_range(elements, 16384, (void*)&work, gather_ragged)
     return try Attribute.ragged(source.name(), source.domain, source.kind, source.width, offsets, values)
+
+## An array gather's inputs: each element's items go to its new offset.
+struct RaggedWork:
+    let source: const Attribute*
+    let parents: const i32[]
+    let bounds: const u32[]
+    let output: u8[]
+    ## Bytes per item.
+    let item: usize
+
+func gather_ragged(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (RaggedWork*)context
+    let input = work.source.data.view()
+    let item = work.item
+    for at in first..<end:
+        let parent = work.parents[at]
+        if parent < 0: continue
+        let count = work.source.item_count((usize)parent)
+        let from_item = work.source.first_item((usize)parent)
+        let to = (usize)work.bounds[at] * item
+        memory.copy(work.output[to..<to + count * item], input[from_item * item..<(from_item + count) * item], count * item)
 
 ## The array attribute of a concatenation: each piece's elements' arrays in turn, empty
 ## arrays where a piece lacks it. Pieces must agree on item kind and width.

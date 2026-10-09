@@ -3,40 +3,90 @@
 ## points within a radius (its isolation test); Reduce GSplats finds each
 ## splat's nearest few to merge with. Cells hash into a table of a power of
 ## two buckets at least twice the points, so a bucket can hold several cells;
-## every candidate is checked by its distance, which keeps answers exact.
+## a search visiting a cube takes only that cube's points (by their positions), and every candidate is checked by its distance, which
+## keeps answers exact.
+##
+## A search walks rings of cubes outward from the query's own (ring r: the
+## cubes r steps away along some axis) and stops once the next ring lies
+## beyond the radius, or, for the nearest k, beyond the k-th found. `for_radius`
+## picks cubes a fraction of the radius wide where the cloud is dense, so a
+## query reads a few cubes' points instead of a radius-wide neighborhood's.
 
 ## Points bucketed by the cube of side `cell` they lie in.
 pub struct PointHash:
     let points: const Float3[]
     let cell: f64
     let mask: u64
-    ## Bucket b's points are order[starts[b]..<starts[b + 1]].
+    ## Bucket b's points are order[starts[b]..<starts[b + 1]]; slots[s] is the
+    ## position of the point at slot s, so a bucket's points read in a row.
     var starts: u32[]
     var order: u32[]
+    var slots: Float3[]
 
-    ## The hash of `points` with cubes of side `cell` (> 0).
+    ## The hash of `points` with cubes of side `cell` (> 0). Each point's
+    ## bucket is found on the pool; counting and placing them are sequential
+    ## passes.
     pub static func build(points: const Float3[], cell: f64) -> PointHash!:
-        var size: usize = 64
-        while size < points.length * 2: size *= 2
+        let size = bucket_count(points.length)
         let starts = try new u32[size + 1] in memory.heap
         errdefer free(starts) in memory.heap
         let order = try new u32[points.length + 1] --- in memory.heap
         errdefer free(order) in memory.heap
-        var made = PointHash(points, cell, (u64)(size - 1), starts, order)
-        for p in points: starts[(usize)made.bucket(made.cube(p.vector())) + 1] += 1
+        let slots = try new Float3[points.length + 1] --- in memory.heap
+        errdefer free(slots) in memory.heap
+        var made = PointHash(points, cell, (u64)(size - 1), starts, order, slots)
+        let keys = try made.buckets()
+        defer free(keys) in memory.heap
+        for key in keys[..<points.length]: starts[(usize)key + 1] += 1
         for at in 0..<size: starts[at + 1] += starts[at]
         let filled = try new u32[size] in memory.heap
         defer free(filled) in memory.heap
         for (index, p) in points.indexed():
-            let b = (usize)made.bucket(made.cube(p.vector()))
-            order[(usize)starts[b] + (usize)filled[b]] = (u32)index
+            let b = (usize)keys[index]
+            let slot = (usize)starts[b] + (usize)filled[b]
+            order[slot] = (u32)index
+            slots[slot] = p
             filled[b] += 1
         return made
+
+    ## Every point's bucket, found on the pool (one more entry than points;
+    ## the caller frees it).
+    func buckets() -> u32[]!:
+        let keys = try new u32[self.points.length + 1] --- in memory.heap
+        var work = BucketWork(&self, keys)
+        ranges.each_range(self.points.length, 16384, (void*)&work, bucket_range)
+        return keys
+
+    ## A hash for searches within `radius` (> 0): cubes of side radius / m, m
+    ## from 1 to 8 chosen so a point's cube holds about `points_per_cube` points
+    ## (measured on radius-wide cubes: the mean, over points, of the points
+    ## sharing one's cube, which dense regions dominate as they dominate the
+    ## searches).
+    pub static func for_radius(points: const Float3[], radius: f64) -> PointHash!:
+        let size = bucket_count(points.length)
+        let counts = try new u32[size] in memory.heap
+        defer free(counts) in memory.heap
+        let probe = PointHash(points, radius, (u64)(size - 1), no_order(), no_order(), no_points())
+        let keys = try probe.buckets()
+        defer free(keys) in memory.heap
+        for key in keys[..<points.length]: counts[(usize)key] += 1
+        var shared: f64 = 0.0
+        for count in counts: shared += (f64)count * (f64)count
+        let per_cube = shared / (f64)(points.length if points.length > 0 else 1)
+        let m = math.clamp(math.round(math.cbrt(per_cube / points_per_cube)), 1.0, 8.0)
+        return try PointHash.build(points, radius / m)
+
+    ## The point at slot `slot` (0..<count): visiting points in slot order
+    ## visits them cube by cube, so neighboring queries share their cubes in
+    ## cache.
+    pub func point_at(slot: usize) -> usize:
+        return (usize)self.order[slot]
 
     ## Release the buckets.
     pub func close():
         free(self.starts) in memory.heap
         free(self.order) in memory.heap
+        free(self.slots) in memory.heap
 
     ## The integer cube a point lies in (a non-finite point: cube 0).
     func cube(p: Vector3) -> Cube:
@@ -46,64 +96,133 @@ pub struct PointHash:
         let h = ((u64)(c.x + cube_offset) *% 73856093) ^ ((u64)(c.y + cube_offset) *% 19349663) ^ ((u64)(c.z + cube_offset) *% 83492791)
         return (h ^ (h >> 17)) & self.mask
 
-    ## The buckets of the 27 cubes around `center`, each once (cubes can share a
-    ## bucket), into `out`; returns how many.
-    func around(center: Cube, out: u64[]) -> usize:
-        var count: usize = 0
-        for dx in -1..<(i64)2:
-            for dy in -1..<(i64)2:
-                for dz in -1..<(i64)2:
-                    let b = self.bucket(Cube(center.x + dx, center.y + dy, center.z + dz))
-                    var seen = false
-                    for at in 0..<count: seen = seen or out[at] == b
-                    if not seen:
-                        out[count] = b
-                        count += 1
-        return count
+    ## How far `p` is from the faces of its cube `c`, at least.
+    func inset(p: Vector3, c: Cube) -> f64:
+        let low = Vector3((f64)c.x * self.cell, (f64)c.y * self.cell, (f64)c.z * self.cell)
+        let a = math.min(p.x - low.x, low.x + self.cell - p.x)
+        let b = math.min(p.y - low.y, low.y + self.cell - p.y)
+        let d = math.min(p.z - low.z, low.z + self.cell - p.z)
+        return math.max(math.min(a, math.min(b, d)), 0.0)
 
-    ## How many other points lie within `radius` (at most the cell) of point
-    ## `index`, counting no further than `most`.
+    ## How many other points lie within `radius` of point `index`, counting no
+    ## further than `most`.
     pub func count_within(index: usize, radius: f64, most: usize) -> usize:
         let p = self.points[index].vector()
         let center = self.cube(p)
         let limit = radius * radius
+        let inset = self.inset(p, center)
         var found: usize = 0
-        var buckets: u64[27]
-        for b in buckets[..<self.around(center, buckets)]:
-            for slot in (usize)self.starts[(usize)b]..<(usize)self.starts[(usize)b + 1]:
-                let other = (usize)self.order[slot]
-                if other == index: continue
-                if not (distance2(self.points[other], p) <= limit): continue
-                found += 1
-                if found >= most: return found
+        var ring: i64 = 0
+        while true:
+            # Every point of ring r is at least (r - 1) cells and the inset away.
+            if ring > 0 and (f64)(ring - 1) * self.cell + inset > radius: break
+            var walk = RingWalk.of(center, ring)
+            while let c = walk.next():
+                let b = (usize)self.bucket(c)
+                for slot in (usize)self.starts[b]..<(usize)self.starts[b + 1]:
+                    if not (distance2(self.slots[slot], p) <= limit): continue
+                    # A bucket can hold other cubes' points: take this cube's.
+                    if (usize)self.order[slot] == index or not self.cube(self.slots[slot].vector()).equals(c): continue
+                    found += 1
+                    if found >= most: return found
+            ring += 1
         return found
 
     ## The up to `k` (at most 16) nearest other points of point `index` within
-    ## one cell, nearest first, into `out`; returns how many.
-    pub func nearest(index: usize, k: usize, out: u32[]) -> usize:
+    ## `radius`, nearest first, into `out`; returns how many.
+    pub func nearest(index: usize, k: usize, radius: f64, out: u32[]) -> usize:
         let p = self.points[index].vector()
         let center = self.cube(p)
-        let limit = self.cell * self.cell
+        let limit = radius * radius
+        let inset = self.inset(p, center)
         var distances: f64[16]
         var found: usize = 0
-        var buckets: u64[27]
-        for b in buckets[..<self.around(center, buckets)]:
-            for slot in (usize)self.starts[(usize)b]..<(usize)self.starts[(usize)b + 1]:
-                let other = (usize)self.order[slot]
-                if other == index: continue
-                let d = distance2(self.points[other], p)
-                if not (d <= limit): continue
-                if found == k and d >= distances[k - 1]: continue
-                # Insert in order; a full list drops its farthest.
-                var at = found if found < k else k - 1
-                while at > 0 and distances[at - 1] > d:
-                    distances[at] = distances[at - 1]
-                    out[at] = out[at - 1]
-                    at -= 1
-                distances[at] = d
-                out[at] = (u32)other
-                if found < k: found += 1
+        var ring: i64 = 0
+        while true:
+            if ring > 0:
+                let near = (f64)(ring - 1) * self.cell + inset
+                if near > radius: break
+                # A full list keeps only nearer points; this ring has none.
+                if found == k and near * near >= distances[k - 1]: break
+            var walk = RingWalk.of(center, ring)
+            while let c = walk.next():
+                let b = (usize)self.bucket(c)
+                for slot in (usize)self.starts[b]..<(usize)self.starts[b + 1]:
+                    let d = distance2(self.slots[slot], p)
+                    if not (d <= limit): continue
+                    if found == k and d >= distances[k - 1]: continue
+                    # A bucket can hold other cubes' points: take this cube's.
+                    let other = (usize)self.order[slot]
+                    if other == index or not self.cube(self.slots[slot].vector()).equals(c): continue
+                    # Insert in order; a full list drops its farthest.
+                    var at = found if found < k else k - 1
+                    while at > 0 and distances[at - 1] > d:
+                        distances[at] = distances[at - 1]
+                        out[at] = out[at - 1]
+                        at -= 1
+                    distances[at] = d
+                    out[at] = (u32)other
+                    if found < k: found += 1
+            ring += 1
         return found
+
+struct BucketWork:
+    let hash: const PointHash*
+    let keys: u32[]
+
+func bucket_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (BucketWork*)context
+    let hash = work.hash
+    for at in first..<end: work.keys[at] = (u32)hash.bucket(hash.cube(hash.points[at].vector()))
+
+## The cubes of ring `ring` around a center: those whose largest axis step
+## from it is `ring`, x-major. Ring 0 is the center alone.
+struct RingWalk:
+    let center: Cube
+    let ring: i64
+    var dx: i64
+    var dy: i64
+    var dz: i64
+    var done: bool
+
+    static func of(center: Cube, ring: i64) -> RingWalk:
+        return RingWalk(center, ring, -ring, -ring, -ring, false)
+
+    ## The next cube of the ring, or none after the last. A column (dx, dy)
+    ## on the ring's x or y faces holds every z of -r..r; one inside them only
+    ## z = -r and z = r. Every column starts at z = -r.
+    func next() -> Cube?:
+        if self.done: return none
+        let r = self.ring
+        let (x, y, z) = (self.dx, self.dy, self.dz)
+        let face = x == -r or x == r or y == -r or y == r
+        if face and z < r: self.dz = z + 1
+        elif not face and z == -r: self.dz = r
+        else:
+            self.dz = -r
+            if y < r: self.dy = y + 1
+            elif x < r:
+                self.dy = -r
+                self.dx = x + 1
+            else: self.done = true
+        return Cube(self.center.x + x, self.center.y + y, self.center.z + z)
+
+## What `for_radius` aims a point's cube to hold: fewer cubes are slower to
+## visit, more points slower to test (measured on a 1.16M-splat capture).
+let points_per_cube: f64 = 12.0
+
+## The hash table size for `count` points: a power of two at least twice it.
+func bucket_count(count: usize) -> usize:
+    var size: usize = 64
+    while size < count * 2: size *= 2
+    return size
+
+func no_order() -> u32[]:
+    return u32[]((u32*)0, 0)
+
+func no_points() -> Float3[]:
+    return Float3[]((Float3*)0, 0)
 
 ## Cube indices are offset by this before hashing, so they hash as unsigned.
 let cube_offset: i64 = 1099511627776
@@ -117,6 +236,9 @@ struct Cube:
     let x: i64
     let y: i64
     let z: i64
+
+    func equals(other: Cube) -> bool:
+        return self.x == other.x and self.y == other.y and self.z == other.z
 
 ## The squared distance from `a` to `p`.
 func distance2(a: Float3, p: Vector3) -> f64:

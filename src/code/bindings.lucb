@@ -9,7 +9,7 @@ let accessor_names: str[7] = ["f32", "f64", "i32", "i64", "vec2", "vec3", "vec4"
 let accessor_lanes: usize[7] = [1, 1, 1, 1, 2, 3, 4]
 
 ## The bindings of `mode`. With `layout`, the input's columns are declared and reads of
-## missing ones give 0; without it (checking with no geometry) every read is allowed.
+## missing ones give 0 (`orient` the identity); without it (checking with no geometry) every read is allowed.
 func make_host(mode: RunOver, layout: const Layout*?) -> Host!:
     var host = Host()
     errdefer host.destroy()
@@ -93,6 +93,8 @@ func make_host(mode: RunOver, layout: const Layout*?) -> Host!:
     try bind_splats(&host)
     if let given = layout:
         host.missing_reads_zero()
+        # A point without a rotation is unrotated: `p.orient` reads the identity.
+        try host.missing_reads("orient", [0.0, 0.0, 0.0, 1.0])
         for column in given.columns.view():
             try host.column(column.name, column.kind, column.components)
     return host

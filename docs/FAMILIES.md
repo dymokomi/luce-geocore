@@ -291,15 +291,22 @@ them, and the design is luced-3d's `docs/research/GAUSSIAN-SPLATS.md`.
   GSplats** keeps a box, a sphere or the second input's bounds, inside or out,
   by center or by the 3σ extent (any cloud). **Clean GSplats** removes (or
   groups) faint, huge, needle-like, non-finite and isolated splats; its
-  neighbor counts use `PointHash` (`splats/neighbors.lucb`). **Reduce GSplats**
-  reaches a count or ratio by merging nearest pairs with moment matching (mass
-  and mass-weighted centroid kept) or by dropping the lightest (opacity ·
-  σ₁σ₂σ₃) with the others' opacity raised to keep the mass.
+  neighbor counts use `PointHash` (`splats/neighbors.lucb`: ring searches over
+  cubes sized to the cloud's density). **Reduce GSplats** reaches a count or
+  ratio by merging nearest pairs with moment matching (mass and mass-weighted
+  centroid kept) or by dropping the lightest (opacity · σ₁σ₂σ₃) with the
+  others' opacity raised to keep the mass. Every pass runs on the pool: the
+  neighbor search, the candidate pairs (each once), a parallel merge sort of
+  their costs, the gathers and the merges; only the greedy matching is
+  sequential (halving a 1.16M-splat capture takes about 0.5 s).
 - **Point nodes on clouds.** `SetAttributes` deletes cloud points by a group
   expression (Blast, Delete), groups them (Selection Group) and promotes point
   and detail attributes. A cloud's expressions are read through a faceless mesh
   of its points (`cloud_mesh`), which is also how the Code node runs over a
-  cloud (Run Over Points on a set without a mesh).
+  cloud (Run Over Points on a set without a mesh). The run gives a cloud back:
+  every point it kept or added stays a point of the cloud, splats stay splats,
+  and polygons a snippet adds become a mesh beside the cloud, over copies of
+  the points they use. `p.orient` reads the identity on points without one.
 - **Export.** `unbaked_set` (`GeometrySet.unbaked_splats` in Luce) gives the raw
   names back, turned back down for a `y_down` cloud, `restorient` baked into
   `f_rest`. Bake keeps `scale`, `opacity`

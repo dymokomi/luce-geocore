@@ -113,7 +113,12 @@ func cloud_runs() -> !:
     expect(try support.value(try support.mesh_of(counted), "n", 0, 0) == 1000.0, "a cloud as the second input reads as its points")
     let other = try support.run_inputs(cloud, cloud, support.points_mode, "p.set_i32(\"near\", k.input(1).nearpoint(p.P + [0.1, 0.0, 0.0, 0.0], 1.0))\n")
     expect(number(other, "near", 12) == 12.0, "nearpoint over a cloud input")
-    print("ok    clouds: Run Over Points runs on point clouds (attributes, groups, removals, adds, inputs)")
+    let faced = try support.run(cloud, support.points_mode, "if p.ptnum == 0:\n    var corners: i32[16]\n    corners[0] = 0\n    corners[1] = 1\n    corners[2] = 10\n    _ = k.add_prim(corners, 3)\n")
+    let faces = try support.mesh_of(faced)
+    expect(faced.value().cloud_count() == 1000 and faces.value().face_count() == 1 and faces.value().point_count() == 3, "polygons added on a cloud: the cloud stays, the polygons are a mesh of their points")
+    let turned = try support.run(cloud, support.points_mode, "p.set_vec4(\"q\", p.orient)\n")
+    expect(number(turned, "q", 7, 0) == 0.0 and number(turned, "q", 7, 2) == 0.0 and number(turned, "q", 7, 3) == 1.0, "p.orient reads the identity on points without one")
+    print("ok    clouds: Run Over Points runs on point clouds (attributes, groups, removals, adds, inputs, identity orient, polygons beside the cloud)")
 
 # mark: Splats
 

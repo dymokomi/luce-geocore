@@ -147,5 +147,14 @@ func subset_points(context: void*, first: usize, end: usize, worker: usize):
 
 ## The faces of `mesh` whose bits are set in `keep` (bits over the faces),
 ## with the points they use; the same mesh (shared) when every face is kept.
+## Heap storage of `mesh` with every face kept and the points no face uses
+## dropped (the rest renumbered in order): the polygons a Code run added on a
+## point cloud, as a mesh of their own points.
+pub func compacted_storage(mesh: const Mesh*) -> Mesh*!:
+    var all = try BitsBuilder.zeros(mesh.offsets.count() - 1)
+    defer all.close()
+    all.invert()
+    return try mesh.subset_storage(all.view())
+
 pub func kept_faces(mesh: const Mesh*, keep: Bits) -> interop.Reference[Mesh]!:
     return try mesh.kept_faces(keep)

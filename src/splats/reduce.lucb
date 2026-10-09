@@ -46,13 +46,24 @@ pub struct Reduced:
 pub func splat_masses(store: const AttributeStore*, out: f64[]):
     let opacity = float_attribute(store, opacity_name, 1)
     let scale = float_attribute(store, scale_name, 3)
-    let alpha = Floats.of(store.entry((usize)opacity)) if opacity >= 0 else Floats.empty()
-    let sigma = Floats.of(store.entry((usize)scale)) if scale >= 0 else Floats.empty()
-    for at in 0..<out.length:
+    var work = MassWork(Floats.of(store.entry((usize)opacity)) if opacity >= 0 else Floats.empty(), Floats.of(store.entry((usize)scale)) if scale >= 0 else Floats.empty(), opacity >= 0, scale >= 0, out)
+    ranges.each_range(out.length, 16384, (void*)&work, mass_range)
+
+struct MassWork:
+    let alpha: Floats
+    let sigma: Floats
+    let has_alpha: bool
+    let has_sigma: bool
+    let out: f64[]
+
+func mass_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (MassWork*)context
+    for at in first..<end:
         var m: f64 = 1.0
-        if opacity >= 0: m = alpha.at(at, 0)
-        if scale >= 0: m = m * math.abs(sigma.at(at, 0) * sigma.at(at, 1) * sigma.at(at, 2))
-        out[at] = m if math.is_finite(m) else 0.0
+        if work.has_alpha: m = work.alpha.at(at, 0)
+        if work.has_sigma: m = m * math.abs(work.sigma.at(at, 0) * work.sigma.at(at, 1) * work.sigma.at(at, 2))
+        work.out[at] = m if math.is_finite(m) else 0.0
 
 ## A cloud (`points` relative to `origin`, attributes `store`) reduced to
 ## `options.target` points (see above). A target at or above the count
@@ -104,35 +115,24 @@ func merge_pass(reduced: Reduced*, target: usize, cell: f64, samples: const ShSa
     let masses = try new f64[count] --- in memory.heap
     defer free(masses) in memory.heap
     splat_masses(&reduced.store, masses)
-    var hash = try PointHash.build(reduced.positions.view(), cell)
+    var hash = try PointHash.for_radius(reduced.positions.view(), cell)
     defer hash.close()
     let neighbors = try new u32[count * graph_degree] --- in memory.heap
     defer free(neighbors) in memory.heap
     let found = try new u8[count] --- in memory.heap
     defer free(found) in memory.heap
-    var search = SearchWork(&hash, neighbors, found)
+    var search = SearchWork(&hash, cell, neighbors, found)
+    # In slot order: a worker's queries share their neighborhoods in cache.
     ranges.each_range(count, 4096, (void*)&search, search_range)
-    var total: usize = 0
-    for at in 0..<count: total += (usize)found[at]
-    let pairs = try new Pair[total + 1] --- in memory.heap
-    defer free(pairs) in memory.heap
-    let points = reduced.positions.view()
-    var used: usize = 0
-    for a in 0..<count:
-        for slot in 0..<(usize)found[a]:
-            let b = (usize)neighbors[a * graph_degree + slot]
-            let ma = masses[a]
-            let mb = masses[b]
-            let weight = ma * mb / (ma + mb) if ma + mb > 0.0 else 0.0
-            let d = points[a].vector().subtract(points[b].vector())
-            pairs[used] = Pair(weight * d.dot(d), (u32)(a if a < b else b), (u32)(b if a < b else a))
-            used += 1
-    sort.by(pairs[..<used], cheaper)
+    var listing = try PairList.of(reduced.positions.view(), masses, neighbors, found)
+    defer listing.close()
+    try sort_pairs(listing.pairs)
+    let pairs = listing.pairs
     let partner = try new u32[count] --- in memory.heap
     defer free(partner) in memory.heap
     for at in 0..<count: partner[at] = unmatched
     var merged: usize = 0
-    for pair in pairs[..<used]:
+    for pair in pairs:
         if merged >= need: break
         if partner[(usize)pair.a] != unmatched or partner[(usize)pair.b] != unmatched: continue
         partner[(usize)pair.a] = pair.b
@@ -169,14 +169,135 @@ func merge_pass(reduced: Reduced*, target: usize, cell: f64, samples: const ShSa
 
 struct SearchWork:
     let hash: const PointHash*
+    let radius: f64
     let neighbors: u32[]
     let found: u8[]
 
 func search_range(context: void*, first: usize, end: usize, worker: usize):
     _ = worker
     let work = (SearchWork*)context
-    for at in first..<end:
-        work.found[at] = (u8)work.hash.nearest(at, graph_degree, work.neighbors[at * graph_degree..<(at + 1) * graph_degree])
+    for slot in first..<end:
+        let at = work.hash.point_at(slot)
+        work.found[at] = (u8)work.hash.nearest(at, graph_degree, work.radius, work.neighbors[at * graph_degree..<(at + 1) * graph_degree])
+
+## The candidate pairs of a pass, each once: listed by its lower splat, or by
+## the higher one when the lower did not list it. Counted, then written, in
+## parallel; a pair's cost is the same from either side.
+struct PairList:
+    var pairs: Pair[]
+    ## Where splat a's pairs start (count + 1 entries).
+    var starts: usize[]
+    let points: const Float3[]
+    let masses: const f64[]
+    let neighbors: const u32[]
+    let found: const u8[]
+
+    static func of(points: const Float3[], masses: const f64[], neighbors: const u32[], found: const u8[]) -> PairList!:
+        let count = points.length
+        let starts = try new usize[count + 1] --- in memory.heap
+        errdefer free(starts) in memory.heap
+        var list = PairList(Pair[]((Pair*)0, 0), starts, points, masses, neighbors, found)
+        ranges.each_range(count, 8192, (void*)&list, count_pairs)
+        var total: usize = 0
+        for at in 0..<count:
+            let own = starts[at]
+            starts[at] = total
+            total += own
+        starts[count] = total
+        list.pairs = try new Pair[total + 1] --- in memory.heap
+        list.pairs = list.pairs[..<total]
+        ranges.each_range(count, 8192, (void*)&list, write_pairs)
+        return list
+
+    func close():
+        free(self.starts) in memory.heap
+        free(Pair[](self.pairs.data, self.pairs.length + 1)) in memory.heap
+
+    ## Whether splat a writes its pair with its `slot`-th neighbor.
+    func owns(a: usize, slot: usize) -> bool:
+        let b = (usize)self.neighbors[a * graph_degree + slot]
+        if a < b: return true
+        for other in 0..<(usize)self.found[b]:
+            if (usize)self.neighbors[b * graph_degree + other] == a: return false
+        return true
+
+func count_pairs(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let list = (PairList*)context
+    for a in first..<end:
+        var own: usize = 0
+        for slot in 0..<(usize)list.found[a]:
+            if list.owns(a, slot): own += 1
+        list.starts[a] = own
+
+func write_pairs(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let list = (PairList*)context
+    for a in first..<end:
+        var at = list.starts[a]
+        for slot in 0..<(usize)list.found[a]:
+            if not list.owns(a, slot): continue
+            let b = (usize)list.neighbors[a * graph_degree + slot]
+            let ma = list.masses[a]
+            let mb = list.masses[b]
+            let weight = ma * mb / (ma + mb) if ma + mb > 0.0 else 0.0
+            let d = list.points[a].vector().subtract(list.points[b].vector())
+            list.pairs[at] = Pair(weight * d.dot(d), (u32)(a if a < b else b), (u32)(b if a < b else a))
+            at += 1
+
+## Sort `pairs` by `cheaper` on the pool: equal runs sorted in parallel, then
+## merged pairwise level by level, each level's merges in parallel. `cheaper`
+## is a strict total order, so the result is what one sort would give.
+func sort_pairs(pairs: Pair[]) -> !:
+    let n = pairs.length
+    if n < 131072:
+        sort.by(pairs, cheaper)
+        return
+    # 4, 16 or 64 runs: an even number of merge levels ends back in `pairs`.
+    var runs: usize = 4
+    while runs < 64 and n // (runs * 4) >= 32768: runs *= 4
+    let scratch = try new Pair[n] --- in memory.heap
+    defer free(scratch) in memory.heap
+    var work = SortWork(pairs, scratch, runs, 1)
+    ranges.each(runs, (void*)&work, sort_run)
+    while work.span < runs:
+        ranges.each(runs // (work.span * 2), (void*)&work, merge_runs)
+        let read = work.source
+        work.source = work.target
+        work.target = read
+        work.span *= 2
+
+struct SortWork:
+    ## Merges read `source` and write `target`, `span` sorted runs at a time.
+    var source: Pair[]
+    var target: Pair[]
+    let runs: usize
+    var span: usize
+
+    ## Where run `run` starts.
+    func bound(run: usize) -> usize:
+        return run * self.source.length // self.runs
+
+func sort_run(context: void*, index: usize, worker: usize):
+    _ = worker
+    let work = (SortWork*)context
+    sort.by(work.source[work.bound(index)..<work.bound(index + 1)], cheaper)
+
+func merge_runs(context: void*, index: usize, worker: usize):
+    _ = worker
+    let work = (SortWork*)context
+    let low = work.bound(index * 2 * work.span)
+    let middle = work.bound((index * 2 + 1) * work.span)
+    let high = work.bound((index * 2 + 2) * work.span)
+    var a = low
+    var b = middle
+    for at in low..<high:
+        if b >= high or (a < middle and not cheaper(work.source[b], work.source[a])):
+            work.target[at] = work.source[a]
+            a += 1
+        else:
+            work.target[at] = work.source[b]
+            b += 1
 
 ## `reduced` through parent map `parents`: positions and point attributes
 ## gathered, detail attributes shared.
@@ -184,9 +305,8 @@ func gathered(reduced: const Reduced*, parents: const i32[]) -> Reduced!:
     let size = parents.length
     var positions = try Column[Float3].allocate(size)
     errdefer positions.release()
-    let from_points = reduced.positions.view()
-    let out = positions.span()
-    for at in 0..<size: out[at] = from_points[(usize)parents[at]]
+    var moving = PointGather(reduced.positions.view(), positions.span(), parents)
+    ranges.each_range(size, 65536, (void*)&moving, gather_points)
     var attributes = AttributeStore()
     errdefer attributes.close()
     for index in 0..<reduced.store.count():
@@ -196,6 +316,16 @@ func gathered(reduced: const Reduced*, parents: const i32[]) -> Reduced!:
             continue
         try attributes.put(try attribute_ops.remapped(entry, parents, size))
     return Reduced(positions, attributes, 0, 0)
+
+struct PointGather:
+    let points: const Float3[]
+    let out: Float3[]
+    let parents: const i32[]
+
+func gather_points(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (PointGather*)context
+    for at in first..<end: work.out[at] = work.points[(usize)work.parents[at]]
 
 ## Write the merged splats of `made` (gathered from `reduced` by `parents`;
 ## `others` names each merged element's second splat, -1 for none).

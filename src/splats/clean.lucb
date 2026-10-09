@@ -69,7 +69,7 @@ pub func clean_flags(points: const Float3[], origin: Vector3, store: const Attri
         var radius = options.radius
         if not (radius > 0.0): radius = 5.0 * median if median > 0.0 else 3.0 * mean_spacing(points)
         if radius > 0.0:
-            var hash = try PointHash.build(points, radius)
+            var hash = try PointHash.for_radius(points, radius)
             defer hash.close()
             work.hash = &hash
             work.radius = radius
@@ -99,8 +99,42 @@ pub func median_largest(scale: const Floats*, count: usize) -> f64!:
     for at in 0..<count:
         let value = math.max(math.abs(scale.at(at, 0)), math.max(math.abs(scale.at(at, 1)), math.abs(scale.at(at, 2))))
         largest[at] = value if math.is_finite(value) else 0.0
-    sort.sort(largest)
-    return largest[count // 2]
+    return selected(largest, count // 2)
+
+## The value `rank` places from the smallest of `values` (which it reorders):
+## quickselect around the median of three with a three-way partition, so runs
+## of equal values (quantized files have few distinct sizes) cost nothing
+## extra; O(n) on average, where a sort would be O(n log n).
+func selected(values: f64[], rank: usize) -> f64:
+    var low: usize = 0
+    var high = values.length
+    while high - low > 1:
+        let a = values[low]
+        let b = values[low + (high - low) // 2]
+        let c = values[high - 1]
+        let pivot = math.max(math.min(a, b), math.min(math.max(a, b), c))
+        # values[low..<less] < pivot, [less..<at] == pivot, [more..<high] > pivot.
+        var less = low
+        var at = low
+        var more = high
+        while at < more:
+            if values[at] < pivot:
+                swap(values, at, less)
+                less += 1
+                at += 1
+            elif values[at] > pivot:
+                more -= 1
+                swap(values, at, more)
+            else: at += 1
+        if rank < less: high = less
+        elif rank >= more: low = more
+        else: return pivot
+    return values[low]
+
+func swap(values: f64[], a: usize, b: usize):
+    let kept = values[a]
+    values[a] = values[b]
+    values[b] = kept
 
 ## The mean spacing of `points` over their bounding box: the cube root of its
 ## volume per point (its largest side per point for a flat or linear cloud).

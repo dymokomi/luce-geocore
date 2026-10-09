@@ -50,7 +50,7 @@ pub struct Point:
     ## This point's number and how many points there are.
     pub let ptnum: i32
     pub let numpt: i32
-    ## A Gaussian splat's rotation, x, y, z, w (Houdini's `orient`); 0 without one.
+    ## A Gaussian splat's rotation, x, y, z, w (Houdini's `orient`); the identity (0, 0, 0, 1) without one.
     pub var orient: f32[4]
     ## A splat's size along its own axes (σ, Houdini's `scale`), lane 3 zero.
     pub var scale: f32[4]
