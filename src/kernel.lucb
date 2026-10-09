@@ -1,51 +1,56 @@
 ## The geocore_kernel export: what Base kernels in other packages build on.
-## Bit sets and groups, string tables, path filters, mesh assembly and
-## concatenation, and the geometry set's component protocol (luce-cad's CAD
-## family implements it). Luce code never imports it: these take spans and
-## pointers.
-import core.bits
-import core.strings
-import core.paths
-import core.idset
+## Luce code never imports it: these take spans and pointers. Sections:
+## attributes and bits, meshes, groups and selections, geometry sets, verbs
+## and subdivision, curves, fields, the geometry codec, and polygon
+## triangulation.
 import core.attributes
+import core.bits
+import core.float3
+import core.idset
 import core.limits
+import core.paths
+import core.strings
 import geometries.polygon
+import geometries.triangulation.display_triangulation
+import geometries.triangulation.face_scratch
+import geometries.triangulation.polygon_triangulation
 import geometry_set
 import groups
+import verbs
+import set_verbs
+import subdivision
+import curves
+import fields
+import geometry_files
 
+# mark: Attributes and bits
+
+## Element domains: point, corner, face, detail, edge.
 pub type Domain = attributes.Domain
+## An attribute's scalar type.
 pub type DataType = attributes.DataType
+## How operations treat an attribute's values (generic, position, normal, …).
 pub type Role = attributes.Role
+## One named attribute: its domain, type, width and shared column.
 pub type Attribute = attributes.Attribute
+## The attributes of one mesh, cloud or curves; (name, domain) is unique.
 pub type AttributeStore = attributes.AttributeStore
+## f32 positions and normals, as columns store them.
+pub type Float3 = float3.Float3
+## A read-only bit set over a domain's elements.
 pub type Bits = bits.Bits
+## Bits being built, published by `finish`.
 pub type BitsBuilder = bits.BitsBuilder
-pub let word_count = bits.word_count
+## The number of set bits in a word.
 pub let popcount = bits.popcount
+## The index of the lowest set bit of a nonzero word.
 pub let trailing_zeros = bits.trailing_zeros
-
+## Interns strings for a text attribute and publishes their table.
 pub type TableBuilder = strings.TableBuilder
-pub let table_count = strings.table_count
-pub let table_text = strings.table_text
+## Which `path` values a Blast or export keeps (glob patterns).
 pub type PathFilter = paths.PathFilter
-pub let glob = paths.glob
+## Column block ids already counted (memory footprints).
 pub type IdSet = idset.IdSet
-
-pub type MeshPart = polygon.MeshPart
-pub let concatenated = polygon.concatenated
-pub let group_bits = polygon.group_bits
-pub let with_group_bits = polygon.with_group_bits
-pub let edge_pairs = polygon.edge_pairs
-pub let edge_bits_from_pairs = polygon.edge_bits_from_pairs
-pub let mesh_share = polygon.mesh_share
-pub let mesh_dispose = polygon.mesh_dispose
-pub let mesh_adopt = polygon.mesh_adopt
-## A mesh over `source`'s topology with new positions of which `moved`
-## changed (normals around them refreshed; caches update in part).
-pub let moved_storage = polygon.moved_storage
-pub let precise_span = polygon.precise_span
-pub let mesh_unique_bytes = polygon.mesh_unique_bytes
-pub let kept_faces = polygon.kept_faces
 
 ## A text attribute of `elements` whose element i is string `values[i]` of
 ## `texts` (-1: "").
@@ -54,34 +59,84 @@ pub func text_attribute(name: str, domain: Domain, elements: usize, texts: const
     defer table.release()
     return try Attribute.text(name, domain, elements, table, values)
 
+# mark: Meshes
+
+## Assembly from columns an importer filled (luce-usd, luce-fbx): a mesh
+## taking its columns, its attributes put on afterwards. Meshes past the
+## size limits are refused.
+pub let assembled = polygon.assembled
+## Add or replace an attribute of a mesh being built.
+pub let put_attribute = polygon.put_attribute
+## The size limits every mesh keeps.
+pub let max_points = limits.max_points
+pub let max_faces = limits.max_faces
+pub let max_corners = limits.max_corners
+## An error when a mesh of these sizes would pass the limits.
+pub let check_mesh_size = limits.check_mesh_size
+## A new owner sharing every column of a mesh.
+pub let mesh_share = polygon.mesh_share
+## Release one owner of a mesh.
+pub let mesh_dispose = polygon.mesh_dispose
+## Adopt heap mesh storage as a Luce-visible mesh.
+pub let mesh_adopt = polygon.mesh_adopt
+## A mesh over `source`'s topology with new positions of which `moved`
+## changed (normals around them refreshed; caches update in part).
+pub let moved_storage = polygon.moved_storage
+## A precise mesh's f64 points; empty otherwise.
+pub let precise_span = polygon.precise_span
+## One mesh of a concatenation and its placement.
+pub type MeshPart = polygon.MeshPart
+## Every part's points, faces and attributes, placed, in one mesh.
+pub let concatenated = polygon.concatenated
+
+# mark: Groups and selections
+
+## The bits of group attribute `index` of a mesh.
+pub let group_bits = polygon.group_bits
+## A snapshot of a mesh with a group holding given bits.
+pub let with_group_bits = polygon.with_group_bits
+## Edge bits as (low, high) point pairs, which survive topology changes.
+pub let edge_pairs = polygon.edge_pairs
+## Set the bits of the edges named by point pairs.
+pub let edge_bits_from_pairs = polygon.edge_bits_from_pairs
+## What group evaluation noticed without failing (numbers naming nothing).
+pub type GroupReport = groups.GroupReport
+## A selection: bits over one domain, guarded by a topology hash.
+pub type Selection = groups.Selection
+## The bits a group expression names on a domain, evaluated or cached.
+pub let group_bits_of = groups.group_bits
+## Drop every cached group (tests with allocation trackers).
+pub let clear_group_cache = groups.clear_group_cache
+## The bits of a selection.
+pub let selection_bits = groups.selection_bits
+## A selection over bits a Base kernel made (a knife stroke's faces).
+pub let adopt_selection = groups.adopt_selection
+
+# mark: Geometry sets
+
+## A geometry set: one component per family, plus detail attributes.
 pub type GeometrySet = geometry_set.GeometrySet
+## A component family's operations (share, close, bounds, placement, …).
 pub type ComponentType = geometry_set.ComponentType
+## One family's data in a set.
 pub type Component = geometry_set.Component
+## Where a component or instance is placed.
 pub type Placement = geometry_set.Placement
-pub type PointCloud = geometry_set.PointCloud
-pub type Instances = geometry_set.Instances
-pub type Instance = geometry_set.Instance
-pub let register_component = geometry_set.register
-pub let new_instances = geometry_set.new_instances
-pub type SceneObjects = geometry_set.SceneObjects
-pub let scene_component = geometry_set.scene_component
-pub let scene_flattened = geometry_set.scene_flattened
-pub let set_has_scene = geometry_set.set_has_scene
-pub type Materials = geometry_set.Materials
-pub type MaterialParameter = geometry_set.MaterialParameter
-pub let materials_component = geometry_set.materials_component
-pub let materials_flattened = geometry_set.materials_flattened
-pub let component_type = geometry_set.component_type
-pub let no_trace = geometry_set.no_trace
-pub let adopt_set = geometry_set.adopt_set
-pub let dispose_set = geometry_set.dispose_set
+## A heap set holding nothing yet.
 pub let empty_set = geometry_set.empty_storage
+## Adopt heap set storage as a Luce-visible set.
+pub let adopt_set = geometry_set.adopt_set
+## Release heap set storage.
+pub let dispose_set = geometry_set.dispose_set
+## The mesh of a set, borrowed while the set lives.
 pub let set_mesh = geometry_set.set_mesh
-pub let set_realized = geometry_set.set_realized
+## The detail attributes of a set.
+pub let set_detail = geometry_set.set_detail
+## Put an attribute (taken) among a set's detail attributes.
+pub let set_put_detail = geometry_set.set_put_detail
+## Append text and decimal numbers to a byte buffer (component labels).
 pub let append_text = geometry_set.append_text
 pub let append_number = geometry_set.append_number
-pub let placed_box = geometry_set.placed_box
-pub let union_box = geometry_set.union_box
 
 ## The built-in families (taking a global's address in a global initializer
 ## does not compile through the C backend).
@@ -94,165 +149,141 @@ pub func points_component() -> const ComponentType*:
 pub func instances_component() -> const ComponentType*:
     return &geometry_set.instances_component
 
-## Group expressions for Base kernels: evaluation (cached) and the cache's
-## release, for allocation-tracking tests.
-pub type GroupResult = groups.GroupResult
-pub type GroupReport = groups.GroupReport
-pub type Selection = groups.Selection
-pub let group_bits_of = groups.group_bits
-pub let clear_group_cache = groups.clear_group_cache
-pub let selection_bits = groups.selection_bits
-## A selection over bits a Base kernel made (a knife stroke's faces).
-pub let adopt_selection = groups.adopt_selection
+## Points without faces, and their columns for Base readers.
+pub type PointCloud = geometry_set.PointCloud
+pub let cloud_positions = geometry_set.cloud_positions
+pub let cloud_origin = geometry_set.cloud_origin
+pub let cloud_store = geometry_set.cloud_store
+## A heap cloud owning given columns.
+pub let cloud_assembled = geometry_set.cloud_assembled
+## Placed copies of prototype sets.
+pub type Instances = geometry_set.Instances
+## A new, empty instances component.
+pub let new_instances = geometry_set.new_instances
+## Cameras and lights, and every one of a set and its instances, placed.
+pub type SceneObjects = geometry_set.SceneObjects
+pub let scene_flattened = geometry_set.scene_flattened
+## Materials, and every one of a set and its instances.
+pub type Materials = geometry_set.Materials
+pub type MaterialParameter = geometry_set.MaterialParameter
+pub let materials_flattened = geometry_set.materials_flattened
+
+# mark: Verbs and subdivision
 
 ## Per-point soft weights of a selection (the Edit viewport's falloff tint).
-import verbs
 pub let selection_weights = verbs.selection_weights
 ## Transform Components' numbers as matrices, for editors moving whole things.
 pub type ComponentTransform = verbs.ComponentTransform
-
-import subdivision
+## What a set verb made: its set (taken by the caller) and its report.
+pub type SetVerbOutput = set_verbs.SetVerbOutput
+## Run a set verb found by name, for Base callers and tests.
+pub let run_set_verb = set_verbs.run_set_verb
+pub let find_set_verb = set_verbs.find_set_verb
 ## A subdivided mesh's display mesh (limit surface, cached), or none.
 pub let subdivided_display = subdivision.subdivided_display
 
-## Curves (the curves family): the structure, its builder, its evaluated
-## caches and its place in a set.
-import curves
+# mark: Curves
+
+## Poly, Bezier, NURBS and Catmull-Rom curves sharing one point column.
 pub type Curves = curves.Curves
 pub type CurvesBuilder = curves.CurvesBuilder
 pub type CurveType = curves.CurveType
 pub type KnotMode = curves.KnotMode
 pub type CurveSettings = curves.CurveSettings
-pub type CurveFrames = curves.Frames
-pub type OwnedCurves = curves.Owned
-pub let curve_domain = curves.curve_domain
-pub let curves_origin = curves.curves_origin
-pub let curve_float3_span = curves.float3_span
-import core.float3
-## f32 positions and normals, as columns store them.
-pub type Float3 = float3.Float3
+## A Curves owning given columns.
+pub let curves_assembled = curves.curves_assembled
+## The curves family, and a set's curves.
 pub let curves_type = curves.curves_type
 pub let set_curves = curves.set_curves
+## A copy of a set with other curves (taken).
 pub let with_curves = curves.with_curves
+## A new owner of curves, and releasing one.
 pub let curves_share = curves.curves_share
 pub let curves_dispose = curves.curves_dispose
+## The curves whose bits are set, every attribute carried.
 pub let curves_subset = curves.curves_subset
-pub let curves_reordered = curves.curves_reordered
-pub let evaluated_offsets = curves.evaluated_offsets
-## A sketch's plane (the set's detail attributes) and NURBS weights, for
-## kernels that read sketches exactly (luce-cad's profiles).
-pub type SketchPlane = curves.SketchPlane
-pub let sketch_plane_of = curves.sketch_plane_of
+## The origin positions are measured from, and the columns as spans.
+pub let curves_origin = curves.curves_origin
+pub let curve_float3_span = curves.float3_span
 pub let curve_weight_span = curves.weight_span
+pub let curves_knots = curves.curves_knots
+pub let curves_knot_offsets = curves.curves_knot_offsets
+## Evaluated points: their offsets per curve, positions, frames and change id.
+pub let evaluated_offsets = curves.evaluated_offsets
 pub let evaluated_positions = curves.evaluated_positions
 pub let evaluated_frames = curves.evaluated_frames
 pub let evaluated_id = curves.evaluated_id
+## The group language on curves.
 pub let curve_group_bits = curves.curve_group_bits
-pub let guess_curve_domain = curves.guess_curve_domain
-pub let convert_curve_bits = curves.convert_curve_bits
-pub type CurvePlace = curves.CurvePlace
-pub type CurveProfile = curves.Profile
-pub let place_at = curves.place_at
-pub let control_parents = curves.control_parents
+## Line, arc and spiral curves.
 pub let line_curves = curves.line_curves
 pub let arc_curves = curves.arc_curves
 pub let spiral_curves = curves.spiral_curves
-pub let resampled_curves = curves.resampled
-pub let trimmed_curves = curves.trimmed
-pub let filleted_curves = curves.filleted
-pub let reversed_curves = curves.reversed
-pub let curves_with_type = curves.with_type
-pub let circle_profile = curves.circle_profile
-pub let curve_profile = curves.curve_profile
-pub let swept_curves = curves.swept
-pub let mesh_edge_curves = curves.mesh_edge_curves
+## A sketch's plane (the set's detail attributes), for kernels that read
+## sketches exactly (luce-cad's profiles).
+pub type SketchPlane = curves.SketchPlane
+pub let sketch_plane_of = curves.sketch_plane_of
 
-## Set verbs, for Base callers and tests.
-import set_verbs
-pub type SetVerb = set_verbs.SetVerb
-pub type SetVerbOutput = set_verbs.SetVerbOutput
-pub let run_set_verb = set_verbs.run_set_verb
-pub let find_set_verb = set_verbs.find_set_verb
+# mark: Fields
 
-## The geometry codec: saving and loading sets as prism crates, and the
-## registry through which other packages' families (luce-cad's B-rep) add
-## their encoders and decoders.
-import geometry_files
-pub type GeometryWriter = geometry_files.GeometryWriter
-pub type GeometryReader = geometry_files.GeometryReader
-pub type PropertyHeader = geometry_files.PropertyHeader
-pub type CrateWriter = geometry_files.CrateWriter
-pub type CrateReader = geometry_files.CrateReader
-pub let register_codec = geometry_files.register_codec
-pub let encode_set = geometry_files.encode_set
-pub let save_geometry = geometry_files.save_geometry
-pub let load_geometry = geometry_files.load_geometry
-pub let geometry_key = geometry_files.geometry_key
-pub let cloud_positions = geometry_set.cloud_positions
-pub let cloud_origin = geometry_set.cloud_origin
-pub let cloud_store = geometry_set.cloud_store
-pub let cloud_assembled = geometry_set.cloud_assembled
-pub let curves_knots = curves.curves_knots
-pub let curves_knot_offsets = curves.curves_knot_offsets
-## Assembly from columns an importer filled (luce-usd): a mesh taking its
-## columns, attributes put on it, curves and detail attributes likewise.
-## `assembled` refuses meshes past the size limits.
-pub let assembled = polygon.assembled
-pub let max_points = limits.max_points
-pub let max_faces = limits.max_faces
-pub let max_corners = limits.max_corners
-pub let put_attribute = polygon.put_attribute
-pub let curves_assembled = curves.curves_assembled
-pub let set_detail = geometry_set.set_detail
-pub let set_put_detail = geometry_set.set_put_detail
-## Prism wire dtypes, for codecs' columns.
-pub let dtype_int8 = geometry_files.dtype_int8
-pub let dtype_int32 = geometry_files.dtype_int32
-pub let dtype_int64 = geometry_files.dtype_int64
-pub let dtype_uint8 = geometry_files.dtype_uint8
-pub let dtype_uint64 = geometry_files.dtype_uint64
-pub let dtype_float32 = geometry_files.dtype_float32
-pub let dtype_float64 = geometry_files.dtype_float64
-pub let dtype_str = geometry_files.dtype_str
-
-## Fields: sparse voxel grids and volumes, SDF programs, sampling and
-## surfaces.
-import fields
+## Sparse voxel grids, their class and a trilinear sampler.
 pub type SparseGrid = fields.SparseGrid
 pub type GridClass = fields.GridClass
 pub type GridSampler = fields.GridSampler
+## The leaf key of leaf coordinates, and back.
+pub let leaf_key = fields.leaf_key
+pub let key_leaf = fields.key_leaf
+pub let release_grid = fields.release_grid
+## Volumes: named grids in a set.
 pub type Volume = fields.Volume
-pub type Sdf = fields.Sdf
-pub type SdfOp = fields.SdfOp
 pub let volume_type = fields.volume_type
-pub let sdf_type = fields.sdf_type
 pub let set_volume = fields.set_volume
-pub let set_sdf = fields.set_sdf
 pub let new_volume = fields.new_volume
 pub let add_grid = fields.add_grid
 pub let release_volume = fields.release_volume
-pub let release_grid = fields.release_grid
+## SDF programs: primitives, booleans, modifiers and placement.
+pub type Sdf = fields.Sdf
+pub type SdfOp = fields.SdfOp
+pub let sdf_type = fields.sdf_type
+pub let set_sdf = fields.set_sdf
 pub let release_sdf = fields.release_sdf
 pub let primitive_sdf = fields.primitive_sdf
 pub let combined_sdf = fields.combined_sdf
 pub let modified_sdf = fields.modified_sdf
 pub let placed_sdf = fields.placed_sdf
+## Level sets sampled from an SDF, a mesh or points.
 pub let sampled_sdf = fields.sampled_sdf
 pub let mesh_level_set = fields.mesh_level_set
 pub let points_level_set = fields.points_level_set
+## The surface mesh where a grid crosses a value.
 pub let surface_mesh = fields.surface_mesh
-pub let slice_mesh = fields.slice_mesh
+## An SDF's surface preview, built on first use and kept.
 pub let sdf_preview = fields.sdf_preview
-pub let volume_preview = fields.volume_preview
-pub let leaf_key = fields.leaf_key
-pub let key_leaf = fields.key_leaf
+
+# mark: Geometry codec
+
+## Saving and loading sets as prism crates, and the registry through which
+## other packages' families (luce-cad's B-rep) add encoders and decoders.
+pub type GeometryWriter = geometry_files.GeometryWriter
+pub type GeometryReader = geometry_files.GeometryReader
+pub type PropertyHeader = geometry_files.PropertyHeader
+pub type CrateReader = geometry_files.CrateReader
+pub let register_codec = geometry_files.register_codec
+pub let encode_set = geometry_files.encode_set
+pub let save_geometry = geometry_files.save_geometry
+pub let load_geometry = geometry_files.load_geometry
+## The key a geometry file was saved with.
+pub let geometry_key = geometry_files.geometry_key
+## Prism wire dtypes, for codecs' columns.
+pub let dtype_int32 = geometry_files.dtype_int32
+pub let dtype_uint8 = geometry_files.dtype_uint8
+pub let dtype_float64 = geometry_files.dtype_float64
+
+# mark: Polygon triangulation
 
 ## Display triangulation of one polygon of any size: `output` gets the
 ## 3 * (count - 2) corner indices of corners start..<start + count, wound
 ## about the unit `normal` (zero: a fan). Only running out of memory fails.
-import geometries.polygon_triangulation
-import geometries.display_triangulation
-import geometries.face_scratch
 pub let triangulate_polygon = polygon_triangulation.triangulate
 ## Check display triangles of one polygon as Mesh construction does.
 pub let validate_polygon_display = display_triangulation.validate

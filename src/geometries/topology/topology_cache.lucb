@@ -7,7 +7,7 @@ import memory
 import sync
 import core.parallel
 from core.shared import Column
-from geometries.topology_hash import topology_hash
+from geometries.topology.topology_hash import topology_hash
 
 pub struct TopologyCache:
     pub var users: @usize = 1

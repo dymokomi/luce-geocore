@@ -34,16 +34,16 @@ from core.paths import PathFilter
 from math.vector import Vector3
 from math.matrix import Matrix4
 from geometries.query_cache import QueryCache, release_query
-from geometries.shading_cache import ShadingCache, release_shading
-from geometries.smooth_normals import Surface
-from geometries.normal_refresh import refresh_normals
-from geometries.curvature import CurvatureShape
+from geometries.shading.shading_cache import ShadingCache, release_shading
+from geometries.shading.smooth_normals import Surface
+from geometries.shading.normal_refresh import refresh_normals
+from geometries.shading.curvature import CurvatureShape
 from geometries.triangle_index import TriangleIndex
-from geometries.topology_cache import TopologyCache
-from geometries.polygon_triangulation import triangulate, unit_or_zero, is_degenerate
-import geometries.display_triangulation as display_triangles
+from geometries.topology.topology_cache import TopologyCache
+from geometries.triangulation.polygon_triangulation import triangulate, unit_or_zero, is_degenerate
+import geometries.triangulation.display_triangulation as display_triangles
 import geometries.position_edit
-import geometries.face_scratch
+import geometries.triangulation.face_scratch
 from core.limits import max_corners, check_mesh_size
 from core.hash import mix
 

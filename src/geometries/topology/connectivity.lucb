@@ -1,0 +1,58 @@
+## The borrowed connectivity view kernels walk: a mesh's corners and faces
+## with the edge and incidence lists of its topology cache, as spans.
+from geometries.polygon import Mesh
+from core.attributes import Domain
+
+## Borrowed connectivity of one mesh; valid while the mesh is.
+pub struct Topology:
+    pub let points: usize
+    pub let offsets: const i32[]
+    pub let corners: const i32[]
+    pub let corner_faces: const i32[]
+    pub let corner_edges: const i32[]
+    pub let edge_points: const i32[]
+    pub let edge_corner_offsets: const i32[]
+    pub let edge_corners: const i32[]
+    pub let point_edge_offsets: const i32[]
+    pub let point_edges: const i32[]
+
+    pub static func of(mesh: const Mesh*) -> Topology!:
+        let edge_corners = try mesh.edge_corner_span()
+        let point_edges = try mesh.point_edge_span()
+        return Topology((usize)mesh.point_count(), mesh.offset_span(), mesh.corner_span(), try mesh.corner_face_span(), try mesh.corner_edge_span(), try mesh.edge_span(),
+                        edge_corners.0, edge_corners.1, point_edges.0, point_edges.1)
+
+    pub func faces() -> usize:
+        return self.offsets.length - 1
+
+    pub func edges() -> usize:
+        return self.edge_points.length // 2
+
+    pub func size(domain: Domain) -> usize:
+        match domain:
+            .point: return self.points
+            .corner: return self.corners.length
+            .face: return self.faces()
+            .edge: return self.edges()
+            _: return 1
+
+    ## The corner after `corner` in its face.
+    pub func next(corner: usize) -> usize:
+        let face = (usize)self.corner_faces[corner]
+        return corner + 1 if corner + 1 < (usize)self.offsets[face + 1] else (usize)self.offsets[face]
+
+    pub func previous(corner: usize) -> usize:
+        let face = (usize)self.corner_faces[corner]
+        return corner - 1 if corner > (usize)self.offsets[face] else (usize)self.offsets[face + 1] - 1
+
+    ## The corner of the same edge in the neighbouring face, or -1.
+    pub func twin(corner: usize) -> i64:
+        let edge = (usize)self.corner_edges[corner]
+        for at in (usize)self.edge_corner_offsets[edge]..<(usize)self.edge_corner_offsets[edge + 1]:
+            let other = (usize)self.edge_corners[at]
+            if other != corner: return (i64)other
+        return -1
+
+    ## Edges at a point.
+    pub func valence(point: usize) -> usize:
+        return (usize)(self.point_edge_offsets[point + 1] - self.point_edge_offsets[point])

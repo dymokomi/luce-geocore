@@ -27,9 +27,9 @@ from core.attributes import Attribute, Domain, DataType, Role
 from core.attribute_ops import typed, typed_mut
 from math.vector import Vector3
 from geometries.polygon import Mesh, mesh_share, mesh_dispose, mesh_adopt, precise_span, moved_storage, displayed, put_attribute, remove_attribute
-from groups import Topology
+from geometries.topology.connectivity import Topology
 from verbs import TopologyBuilder
-import geometries.face_scratch
+import geometries.triangulation.face_scratch
 from core.limits import max_points, max_faces
 import core.hash
 

@@ -2,9 +2,9 @@ import errors
 from luce_std import math
 import memory
 from math.vector import Vector3
-from geometries.polygon_partition import partition
-from geometries.ring_triangulation import triangulate_ring
-import geometries.face_scratch
+from geometries.triangulation.polygon_partition import partition
+from geometries.triangulation.ring_triangulation import triangulate_ring
+import geometries.triangulation.face_scratch
 
 ## Faces of more corners than this triangulate on a linked ring in about
 ## linear time (ring_triangulation); smaller ones keep the scanning ear

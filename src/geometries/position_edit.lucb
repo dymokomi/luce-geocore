@@ -15,8 +15,8 @@ from core.attributes import AttributeStore, DataType
 from core.attribute_ops import typed_mut
 from math.vector import Vector3
 from math.matrix import Matrix4
-from geometries.polygon_triangulation import triangulate, area_normal, is_degenerate
-import geometries.face_scratch
+from geometries.triangulation.polygon_triangulation import triangulate, area_normal, is_degenerate
+import geometries.triangulation.face_scratch
 
 ## Owned columns for the new mesh. `triangles` is empty when the previous
 ## triangles remain valid and are shared.

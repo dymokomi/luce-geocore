@@ -8,8 +8,8 @@ import memory
 import sync
 from core.float3 import Float3
 from core.shared import Column
-from geometries.smooth_normals import Surface, point_normals, corner_normals, affected_points, refresh_points, refresh_corners
-from geometries.curvature import CurvatureShape, point_curvatures
+from geometries.shading.smooth_normals import Surface, point_normals, corner_normals, affected_points, refresh_points, refresh_corners
+from geometries.shading.curvature import CurvatureShape, point_curvatures
 
 pub struct ShadingCache:
     pub var owners: @usize = 1

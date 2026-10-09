@@ -5,8 +5,8 @@ from luce_std import math
 import errors
 from math.vector import Vector3
 from geometries.polygon import Mesh, mesh_type
-from geometries.polygon_triangulation import triangulate, unit_or_zero
-import geometries.face_scratch
+from geometries.triangulation.polygon_triangulation import triangulate, unit_or_zero
+import geometries.triangulation.face_scratch
 from core.limits import max_points, max_faces, max_corners, check_mesh_size
 from core.growing import grown
 

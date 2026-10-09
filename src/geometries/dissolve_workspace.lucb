@@ -12,9 +12,9 @@ from core.polygon_topology import PolygonTopology
 from core.growing import grown
 from geometries.polygon import Mesh
 from geometries.builder import MeshBuilder
-from geometries.polygon_triangulation import area_normal
-import geometries.display_triangulation as display_triangles
-import geometries.face_scratch
+from geometries.triangulation.polygon_triangulation import area_normal
+import geometries.triangulation.display_triangulation as display_triangles
+import geometries.triangulation.face_scratch
 
 struct Face:
     let start: usize

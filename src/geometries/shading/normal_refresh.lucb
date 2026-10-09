@@ -10,7 +10,7 @@ import core.parallel
 from core.attributes import AttributeStore, DataType, Domain
 from core.attribute_ops import typed_mut
 from math.vector import Vector3
-from geometries.smooth_normals import Surface, affected_points, point_normal, corner_normal
+from geometries.shading.smooth_normals import Surface, affected_points, point_normal, corner_normal
 
 pub func refresh_normals(attributes: AttributeStore*, shape: const Surface*, moved: const u32[]) -> !:
     if moved.length == 0: return

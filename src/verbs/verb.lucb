@@ -21,10 +21,11 @@ from core.geometry import Bounds
 from math.vector import Vector3
 from math.matrix import Matrix4
 from geometries.polygon import with_group_bits, Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute, edge_bits_from_pairs
-from geometries.polygon_triangulation import area_normal
-import geometries.face_scratch
+from geometries.triangulation.polygon_triangulation import area_normal
+import geometries.triangulation.face_scratch
 from geometries.point_hash import PointHash
-from groups import GroupType, is_blank, guess_domain, GroupResult, GroupReport, group_bits, converted, Topology, Selection, adopt_selection, strict_conversion, selection_bits
+from geometries.topology.connectivity import Topology
+from groups import GroupType, is_blank, guess_domain, GroupResult, GroupReport, group_bits, converted, Selection, adopt_selection, strict_conversion, selection_bits
 from core.limits import max_points, check_mesh_size
 
 pub enum ParmKind as u8:
