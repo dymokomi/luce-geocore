@@ -253,3 +253,15 @@ struct Reader:
             self.spaces()
             if self.peek() != ',': break
             self.at += 1
+
+## A heap copy of `text` (empty text owns nothing).
+func heap_text(text: str) -> str!:
+    if text.length == 0: return ""
+    with memory.heap:
+        return try strings.copy(text)
+
+## Give back a heap_text copy.
+func release_text(text: str):
+    if text.length == 0: return
+    with memory.heap:
+        strings.release(text)

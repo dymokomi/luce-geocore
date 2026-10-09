@@ -14,21 +14,20 @@
 #       any verb of the node menu by name. `Cook` (the `k` of the code) holds the inputs,
 #       the spare parameters, the timeline and the console.
 #
-#       The parent side (`ScriptProcess`, `ScriptText`) is here too: it starts the tool,
-#       sends a request and reads the replies, so both ends of the protocol live together.
+#       Only what a script codes against is public. The host's side (the parent process,
+#       the parameter scan) is the `script_host` module; what the host and tests need of
+#       these types (a finished set, a cook run outside a node) stays private or goes
+#       through `CookRun`, so completion in the Script editor lists none of it.
 #
 #==============================================================================================
 import interop
 import io
 import luce
 import memory
-import platform
 import strings
-import thread
 import time
 from luce_std import files, math, paths, ramp
-from luce_std.process import Command
-from luce_std.net import Connection, Listener, SocketAddress, Deadline, WaitInterest
+from luce_std.net import Connection, SocketAddress, Deadline, WaitInterest
 import errors
 import core.float3
 from core.growing import Growing
@@ -170,7 +169,7 @@ pub struct Geometry:
     # mark: The set and its mesh ======================================================
 
     ## The set, its edits assembled into it first.
-    pub func finished() -> const GeometrySet*!:
+    func finished() -> const GeometrySet*!:
         try self.flush()
         return self.set()
 
@@ -181,7 +180,7 @@ pub struct Geometry:
     ## Assemble open edits: the edit form's mesh, the pending curves and written grids
     ## go into the set. The edit form and grids stay open, so spans a script holds stay
     ## valid.
-    pub func flush() -> !:
+    func flush() -> !:
         if let edit = self.edit:
             if edit.dirty or edit.spans:
                 let made = try edit.finish()
@@ -226,11 +225,11 @@ pub struct Geometry:
         return set_mesh(self.set())
 
     ## A Luce-visible reference to the finished set (the caller releases it).
-    pub func adopted() -> interop.Reference[GeometrySet]!:
+    func adopted() -> interop.Reference[GeometrySet]!:
         return try adopt_set(try (try self.finished()).storage())
 
     ## Take the set out (the caller owns it); the geometry is left closed.
-    pub func take() -> GeometrySet*!:
+    func take() -> GeometrySet*!:
         try self.flush()
         self.drop_edits()
         let storage = self.set()

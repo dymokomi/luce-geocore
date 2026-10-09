@@ -6,8 +6,9 @@ import strings
 import time
 from io import path
 from luce_std import collections, files, process
-from luce_geocore.geocore import ScriptHelp, CodeCompletion
+from luce_geocore.geocore import ScriptHelp, ScriptCheckJob, CodeCompletion
 import interop
+import thread
 
 let not_found: ErrorCode = ErrorCode.package(1)
 
@@ -24,9 +25,16 @@ pub func run_all() -> !:
     defer kept.destroy()
     try check_package(&kept)
     let file = (str)kept.view()
+    # The first check, which reads the packages, on a thread of its own (as luced-3d runs
+    # it); a check here meanwhile waits for it, since checks run one at a time.
     let started = time.now()
-    let clean = try ScriptHelp.check(file, script)
+    let job = try ScriptCheckJob.start(file, script)
+    defer job.release()
+    let beside = try ScriptHelp.check(file, script)
+    expect((try beside.get()).ok(), "a check beside a running job")
+    while not (try job.get()).finished(): thread.sleep(1)
     let first = time.now() - started
+    let clean = try (try job.get()).result()
     let checked = try clean.get()
     for at: i64 in 0..<checked.diagnostic_count():
         print(f"  {checked.diagnostic_line(at)}:{checked.diagnostic_column(at)}: {checked.diagnostic_message(at)}")
@@ -49,6 +57,10 @@ pub func run_all() -> !:
     try expect_labels(file, "    verb.", 10, ["parm", "run", "group"], "verb. lists a Verb's members")
     try expect_labels(file, "    Verb.", 10, ["named"], "Verb. lists its static functions")
     try expect_labels(file, "    Geometry.", 14, ["grid", "sphere", "empty"], "Geometry. lists its makers")
+    # What only the host uses is not the script's to see.
+    try expect_absent(file, "    g.", 7, ["finished", "flush", "adopted", "take", "drop_edits"], "g. lists no host-side method")
+    try expect_absent(file, "    k.", 7, ["close", "put_number", "put_text", "warnings", "error_line"], "k. lists no host-side method")
+    try expect_absent(file, "    Cook.", 9, ["blank"], "Cook. lists no host-side maker")
     try expect_labels(file, "    positions[0].", 18, ["x", "y", "z"], "an element of a span")
     try expect_labels(file, "    k.geometry().", 18, ["positions", "bounds"], "a call's result")
     # Signatures and docs.
@@ -124,3 +136,12 @@ func names_geocore(manifest: str) -> bool:
         return false
     defer text.release()
     return strings.contains(text.value, "def package \"luce-geocore\"")
+
+func expect_absent(file: str, extra: str, column: i64, unwanted: const str[], what: str) -> !:
+    let made = try complete(file, extra, column)
+    let items = try made.get()
+    for name in unwanted:
+        for at: i64 in 0..<items.count():
+            if items.label(at) == name:
+                print(f"  listed {name}")
+                expect(false, what)

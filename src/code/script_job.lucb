@@ -1,0 +1,103 @@
+# A Script node's check on a thread of its own. The first check of a package set reads its
+# packages (about 0.1 s), longer than an editor may wait between frames; luced-3d runs it
+# here and polls `finished`. Checks stay one at a time in the process: luce-kernel's file
+# help runs under its check lock, so a completion asked while a job runs would wait for it,
+# and luced-3d asks none until the job has finished.
+
+## A `ScriptHelp.check` running in the background.
+pub struct ScriptCheckJob:
+    var state: JobState*?
+
+    ## Start checking `text` as the file `file` (both copied), as `ScriptHelp.check` does.
+    pub static func start(file: str, text: str) -> interop.Reference[ScriptCheckJob]!:
+        let state = try new JobState(file = try heap_copy(file), text = "", check = empty_check(), code = errors.invalid, message = "", failed = false) in memory.heap
+        errdefer release_state(state)
+        state.text = try heap_copy(text)
+        state.handle = try thread.spawn(run_job, (void*)state, name = "script check")
+        state.joined = false
+        let storage = new ScriptCheckJob[1] --- in memory.heap catch failure:
+            state.join()
+            release_state(state)
+            error(failure.code, failure.message)
+        storage[0] = ScriptCheckJob(state = state)
+        return try interop.Reference[ScriptCheckJob].adopt(storage.data, script_check_job_type, memory.heap)
+
+    ## Whether the check has finished (its result is ready).
+    pub func finished() -> bool:
+        let state = self.state else return true
+        state.lock.lock()
+        defer state.lock.unlock()
+        return state.done
+
+    ## The check's result, waiting for it if it is still running; once.
+    pub func result() -> interop.Reference[CodeCheck]!:
+        let state = self.state else error(errors.invalid, "the script check is closed")
+        state.join()
+        if state.failed: error(state.code, state.message)
+        let storage = try new CodeCheck[1] --- in memory.heap
+        storage[0] = state.check
+        state.check = empty_check()
+        return try interop.Reference[CodeCheck].adopt(storage.data, code_check_type, memory.heap)
+
+    ## Wait for the check and give everything back.
+    pub func close():
+        let state = self.state else return
+        state.join()
+        release_state(state)
+        self.state = none
+
+## What the job's thread shares with its owner: the input, and under `lock` whether it is
+## done; the result and failure are read only after the join.
+struct JobState:
+    var file: str
+    var text: str
+    var check: CodeCheck
+    var code: ErrorCode
+    var message: str
+    var failed: bool
+    var lock: sync.Mutex
+    var done: bool = false
+    var joined: bool = true
+    var handle: thread.Handle
+
+    ## Wait for the thread, once.
+    func join():
+        if self.joined: return
+        self.handle.join() catch failure: trap(failure.message)
+        self.joined = true
+
+## Free `state`'s copies, its result and the state itself (joined first).
+func release_state(state: JobState*):
+    heap_release(state.file)
+    heap_release(state.text)
+    heap_release(state.message)
+    state.check.close()
+    free(state) in memory.heap
+
+## The thread: run the check, keep its result or its failure.
+func run_job(raw: void*?):
+    let state = (JobState*)(raw else return)
+    fill_script_check(&state.check, state.file, state.text) catch failure:
+        state.failed = true
+        state.code = failure.code
+        state.message = heap_copy(failure.message) catch exhausted: recover ""
+    state.lock.lock()
+    state.done = true
+    state.lock.unlock()
+
+func empty_check() -> CodeCheck:
+    return CodeCheck(passed = false, lines = collections.List[CheckLine](), parameters = collections.List[CheckParameter](), timeline = false, texts = collections.TextPool())
+
+## A heap copy of `text` ("" owns nothing).
+func heap_copy(text: str) -> str!:
+    if text.length == 0: return ""
+    with memory.heap:
+        return try strings.copy(text)
+
+func heap_release(text: str):
+    if text.length == 0: return
+    with memory.heap:
+        strings.release(text)
+
+## ScriptCheckJob's interop type, for luced-3d.
+pub let script_check_job_type: interop.Type[ScriptCheckJob] = interop.Type[ScriptCheckJob]("ScriptCheckJob", ScriptCheckJob.close, closeable = true)

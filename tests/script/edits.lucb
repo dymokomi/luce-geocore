@@ -1,7 +1,7 @@
 ## The script API's later calls: a polygon's own vertices, array attributes and volumes,
 ## each through assembly and a .prism round trip.
 import strings
-from luce_geocore.script import Geometry, Domain3, VolumeClass, VoxelGrid, Cook
+from luce_geocore.script import Geometry, Domain3, VolumeClass, VoxelGrid, Cook, CookRun
 import api
 
 ## Reading, setting, inserting and removing a polygon's vertices; vertex attributes
@@ -139,8 +139,9 @@ pub func volumes() -> !:
 ## `set_geometry` and a new `add_volume` of its name it reads the new grid of its name;
 ## when none is left it reads as empty and a write fails, naming the grid.
 pub func volume_handles() -> !:
-    var k = try Cook.blank(try Geometry.empty())
-    defer k.close()
+    var run = try CookRun.blank(try Geometry.empty())
+    defer run.close()
+    let k = run.cook()
     let g = k.geometry()
     let fog = try g.add_volume("density", VolumeClass.fog, [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0], voxel = 0.125, initial = 0.5)
     try fog.set(0, 0, 0, 2.0)

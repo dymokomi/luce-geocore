@@ -1,3 +1,24 @@
+#==============================================================================================
+#
+#   script_host - The editor's side of the Script node
+#
+#   DESCRIPTION:
+#       What luced-3d uses to run a Script node, kept apart from `script` so a script (and
+#       completion in its editor) sees only the API it codes against: `ScriptProcess`
+#       starts a built tool and speaks the protocol `script.serve` answers, `ScriptText`
+#       reads a script's spare parameters from its text, and `geocore_requirement` is the
+#       luce-geocore release a tool built from the registry names.
+#
+#==============================================================================================
+
+import interop
+import memory
+import strings
+import errors
+from core.growing import Growing
+from luce_std.process import Command
+from luce_std.net import Connection, Listener, SocketAddress, Deadline, WaitInterest
+
 # The parent's side of the protocol (serve.lucb has the child's): a Script tool started
 # as a child process that connects back over loopback TCP and waits for its request.
 # Requests and replies are lines on that connection; what the child prints, and the trap

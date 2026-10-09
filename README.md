@@ -34,7 +34,8 @@ The Script node's API is `luce_geocore.script` (Houdini's Python SOP, in Base): 
 script's `cook(k: Cook*)` builds and edits a `Geometry` (points, polygons, attributes,
 groups, curves, the point cloud, instances) and runs any verb by name (`Verb`); luced-3d
 builds it into a tool whose `main` calls `serve`, run in a child process the editor
-drives with `ScriptProcess`. `tests/script` checks the API and the protocol end to end.
+drives with `luce_geocore.script_host` (`ScriptProcess`, and `ScriptText` for the
+node's parameter rows). `tests/script` checks the API and the protocol end to end.
 
 Import `geocore` (`from luce_geocore.geocore import Mesh, MeshBuilder,
 Vector3`). Base code in other packages also has `luce_geocore.kernel` (bit

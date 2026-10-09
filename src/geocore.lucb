@@ -95,3 +95,5 @@ pub type CodeCompletion = code.CodeCompletion
 ## Editor help for a Script node's script, checked as a file of a check package:
 ## `ScriptHelp.check`, `ScriptHelp.complete` and `ScriptHelp.hover`.
 pub type ScriptHelp = code.ScriptHelp
+## `ScriptHelp.check` on a thread of its own, for a first check that reads packages.
+pub type ScriptCheckJob = code.ScriptCheckJob

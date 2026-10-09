@@ -29,9 +29,8 @@ pub struct Cook:
     var target: str
     var echo: bool
 
-    ## A cook over `output` (taken) with no inputs or parameters, at frame 1 of 24 fps:
-    ## for tests and for running a cook function directly.
-    pub static func blank(output: Geometry) -> Cook!:
+    ## A cook over `output` (taken) with no inputs or parameters, at frame 1 of 24 fps.
+    static func blank(output: Geometry) -> Cook!:
         return Cook(output = output, inputs = [try Geometry.input(), try Geometry.input()], wired = [false, false], values = Growing[Value](),
                     clock = [1.0, 0.0, 24.0], folder = "", link = none, warned = Growing[u8](), last_progress = 0, failed_line = 0, target = "", echo = false)
 
@@ -155,14 +154,14 @@ pub struct Cook:
         try self.reply(strings.format(buffer, f"progress {fraction}") catch failure: recover "progress 0")
 
     ## The line of the last k.error (0: none yet).
-    pub func error_line() -> u32:
+    func error_line() -> u32:
         return self.failed_line
 
     ## The warnings sent so far, a line each ("line: message").
-    pub func warnings() -> str:
+    func warnings() -> str:
         return (str)self.warned.view()
 
-    pub func close():
+    func close():
         self.output.close()
         self.inputs[0].close()
         self.inputs[1].close()
@@ -189,12 +188,13 @@ pub struct Cook:
         return value.numbers.items[component]
 
     ## Give a parameter its value (what a request's lines say).
-    pub func put_number(name: str, numbers: const f64[]) -> !:
+    func put_number(name: str, numbers: const f64[]) -> !:
         var value = Value(label = try heap_text(name), numbers = Growing[f64](), text = "", textual = false)
         try value.numbers.assign(numbers)
         try self.values.push(value)
 
-    pub func put_text(name: str, text: str) -> !:
+    ## Give a text parameter its value.
+    func put_text(name: str, text: str) -> !:
         try self.values.push(Value(label = try heap_text(name), numbers = Growing[f64](), text = try heap_text(text), textual = true))
 
     func reply_warning(line: u32, message: str) -> !:
@@ -214,3 +214,37 @@ pub struct Cook:
             try link.write_text("\n")
         elif self.echo:
             try io.stdout().write(f"@l3d {line}\n")
+
+## A cook run outside a Script node, for tests and for calling a cook function directly:
+## it gives the parameters their values and reads back the warnings and the line of the
+## last `k.error`. A script never needs it; the node's own cooks go through `serve`.
+pub struct CookRun:
+    var held: Cook
+
+    ## A run over `output` (taken) with no inputs or parameters, at frame 1 of 24 fps.
+    pub static func blank(output: Geometry) -> CookRun!:
+        return CookRun(held = try Cook.blank(output))
+
+    ## The cook to pass to a cook function.
+    pub func cook() -> Cook*:
+        return &self.held
+
+    ## Give parameter `name` its numbers.
+    pub func put_number(name: str, numbers: const f64[]) -> !:
+        try self.held.put_number(name, numbers)
+
+    ## Give text parameter `name` its text.
+    pub func put_text(name: str, text: str) -> !:
+        try self.held.put_text(name, text)
+
+    ## The warnings sent so far, a line each ("line: message").
+    pub func warnings() -> str:
+        return self.held.warnings()
+
+    ## The line of the last k.error (0: none yet).
+    pub func error_line() -> u32:
+        return self.held.error_line()
+
+    ## Give back the cook, its geometry and its parameters.
+    pub func close():
+        self.held.close()

@@ -5,7 +5,8 @@ import strings
 import thread
 import time
 from luce_std import files
-from luce_geocore.script import Geometry, Cook, ScriptProcess, Domain3
+from luce_geocore.script import Geometry, Cook, Domain3
+from luce_geocore.script_host import ScriptProcess
 import api
 
 let failed: ErrorCode = ErrorCode.package(1)

@@ -2,7 +2,8 @@
 ## families and whole-set operations, checked against geocore's own builders.
 import strings
 from luce_std import files
-from luce_geocore.script import Geometry, Domain3, AttributeKind, Float3, Cook, geocore_requirement
+from luce_geocore.script import Geometry, Domain3, AttributeKind, Float3, Cook, CookRun
+from luce_geocore.script_host import geocore_requirement
 from luce_geocore.geocore import MeshBuilder, Vector3
 
 ## Where a test may write files (luc test gives each program a scratch HOME).
@@ -35,7 +36,7 @@ pub func building() -> !:
     let mesh = try expected.get()
     assert(g.point_count() == mesh.point_count())
     assert(g.prim_count() == mesh.face_count())
-    try g.flush()
+    _ = try g.bounds()
     assert(g.point_count() == 10000)
     assert(g.prim_count() == 9801)
     assert(g.vertex_count() == 9801 * 4)
@@ -85,7 +86,7 @@ pub func attributes() -> !:
     masses[0] = 9.0
     let colors = try back.point_vec3s("Cd")
     colors[1] = Float3(x = 1.0, y = 0.0, z = 0.0)
-    try back.flush()
+    _ = try back.bounds()
     assert((try back.position(12))[1] == 1.0)
     assert(try back.point_f32(0, "mass") == 9.0)
     assert((try back.point_vec3(1, "Cd"))[0] == 1.0)
@@ -93,7 +94,7 @@ pub func attributes() -> !:
     let held = try back.positions()
     _ = try back.bounds()
     held[0].y = 7.0
-    try back.flush()
+    _ = try back.bounds()
     assert((try back.bounds()).maximum.y == 7.0)
     print("ok    script: attributes of every kind round trip")
 
@@ -103,7 +104,7 @@ pub func reshaping() -> !:
     var g = try Geometry.grid(2.0, 2)
     defer g.close()
     for point in 0..<g.point_count(): try g.set_point_f32(point, "n", (f32)point)
-    try g.flush()
+    _ = try g.bounds()
     # The center point (4) is on every quad.
     let center: i64[1] = [4]
     try g.remove_points(center)
@@ -112,7 +113,7 @@ pub func reshaping() -> !:
     let a = try g.add_point([0.0, 1.0, 0.0, 0.0])
     let triangle: i64[3] = [0, 1, a]
     _ = try g.add_polygon(triangle)
-    try g.flush()
+    _ = try g.bounds()
     assert(g.point_count() == 9 and g.prim_count() == 1)
     assert(try g.point_f32(7, "n") == 8.0)
     assert(try g.point_f32(8, "n") == 0.0)
@@ -153,10 +154,10 @@ pub func families() -> !:
     assert(try g.add_polyline(line) == 0)
     let control: f32[6][4] = [[0.0, 0.0, 0.0, 0.0], [1.0, 0.0, 0.0, 0.0], [2.0, 1.0, 0.0, 0.0], [3.0, 0.0, 0.0, 0.0], [4.0, 1.0, 0.0, 0.0], [5.0, 0.0, 0.0, 0.0]]
     assert(try g.add_curve(control, degree = 5) == 1)
-    try g.flush()
+    _ = try g.bounds()
     assert(g.curve_count() == 2)
     _ = try g.add_polyline(line, closed = true)
-    try g.flush()
+    _ = try g.bounds()
     assert(g.curve_count() == 3)
     var cloud = try Geometry.empty()
     defer cloud.close()
@@ -183,8 +184,9 @@ pub func families() -> !:
 
 ## Inputs are read-only.
 pub func locking() -> !:
-    var k = try Cook.blank(try Geometry.empty())
-    defer k.close()
+    var run = try CookRun.blank(try Geometry.empty())
+    defer run.close()
+    let k = run.cook()
     let input = try k.input(0)
     var refused = false
     _ = input.add_point([0.0, 0.0, 0.0, 0.0]) catch failure:

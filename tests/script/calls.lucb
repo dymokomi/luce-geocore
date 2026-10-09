@@ -1,6 +1,7 @@
 ## Verbs by name, the cook's parameters and messages, and the editor's text scan.
 import strings
-from luce_geocore.script import Geometry, Verb, Cook, ScriptText, GroupKind, Domain3
+from luce_geocore.script import Geometry, Verb, Cook, CookRun, GroupKind, Domain3
+from luce_geocore.script_host import ScriptText
 from luce_geocore.geocore import Verbs, MeshPrimitives
 
 ## Verb.named with labels matches the node's run; a bad label lists the labels.
@@ -50,13 +51,14 @@ pub func verbs() -> !:
 ## Parameters read the request's values or their defaults; k.error keeps its line;
 ## warnings collect.
 pub func cooking() -> !:
-    var k = try Cook.blank(try Geometry.empty())
-    defer k.close()
+    var run = try CookRun.blank(try Geometry.empty())
+    defer run.close()
+    let k = run.cook()
     let height: f64[1] = [0.75]
-    try k.put_number("height", height)
+    try run.put_number("height", height)
     let at: f64[3] = [1.0, 2.0, 3.0]
-    try k.put_number("at", at)
-    try k.put_text("image", "/tmp/a.jpg")
+    try run.put_number("at", at)
+    try run.put_text("image", "/tmp/a.jpg")
     assert(k.f32("height", 0.3) == 0.75)
     assert(k.f32("other", 0.3) == 0.3)
     assert(k.i32("count", 7) == 7)
@@ -68,11 +70,11 @@ pub func cooking() -> !:
     assert(k.ramp("shape", 0.25) == 0.25)
     assert(k.frame() == 1.0 and k.fps() == 24.0)
     k.warning("first")
-    assert(strings.contains(k.warnings(), "first"))
+    assert(strings.contains(run.warnings(), "first"))
     var line: u32 = 0
     k.error("bad") catch failure:
-        line = k.error_line()
-    assert(line == 73)
+        line = run.error_line()
+    assert(line == 75)
     # Writing the output works; it starts empty with nothing wired.
     _ = try k.geometry().add_point([1.0, 2.0, 3.0, 0.0])
     assert(k.geometry().point_count() == 1)
