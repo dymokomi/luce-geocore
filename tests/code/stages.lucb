@@ -5,7 +5,8 @@ import memory
 import strings
 from luce_std import math, math32, ramp
 from luce_geocore import kernel as geocore_kernel
-from luce_geocore.geocore import Code, GeometryVerbs, Mesh, GeometrySet, MeshPrimitives, Vector3, Matrix4, mesh_overlay_points
+from luce_geocore.kernel import Bits, Domain
+from luce_geocore.geocore import Code, Verbs, GeometryVerbs, Mesh, GeometrySet, MeshPrimitives, Vector3, Matrix4, mesh_overlay_points
 import support
 
 func expect(condition: bool, what: str):
@@ -444,3 +445,69 @@ pub func arrays() -> !:
     let full = failure(set, support.points_mode, "var a = k.floats()\nfor i in 0..<65:\n    a = a.append(1.0)\n")
     expect(strings.ends_with(full, "too many additions from one element (point 0)"), "64 items at most")
     print("ok    arrays: append in a loop, sort, argsort, find, insert, remove, set, reverse, slice, resize, pop, vectors, ints, the limit")
+
+## Regression: an array built in a varying-bound loop from gathers holds each point's own
+## neighbors' values (the median filter example), and a P write in a branch after it.
+pub func array_median() -> !:
+    let grid = try GeometrySet.of_mesh(try MeshPrimitives.grid(8.0, 80))
+    let first_run = try Code.cook(grid, support.points_mode, "", "p.P[1] = snoise(p.P * 0.4) * 0.8\nif rand((i64)p.ptnum) < 0.05:\n    p.P[1] += 1.5\n", "", 0, support.no_names(), support.no_values(), 1.0, 0.0, 24.0, 0)
+    let spiky = (try first_run.get()).geometry()
+    let body = "let g = k.input(0)\nlet near = g.nearpoints(p.P, 0.4, 9)\nvar heights = k.floats()\nfor i in 0..<near.count:\n    heights = heights.append(g.point_P(near.points[i])[1])\nheights = heights.sort()\nlet mid = heights.at(heights.len() // 2)\nk.set_point_f32(p.ptnum, \"self\", p.P[1])\nk.set_point_f32(p.ptnum, \"mid\", mid)\nk.set_point_f32(p.ptnum, \"count\", (f32)near.count)\nif heights.len() > 0:\n    p.P[1] = mid\n"
+    let second_run = try Code.cook(spiky, support.points_mode, "", body, "", 0, support.no_names(), support.no_values(), 1.0, 0.0, 24.0, 0)
+    let made = try support.mesh_of((try second_run.get()).geometry())
+    let before = try (try support.mesh_of(spiky)).get()
+    let after = try made.get()
+    var bad: i64 = 0
+    for at: i64 in 0..<before.point_count():
+        let q = try before.point(at)
+        # The nine nearest within 0.4 (ties by number), as nearpoints finds them.
+        var best: f64[9]
+        var who: i64[9]
+        var count: usize = 0
+        for other: i64 in 0..<before.point_count():
+            let d = (try before.point(other)).subtract(q).length()
+            if d > 0.4: continue
+            var slot = count
+            while slot > 0 and best[slot - 1] > d: slot -= 1
+            if slot >= 9: continue
+            var move = count if count < 9 else 8
+            while move > slot:
+                best[move] = best[move - 1]
+                who[move] = who[move - 1]
+                move -= 1
+            best[slot] = d
+            who[slot] = other
+            if count < 9: count += 1
+        var heights: f64[9]
+        for k in 0..<count: heights[k] = (f64)(f32)(try before.point(who[k])).y
+        for k in 1..<count:
+            var j = k
+            while j > 0 and heights[j] < heights[j - 1]:
+                let held = heights[j]
+                heights[j] = heights[j - 1]
+                heights[j - 1] = held
+                j -= 1
+        let want = heights[count // 2]
+        let got = try support.value(made, "mid", 0, at)
+        if math.abs(got - want) > 0.0001 or math.abs((try after.point(at)).y - want) > 0.0001:
+            if bad < 5: print(f"      point {at}: mid {got} wanted {want} y {(try after.point(at)).y} count vs {count}")
+            bad += 1
+    expect(bad == 0, "the median of each point's neighbors, and P written in a branch after the loop")
+    print("ok    arrays from gathers in a varying loop: medians, P written after")
+
+## Regression: text attributes from Code are face-domain text attributes that group
+## expressions read (`@name=quad_2`), on a small grid by quadrant.
+pub func text_groups() -> !:
+    let grid = try support.grid_set(4)
+    let named = try support.run(grid, support.primitives_mode, "let c = f.center()\nlet quadrant = (0 if c[0] < 0.0 else 1) + (0 if c[2] < 0.0 else 2)\nf.set_text(\"name\", k.sprintf(\"quad_%d\", (f32)quadrant))\n")
+    let mesh = try (try support.mesh_of(named)).get()
+    var result = try geocore_kernel.group_bits_of(mesh, "@name=quad_2", Domain.face)
+    defer result.bits.release()
+    let chosen = Bits(result.bits.view(), (usize)mesh.face_count())
+    print(f"      @name=quad_2 picks {chosen.population()} of {mesh.face_count()}")
+    expect(chosen.population() == 4, "a group expression reads a Code text attribute")
+    # The Delete verb (Houdini's Blast) removes the quadrant through the same group.
+    let deleted = try Verbs.run("Delete", try support.mesh_of(named), "@name=quad_2", 0, support.no_values())
+    let left = try (try deleted.get()).mesh()
+    expect((try left.get()).face_count() == 12, "Delete with @name=quad_2 removes that quadrant")
+    print("ok    text attributes from Code feed group expressions")
