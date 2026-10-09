@@ -36,6 +36,11 @@ pub func cloud_origin(cloud: const PointCloud*) -> Vector3:
 pub func cloud_store(cloud: const PointCloud*) -> const AttributeStore*:
     return &cloud.attributes
 
+## The change id of a cloud's positions (luce-geocore's column ids): equal
+## ids mean equal positions, so a renderer keys its GPU copy on it.
+pub func cloud_positions_id(cloud: const PointCloud*) -> u64:
+    return cloud.positions.id()
+
 ## `cloud` with `attributes` (taken, even on failure) in place of its
 ## own; the positions are shared.
 pub func cloud_with_store(cloud: const PointCloud*, attributes: AttributeStore) -> PointCloud*!:
@@ -63,6 +68,11 @@ pub func cloud_of_mesh(mesh: const Mesh*) -> PointCloud*!:
     let storage = try new PointCloud[1] --- in memory.heap
     storage[0] = PointCloud(mesh_positions(mesh), mesh.position_origin(), attributes)
     return storage.data
+
+## The set's point cloud, splats or plain points, for renderers.
+pub func set_cloud(set: const GeometrySet*) -> const PointCloud*?:
+    let data = set.find(&points_component) else return none
+    return (const PointCloud*)data
 
 ## The set's point cloud when it is a splat cloud (its points carry orient,
 ## scale and opacity: splats/conventions.lucb), for renderers and exporters.

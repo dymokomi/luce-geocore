@@ -287,7 +287,9 @@ them, and the design is luced-3d's `docs/research/GAUSSIAN-SPLATS.md`.
   and `Cd` in f64 and the file's quaternion as it is, so a file's values come
   back bit for bit (`tests/splats`).
 - **Renderers** find a set's splats with `set_splats` (Base) or
-  `GeometrySet.splat_count` (Luce).
+  `GeometrySet.splat_count` (Luce), and any cloud, splats or plain points,
+  with `set_cloud`; `cloud_positions_id` is its positions' change id, which a
+  GPU copy keys on (luce-3d's GaussianSplats).
 
 ## Set verbs and the verb catalog
 
