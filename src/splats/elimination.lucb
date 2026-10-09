@@ -1,0 +1,189 @@
+## Weighted sample elimination (Yuksel 2015, "Sample Elimination for
+## Generating Poisson Disk Sample Sets"): blue-noise points picked from more
+## random candidates, for GSplats from Polygons' even coverage.
+##
+## Every candidate is weighed by its neighbors within 2 r_max, each adding
+## (1 - d̂ / 2 r_max)^8, where r_max = √(A / (2√3 n)) is the spacing n points
+## would have packed hexagonally over the area A, and d̂ = max(d, r_min)
+## limits what very close pairs weigh (r_min = r_max (1 - (n/m)^1.5) 0.65 for m
+## candidates, the paper's weight limiting). The most crowded candidates go
+## first and their neighbors lose their shares, until n remain. Distances are
+## straight-line ones in 3D, as the paper does on surfaces.
+##
+## The paper removes the single heaviest candidate at a time from a heap; on
+## millions of candidates that heap is a cache miss per level, and sequential
+## (2.2 s for a million splats). Here elimination runs in rounds on the pool.
+## A round takes the weight the heaviest still-to-go candidates reach (as
+## many as are still to go) and removes every candidate at least that heavy
+## that outweighs all its kept neighbors: an independent set of local maxima
+## among the most crowded, each one the heap would also take before its
+## neighbors (the heaviest first when the round would remove too many). Then
+## the kept weights are recounted. A light candidate in a sparse spot is never
+## taken just for topping its own neighbors. About 18 rounds make a million
+## splats from three million candidates in 0.5 s, with the same closest pairs
+## and holes as the heap's; since a round reads only the previous round's
+## state, the result is the same on any number of threads.
+##
+## Neighbors are each candidate's nearest 16 within 2 r_max (PointHash). At
+## three candidates a splat about 11 lie within 2 r_max, so the 16 nearest
+## hold them all but in the densest clumps, and the lists are symmetric for
+## what counts: weights are recounted from them over the kept each round.
+
+## Bins of the weight histogram that finds a round's threshold.
+let threshold_bins: usize = 1024
+
+## The nearest neighbors each candidate keeps.
+let elimination_neighbors: usize = 16
+
+## `keep` of `points` chosen as blue noise over a surface of `area`: `alive`
+## (one per point) is 1 for those kept, 0 for the others. All are kept when
+## there are no more than `keep`.
+pub func eliminate_samples(points: const Float3[], keep: usize, area: f64, alive: u8[]) -> !:
+    let count = points.length
+    for at in 0..<count: alive[at] = 1
+    if keep >= count: return
+    if not (area > 0.0) or keep == 0:
+        for at in keep..<count: alive[at] = 0
+        return
+    let r_max = math.sqrt(area / (2.0 * math.sqrt(3.0) * (f64)keep))
+    var work = EliminationWork(points = points, radius = 2.0 * r_max, r_min = r_max * (1.0 - math.pow((f64)keep / (f64)count, 1.5)) * 0.65)
+    work.hash = try PointHash.for_radius(points, work.radius)
+    defer work.hash.close()
+    let k = elimination_neighbors
+    work.lists = try new u32[count * k + 1] --- in memory.heap
+    defer free(work.lists) in memory.heap
+    work.found = try new u8[count + 1] --- in memory.heap
+    defer free(work.found) in memory.heap
+    ranges.each_range(count, 2048, (void*)&work, find_neighbors)
+    work.weights = try new f64[count + 1] --- in memory.heap
+    defer free(work.weights) in memory.heap
+    work.marked = try new u8[count + 1] --- in memory.heap
+    defer free(work.marked) in memory.heap
+    work.alive = alive
+    ranges.each_range(count, 4096, (void*)&work, weigh_samples)
+    var left = count
+    var chosen = Growing[u32]()
+    defer chosen.close()
+    let bins = try new usize[threshold_bins] in memory.heap
+    defer free(bins) in memory.heap
+    while left > keep:
+        work.threshold = crowd_threshold(&work, bins, left - keep)
+        ranges.each_range(count, 4096, (void*)&work, mark_crowded)
+        chosen.clear()
+        for i in 0..<count:
+            if work.marked[i] != 0: try chosen.push((u32)i)
+        # The heaviest kept candidate always tops its neighbors: never empty.
+        if chosen.count == 0: break
+        var removing = chosen.count
+        if removing > left - keep:
+            # The last round takes only the heaviest it needs.
+            removing = left - keep
+            sort.using(chosen.items[..<chosen.count], &work, most_crowded_first)
+        for at in 0..<removing: alive[(usize)chosen.items[at]] = 0
+        left -= removing
+        ranges.each_range(count, 4096, (void*)&work, weigh_samples)
+
+struct EliminationWork:
+    var points: const Float3[]
+    var radius: f64
+    var r_min: f64
+    var hash: PointHash = PointHash(no_points(), 1.0, 0, no_order(), no_order(), no_points())
+    ## Each candidate's nearest within 2 r_max: lists[i * 16..] up to found[i].
+    var lists: u32[] = no_order()
+    var found: u8[] = no_bytes()
+    var weights: f64[] = no_numbers()
+    ## The kept so far, and this round's crowded ones: those at least
+    ## `threshold` heavy that outweigh their kept neighbors.
+    var threshold: f64 = 0.0
+    var alive: u8[] = no_bytes()
+    var marked: u8[] = no_bytes()
+
+    ## Candidate i's neighbors.
+    func list(i: usize) -> const u32[]:
+        return self.lists[i * elimination_neighbors..<i * elimination_neighbors + (usize)self.found[i]]
+
+    ## What a neighbor at squared distance `d2` adds to a weight.
+    func share(d2: f64) -> f64:
+        let d = math.max(math.sqrt(d2), self.r_min)
+        if d >= self.radius: return 0.0
+        let t = 1.0 - d / self.radius
+        let t2 = t * t
+        let t4 = t2 * t2
+        return t4 * t4
+
+func find_neighbors(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (EliminationWork*)context
+    let k = elimination_neighbors
+    for i in first..<end:
+        work.found[i] = (u8)work.hash.nearest(i, k, work.radius, work.lists[i * k..<(i + 1) * k])
+
+## Each kept candidate's weight from its kept neighbors.
+func weigh_samples(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (EliminationWork*)context
+    for i in first..<end:
+        if work.alive[i] == 0: continue
+        let p = work.points[i].vector()
+        var total: f64 = 0.0
+        for j in work.list(i):
+            if work.alive[(usize)j] != 0: total += work.share(distance2(work.points[(usize)j], p))
+        work.weights[i] = total
+
+## Mark the kept candidates heavier than every kept neighbor (ties: the lower
+## number), which have a neighbor at all.
+func mark_crowded(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (EliminationWork*)context
+    for i in first..<end:
+        work.marked[i] = 0
+        if work.alive[i] == 0 or work.weights[i] <= 0.0 or work.weights[i] < work.threshold: continue
+        var top = true
+        for neighbor in work.list(i):
+            let j = (usize)neighbor
+            if work.alive[j] != 0 and more_crowded(work.weights, j, i):
+                top = false
+                break
+        if top: work.marked[i] = 1
+
+## The weight the `most` heaviest kept candidates reach, about: the lower
+## edge of the histogram bin where they add up to `most`. Past 64k candidates
+## the histogram reads every 8th, which estimates the quantile as well for a
+## fraction of the time.
+func crowd_threshold(work: const EliminationWork*, bins: usize[], most: usize) -> f64:
+    let count = work.points.length
+    let stride: usize = 8 if count >= 65536 else 1
+    var top: f64 = 0.0
+    var at: usize = 0
+    while at < count:
+        if work.alive[at] != 0 and work.weights[at] > top: top = work.weights[at]
+        at += stride
+    if not (top > 0.0): return 0.0
+    for bin in 0..<bins.length: bins[bin] = 0
+    let scale = (f64)(bins.length - 1) / top
+    at = 0
+    while at < count:
+        if work.alive[at] != 0: bins[(usize)(work.weights[at] * scale)] += stride
+        at += stride
+    var total: usize = 0
+    var bin = bins.length
+    while bin > 0:
+        bin -= 1
+        total += bins[bin]
+        if total >= most: return (f64)bin / scale
+    return 0.0
+
+## Whether candidate a weighs more than b (ties: the lower number).
+func more_crowded(weights: const f64[], a: usize, b: usize) -> bool:
+    return weights[a] > weights[b] or (weights[a] == weights[b] and a < b)
+
+func most_crowded_first(work: const EliminationWork*, a: u32, b: u32) -> bool:
+    return more_crowded(work.weights, (usize)a, (usize)b)
+
+func no_bytes() -> u8[]:
+    var none_yet: u8[]
+    return none_yet
+
+func no_numbers() -> f64[]:
+    var none_yet: f64[]
+    return none_yet

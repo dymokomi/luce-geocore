@@ -1,13 +1,17 @@
 ## GSplats from Polygons' kernel: Gaussian splats made with no training, as
 ## flat discs lying on a surface (GSOPs' gaussian_splats_from_polygons).
 ##
-## The surface is a mesh's display triangles. Each triangle gets its share of
-## `density` × area splats: the whole part, plus one more with the chance of
-## the fraction, so the expected count is exact and a triangle's count does
-## not depend on any other's. Points are uniform over the triangle
-## (barycentrics from √u, the standard area-uniform map). Every draw comes
-## from a hash of the seed, the triangle and the point, so the result is the
-## same on any number of threads.
+## The surface is a mesh's display triangles, and `density` × area splats
+## (rounded) cover it as blue noise, so the coverage is even: no clumps and
+## no holes, across triangle edges too. Each triangle first gets its share of
+## three times as many random candidates (the whole part, plus one more with
+## the chance of the fraction), uniform over it (barycentrics from √u, the
+## standard area-uniform map); weighted sample elimination (elimination.lucb)
+## then keeps the splats. Every draw comes from a hash of the seed, the
+## triangle and the point, and the elimination is sequential, so the result is
+## the same on any number of threads. Past `most_eliminated` splats the
+## candidates are the splats, random as drawn (the elimination's lists would
+## take too much memory).
 ##
 ## A splat is a disc in the triangle's plane: `orient` turns local x and y
 ## onto the plane (x along the triangle's first edge) and local z onto the
@@ -66,50 +70,75 @@ pub struct SurfaceSplats:
 
 ## The most splats one run makes.
 let most_surface_splats: usize = 200000000
+## The most splats chosen by elimination, and the candidates drawn per splat.
+let most_eliminated: usize = 16000000
+let oversampling: f64 = 3.0
 
 ## Splats covering `mesh` as `options` say.
 pub func surface_splats(mesh: const SurfaceMesh*, options: const SurfaceSplatOptions*) -> SurfaceSplats!:
     if not (options.density > 0.0 and options.density < 1.0e12): error(errors.invalid, "the density must be positive")
     let triangles = mesh.triangles.length // 3
-    # Each triangle's count, then where its splats start.
-    let starts = try new usize[triangles + 1] in memory.heap
-    defer free(starts) in memory.heap
-    var counting: SurfaceWork
-    counting.mesh = *mesh
-    counting.options = *options
-    counting.starts = starts
-    ranges.each_range(triangles, 4096, (void*)&counting, count_triangle_splats)
+    var work: SurfaceWork
+    work.mesh = *mesh
+    work.options = *options
+    work.areas = try new f64[triangles + 1] --- in memory.heap
+    defer free(work.areas) in memory.heap
+    work.starts = try new usize[triangles + 1] in memory.heap
+    defer free(work.starts) in memory.heap
+    ranges.each_range(triangles, 4096, (void*)&work, measure_triangles)
+    var area: f64 = 0.0
+    for at in 0..<triangles: area += work.areas[at]
+    let wanted = math.round(area * options.density)
+    if wanted > (f64)most_surface_splats: error(errors.limit, "the density makes too many splats for this surface")
+    let keep = (usize)wanted
+    work.factor = oversampling if keep <= most_eliminated else 1.0
+    # Each triangle's candidates, then where they start.
+    ranges.each_range(triangles, 4096, (void*)&work, count_candidates)
     var total: usize = 0
     for at in 0..<triangles:
-        let count = starts[at]
-        starts[at] = total
+        let count = work.starts[at]
+        work.starts[at] = total
         total += count
-        if total > most_surface_splats: error(errors.limit, "the density makes too many splats for this surface")
-    starts[triangles] = total
-    var positions = try Column[Float3].allocate(total)
+        if total > most_surface_splats * 4: error(errors.limit, "the density makes too many splats for this surface")
+    work.starts[triangles] = total
+    # Candidates: where each lies (triangle and barycentrics b, c), and its point.
+    var candidates = try Column[Float3].allocate(total)
+    defer candidates.release()
+    work.positions = candidates.span()
+    work.places = try new Place[total + 1] --- in memory.heap
+    defer free(work.places) in memory.heap
+    ranges.each_range(triangles, 1024, (void*)&work, place_candidates)
+    let alive = try new u8[total + 1] --- in memory.heap
+    defer free(alive) in memory.heap
+    if work.factor > 1.0: try eliminate_samples(candidates.span()[..<total], keep, area, alive[..<total])
+    else:
+        for at in 0..<total: alive[at] = 1
+    # The kept, in candidate order (triangle by triangle).
+    var kept: usize = 0
+    for at in 0..<total:
+        if alive[at] != 0:
+            work.places[kept] = work.places[at]
+            kept += 1
+    var positions = try Column[Float3].allocate(kept)
     errdefer positions.release()
-    var orient = try float32_points(orient_name, 4, total)
+    var orient = try float32_points(orient_name, 4, kept)
     defer orient.release()
-    var scale = try float32_points(scale_name, 3, total)
+    var scale = try float32_points(scale_name, 3, kept)
     defer scale.release()
-    var opacity = try float32_points(opacity_name, 1, total)
+    var opacity = try float32_points(opacity_name, 1, kept)
     defer opacity.release()
-    var color = try float32_points(color_name, 3, total)
+    var color = try float32_points(color_name, 3, kept)
     defer color.release()
-    var normal = try float32_points("N", 3, total)
+    var normal = try float32_points("N", 3, kept)
     defer normal.release()
-    var filling: SurfaceWork
-    filling.mesh = *mesh
-    filling.options = *options
-    filling.starts = starts
-    filling.positions = positions.span()
-    filling.orient = float32_values(&orient)
-    filling.scale = float32_values(&scale)
-    filling.opacity = float32_values(&opacity)
-    filling.color = float32_values(&color)
-    filling.normal = float32_values(&normal)
-    filling.sigma = options.size if options.size > 0.0 else 0.6 / math.sqrt(options.density)
-    ranges.each_range(triangles, 1024, (void*)&filling, fill_triangle_splats)
+    work.positions = positions.span()
+    work.orient = float32_values(&orient)
+    work.scale = float32_values(&scale)
+    work.opacity = float32_values(&opacity)
+    work.color = float32_values(&color)
+    work.normal = float32_values(&normal)
+    work.sigma = options.size if options.size > 0.0 else 0.6 / math.sqrt(options.density)
+    ranges.each_range(kept, 4096, (void*)&work, fill_splats)
     var store = AttributeStore()
     errdefer store.close()
     try store.put(orient.share())
@@ -119,11 +148,22 @@ pub func surface_splats(mesh: const SurfaceMesh*, options: const SurfaceSplatOpt
     try store.put(normal.share())
     return SurfaceSplats(positions, store)
 
+## Where a candidate lies: its triangle and barycentrics (1 - b - c, b, c).
+struct Place:
+    var triangle: u32
+    var b: f32
+    var c: f32
+
 struct SurfaceWork:
     ## Copies of the caller's (slices and numbers).
     var mesh: SurfaceMesh
     var options: SurfaceSplatOptions
+    ## Each triangle's area, and where its candidates start.
+    var areas: f64[]
     var starts: usize[]
+    ## Candidates per splat (1: no elimination).
+    var factor: f64 = 1.0
+    var places: Place[]
     var positions: Float3[]
     var orient: f32[]
     var scale: f32[]
@@ -155,13 +195,19 @@ struct SurfaceWork:
             out[channel] = a * mesh.color.at(elements[0], channel) + b * mesh.color.at(elements[1], channel) + c * mesh.color.at(elements[2], channel)
         return Vector3(out[0], out[1], out[2])
 
-func count_triangle_splats(context: void*, first: usize, end: usize, worker: usize):
+func measure_triangles(context: void*, first: usize, end: usize, worker: usize):
     _ = worker
     let work = (SurfaceWork*)context
     for t in first..<end:
         let a = work.position(t, 0)
         let area = 0.5 * work.position(t, 1).subtract(a).cross(work.position(t, 2).subtract(a)).length()
-        let expected = area * work.options.density
+        work.areas[t] = area if area > 0.0 and area < 1.0e30 else 0.0
+
+func count_candidates(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (SurfaceWork*)context
+    for t in first..<end:
+        let expected = work.areas[t] * work.options.density * work.factor
         if not (expected > 0.0 and expected < 1.0e12):
             work.starts[t] = 0
             continue
@@ -169,48 +215,61 @@ func count_triangle_splats(context: void*, first: usize, end: usize, worker: usi
         let extra = 1 if draw(work.options.seed, t, 0xFFFFFFFF, 0) < expected - whole else 0
         work.starts[t] = (usize)whole + (usize)extra
 
-func fill_triangle_splats(context: void*, first: usize, end: usize, worker: usize):
+func place_candidates(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (SurfaceWork*)context
+    for t in first..<end:
+        let from_candidate = work.starts[t]
+        let count = work.starts[t + 1] - from_candidate
+        if count == 0: continue
+        let p0 = work.position(t, 0)
+        let e1 = work.position(t, 1).subtract(p0)
+        let e2 = work.position(t, 2).subtract(p0)
+        for k in 0..<count:
+            let at = from_candidate + k
+            # Area-uniform barycentrics.
+            let r = math.sqrt(draw(work.options.seed, t, (u64)k, 1))
+            let s = draw(work.options.seed, t, (u64)k, 2)
+            let b = r * (1.0 - s)
+            let c = r * s
+            work.places[at] = Place(triangle = (u32)t, b = (f32)b, c = (f32)c)
+            work.positions[at] = Float3.of(p0.add(e1.multiply_scalar(b)).add(e2.multiply_scalar(c)))
+
+## Kept splat `at`'s disc: x along its triangle's first edge, z its normal.
+func fill_splats(context: void*, first: usize, end: usize, worker: usize):
     _ = worker
     let work = (SurfaceWork*)context
     let sigma = work.sigma
     let thin = sigma * math.max(work.options.thickness, 0.0)
     let alpha = (f32)math.clamp(work.options.opacity, 0.0, 1.0)
-    for t in first..<end:
-        let from_splat = work.starts[t]
-        let count = work.starts[t + 1] - from_splat
-        if count == 0: continue
+    for at in first..<end:
+        let place = work.places[at]
+        let t = (usize)place.triangle
         let p0 = work.position(t, 0)
         let e1 = work.position(t, 1).subtract(p0)
         let e2 = work.position(t, 2).subtract(p0)
-        # The disc frame: x along the first edge, z the face normal.
         let z = unit_or(e1.cross(e2), Vector3(0.0, 1.0, 0.0))
         let x = unit_or(e1.subtract(z.multiply_scalar(e1.dot(z))), Vector3(1.0, 0.0, 0.0) if math.abs(z.x) < 0.9 else Vector3(0.0, 1.0, 0.0))
         let y = z.cross(x)
         let q = Quat.of_matrix(Mat3.of_columns(x, y, z)).normalized()
-        for k in 0..<count:
-            let at = from_splat + k
-            # Area-uniform barycentrics.
-            let r = math.sqrt(draw(work.options.seed, t, (u64)k, 1))
-            let s = draw(work.options.seed, t, (u64)k, 2)
-            let a = 1.0 - r
-            let b = r * (1.0 - s)
-            let c = r * s
-            work.positions[at] = Float3.of(p0.add(e1.multiply_scalar(b)).add(e2.multiply_scalar(c)))
-            work.orient[at * 4] = (f32)q.x
-            work.orient[at * 4 + 1] = (f32)q.y
-            work.orient[at * 4 + 2] = (f32)q.z
-            work.orient[at * 4 + 3] = (f32)q.w
-            work.scale[at * 3] = (f32)sigma
-            work.scale[at * 3 + 1] = (f32)sigma
-            work.scale[at * 3 + 2] = (f32)thin
-            work.opacity[at] = alpha
-            let color = work.color_at(t, a, b, c)
-            work.color[at * 3] = (f32)color.x
-            work.color[at * 3 + 1] = (f32)color.y
-            work.color[at * 3 + 2] = (f32)color.z
-            work.normal[at * 3] = (f32)z.x
-            work.normal[at * 3 + 1] = (f32)z.y
-            work.normal[at * 3 + 2] = (f32)z.z
+        let b = (f64)place.b
+        let c = (f64)place.c
+        work.positions[at] = Float3.of(p0.add(e1.multiply_scalar(b)).add(e2.multiply_scalar(c)))
+        work.orient[at * 4] = (f32)q.x
+        work.orient[at * 4 + 1] = (f32)q.y
+        work.orient[at * 4 + 2] = (f32)q.z
+        work.orient[at * 4 + 3] = (f32)q.w
+        work.scale[at * 3] = (f32)sigma
+        work.scale[at * 3 + 1] = (f32)sigma
+        work.scale[at * 3 + 2] = (f32)thin
+        work.opacity[at] = alpha
+        let color = work.color_at(t, 1.0 - b - c, b, c)
+        work.color[at * 3] = (f32)color.x
+        work.color[at * 3 + 1] = (f32)color.y
+        work.color[at * 3 + 2] = (f32)color.z
+        work.normal[at * 3] = (f32)z.x
+        work.normal[at * 3 + 1] = (f32)z.y
+        work.normal[at * 3 + 2] = (f32)z.z
 
 ## A uniform draw in [0, 1) for (seed, triangle, point, stream): splitmix64's
 ## finalizer over the four mixed together.

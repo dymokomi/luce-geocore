@@ -16,7 +16,7 @@ let from_polygons_parms: ParmSpec[7] = [
     ParmSpec("Keep Input", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep the mesh beside the splats.")]
 
 func gsplats_from_polygons_verb() -> SetVerb:
-    return SetVerb("GSplats from Polygons", gsplats_category, "Gaussian splats with no training: flat discs scattered over a mesh's surface, colored by its Cd", 1, false, false, from_polygons_parms, cook_from_polygons)
+    return SetVerb("GSplats from Polygons", gsplats_category, "Gaussian splats with no training: flat discs covering a mesh's surface evenly, colored by its Cd", 1, false, false, from_polygons_parms, cook_from_polygons)
 
 func cook_from_polygons(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     let found = set_mesh(input.set)

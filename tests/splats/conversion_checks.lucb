@@ -15,6 +15,7 @@ import draws
 
 pub func run() -> !:
     try plane_discs()
+    try even_coverage()
     try density_mass(0.05)
     try density_mass(0.2)
     try density_surface()
@@ -74,6 +75,39 @@ func plane_discs() -> !:
     defer other.release()
     assert(clouds.point_of(other.value(), 7).x != clouds.point_of(discs.value(), 7).x, "another seed moves them")
     assert(set_mesh(other.value()) != none, "Keep Input keeps the mesh")
+
+## Even coverage: on a 2 × 2 grid at 400 per unit area, the 1600 splats are
+## blue noise (weighted sample elimination over random candidates). No two lie
+## much closer than the spacing, and no spot of the plane is far from a
+## splat. Random points (the candidates kept as drawn) measure a closest pair
+## of 0.04 and a widest hole of 1.32 spacings here; elimination 0.66 and 0.94.
+func even_coverage() -> !:
+    let plain = try MeshPrimitives.grid(2.0, 16)
+    defer plain.release()
+    let grid = try GeometrySet.of_mesh(plain)
+    defer grid.release()
+    let density = 400.0
+    let discs = try run_with("GSplats from Polygons", grid, [density])
+    defer discs.release()
+    let count = count_of(discs)
+    assert(count == 1600, "density × area splats, rounded")
+    let spacing = 1.0 / math.sqrt(density)
+    var closest: f64 = 1.0e9
+    for i in 0..<count:
+        let p = clouds.point_of(discs.value(), i)
+        for j in i + 1..<count:
+            closest = math.min(closest, p.subtract(clouds.point_of(discs.value(), j)).length())
+    # The widest hole: the farthest any probe inside the plane is from a splat.
+    var widest: f64 = 0.0
+    for a in 0..<(usize)60:
+        for b in 0..<(usize)60:
+            let probe = Vector3(-0.95 + 1.9 * (f64)a / 59.0, 0.0, -0.95 + 1.9 * (f64)b / 59.0)
+            var nearest: f64 = 1.0e9
+            for i in 0..<count: nearest = math.min(nearest, probe.subtract(clouds.point_of(discs.value(), i)).length())
+            widest = math.max(widest, nearest)
+    print(f"      even coverage: closest pair {closest / spacing:.3f}, widest hole {widest / spacing:.3f} of the spacing 1/√density")
+    assert(closest > 0.5 * spacing, "no two splats crowd together")
+    assert(widest < 1.05 * spacing, "no holes")
 
 # mark: GSplats to Volume
 
