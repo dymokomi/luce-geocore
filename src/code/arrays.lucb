@@ -1,0 +1,254 @@
+# Arrays in snippets (VEX's float[], int[] and vector[] values): `const FloatArray*`,
+# `const IntArray*` and `const VectorArray*`, up to `array_items` items each, stored like
+# texts (per call site and worker, never allocated per lane). They are values: every
+# method that changes one gives a new array (`a = a.append(1.0)`). Made empty by
+# `k.floats()`, `k.ints()`, `k.vectors()`.
+
+## The most items an array holds; appending past it is a `limit` fault.
+let array_items: usize = 64
+
+## Item kinds: f32, i32, or a vector of three f32.
+let item_float: i32 = 0
+let item_int: i32 = 1
+let item_vector: i32 = 2
+
+## Bytes per item of a kind.
+func item_size(kind: i32) -> usize:
+    return 12 if kind == item_vector else 4
+
+let array_types: str[3] = ["FloatArray", "IntArray", "VectorArray"]
+let array_makers: str[3] = ["floats", "ints", "vectors"]
+
+## An array builtin: its operation and the item kind of the array it works on.
+struct ArrayOp:
+    let code: i32
+    let kind: i32
+
+let op_len: i32 = 0
+let op_at: i32 = 1
+let op_set: i32 = 2
+let op_append: i32 = 3
+let op_insert: i32 = 4
+let op_pop: i32 = 5
+let op_remove: i32 = 6
+let op_resize: i32 = 7
+let op_reverse: i32 = 8
+let op_slice: i32 = 9
+let op_sort: i32 = 10
+let op_argsort: i32 = 11
+let op_find: i32 = 12
+let op_empty: i32 = 13
+
+let array_op_names: str[14] = ["len", "at", "set", "append", "insert", "pop", "remove", "resize", "reverse", "slice", "sort", "argsort", "find", "empty"]
+
+## The builtins' names, by kind then operation.
+let array_builtin_names: str[42] = [
+    "FloatArray_len", "FloatArray_at", "FloatArray_set", "FloatArray_append", "FloatArray_insert", "FloatArray_pop",
+    "FloatArray_remove", "FloatArray_resize", "FloatArray_reverse", "FloatArray_slice", "FloatArray_sort", "FloatArray_argsort",
+    "FloatArray_find", "FloatArray_empty", "IntArray_len", "IntArray_at", "IntArray_set", "IntArray_append",
+    "IntArray_insert", "IntArray_pop", "IntArray_remove", "IntArray_resize", "IntArray_reverse", "IntArray_slice",
+    "IntArray_sort", "IntArray_argsort", "IntArray_find", "IntArray_empty", "VectorArray_len", "VectorArray_at",
+    "VectorArray_set", "VectorArray_append", "VectorArray_insert", "VectorArray_pop", "VectorArray_remove", "VectorArray_resize",
+    "VectorArray_reverse", "VectorArray_slice", "VectorArray_sort", "VectorArray_argsort", "VectorArray_find", "VectorArray_empty",
+]
+
+## Every (operation, kind) context, so builtins can point at them.
+var array_ops: ArrayOp[42]
+
+## Register the array builtins of all three kinds.
+func bind_arrays(host: Host*) -> !:
+    for kind: i32 in 0..<3:
+        for code: i32 in 0..<14:
+            array_ops[(usize)(kind * 14 + code)] = ArrayOp(code = code, kind = kind)
+        let owner = array_types[(usize)kind]
+        var item: Kind[4] = [Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+        var lanes: usize = 4 if kind == item_vector else 1
+        if kind == item_int: item[0] = .i32
+        for code: i32 in 0..<14:
+            let context = (void*)&array_ops[(usize)(kind * 14 + code)]
+            var arguments: Kind[8]
+            var count: usize = 0
+            if code != op_empty:
+                arguments[0] = .i64
+                count = 1
+            if code == op_at or code == op_set or code == op_insert or code == op_remove or code == op_resize:
+                arguments[count] = .i32
+                count += 1
+            if code == op_slice:
+                arguments[count] = .i32
+                arguments[count + 1] = .i32
+                count += 2
+            if code == op_set or code == op_append or code == op_insert or code == op_find:
+                for k in 0..<lanes: arguments[count + k] = item[k]
+                count += lanes
+            let kept = array_builtin_names[(usize)(kind * 14 + code)]
+            if code == op_len or code == op_find:
+                try host.builtin(owner, array_op_names[(usize)code], engine.Builtin.of(kept, arguments[..<count], [Kind.i32], array_lanes, context))
+            elif code == op_at:
+                try host.builtin(owner, "at", engine.Builtin.of(kept, arguments[..<count], item[..<lanes], array_lanes, context))
+            elif code == op_empty:
+                try host.builtin("Kernel", array_makers[(usize)kind], engine.Builtin.of(kept, arguments[..<count], [Kind.i64], array_lanes, context))
+            else:
+                try host.builtin(owner, array_op_names[(usize)code], engine.Builtin.of(kept, arguments[..<count], [Kind.i64], array_lanes, context))
+
+## The items a handle names (an empty array for 0) and how many there are.
+func items_of(state: const CookState*, handle: i64) -> (const u8[], usize):
+    let named = state.values.named(handle) else return (no_u8s(), 0)
+    let block = named.0
+    let lane = named.1
+    return (block.lane_bytes(lane), (usize)block.lengths[lane])
+
+func array_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let op = *(const ArrayOp*)context
+    let size = item_size(op.kind)
+    # The result's kind: argsort gives int indices.
+    let result_kind = item_int if op.code == op_argsort else op.kind
+    let makes = not (op.code == op_len or op.code == op_at or op.code == op_find)
+    var block: ValueBlock*? = none
+    if makes:
+        block = state.values.block(call, array_items * item_size(result_kind))
+        if block == none:
+            for lane in 0..<call.lanes: call.fail(lane)
+            return
+    # Argument positions: the array, an index or two, then the item's lanes.
+    let index_at: usize = 1
+    let value_at: usize = 2 if op.code == op_set or op.code == op_insert else 1
+    var held: u8[768]
+    var item: u8[12]
+    for lane in 0..<call.lanes:
+        if not call.active(lane): continue
+        var count: usize = 0
+        var source: const u8[] = no_u8s()
+        if op.code != op_empty:
+            let (bytes, length) = items_of(state, call.i64_argument(0)[lane])
+            source = bytes
+            count = length
+        # The given item's bytes (set, append, insert, find).
+        if op.code == op_set or op.code == op_append or op.code == op_insert or op.code == op_find:
+            read_item(call, value_at, lane, op.kind, item)
+        if op.code == op_len:
+            call.i32_result(0)[lane] = (i32)count
+            continue
+        if op.code == op_at:
+            let i = call.i32_argument(index_at)[lane]
+            if i < 0 or (usize)i >= count:
+                call.fail_as(lane, .bounds)
+                continue
+            write_item(call, lane, op.kind, source[(usize)i * size..<((usize)i + 1) * size])
+            continue
+        if op.code == op_find:
+            call.i32_result(0)[lane] = -1
+            for i in 0..<count:
+                if same_bytes(source[i * size..<(i + 1) * size], item[..<size]):
+                    call.i32_result(0)[lane] = (i32)i
+                    break
+            continue
+        # Build the new array in `held`, then store it at this site.
+        memory.copy(held[..<count * size], source[..<count * size], count * size)
+        var length = count
+        if op.code == op_set or op.code == op_insert or op.code == op_remove:
+            let i = call.i32_argument(index_at)[lane]
+            let limit = count + 1 if op.code == op_insert else count
+            if i < 0 or (usize)i >= limit:
+                call.fail_as(lane, .bounds)
+                continue
+            let at = (usize)i
+            if op.code == op_set:
+                memory.copy(held[at * size..<(at + 1) * size], item[..<size], size)
+            elif op.code == op_insert:
+                if count >= array_items:
+                    call.fail_as(lane, .limit)
+                    continue
+                var k = count
+                while k > at:
+                    memory.copy(held[k * size..<(k + 1) * size], source[(k - 1) * size..<k * size], size)
+                    k -= 1
+                memory.copy(held[at * size..<(at + 1) * size], item[..<size], size)
+                length = count + 1
+            else:
+                for k in at..<count - 1: memory.copy(held[k * size..<(k + 1) * size], source[(k + 1) * size..<(k + 2) * size], size)
+                length = count - 1
+        elif op.code == op_append:
+            if count >= array_items:
+                call.fail_as(lane, .limit)
+                continue
+            memory.copy(held[count * size..<(count + 1) * size], item[..<size], size)
+            length = count + 1
+        elif op.code == op_pop:
+            length = count - 1 if count > 0 else 0
+        elif op.code == op_resize:
+            let n = call.i32_argument(index_at)[lane]
+            length = 0 if n < 0 else (array_items if (usize)n > array_items else (usize)n)
+            if length > count: memory.set(held[count * size..<length * size], 0)
+        elif op.code == op_reverse:
+            for k in 0..<count: memory.copy(held[k * size..<(k + 1) * size], source[(count - 1 - k) * size..<(count - k) * size], size)
+        elif op.code == op_slice:
+            let (a, b) = slice_range(call.i32_argument(1)[lane], call.i32_argument(2)[lane], count)
+            length = b - a
+            memory.copy(held[..<length * size], source[a * size..<b * size], length * size)
+        elif op.code == op_sort or op.code == op_argsort:
+            # Insertion sort of the item indices by value (stable; at most 64 items).
+            var order: u8[64]
+            for k in 0..<count: order[k] = (u8)k
+            for k in 1..<count:
+                let moving = order[k]
+                var j = k
+                while j > 0 and item_less(source, (usize)moving, (usize)order[j - 1], op.kind):
+                    order[j] = order[j - 1]
+                    j -= 1
+                order[j] = moving
+            for k in 0..<count:
+                if op.code == op_sort:
+                    let from_item = (usize)order[k]
+                    memory.copy(held[k * size..<(k + 1) * size], source[from_item * size..<(from_item + 1) * size], size)
+                else:
+                    memory.write[i32]((void*)&held[k * 4], (i32)order[k])
+        let target = block else continue
+        let out_size = item_size(result_kind)
+        memory.copy(target.lane_bytes(lane)[..<length * out_size], held[..<length * out_size], length * out_size)
+        target.lengths[lane] = (u32)length
+        target.widths[lane] = (u8)result_kind
+        call.i64_result(0)[lane] = value_handle(call, call.first + lane)
+
+## `start..<end` within `count` items, Python style (negative from the end, clamped).
+func slice_range(start: i32, end: i32, count: usize) -> (usize, usize):
+    let n = (i64)count
+    var a = (i64)start + n if start < 0 else (i64)start
+    var b = (i64)end + n if end < 0 else (i64)end
+    a = 0 if a < 0 else (n if a > n else a)
+    b = 0 if b < 0 else (n if b > n else b)
+    if b < a: b = a
+    return ((usize)a, (usize)b)
+
+## Whether item `a` sorts before item `b`: by value, a vector by x, then y, then z.
+func item_less(items: const u8[], a: usize, b: usize, kind: i32) -> bool:
+    if kind == item_int:
+        return memory.read[i32]((void*)&items[a * 4]) < memory.read[i32]((void*)&items[b * 4])
+    let lanes: usize = 3 if kind == item_vector else 1
+    for k in 0..<lanes:
+        let x = memory.read[f32]((void*)&items[(a * lanes + k) * 4])
+        let y = memory.read[f32]((void*)&items[(b * lanes + k) * 4])
+        if x < y: return true
+        if x > y: return false
+    return false
+
+## The item argument starting at argument `first`, as bytes.
+func read_item(call: engine.Call*, first: usize, lane: usize, kind: i32, item: u8[]):
+    if kind == item_int:
+        memory.write[i32]((void*)&item[0], call.i32_argument(first)[lane])
+        return
+    let lanes: usize = 3 if kind == item_vector else 1
+    for k in 0..<lanes: memory.write[f32]((void*)&item[k * 4], call.f32_argument(first + k)[lane])
+
+## Write an item's bytes into the call's result lanes (a vector's lane 3 zero).
+func write_item(call: engine.Call*, lane: usize, kind: i32, bytes: const u8[]):
+    if kind == item_int:
+        call.i32_result(0)[lane] = memory.read[i32]((void*)&bytes[0])
+        return
+    if kind == item_float:
+        call.f32_result(0)[lane] = memory.read[f32]((void*)&bytes[0])
+        return
+    for k: usize in 0..<3: call.f32_result(k)[lane] = memory.read[f32]((void*)&bytes[k * 4])
+    call.f32_result(3)[lane] = 0.0

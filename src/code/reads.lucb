@@ -107,10 +107,28 @@ func mesh_or_fail(source: const Source*, call: engine.Call*, lane: usize) -> con
 func read_position(call: engine.Call*):
     let state = state_of(call) else return
     let indices = call.i32_argument(1)
+    let out = VectorOut.of(call, 0)
     for lane in 0..<call.lanes:
         let source = source_or_fail(state, call, lane) else continue
         let index = element_or_fail(call, lane, indices[lane], source.points()) else continue
-        write_vector(call, 0, lane, source.position(index))
+        out.put(lane, source.position(index))
+
+## Four f32 result columns fetched once, for a vector result written lane by lane.
+struct VectorOut:
+    let x: f32[]
+    let y: f32[]
+    let z: f32[]
+    let w: f32[]
+
+    static func of(call: engine.Call*, first: usize) -> VectorOut:
+        return VectorOut(x = call.f32_result(first), y = call.f32_result(first + 1), z = call.f32_result(first + 2), w = call.f32_result(first + 3))
+
+    ## Lane `lane` = `value`, lane 3 zero.
+    func put(lane: usize, value: Vector3):
+        self.x[lane] = (f32)value.x
+        self.y[lane] = (f32)value.y
+        self.z[lane] = (f32)value.z
+        self.w[lane] = 0.0
 
 ## Lanes `first..first + 3` of the results = `value` (lane `first + 3` = 0).
 func write_vector(call: engine.Call*, first: usize, lane: usize, value: Vector3):

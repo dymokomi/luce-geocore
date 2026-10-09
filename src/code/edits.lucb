@@ -52,6 +52,9 @@ struct Edits:
     ## call count (its calls run one at a time, so it orders a lane's sets).
     var sets: collections.List[collections.List[AttributeSet]]
     var set_calls: u64[]
+    ## Text sets, a queue and a pool of copied texts per worker.
+    var text_sets: collections.List[collections.List[TextSet]]
+    var text_pools: collections.List[collections.TextPool]
     ## Adds so far per lane (lanes of the run), and the input's counts.
     var point_counts: u16[]
     var prim_counts: u16[]
@@ -71,6 +74,10 @@ struct Edits:
         self.removals.destroy()
         for at in 0..<self.sets.length(): self.sets.items()[at].destroy()
         self.sets.destroy()
+        for at in 0..<self.text_sets.length(): self.text_sets.items()[at].destroy()
+        self.text_sets.destroy()
+        for at in 0..<self.text_pools.length(): self.text_pools.items()[at].destroy()
+        self.text_pools.destroy()
         if self.set_calls.length > 0: free(self.set_calls) in memory.heap
         if self.point_counts.length > 0: free(self.point_counts) in memory.heap
         if self.prim_counts.length > 0: free(self.prim_counts) in memory.heap
@@ -84,11 +91,15 @@ struct Edits:
     func set_count() -> usize:
         var count: usize = 0
         for queue in self.sets.view(): count += queue.length()
+        for queue in self.text_sets.view(): count += queue.length()
         return count
 
     ## One empty set queue per worker of the run.
     func prepare_sets(workers: usize) -> !:
-        for _ in 0..<workers: try self.sets.append(collections.List[AttributeSet]())
+        for _ in 0..<workers:
+            try self.sets.append(collections.List[AttributeSet]())
+            try self.text_sets.append(collections.List[TextSet]())
+            try self.text_pools.append(collections.TextPool())
         self.set_calls = try new u64[workers] in memory.heap
 
     ## The run's lanes and the input's counts, before the run.

@@ -171,6 +171,7 @@ func applied(source: const Mesh*?, edits: Edits*) -> Mesh*!:
     if let old = source:
         try transfer_attributes(old, made, point_parents, face_parents, corner_parents, true)
     try apply_sets(made, edits, &numbering, point_map, prim_map)
+    try apply_text_sets(made, edits, &numbering, point_map, prim_map)
     return made
 
 func prim_size(face: usize, old_prims: usize, offsets: const i32[], adds: const PrimAdd[]) -> usize:

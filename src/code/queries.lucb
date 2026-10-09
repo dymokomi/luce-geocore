@@ -32,6 +32,10 @@ func nearpoints(call: engine.Call*):
     let most = call.i32_argument(6)
     var found: u32[16]
     var distances: f64[16]
+    # The result columns, fetched once: the count, then the 16 point numbers.
+    let counts = call.i32_result(0)
+    var columns: (i32[])[16]
+    for k: usize in 0..<16: columns[k] = call.i32_result(1 + k)
     for lane in 0..<call.lanes:
         var count: usize = 0
         if let source = source_or_fail(state, call, lane):
@@ -41,9 +45,9 @@ func nearpoints(call: engine.Call*):
                     count = source.grid.nearest(position_argument(call, 1, lane), (f64)reach[lane], limit, found, distances)
                 else:
                     call.fail(lane)
-        call.i32_result(0)[lane] = (i32)count
+        counts[lane] = (i32)count
         for k: usize in 0..<16:
-            call.i32_result(1 + k)[lane] = (i32)found[k] if k < count else -1
+            columns[k][lane] = (i32)found[k] if k < count else -1
 
 ## The nearest face to `p` and its distance, or (-1, -1.0) with no surface. With
 ## `bound` >= 0 (an upper bound on the answer, as a neighboring lane's distance plus

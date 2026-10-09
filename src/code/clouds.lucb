@@ -177,6 +177,52 @@ func point_number(source: const Source*, name: str, point: usize, component: usi
     if component >= entry.width: return 0.0
     return entry.number(point, component)
 
+## Reads one point attribute of one source, resolved once: the position for "P", else
+## the attribute's entry (none: the source lacks it, every read 0).
+struct PointReader:
+    var position: bool = false
+    var entry: const Attribute*? = none
+    var points: const Float3[]
+    var origin: Vector3 = Vector3()
+
+    static func of(source: const Source*, name: str) -> PointReader:
+        var reader = PointReader(position = false, entry = none, points = no_float3(), origin = Vector3())
+        let mesh = source.mesh else return reader
+        if name == "P":
+            reader.position = true
+            reader.points = mesh.point_span()
+            reader.origin = mesh.position_origin()
+            return reader
+        let found = mesh.find_attribute(name, (i64)(u8)Domain.point)
+        if found >= 0:
+            reader.entry = mesh.attribute_entry(found) catch failure: recover none
+        return reader
+
+    ## Component `component` of point `point`.
+    func read(point: usize, component: usize) -> f64:
+        if self.position:
+            let p = self.points[point]
+            return (f64)p.x + self.origin.x if component == 0 else ((f64)p.y + self.origin.y if component == 1 else ((f64)p.z + self.origin.z if component == 2 else 0.0))
+        let entry = self.entry else return 0.0
+        if component >= entry.width: return 0.0
+        return entry.number(point, component)
+
+func no_float3() -> const Float3[]:
+    var none_given: const Float3[]
+    return none_given
+
+## A reader per input for one call's attribute name, made on first use.
+struct Readers:
+    var made: bool[2]
+    var readers: PointReader[2] = [PointReader(), PointReader()]
+
+    func get(state: CookState*, block: const CloudBlock*, at: usize, name: str) -> const PointReader*:
+        let which: usize = 0 if block.inputs[at] == 0 else 1
+        if not self.made[which]:
+            self.readers[which] = PointReader.of(cloud_source(state, block, at), name)
+            self.made[which] = true
+        return &self.readers[which]
+
 ## The cloud a call's lane names: its block and lane, or a fault.
 func cloud_of(state: CookState*, call: engine.Call*, lane: usize) -> (CloudBlock*, usize)?:
     let found = state.clouds.named(call.i64_argument(0)[lane])
@@ -236,14 +282,15 @@ func cloud_value(call: engine.Call*):
     let components = *(const usize*)context
     let indices = call.i32_argument(1)
     let name = call.text(0)
+    var readers: Readers
     for lane in 0..<call.lanes:
         for k in 0..<(components if components == 1 else 4): call.f32_result(k)[lane] = 0.0
         let named = cloud_of(state, call, lane) else continue
         let block = named.0
         let at = named.1
         let slot = found_slot(block, at, indices[lane], call, lane) else continue
-        let source = cloud_source(state, block, at)
-        for k in 0..<components: call.f32_result(k)[lane] = (f32)point_number(source, name, (usize)block.points[slot], k)
+        let reader = readers.get(state, block, at, name)
+        for k in 0..<components: call.f32_result(k)[lane] = (f32)reader.read((usize)block.points[slot], k)
 
 ## `pc.filter_f32("name")` and `pc.filter_vec3("name")`: the found points' attribute
 ## averaged with weights `1 - (d / radius)^2`, normalized (VEX `pcfilter`); the plain mean
@@ -253,6 +300,7 @@ func cloud_filter(call: engine.Call*):
     let context = call.context else return
     let components = *(const usize*)context
     let name = call.text(0)
+    var readers: Readers
     for lane in 0..<call.lanes:
         for k in 0..<(components if components == 1 else 4): call.f32_result(k)[lane] = 0.0
         let named = cloud_of(state, call, lane) else continue
@@ -260,7 +308,7 @@ func cloud_filter(call: engine.Call*):
         let at = named.1
         let count = (usize)block.counts[at]
         if count == 0: continue
-        let source = cloud_source(state, block, at)
+        let reader = readers.get(state, block, at, name)
         let radius = (f64)block.radii[at]
         var sums: f64[3]
         var plain: f64[3]
@@ -271,7 +319,7 @@ func cloud_filter(call: engine.Call*):
             let w = math.max(1.0 - d * d, 0.0)
             weight += w
             for k in 0..<components:
-                let value = point_number(source, name, (usize)block.points[slot], k)
+                let value = reader.read((usize)block.points[slot], k)
                 sums[k] += w * value
                 plain[k] += value
         for k in 0..<components:

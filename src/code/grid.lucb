@@ -8,7 +8,8 @@ struct PointGrid:
     var nx: usize
     var ny: usize
     var nz: usize
-    ## Cell c's points are order[starts[c]..<starts[c + 1]]; positions are world, in f64.
+    ## Cell c's points are order[starts[c]..<starts[c + 1]]; `positions` are their world
+    ## positions in the same (cell) order, so a cell's scan reads contiguous memory.
     var starts: u32[]
     var order: u32[]
     var positions: Vector3[]
@@ -74,6 +75,11 @@ struct PointGrid:
             let c = (usize)cell_ids[at]
             self.order[(usize)self.starts[c] + (usize)filled[c]] = (u32)at
             filled[c] += 1
+        # The positions in cell order.
+        let by_cell = try new Vector3[count] --- in memory.heap
+        for at in 0..<count: by_cell[at] = self.positions[(usize)self.order[at]]
+        free(self.positions) in memory.heap
+        self.positions = by_cell
         self.built = true
 
     func axis(value: f64, cells: usize) -> usize:
@@ -108,7 +114,7 @@ struct PointGrid:
                     let c = (z * self.ny + y) * self.nx + x
                     for at in (usize)self.starts[c]..<(usize)self.starts[c + 1]:
                         let index = self.order[at]
-                        let d = self.positions[(usize)index].subtract(p)
+                        let d = self.positions[at].subtract(p)
                         let distance = d.x * d.x + d.y * d.y + d.z * d.z
                         if distance > limit:
                             continue

@@ -19,6 +19,9 @@ struct WindingNode:
     var area: Vector3
     var moment: f64[9]
     var third: f64[27]
+    ## The Hessian's delta terms folded: `delta[j]` is the sum over i of
+    ## third[i][j][i] + third[j][i][i] + third[i][i][j], so they cost one dot product.
+    var delta: f64[3]
     var first: u32
     var count: u32
     var left: u32
@@ -99,8 +102,11 @@ struct WindingTree:
                     moment[i * 3 + j] += ys[i] * ns[j]
                     let mean = (v[i] * v[j] + v[3 + i] * v[3 + j] + v[6 + i] * v[6 + j] + sum[i] * sum[j]) * (1.0 / 12.0)
                     for k: usize in 0..<3: third[(i * 3 + j) * 3 + k] += mean * ns[k]
+        var delta: f64[3]
+        for j: usize in 0..<3:
+            for i: usize in 0..<3: delta[j] += third[(i * 3 + j) * 3 + i] + third[(j * 3 + i) * 3 + i] + third[(i * 3 + i) * 3 + j]
         let id = (u32)self.nodes.length()
-        try self.nodes.append(WindingNode(center = center, radius = radius, area = area, moment = moment, third = third, first = (u32)first, count = (u32)(end - first), left = 0, right = 0))
+        try self.nodes.append(WindingNode(center = center, radius = radius, area = area, moment = moment, third = third, delta = delta, first = (u32)first, count = (u32)(end - first), left = 0, right = 0))
         if end - first <= winding_leaf:
             return id
         # Split at the middle of the widest axis of the triangles' centers.
@@ -138,7 +144,7 @@ struct WindingTree:
         let nodes = self.nodes.view()
         while depth > 0:
             depth -= 1
-            let node = nodes[(usize)stack[depth]]
+            let node = &nodes[(usize)stack[depth]]
             let to = node.center.subtract(p)
             let distance = to.length()
             if distance > winding_beta * node.radius and distance > 0.0:
@@ -157,25 +163,24 @@ struct WindingTree:
 ## A far cluster's solid angle from `p`, `to` its center less `p`: the Taylor expansion of
 ## F(x) = (x - p) / |x - p|^3 to second order integrated against the area, F(center) .
 ## area, then its Jacobian with the first moment, then half its Hessian with the second.
-func far_field(node: WindingNode, to: Vector3, distance: f64) -> f64:
+func far_field(node: const WindingNode*, to: Vector3, distance: f64) -> f64:
     let d2 = distance * distance
     let d3 = d2 * distance
     let d5 = d3 * d2
     let d7 = d5 * d2
-    let r: f64[3] = [to.x, to.y, to.z]
-    let m = node.moment
-    let t = node.third
-    var rmr: f64 = 0.0
-    var linear: f64 = 0.0
+    let rx = to.x
+    let ry = to.y
+    let rz = to.z
+    # r^T M r, and the cubic form sum T_ijk r_i r_j r_k with the outer pair summed first.
+    let rmr = rx * (node.moment[0] * rx + node.moment[1] * ry + node.moment[2] * rz) + ry * (node.moment[3] * rx + node.moment[4] * ry + node.moment[5] * rz) + rz * (node.moment[6] * rx + node.moment[7] * ry + node.moment[8] * rz)
     var cubic: f64 = 0.0
-    for i: usize in 0..<3:
-        for j: usize in 0..<3:
-            rmr += r[i] * m[i * 3 + j] * r[j]
-            # The Hessian's delta terms: T_iji r_j + T_ijj r_i + T_iij r_j.
-            linear += t[(i * 3 + j) * 3 + i] * r[j] + t[(i * 3 + j) * 3 + j] * r[i] + t[(i * 3 + i) * 3 + j] * r[j]
-            for k: usize in 0..<3: cubic += t[(i * 3 + j) * 3 + k] * r[i] * r[j] * r[k]
+    for k: usize in 0..<3:
+        let r = rx if k == 0 else (ry if k == 1 else rz)
+        let q = rx * (node.third[k] * rx + node.third[3 + k] * ry + node.third[6 + k] * rz) + ry * (node.third[9 + k] * rx + node.third[12 + k] * ry + node.third[15 + k] * rz) + rz * (node.third[18 + k] * rx + node.third[21 + k] * ry + node.third[24 + k] * rz)
+        cubic += q * r
+    let linear = node.delta[0] * rx + node.delta[1] * ry + node.delta[2] * rz
     let first = to.dot(node.area) / d3
-    let second = (m[0] + m[4] + m[8]) / d3 - 3.0 * rmr / d5
+    let second = (node.moment[0] + node.moment[4] + node.moment[8]) / d3 - 3.0 * rmr / d5
     let third_order = 0.5 * (-3.0 * linear / d5 + 15.0 * cubic / d7)
     return first + second + third_order
 

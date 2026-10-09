@@ -1,0 +1,101 @@
+# Per-element values wider than a column lane: texts and arrays. A builtin that makes one
+# writes it into its call site's block on the worker running the element, `stride` bytes
+# a lane, and gives a handle naming the site, the worker and the element (the same
+# scheme as point clouds). A later call at the same site (a loop) replaces the element's
+# value, so a snippet keeps the newest value of each expression, as a variable would.
+# Nothing is allocated per lane: a block is made once per site and worker and reused for
+# every chunk. A handle is never 0; one with `literal_tag` set names a call site's
+# literal text instead.
+
+## Handles of stored values carry this bit, so 0 means "no value" (an empty text or array).
+let stored_tag: i64 = 1 << 61
+## A literal text's handle: this bit and the call site whose first text it is.
+let literal_tag: i64 = 1 << 62
+
+## One call site's values on one worker, for the lanes of its current chunk.
+struct ValueBlock:
+    var site: usize
+    var first: usize
+    var lanes: usize
+    var stride: usize
+    ## Per lane: how many bytes (texts) or items (arrays) it holds, and an array's item
+    ## width (1, or 3 for vectors).
+    var lengths: u32[]
+    var widths: u8[]
+    var bytes: u8[]
+
+    func close():
+        if self.lengths.length == 0: return
+        free(self.lengths) in memory.heap
+        free(self.widths) in memory.heap
+        free(self.bytes) in memory.heap
+
+    ## Room for `lanes` lanes from element `first`.
+    func ready(first: usize, lanes: usize) -> !:
+        if self.lengths.length < lanes:
+            self.close()
+            self.lengths = try new u32[lanes] in memory.heap
+            self.widths = try new u8[lanes] in memory.heap
+            self.bytes = try new u8[lanes * self.stride] --- in memory.heap
+        self.first = first
+        self.lanes = lanes
+
+    ## Lane `lane`'s bytes.
+    func lane_bytes(lane: usize) -> u8[]:
+        return self.bytes[lane * self.stride..<(lane + 1) * self.stride]
+
+## Every worker's value blocks.
+struct ValueStore:
+    var workers: collections.List[collections.List[ValueBlock]]
+
+    func close():
+        for at in 0..<self.workers.length():
+            let blocks = &self.workers.items()[at]
+            for block in blocks.items(): block.close()
+            blocks.destroy()
+        self.workers.destroy()
+
+    func prepare(workers: usize) -> !:
+        for _ in 0..<workers: try self.workers.append(collections.List[ValueBlock]())
+
+    ## Worker `worker`'s block for `site` (`stride` bytes a lane), ready for `call`'s chunk.
+    func block(call: const engine.Call*, stride: usize) -> ValueBlock*?:
+        let worker = call.worker_number()
+        let site = call.site_number()
+        if worker >= self.workers.length(): return none
+        let blocks = &self.workers.items()[worker]
+        var found: ValueBlock*? = none
+        for at in 0..<blocks.length():
+            if blocks.items()[at].site == site: found = &blocks.items()[at]
+        if found == none:
+            blocks.append(ValueBlock(site = site, first = 0, lanes = 0, stride = stride, lengths = no_u32s(), widths = no_u8s(), bytes = no_u8s())) catch failure: return none
+            found = &blocks.items()[blocks.length() - 1]
+        let block = found else return none
+        block.ready(call.first, call.lanes) catch failure: return none
+        return block
+
+    ## The block and lane handle `handle` names, or none (0, a literal, or stale).
+    func named(handle: i64) -> (ValueBlock*, usize)?:
+        if (handle & stored_tag) == 0 or (handle & literal_tag) != 0: return none
+        let site = (usize)((handle >> 40) & 0xFFFFF)
+        let worker = (usize)((handle >> 32) & 0xFF)
+        let element = (usize)(handle & 0xFFFFFFFF)
+        if worker >= self.workers.length(): return none
+        let blocks = &self.workers.items()[worker]
+        for at in 0..<blocks.length():
+            let block = &blocks.items()[at]
+            if block.site == site and element >= block.first and element < block.first + block.lanes:
+                return (block, element - block.first)
+        return none
+
+## The handle of `element`'s value at `call`'s site.
+func value_handle(call: const engine.Call*, element: usize) -> i64:
+    return stored_tag | ((i64)call.site_number() << 40) | ((i64)call.worker_number() << 32) | (i64)element
+
+func no_u32s() -> u32[]:
+    var none_given: u32[]
+    return none_given
+
+func no_u8s() -> u8[]:
+    var none_given: u8[]
+    return none_given

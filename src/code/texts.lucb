@@ -1,0 +1,246 @@
+# Texts in snippets: `const Text*` values (VEX strings), up to `text_bytes` bytes each,
+# made by literals (`k.text("abc")`), attribute reads (`p.text("name")`,
+# `g.point_text(i, "name")`), `k.itoa`, `k.sprintf` and the Text methods; written back by
+# `p.set_text` and `k.set_point_text` / `k.set_prim_text`. A text past `text_bytes` is cut
+# there (at a byte, which may split a UTF-8 character).
+
+## The most bytes a text value holds.
+let text_bytes: usize = 256
+
+## The text a handle names: "" for 0, a call site's literal, or a stored value (a view
+## valid until that site runs again for the element).
+func text_of(state: const CookState*, handle: i64) -> str:
+    if handle == 0: return ""
+    if (handle & literal_tag) != 0:
+        let program = state.program else return ""
+        return program.call_text((usize)(handle & 0xFFFFF), 0)
+    let named = state.values.named(handle) else return ""
+    let block = named.0
+    let lane = named.1
+    return (str)block.lane_bytes(lane)[..<(usize)block.lengths[lane]]
+
+## Write `text` (cut to `text_bytes`) as lane `lane`'s value of `block`.
+func store_text(block: ValueBlock*, lane: usize, text: str):
+    let length = text.length if text.length < text_bytes else text_bytes
+    memory.copy(block.lane_bytes(lane), text.bytes, length)
+    block.lengths[lane] = (u32)length
+
+## The text operations, by the builtin's context.
+let text_concat: i32 = 0
+let text_replace: i32 = 1
+let text_slice: i32 = 2
+let text_split: i32 = 3
+let text_join: i32 = 4
+let text_itoa: i32 = 5
+let text_sprintf: i32 = 6
+let text_literal: i32 = 7
+let text_point: i32 = 8
+let text_prim: i32 = 9
+let text_own: i32 = 10
+let text_own_prim: i32 = 11
+let text_codes: i32[12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+let query_length: i32 = 0
+let query_find: i32 = 1
+let query_split_count: i32 = 2
+let query_to_i32: i32 = 3
+let query_codes: i32[4] = [0, 1, 2, 3]
+
+let test_equals: i32 = 0
+let test_starts: i32 = 1
+let test_ends: i32 = 2
+let test_codes: i32[3] = [0, 1, 2]
+
+## Register the text builtins.
+func bind_texts(host: Host*) -> !:
+    let one = [Kind.i64]
+    let two = [Kind.i64, Kind.i64]
+    try host.builtin("Text", "concat", engine.Builtin.of("text_concat", two, [Kind.i64], text_lanes, (void*)&text_codes[0]))
+    try host.builtin("Text", "replace", engine.Builtin.of("text_replace", [Kind.i64, Kind.i64, Kind.i64], [Kind.i64], text_lanes, (void*)&text_codes[1]))
+    try host.builtin("Text", "slice", engine.Builtin.of("text_slice", [Kind.i64, Kind.i32, Kind.i32], [Kind.i64], text_lanes, (void*)&text_codes[2]))
+    try host.builtin("Text", "split", engine.Builtin.of("text_split", [Kind.i64, Kind.i64, Kind.i32], [Kind.i64], text_lanes, (void*)&text_codes[3]))
+    try host.builtin("Text", "join", engine.Builtin.of("text_join", [Kind.i64, Kind.i64, Kind.i64], [Kind.i64], text_lanes, (void*)&text_codes[4]))
+    try host.builtin("Kernel", "itoa", engine.Builtin.of("text_itoa", [Kind.i32], [Kind.i64], text_lanes, (void*)&text_codes[5]))
+    try host.builtin("Kernel", "sprintf", engine.Builtin.of("text_sprintf", [Kind.f32, Kind.f32, Kind.f32, Kind.f32], [Kind.i64], text_lanes, (void*)&text_codes[6]))
+    try host.builtin("Kernel", "text", engine.Builtin.of("text_literal", no_kinds(), [Kind.i64], text_lanes, (void*)&text_codes[7]))
+    try host.builtin("Geometry", "point_text", engine.Builtin.of("text_point", [Kind.i64, Kind.i32], [Kind.i64], text_lanes, (void*)&text_codes[8]))
+    try host.builtin("Geometry", "prim_text", engine.Builtin.of("text_prim", [Kind.i64, Kind.i32], [Kind.i64], text_lanes, (void*)&text_codes[9]))
+    try host.builtin("Point", "text", engine.Builtin.of("text_own", no_kinds(), [Kind.i64], text_lanes, (void*)&text_codes[10]))
+    try host.builtin("Prim", "text", engine.Builtin.of("text_own_prim", no_kinds(), [Kind.i64], text_lanes, (void*)&text_codes[11]))
+    try host.builtin("Text", "length", engine.Builtin.of("text_length", one, [Kind.i32], query_lanes, (void*)&query_codes[0]))
+    try host.builtin("Text", "find", engine.Builtin.of("text_find", two, [Kind.i32], query_lanes, (void*)&query_codes[1]))
+    try host.builtin("Text", "split_count", engine.Builtin.of("text_split_count", two, [Kind.i32], query_lanes, (void*)&query_codes[2]))
+    try host.builtin("Text", "to_i32", engine.Builtin.of("text_to_i32", one, [Kind.i32], query_lanes, (void*)&query_codes[3]))
+    try host.builtin("Text", "to_f32", engine.Builtin.of("text_to_f32", one, [Kind.f32], to_f32_lanes))
+    try host.builtin("Text", "equals", engine.Builtin.of("text_equals", two, [Kind.mask], test_lanes, (void*)&test_codes[0]))
+    try host.builtin("Text", "startswith", engine.Builtin.of("text_startswith", two, [Kind.mask], test_lanes, (void*)&test_codes[1]))
+    try host.builtin("Text", "endswith", engine.Builtin.of("text_endswith", two, [Kind.mask], test_lanes, (void*)&test_codes[2]))
+
+## Builtins giving a text: compute each lane's into a buffer, then store it at this site.
+func text_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let code = *(const i32*)context
+    let out = call.i64_result(0)
+    let made = state.values.block(call, text_bytes)
+    if made == none:
+        for lane in 0..<call.lanes: call.fail(lane)
+        return
+    let block = made else return
+    var room: u8[1024]
+    for lane in 0..<call.lanes:
+        out[lane] = 0
+        if not call.active(lane): continue
+        let element = call.first + lane
+        var text = ""
+        if code == text_concat:
+            text = joined(room, text_of(state, call.i64_argument(0)[lane]), "", text_of(state, call.i64_argument(1)[lane]))
+        elif code == text_join:
+            text = joined(room, text_of(state, call.i64_argument(0)[lane]), text_of(state, call.i64_argument(1)[lane]), text_of(state, call.i64_argument(2)[lane]))
+        elif code == text_replace:
+            text = replaced(room, text_of(state, call.i64_argument(0)[lane]), text_of(state, call.i64_argument(1)[lane]), text_of(state, call.i64_argument(2)[lane]))
+        elif code == text_slice:
+            text = sliced(text_of(state, call.i64_argument(0)[lane]), call.i32_argument(1)[lane], call.i32_argument(2)[lane])
+        elif code == text_split:
+            text = text_piece(text_of(state, call.i64_argument(0)[lane]), text_of(state, call.i64_argument(1)[lane]), call.i32_argument(2)[lane])
+        elif code == text_itoa:
+            text = strings.format(room, f"{call.i32_argument(0)[lane]}") else ""
+        elif code == text_sprintf:
+            var values: f32[4]
+            for k: usize in 0..<4: values[k] = call.f32_argument(k)[lane]
+            text = formatted(room, call.text(0), values)
+        elif code == text_literal:
+            out[lane] = literal_tag | (i64)call.site_number()
+            continue
+        elif code == text_point or code == text_prim:
+            let source = source_or_fail(state, call, lane) else continue
+            let count = source.points() if code == text_point else source.prims()
+            let index = element_or_fail(call, lane, call.i32_argument(1)[lane], count) else continue
+            text = attribute_text(source, call.text(0), Domain.point if code == text_point else Domain.face, index)
+        else:
+            text = attribute_text(&state.first, call.text(0), Domain.point if code == text_own else Domain.face, element)
+        # The result may alias this lane's old value: copy through the buffer first.
+        let length = text.length if text.length < text_bytes else text_bytes
+        var held: u8[256]
+        memory.copy(held[..<length], text.bytes, length)
+        store_text(block, lane, (str)held[..<length])
+        out[lane] = value_handle(call, element)
+
+## Element `index`'s text of attribute `name` on `domain` ("" when the input lacks it).
+func attribute_text(source: const Source*, name: str, domain: Domain, index: usize) -> str:
+    let mesh = source.mesh else return ""
+    let found = mesh.find_attribute(name, (i64)(u8)domain)
+    if found < 0: return ""
+    let entry = mesh.attribute_entry(found) catch failure: return ""
+    if index >= entry.elements and entry.storage != .single: return ""
+    return entry.text_at(index)
+
+## `a` + `between` + `b`, into `room`.
+func joined(room: u8[], a: str, between: str, b: str) -> str:
+    var used: usize = 0
+    for part in [a, between, b]:
+        let take = part.length if used + part.length <= room.length else room.length - used
+        memory.copy(room[used..<used + take], part.bytes, take)
+        used += take
+    return (str)room[..<used]
+
+## `text` with every `old` replaced by `replacement` (an empty `old` changes nothing).
+func replaced(room: u8[], text: str, old: str, replacement: str) -> str:
+    if old.length == 0: return joined(room, text, "", "")
+    var used: usize = 0
+    var at: usize = 0
+    while at < text.length and used < room.length:
+        if at + old.length <= text.length and (str)text.bytes[at..<at + old.length] == old:
+            let take = replacement.length if used + replacement.length <= room.length else room.length - used
+            memory.copy(room[used..<used + take], replacement.bytes, take)
+            used += take
+            at += old.length
+        else:
+            room[used] = text.bytes[at]
+            used += 1
+            at += 1
+    return (str)room[..<used]
+
+## Bytes `start..<end` of `text`, Python style: negative counts from the end, both clamped.
+func sliced(text: str, start: i32, end: i32) -> str:
+    let n = (i64)text.length
+    var a = (i64)start + n if start < 0 else (i64)start
+    var b = (i64)end + n if end < 0 else (i64)end
+    a = 0 if a < 0 else (n if a > n else a)
+    b = 0 if b < 0 else (n if b > n else b)
+    if b <= a: return ""
+    return (str)text.bytes[(usize)a..<(usize)b]
+
+## Piece `index` of `text` split at each `separator` ("" past the last; the whole text
+## for an empty separator and index 0).
+func text_piece(text: str, separator: str, index: i32) -> str:
+    if index < 0: return ""
+    if separator.length == 0: return text if index == 0 else ""
+    var count: i32 = 0
+    var start: usize = 0
+    var at: usize = 0
+    while at + separator.length <= text.length:
+        if (str)text.bytes[at..<at + separator.length] == separator:
+            if count == index: return (str)text.bytes[start..<at]
+            count += 1
+            at += separator.length
+            start = at
+        else:
+            at += 1
+    return (str)text.bytes[start..] if count == index else ""
+
+## How many pieces `text_piece` splits `text` into.
+func piece_count(text: str, separator: str) -> i32:
+    if separator.length == 0: return 1
+    var count: i32 = 1
+    var at: usize = 0
+    while at + separator.length <= text.length:
+        if (str)text.bytes[at..<at + separator.length] == separator:
+            count += 1
+            at += separator.length
+        else:
+            at += 1
+    return count
+
+## The byte where `needle` first starts in `text`, or -1.
+func found_at(text: str, needle: str) -> i32:
+    if needle.length == 0: return 0
+    var at: usize = 0
+    while at + needle.length <= text.length:
+        if (str)text.bytes[at..<at + needle.length] == needle: return (i32)at
+        at += 1
+    return -1
+
+func query_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let code = *(const i32*)context
+    let out = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        let text = text_of(state, call.i64_argument(0)[lane])
+        out[lane] = match code:
+            0 => (i32)text.length
+            1 => found_at(text, text_of(state, call.i64_argument(1)[lane]))
+            2 => piece_count(text, text_of(state, call.i64_argument(1)[lane]))
+            _ => (i32)(strings.parse_i64(strings.trim(text)) else 0)
+
+func to_f32_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let out = call.f32_result(0)
+    for lane in 0..<call.lanes:
+        let text = strings.trim(text_of(state, call.i64_argument(0)[lane]))
+        out[lane] = (f32)(strings.parse_f64(text) catch failure: recover 0.0)
+
+func test_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let code = *(const i32*)context
+    let out = call.mask_result(0)
+    for lane in 0..<call.lanes:
+        let a = text_of(state, call.i64_argument(0)[lane])
+        let b = text_of(state, call.i64_argument(1)[lane])
+        let yes = match code:
+            0 => a == b
+            1 => strings.starts_with(a, b)
+            _ => strings.ends_with(a, b)
+        out[lane] = 1 if yes else 0

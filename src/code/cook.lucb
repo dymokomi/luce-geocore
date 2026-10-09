@@ -65,6 +65,8 @@ pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over
     try state.edits.prepare_sets(workers)
     try state.clouds.prepare(workers)
     try state.log.prepare(workers)
+    try state.values.prepare(workers)
+    state.program = &compiled.program
     if let fault = try engine.run(&compiled.program, &request):
         var room: u8[1024]
         error(errors.invalid, fault_message(room, compiled, fault, mode, header, body))

@@ -1,0 +1,100 @@
+# Text attribute writes: `p.set_text("name", t)` (the running point or primitive) and
+# `k.set_point_text(i, "name", t)` / `k.set_prim_text(i, "name", t)`. They queue per
+# worker like the numeric sets, the text copied out of its handle, and apply after the
+# run: the attribute is made a text attribute (its old texts kept), and an element set
+# more than once takes the set with the highest key (its highest lane, then its last).
+
+## A queued text set: the element (a provisional number for an added one), the
+## attribute (`name` is the call site's text) and the text (in its worker's pool).
+struct TextSet:
+    let key: u64
+    let domain: Domain
+    let name: str
+    let index: i64
+    let text: str
+
+let text_set_codes: i32[4] = [0, 1, 2, 3]
+
+## Register the text writes.
+func bind_text_sets(host: Host*) -> !:
+    try host.builtin("Point", "set_text", engine.Builtin.of("set_text_point", [Kind.i64], [Kind.i32], text_set_lanes, (void*)&text_set_codes[0]))
+    try host.builtin("Prim", "set_text", engine.Builtin.of("set_text_prim", [Kind.i64], [Kind.i32], text_set_lanes, (void*)&text_set_codes[1]))
+    try host.builtin("Kernel", "set_point_text", engine.Builtin.of("set_point_text", [Kind.i32, Kind.i64], [Kind.i32], text_set_lanes, (void*)&text_set_codes[2]))
+    try host.builtin("Kernel", "set_prim_text", engine.Builtin.of("set_prim_text", [Kind.i32, Kind.i64], [Kind.i32], text_set_lanes, (void*)&text_set_codes[3]))
+
+func text_set_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let code = *(const i32*)context
+    let worker = call.worker_number()
+    if worker >= state.edits.text_sets.length():
+        for lane in 0..<call.lanes: call.fail(lane)
+        return
+    let order = state.edits.set_calls[worker]
+    state.edits.set_calls[worker] = order + 1
+    let queue = &state.edits.text_sets.items()[worker]
+    let pool = &state.edits.text_pools.items()[worker]
+    let explicit = code >= 2
+    let domain = Domain.point if code == 0 or code == 2 else Domain.face
+    let name = call.text(0)
+    let texts = call.i64_argument(1 if explicit else 0)
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = 0
+        if not call.active(lane): continue
+        let index = (i64)call.i32_argument(0)[lane] if explicit else (i64)(call.first + lane)
+        let kept = pool.keep_text(text_of(state, texts[lane]).bytes) catch failure:
+            call.fail(lane)
+            continue
+        queue.append(TextSet(key = key_of(call.first + lane, order), domain = domain, name = name, index = index, text = kept)) catch failure: call.fail(lane)
+
+## Each text attribute the sets name, made on `mesh` (its old texts kept).
+func apply_text_sets(mesh: Mesh*, edits: const Edits*, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[]) -> !:
+    var named: collections.List[TextSet]
+    defer named.destroy()
+    for queue in edits.text_sets.view():
+        for set in queue.view():
+            var seen = false
+            for earlier in named.view():
+                if earlier.domain == set.domain and earlier.name == set.name:
+                    seen = true
+                    break
+            if not seen: try named.append(set)
+    for first in named.view():
+        try apply_named_texts(mesh, edits, first, numbering, point_map, prim_map)
+
+func apply_named_texts(mesh: Mesh*, edits: const Edits*, first: TextSet, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[]) -> !:
+    let elements = try mesh.domain_size(first.domain)
+    var table = TableBuilder()
+    defer table.close()
+    let values = try new i32[elements] in memory.heap
+    defer free(values) in memory.heap
+    let empty = try table.intern("")
+    for at in 0..<elements: values[at] = empty
+    # The old texts, when the attribute was text already.
+    let found = mesh.find_attribute(first.name, (i64)(u8)first.domain)
+    if found >= 0:
+        let entry = try mesh.attribute_entry(found)
+        if entry.kind == DataType.text:
+            for at in 0..<elements: values[at] = try table.intern(entry.text_at(at))
+    let winners = try new u64[elements] in memory.heap
+    defer free(winners) in memory.heap
+    for pass in 0..<2:
+        for queue in edits.text_sets.view():
+            for set in queue.view():
+                if set.domain != first.domain or set.name != first.name: continue
+                var target: i64 = -1
+                if set.domain == .point:
+                    let at = numbering.point(set.index) else error(errors.invalid, "a set_text names a point that does not exist")
+                    target = point_map[at]
+                else:
+                    let at = numbering.prim(set.index) else error(errors.invalid, "a set_text names a primitive that does not exist")
+                    target = prim_map[at]
+                if target < 0: continue
+                let slot = (usize)target
+                if pass == 0:
+                    if set.key + 1 > winners[slot]: winners[slot] = set.key + 1
+                elif winners[slot] == set.key + 1:
+                    values[slot] = try table.intern(set.text)
+    var attribute = try Attribute.text(first.name, first.domain, elements, try table.finish(), values)
+    errdefer attribute.release()
+    try put_attribute(mesh, attribute)

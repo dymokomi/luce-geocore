@@ -163,6 +163,9 @@ struct CookState:
     var ramps: Ramps
     var clouds: Clouds
     var log: Log
+    var values: ValueStore
+    ## The program running (literal texts are its call sites' texts).
+    var program: const Program*?
 
     func close():
         self.first.close()
@@ -171,6 +174,7 @@ struct CookState:
         self.ramps.close()
         self.clouds.close()
         self.log.close()
+        self.values.close()
 
 ## The builtins that need each structure, by what they need.
 let grid_users: str[5] = ["nearpoint", "nearpoints", "pcopen", "pcfind", "pcfind_radius"]
