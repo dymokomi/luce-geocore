@@ -229,11 +229,13 @@ program primitive by primitive for luced-3d's Edit SDF.
 
 ### Previews and files
 
-The viewport draws a volume or SDF by its surface preview:
+The viewport draws an SDF or a level set by its surface preview:
 
 - an SDF's zero set at 1/128 of its extent, made exact;
-- a level set's zero set;
-- a fog volume's half-maximum density.
+- a level set's zero set.
+
+A fog volume has no surface preview: viewports ray-march its densities
+(luce-3d's `FogVolume`).
 
 The preview is built once and kept with the component. A drag's frames may
 ask for a quick SDF preview instead (1/40 of the extent), kept apart, so the
