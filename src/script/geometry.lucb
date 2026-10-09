@@ -233,9 +233,10 @@ pub struct Geometry:
     pub func take() -> GeometrySet*!:
         try self.flush()
         self.drop_edits()
-        self.close_grids()
         let storage = self.set()
         self.storage = none
+        # Open grid handles stay allocated (gone) until `close`.
+        self.rebind_grids()
         return storage
 
     # mark: Counts and bounds ==========================================================

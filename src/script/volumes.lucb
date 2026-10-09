@@ -9,6 +9,11 @@
 # fastest (the Voxels mode's lanes), by lane or by (i, j, k). A grid is read where it is
 # until the first write copies it; the copy becomes the set's grid at the next flush.
 # `set_look` is the Volume Visualization node on one grid: how the viewport draws it.
+#
+# A `VoxelGrid` lives as long as its Geometry. When the set is replaced (a verb, `merge`,
+# `transform`, `set_geometry`, a new `add_volume` of its name), the handle finds its grid
+# again by name in the new set; when the new set has none of that name it is *gone*: it
+# reads as an empty grid and a write fails, naming the grid.
 
 ## A grid's class, as the Volume node's Class menu.
 pub enum VolumeClass as u8:
@@ -35,6 +40,8 @@ pub struct VoxelGrid:
     ## Written since the set last took it; part of an input (read-only).
     var dirty: bool
     var locked: bool
+    ## Its grid left the geometry and no grid of its name came back (see `rebind`).
+    var gone: bool
     ## The last leaf found, by key.
     var cached_key: u64
     var cached_leaf: i64
@@ -43,8 +50,8 @@ pub struct VoxelGrid:
     static func open(grid: const SparseGrid*, locked: bool) -> VoxelGrid!:
         return VoxelGrid(label = try heap_text(grid.name()), class = grid.class, background_value = grid.background, transform = grid.transform,
                          inverse = grid.inverse, source = share_grid((SparseGrid*)grid), keys = Growing[u64](), values_owned = Growing[f32](),
-                         masks = Growing[u64](), order = Growing[u32](), styled = grid.look, dirty = false, locked = locked, cached_key = 0xFFFFFFFFFFFFFFFF,
-                         cached_leaf = -1)
+                         masks = Growing[u64](), order = Growing[u32](), styled = grid.look, dirty = false, locked = locked, gone = false,
+                         cached_key = 0xFFFFFFFFFFFFFFFF, cached_leaf = -1)
 
     # mark: What it is ================================================================
 
@@ -238,6 +245,9 @@ pub struct VoxelGrid:
     ## Copy the published grid's voxels to write them (the first write does it).
     func own() -> !:
         if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        if self.gone:
+            var buffer: u8[160]
+            error(errors.invalid, strings.format(buffer, f"the grid \"{self.label}\" is no longer in the geometry: open it again with voxel_grid") else "the grid is no longer in the geometry")
         let grid = self.source else return
         try self.keys.assign(grid.keys.view())
         try self.values_owned.assign(grid.values.view())
@@ -285,13 +295,33 @@ pub struct VoxelGrid:
         made.look = self.styled
         return made
 
-    func close():
+    ## Point the handle at `grid` (shared), the grid of its name in a replaced set, or at
+    ## nothing (gone) without one. Unflushed writes are dropped: callers flush first.
+    func rebind(grid: const SparseGrid*?):
+        self.drop_voxels()
+        self.dirty = false
+        self.cached_key = 0xFFFFFFFFFFFFFFFF
+        self.cached_leaf = -1
+        self.gone = grid == none
+        if let found = grid:
+            self.class = found.class
+            self.background_value = found.background
+            self.transform = found.transform
+            self.inverse = found.inverse
+            self.styled = found.look
+            self.source = share_grid((SparseGrid*)found)
+
+    ## Let go of the voxels it reads or owns; it then has no leaves.
+    func drop_voxels():
         if let grid = self.source: release_grid(grid)
         self.source = none
         self.keys.close()
         self.values_owned.close()
         self.masks.close()
         self.order.close()
+
+    func close():
+        self.drop_voxels()
         release_text(self.label)
 
 func lerp(a: f32, b: f32, t: f32) -> f32:
@@ -307,8 +337,9 @@ extend Geometry:
         let half = Vector3((f64)size[0] * 0.5, (f64)size[1] * 0.5, (f64)size[2] * 0.5)
         let middle = vec3(center)
         let grid = try box_grid(name, GridClass.level_set if class == VolumeClass.level_set else GridClass.fog, middle.subtract(half), middle.add(half), voxel, background, initial, dense)
-        self.close_grid(name)
         try put_grid(self.set(), grid)
+        # A handle already open on that name now reads the new grid.
+        self.rebind_grid(name)
         return try self.voxel_grid(name)
 
     ## Grid `name` of the volume, opened for reading and writing ("" the first grid,
@@ -342,7 +373,7 @@ extend Geometry:
     ## Remove grid `name` from the volume, if it is there.
     pub func remove_volume(name: str) -> !:
         if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
-        self.close_grid(name)
+        defer self.rebind_grid(name)
         let volume = set_volume(self.set()) else return
         let index = grid_index(volume, name) else return
         if volume.grid_count() == 1:
@@ -366,18 +397,38 @@ extend Geometry:
             try put_grid(self.set(), try open.publish())
             open.dirty = false
 
-    ## Close the open grid `name` without keeping its writes.
-    func close_grid(name: str):
-        for at in 0..<self.grids.count:
-            let open = self.grids.items[at]
-            if open.name() != name: continue
-            open.close()
-            free(VoxelGrid[](open, 1)) in memory.heap
-            for later in at + 1..<self.grids.count: self.grids.items[later - 1] = self.grids.items[later]
-            self.grids.count -= 1
-            return
+    ## Point every open grid at the set's grid of its name, or mark it gone: after the
+    ## set was replaced or its volume changed. Handles stay where they are, so a script's
+    ## `VoxelGrid*` never dangles; their unflushed writes are dropped.
+    func rebind_grids():
+        for open in self.grids.view(): open.rebind(self.grid_named(open.name()))
 
-    ## Close every open grid without keeping its writes.
+    ## Point the open grid `name`, if there is one, at the set's grid of that name (or
+    ## mark it gone); the other handles keep their writes.
+    func rebind_grid(name: str):
+        for open in self.grids.view():
+            if open.name() == name: open.rebind(self.grid_named(name))
+
+    ## The set's grid named exactly `name`, or none (also once the set is taken).
+    func grid_named(name: str) -> const SparseGrid*?:
+        if self.storage == none: return none
+        let volume = set_volume(self.set()) else return none
+        for at in 0..<volume.grid_count():
+            if volume.grid(at).name() == name: return volume.grid(at)
+        return none
+
+    ## Take over `other`'s open grids (a geometry `set_geometry` replaced): they rebind to
+    ## this set's grids by name.
+    func adopt_grids(other: Geometry*) -> !:
+        # Room first, so no handle is ever in both lists.
+        try self.grids.reserve(self.grids.count + other.grids.count)
+        for open in other.grids.view():
+            self.grids.items[self.grids.count] = open
+            self.grids.count += 1
+        other.grids.clear()
+        self.rebind_grids()
+
+    ## Close every open grid without keeping its writes (only when the geometry closes).
     func close_grids():
         for open in self.grids.view():
             open.close()

@@ -42,9 +42,12 @@ pub struct Cook:
 
     ## Replace the output wholesale (a verb's result, a loaded file); `geometry` is taken.
     pub func set_geometry(geometry: Geometry) -> !:
-        self.output.close()
+        var replaced = self.output
+        defer replaced.close()
         self.output = geometry
         self.output.locked = false
+        # VoxelGrid handles of the old output move over and find their grids by name.
+        try self.output.adopt_grids(&replaced)
 
     ## Input `index` (0 or 1), read-only and empty when nothing is wired to it.
     pub func input(index: i64) -> Geometry*!:

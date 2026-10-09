@@ -1,6 +1,7 @@
 ## The script API's later calls: a polygon's own vertices, array attributes and volumes,
 ## each through assembly and a .prism round trip.
-from luce_geocore.script import Geometry, Domain3, VolumeClass, VoxelGrid
+import strings
+from luce_geocore.script import Geometry, Domain3, VolumeClass, VoxelGrid, Cook
 import api
 
 ## Reading, setting, inserting and removing a polygon's vertices; vertex attributes
@@ -132,3 +133,43 @@ pub func volumes() -> !:
     try back.remove_volume("density")
     assert(back.volume_count() == 1 and try back.volume_name(0) == "surface")
     print("ok    script: volumes")
+
+## A VoxelGrid handle outlives replacements of its geometry: after `transform`, `merge`,
+## `set_geometry` and a new `add_volume` of its name it reads the new grid of its name;
+## when none is left it reads as empty and a write fails, naming the grid.
+pub func volume_handles() -> !:
+    var k = try Cook.blank(try Geometry.empty())
+    defer k.close()
+    let g = k.geometry()
+    let fog = try g.add_volume("density", VolumeClass.fog, [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0], voxel = 0.125, initial = 0.5)
+    try fog.set(0, 0, 0, 2.0)
+    try g.transform([1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0])
+    # The written voxel, moved with the grid.
+    assert(fog.get(0, 0, 0) == 2.0 and fog.index_position(0, 0, 0)[0] == 1.0 and fog.active_count() == 729)
+    var other = try Geometry.cube(1.0)
+    defer other.close()
+    try g.merge(&other)
+    assert(fog.get(0, 0, 0) == 2.0 and g.prim_count() == 6)
+    try fog.set(1, 0, 0, 3.0)
+    # A new grid of its name: the same handle reads it.
+    let again = try g.add_volume("density", VolumeClass.fog, [0.0, 0.0, 0.0, 0.0], [0.5, 0.5, 0.5, 0.0], voxel = 0.25, initial = 0.25)
+    assert(again == fog and fog.get(0, 0, 0) == 0.25 and fog.voxel_size() == 0.25)
+    # set_geometry: the handle moves to the new output and finds "density" there.
+    var replacement = try Geometry.empty()
+    _ = try replacement.add_volume("density", VolumeClass.fog, [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0], voxel = 0.5, initial = 0.75)
+    try k.set_geometry(replacement)
+    assert(fog.get(0, 0, 0) == 0.75 and fog.voxel_size() == 0.5)
+    try fog.set(0, 0, 0, 1.5)
+    # Its grid removed: the handle is gone.
+    try k.geometry().remove_volume("density")
+    assert(fog.count() == 0 and fog.active_count() == 0 and fog.get(0, 0, 0) == 0.0)
+    var told = false
+    var nothing: f32[]
+    _ = fog.values() catch failure:
+        told = strings.contains(failure.message, "\"density\" is no longer in the geometry")
+        recover nothing
+    assert(told)
+    # Opened again once it is back.
+    _ = try k.geometry().add_volume("density", VolumeClass.fog, [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0], voxel = 0.5, initial = 0.125)
+    assert(fog.get(0, 0, 0) == 0.125)
+    print("ok    script: volume handles")
