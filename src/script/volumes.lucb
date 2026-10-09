@@ -418,15 +418,19 @@ extend Geometry:
         return none
 
     ## Take over `other`'s open grids (a geometry `set_geometry` replaced): they rebind to
-    ## this set's grids by name.
+    ## this set's grids by name, after this geometry's own writes are flushed into it.
     func adopt_grids(other: Geometry*) -> !:
+        try self.flush_grids()
         # Room first, so no handle is ever in both lists.
         try self.grids.reserve(self.grids.count + other.grids.count)
+        let first = self.grids.count
         for open in other.grids.view():
             self.grids.items[self.grids.count] = open
             self.grids.count += 1
         other.grids.clear()
-        self.rebind_grids()
+        # Only the adopted handles rebind: this geometry's own keep what they
+        # hold (a script writing a grid, then set_geometry).
+        for open in self.grids.view()[first..]: open.rebind(self.grid_named(open.name()))
 
     ## Close every open grid without keeping its writes (only when the geometry closes).
     func close_grids():

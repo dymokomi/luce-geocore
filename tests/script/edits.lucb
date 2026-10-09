@@ -155,10 +155,12 @@ pub func volume_handles() -> !:
     let again = try g.add_volume("density", VolumeClass.fog, [0.0, 0.0, 0.0, 0.0], [0.5, 0.5, 0.5, 0.0], voxel = 0.25, initial = 0.25)
     assert(again == fog and fog.get(0, 0, 0) == 0.25 and fog.voxel_size() == 0.25)
     # set_geometry: the handle moves to the new output and finds "density" there.
+    # The new output's own handle keeps its writes, and the moved one reads them.
     var replacement = try Geometry.empty()
-    _ = try replacement.add_volume("density", VolumeClass.fog, [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0], voxel = 0.5, initial = 0.75)
+    let own = try replacement.add_volume("density", VolumeClass.fog, [0.0, 0.0, 0.0, 0.0], [1.0, 1.0, 1.0, 0.0], voxel = 0.5, initial = 0.75)
+    try own.set(1, 1, 1, 4.0)
     try k.set_geometry(replacement)
-    assert(fog.get(0, 0, 0) == 0.75 and fog.voxel_size() == 0.5)
+    assert(fog.get(0, 0, 0) == 0.75 and fog.voxel_size() == 0.5 and own.get(1, 1, 1) == 4.0 and fog.get(1, 1, 1) == 4.0)
     try fog.set(0, 0, 0, 1.5)
     # Its grid removed: the handle is gone.
     try k.geometry().remove_volume("density")
