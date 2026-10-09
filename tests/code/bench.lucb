@@ -1,5 +1,7 @@
 ## Whole cooks through the Code node over a 1M-point grid: the Stage 1 targets.
+import interop
 import time
+from luce_geocore.geocore import GeometrySet
 from luce_geocore import kernel as geocore_kernel
 from luce_geocore.geocore import MeshPrimitives
 import support
@@ -24,6 +26,31 @@ pub func run_all() -> !:
     try measure("empty", "", 3.0)
     _ = geocore_kernel.code_compiles()
     try grid_build()
+    try families()
+
+## One timing of a whole cook (best of 5, after a warm one).
+func time_cook(name: str, set: interop.Reference[GeometrySet], input1: interop.Reference[GeometrySet]?, mode: i64, body: str, count: i64, target: f64) -> !:
+    _ = try support.run_inputs(set, input1, mode, body, count)
+    var best: u64 = 0xFFFFFFFFFFFFFFFF
+    for _ in 0..<5:
+        let started = time.now()
+        let made = try support.run_inputs(set, input1, mode, body, count)
+        let spent = time.since(started)
+        _ = made
+        if spent < best: best = spent
+    print(f"{name}\t{(f64)best / 1000000.0}\t{target}")
+
+## Stage 3 and 4 families over 1M points: nearpoints, xyzdist and add_point.
+func families() -> !:
+    let grid = try support.big_grid_set(1000)
+    try time_cook("nearpoints smoothing (10 nearest)", grid, none, support.points_mode, "let near = k.input(0).nearpoints(p.P, 0.0045, 10)\nvar sum: f32[4] = [0.0, 0.0, 0.0, 0.0]\nfor i in 0..<near.count:\n    sum = sum + k.input(0).point_P(near.points[i])\np.P = sum * (1.0 / (f32)near.count)\n", 0, 80.0)
+    let target = try support.run(try support.big_grid_set(225), support.points_mode, "p.P[1] = 0.25 + 0.1 * math32.sin(p.P[0] * 6.0)\n")
+    let near = try support.run(try support.big_grid_set(225), support.points_mode, "p.P[1] = 0.01 * math32.sin(p.P[0] * 6.0 + p.P[2] * 4.0)\n")
+    try time_cook("xyzdist to 100k triangles, near the surface", grid, near, support.points_mode, "p.Cd = [k.input(1).xyzdist(p.P), 0.0, 0.0, 0.0]\n", 0, 120.0)
+    try time_cook("xyzdist to 100k triangles, 0.15-0.35 away (stress)", grid, target, support.points_mode, "p.Cd = [k.input(1).xyzdist(p.P), 0.0, 0.0, 0.0]\n", 0, 120.0)
+    try time_cook("remove_point of half of 1M", grid, none, support.points_mode, "if p.ptnum % 2 == 0: k.remove_point(p.ptnum)\n", 0, 20.0)
+    try time_cook("set_point_f32 x 1M (scattered)", grid, none, support.points_mode, "k.set_point_f32((p.ptnum * 7) % 1000000, \"mass\", 1.0)\n", 0, 0.0)
+    try time_cook("add_point x 1M (Numbers)", try support.empty_set(), none, support.numbers_mode, "_ = k.add_point([(f32)n * 0.001, 0.0, 0.0, 0.0])\n", 1000000, 60.0)
 
 ## MeshPrimitives.grid at its largest: 2048 divisions, 4.2M points.
 pub func grid_build() -> !:

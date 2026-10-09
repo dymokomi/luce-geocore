@@ -2,6 +2,7 @@
 ## over 1M points instead (tests/code/bench.py).
 import bench
 import checks
+import stages
 
 pub func main(arguments: str[]) -> i32!:
     if arguments.length > 1 and arguments[1] == "--bench":
@@ -14,4 +15,11 @@ pub func main(arguments: str[]) -> i32!:
     try checks.determinism()
     try checks.checking()
     try checks.grids()
+    try stages.reads()
+    try stages.nearpoints_smoothing()
+    try stages.distance_coloring()
+    try stages.ray_projection()
+    try stages.spiral()
+    try stages.polygons()
+    try stages.removals()
     return 0

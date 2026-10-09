@@ -60,6 +60,8 @@ func make_host(mode: RunOver, layout: const Layout*?) -> Host!:
         else:
             try host.reader("Kernel", reader, "detail:")
         try host.setter("Kernel", setter, "detail:", accessor_lanes[at])
+    try bind_geometry(&host)
+    try bind_edits(&host)
     if let given = layout:
         host.missing_reads_zero()
         for column in given.columns.view():

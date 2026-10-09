@@ -1,0 +1,166 @@
+## Stage 3 (reading geometry and a second input) and stage 4 (editing geometry from
+## parallel code), with cases after common Houdini wrangle tutorials.
+import interop
+import strings
+from luce_std import math, math32
+from luce_geocore import kernel as geocore_kernel
+from luce_geocore.geocore import Mesh, GeometrySet, MeshPrimitives, Vector3
+import support
+
+func expect(condition: bool, what: str):
+    if not condition:
+        print(f"FAIL  {what}")
+        trap("stage checks")
+
+func near(a: f64, b: f64, tolerance: f64) -> bool:
+    return math.abs(a - b) <= tolerance
+
+var failure_room: u8[512]
+
+func failure(set: interop.Reference[GeometrySet], mode: i64, body: str, count: i64 = 0) -> str:
+    var text = ""
+    _ = support.run_inputs(set, none, mode, body, count) catch problem:
+        text = strings.format(failure_room, f"{problem.message}") else ""
+    return text
+
+## Reads of the node's own input: counts, positions, attributes, topology, bounds.
+pub func reads() -> !:
+    let set = try support.grid_set(4)
+    let source = try (try support.mesh_of(set)).get()
+    let read = try support.mesh_of(try support.run(set, support.points_mode, "let g = k.input(0)\np.set_i32(\"np\", g.point_count())\np.set_i32(\"nf\", g.prim_count())\np.set_vec3(\"P0\", g.point_P(0))\np.set_i32(\"valence\", g.neighbor_count(p.ptnum))\np.set_i32(\"faces\", g.point_prim_count(p.ptnum))\np.set_vec3(\"size\", g.bounds().size)\nif g.neighbor_count(p.ptnum) > 0:\n    p.set_i32(\"first\", g.neighbor(p.ptnum, 0))\n"))
+    let first = try source.point(0)
+    for at: i64 in 0..<25:
+        let x = at % 5
+        let z = at // 5
+        let border = (if_int(x == 0 or x == 4)) + (if_int(z == 0 or z == 4))
+        expect(try support.value(read, "np", 0, at) == 25.0 and try support.value(read, "nf", 0, at) == 16.0, "point and prim counts")
+        expect(try support.value(read, "P0", 0, at, 0) == first.x and try support.value(read, "P0", 0, at, 2) == first.z, "point_P")
+        expect(try support.value(read, "valence", 0, at) == (f64)(4 - border), "neighbor counts")
+        expect(try support.value(read, "faces", 0, at) == [4.0, 2.0, 1.0][border], "point_prim counts")
+        expect(try support.value(read, "size", 0, at, 0) == 2.0 and try support.value(read, "size", 0, at, 1) == 0.0, "bounds")
+        let neighbor = (i64)(try support.value(read, "first", 0, at))
+        let d = (try source.point(neighbor)).subtract(try source.point(at))
+        expect(near(d.dot(d), 0.25, 1e-9), "a neighbor shares an edge")
+    let prims = try support.mesh_of(try support.run(set, support.primitives_mode, "let g = k.input(0)\nf.set_i32(\"n\", g.prim_point_count(f.primnum))\nf.set_i32(\"p2\", g.prim_point(f.primnum, 2))\nf.set_i32(\"back\", g.point_prim(g.prim_point(f.primnum, 0), 0))\n"))
+    for face: i64 in 0..<16:
+        expect(try support.value(prims, "n", 2, face) == 4.0 and try support.value(prims, "p2", 2, face) == (f64)(try source.face_point(face, 2)), "a primitive's points")
+    let weighted = try support.run(set, support.points_mode, "p.set_f32(\"w\", (f32)p.ptnum * 2.0)\n")
+    let shifted = try support.mesh_of(try support.run(weighted, support.points_mode, "p.set_f32(\"next\", k.input(0).point_f32((p.ptnum + 1) % p.numpt, \"w\") + k.input(0).point_f32(0, \"missing\"))\n"))
+    for at: i64 in 0..<25:
+        expect(try support.value(shifted, "next", 0, at) == (f64)(((at + 1) % 25) * 2), "another point's attribute (a missing one reads 0)")
+    let faulted = failure(set, support.points_mode, "let far = k.input(0).point_P(p.ptnum + 100)\np.Cd = far\n")
+    expect(strings.starts_with(faulted, "line 1, column ") and strings.ends_with(faulted, "index out of bounds (point 0)"), "an index out of range faults")
+    expect(strings.ends_with(failure(set, support.points_mode, "p.Cd = k.input(1).point_P(0)\n"), "index out of bounds (point 0)"), "an empty second input has no points")
+    print("ok    stage 3: counts, positions, attributes, topology, bounds, faults")
+
+func if_int(condition: bool) -> i64:
+    return 1 if condition else 0
+
+## Houdini's nearpoints smoothing: each point moves to the average of its neighbors'.
+pub func nearpoints_smoothing() -> !:
+    let set = try support.grid_set(4)
+    let source = try (try support.mesh_of(set)).get()
+    let smoothed = try support.mesh_of(try support.run(set, support.points_mode, "let near = k.input(0).nearpoints(p.P, 0.6, 8)\nvar sum: f32[4] = [0.0, 0.0, 0.0, 0.0]\nfor i in 0..<near.count:\n    sum = sum + k.input(0).point_P(near.points[i])\np.set_vec3(\"avg\", sum * (1.0 / (f32)near.count))\np.set_i32(\"n\", near.count)\np.set_i32(\"self\", k.input(0).nearpoint(p.P + [0.1, 0.0, 0.0, 0.0], 1.0))\np.set_i32(\"nearest\", near.points[0])\n"))
+    for at: i64 in 0..<25:
+        let here = try source.point(at)
+        var count: i64 = 0
+        var sum = Vector3()
+        for other: i64 in 0..<25:
+            let p = try source.point(other)
+            let d = p.subtract(here)
+            if d.dot(d) <= 0.36:
+                count += 1
+                sum = sum.add(p)
+        expect(try support.value(smoothed, "n", 0, at) == (f64)count, "nearpoints finds every point in reach")
+        expect(near(try support.value(smoothed, "avg", 0, at, 0), sum.x / (f64)count, 1e-6) and near(try support.value(smoothed, "avg", 0, at, 2), sum.z / (f64)count, 1e-6), "the neighbors' average")
+        expect(try support.value(smoothed, "self", 0, at) == (f64)at and try support.value(smoothed, "nearest", 0, at) == (f64)at, "the nearest point is itself")
+    print("ok    stage 3: nearpoints smoothing and nearpoint")
+
+## Houdini's coloring by distance to a second input, and its closest point.
+pub func distance_coloring() -> !:
+    let set = try support.grid_set(8)
+    let sphere = try GeometrySet.of_mesh(try MeshPrimitives.sphere(0.5, 24))
+    let surface = try (try support.mesh_of(sphere)).get()
+    let colored = try support.mesh_of(try support.run_inputs(set, sphere, support.points_mode, "let g = k.input(1)\np.Cd = [g.xyzdist(p.P), 0.0, 0.0, 0.0]\nlet prim = g.closest_prim(p.P)\np.set_vec3(\"onto\", g.primuv_vec3(prim, g.closest_uv(p.P), \"P\"))\np.set_i32(\"prim\", prim)\n"))
+    let mesh = try (try support.mesh_of(set)).get()
+    for at: i64 in 0..<mesh.point_count():
+        let point = try mesh.point(at)
+        let want = try surface.surface_distance(Vector3((f64)(f32)point.x, (f64)(f32)point.y, (f64)(f32)point.z))
+        let got = try support.value(colored, "Cd", 0, at, 0)
+        expect(near(got, want, 1e-5), "xyzdist is the distance to the surface")
+        let onto = Vector3(try support.value(colored, "onto", 0, at, 0), try support.value(colored, "onto", 0, at, 1), try support.value(colored, "onto", 0, at, 2))
+        let d = onto.subtract(point)
+        expect(near(math.sqrt(d.dot(d)), want, 1e-4), "primuv at the closest uv is the closest point")
+        expect(try support.value(colored, "prim", 0, at) == (f64)(try surface.closest_face(point)), "closest_prim")
+    print("ok    stage 3: coloring by distance to a second input (xyzdist, closest_uv, primuv)")
+
+## Houdini's ray projection onto a second input.
+pub func ray_projection() -> !:
+    let lifted = try support.run(try support.grid_set(6), support.points_mode, "p.P[1] = 2.0\n")
+    let ground = try support.run(try GeometrySet.of_mesh(try MeshPrimitives.grid(6.0, 3)), support.points_mode, "p.P[1] = p.P[0] * 0.1\n")
+    let projected = try support.mesh_of(try support.run_inputs(lifted, ground, support.points_mode, "let hit = k.input(1).intersect(p.P, [0.0, -2.0, 0.0, 0.0])\nif hit.prim >= 0:\n    p.P = hit.position\np.set_f32(\"distance\", hit.distance)\n"))
+    let mesh = try projected.get()
+    for at: i64 in 0..<mesh.point_count():
+        let point = try mesh.point(at)
+        expect(near(point.y, point.x * 0.1, 1e-5), "every point lands on the sloped ground")
+        expect(near(try support.value(projected, "distance", 0, at), 2.0 - point.x * 0.1, 1e-5), "the hit's distance")
+    let missed = try support.mesh_of(try support.run_inputs(lifted, ground, support.points_mode, "p.set_i32(\"prim\", k.input(1).intersect(p.P, [0.0, 1.0, 0.0, 0.0]).prim)\n"))
+    expect(try support.value(missed, "prim", 0, 0) == -1.0, "a ray that misses")
+    print("ok    stage 3: ray projection onto a second input (intersect)")
+
+## Houdini's spiral of points from nothing (Run Over Numbers).
+pub func spiral() -> !:
+    let body = "let a = (f32)n * 0.3\nlet pt = k.add_point([math32.cos(a) * (f32)n * 0.1, (f32)n * 0.05, math32.sin(a) * (f32)n * 0.1, 0.0])\nk.set_point_f32(pt, \"id\", (f32)n)\n"
+    let one = try support.mesh_of(try support.run_inputs(try support.empty_set(), none, support.numbers_mode, body, count = 5000, threads = 1))
+    let many = try support.mesh_of(try support.run_inputs(try support.empty_set(), none, support.numbers_mode, body, count = 5000, threads = 16))
+    let a = try one.get()
+    let b = try many.get()
+    expect(a.point_count() == 5000 and a.face_count() == 0, "a spiral of 5000 points")
+    for at: i64 in 0..<5000:
+        let p = try a.point(at)
+        let q = try b.point(at)
+        let angle = (f32)at * 0.3
+        expect((f32)p.x == math32.cos(angle) * (f32)at * 0.1 and (f32)p.y == (f32)at * 0.05, "points in element order")
+        expect(p.x == q.x and p.y == q.y and p.z == q.z, "the same points at 1 and 16 workers")
+        expect(try support.value(one, "id", 0, at) == (f64)at and try support.value(many, "id", 0, at) == (f64)at, "set_point on new points")
+    print("ok    stage 4: a spiral of points from nothing, identical at 1 and 16 workers")
+
+## Polygons between new points, and between a curve's points.
+pub func polygons() -> !:
+    let made = try support.mesh_of(try support.run_inputs(try support.empty_set(), none, support.numbers_mode, "let base: f32[4] = [(f32)n * 2.0, 0.0, 0.0, 0.0]\nvar points: i32[16]\npoints[0] = k.add_point(base)\npoints[1] = k.add_point(base + [1.0, 0.0, 0.0, 0.0])\npoints[2] = k.add_point(base + [0.0, 0.0, 1.0, 0.0])\nlet prim = k.add_prim(points, 3)\nk.set_prim_i32(prim, \"n\", (i32)n)\n", count = 10))
+    let mesh = try made.get()
+    expect(mesh.point_count() == 30 and mesh.face_count() == 10, "ten triangles from nothing")
+    for face: i64 in 0..<10:
+        for corner: i64 in 0..<3:
+            expect((try mesh.face_point(face, corner)) == face * 3 + corner, "a triangle's points")
+        expect(try support.value(made, "n", 2, face) == (f64)face, "set_prim on new primitives")
+    # Quads joining a grid's rows to new points lifted above them.
+    let grid = try support.grid_set(4)
+    let walls = try support.mesh_of(try support.run(grid, support.points_mode, "if p.ptnum % 5 < 4:\n    var points: i32[16]\n    points[0] = p.ptnum\n    points[1] = p.ptnum + 1\n    points[2] = k.add_point(k.input(0).point_P(p.ptnum + 1) + [0.0, 1.0, 0.0, 0.0])\n    points[3] = k.add_point(p.P + [0.0, 1.0, 0.0, 0.0])\n    _ = k.add_prim(points, 4)\n"))
+    let w = try walls.get()
+    expect(w.point_count() == 25 + 40 and w.face_count() == 16 + 20, "a wall on every row segment")
+    let face = 16
+    expect((try w.face_point(face, 0)) == 0 and (try w.face_point(face, 1)) == 1 and (try w.face_point(face, 2)) == 25 and (try w.face_point(face, 3)) == 26, "a wall's corners")
+    expect((try w.point(25)).y == 1.0, "a lifted point")
+    print("ok    stage 4: polygons between new points and onto existing ones")
+
+## Houdini's deleting points by a condition, and set_point winning over p.
+pub func removals() -> !:
+    let set = try support.grid_set(4)
+    let kept = try (try support.mesh_of(try support.run(set, support.points_mode, "if p.P[0] < 0.0:\n    k.remove_point(p.ptnum)\n"))).get()
+    expect(kept.point_count() == 15 and kept.face_count() == 8, "points left of x = 0 and their faces are gone")
+    for at: i64 in 0..<15:
+        expect((try kept.point(at)).x >= 0.0, "the kept points")
+    let prims = try (try support.mesh_of(try support.run(set, support.primitives_mode, "if f.primnum % 2 == 0:\n    k.remove_prim(f.primnum)\n"))).get()
+    expect(prims.face_count() == 8 and prims.point_count() == 25, "removing primitives keeps their points")
+    let colored = try support.mesh_of(try support.run(set, support.points_mode, "p.Cd = [1.0, 0.0, 0.0, 0.0]\nk.set_point_vec3(p.ptnum, \"Cd\", [0.0, 1.0, 0.0, 0.0])\n"))
+    expect(try support.value(colored, "Cd", 0, 7, 0) == 0.0 and try support.value(colored, "Cd", 0, 7, 1) == 1.0, "set_point wins over p.Cd")
+    # Creation and removal in one snippet: a new point removed again, an input point too.
+    let mixed = try (try support.mesh_of(try support.run(set, support.points_mode, "let made = k.add_point(p.P + [0.0, 1.0, 0.0, 0.0])\nif p.ptnum % 2 == 0:\n    k.remove_point(made)\nif p.ptnum == 0:\n    k.remove_point(p.ptnum)\n"))).get()
+    expect(mixed.point_count() == 25 - 1 + 12 and mixed.face_count() == 15, "removing added points and an input point")
+    expect((try mixed.point(24)).y == 1.0 and (try mixed.point(24)).x == (try mixed.point(0)).x, "the first kept new point is point 1's")
+    let negative = failure(set, support.points_mode, "if p.ptnum == 3:\n    k.remove_point(-1)\n")
+    expect(strings.ends_with(negative, "index out of bounds (point 3)"), "a negative removal faults")
+    let limited = failure(try support.empty_set(), support.numbers_mode, "for i in 0..<1100:\n    _ = k.add_point([(f32)i, 0.0, 0.0, 0.0])\n", count = 2)
+    expect(strings.ends_with(limited, "too many additions from one element (number 0)"), "1024 adds per element")
+    print("ok    stage 4: removals by a condition, set_point precedence, the add limit")

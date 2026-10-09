@@ -54,13 +54,24 @@ pub func run(set: interop.Reference[GeometrySet], mode: i64, body: str, threads:
     return try run_with(set, mode, "", body, "", no_names(), no_values(), threads)
 
 pub func run_with(set: interop.Reference[GeometrySet], mode: i64, header: str, body: str, group: str, names: const str[], values: const f64[], threads: usize = 0, count: i64 = 0) -> interop.Reference[GeometrySet]!:
-    let made = try geocore_kernel.run_code(try set.get(), mode, header, body, group, 0, names, values, 1.0, 0.0, 24.0, count, threads)
+    let made = try geocore_kernel.run_code(try set.get(), none, mode, header, body, group, 0, names, values, 1.0, 0.0, 24.0, count, threads)
     return try geocore_kernel.adopt_set(made)
 
 ## Run `body` restricted to `group` read on `group_type`'s domain.
 pub func run_with_type(set: interop.Reference[GeometrySet], mode: i64, body: str, group: str, group_type: i64) -> interop.Reference[GeometrySet]!:
-    let made = try geocore_kernel.run_code(try set.get(), mode, "", body, group, group_type, no_names(), no_values(), 1.0, 0.0, 24.0, 0, 0)
+    let made = try geocore_kernel.run_code(try set.get(), none, mode, "", body, group, group_type, no_names(), no_values(), 1.0, 0.0, 24.0, 0, 0)
     return try geocore_kernel.adopt_set(made)
+
+## Run with a second input and a Numbers count, on `threads` workers.
+pub func run_inputs(set: interop.Reference[GeometrySet], input1: interop.Reference[GeometrySet]?, mode: i64, body: str, count: i64 = 0, threads: usize = 0) -> interop.Reference[GeometrySet]!:
+    var second: const GeometrySet*? = none
+    if let given = input1: second = try given.get()
+    let made = try geocore_kernel.run_code(try set.get(), second, mode, "", body, "", 0, no_names(), no_values(), 1.0, 0.0, 24.0, count, threads)
+    return try geocore_kernel.adopt_set(made)
+
+## An empty set (no mesh).
+pub func empty_set() -> interop.Reference[GeometrySet]!:
+    return try geocore_kernel.adopt_set(try geocore_kernel.empty_set())
 
 ## The mesh of a set (trap without one).
 pub func mesh_of(set: interop.Reference[GeometrySet]) -> interop.Reference[Mesh]!:

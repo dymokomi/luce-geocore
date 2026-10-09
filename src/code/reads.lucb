@@ -1,0 +1,232 @@
+# The Geometry methods: builtins over the inputs. Argument 0 of each is the input's
+# number; an index out of range fails the cook at the element (a bounds fault).
+
+## What an attribute accessor reads: its domain (point or face) and its lanes.
+struct Accessor:
+    let domain: Domain
+    let lanes: usize
+    let kind: Kind
+
+let accessor_kinds: Kind[7] = [.f32, .f64, .i32, .i64, .f32, .f32, .f32]
+let point_accessors: Accessor[7] = [
+    Accessor(domain = .point, lanes = 1, kind = .f32), Accessor(domain = .point, lanes = 1, kind = .f64),
+    Accessor(domain = .point, lanes = 1, kind = .i32), Accessor(domain = .point, lanes = 1, kind = .i64),
+    Accessor(domain = .point, lanes = 2, kind = .f32), Accessor(domain = .point, lanes = 4, kind = .f32),
+    Accessor(domain = .point, lanes = 4, kind = .f32),
+]
+let prim_accessors: Accessor[7] = [
+    Accessor(domain = .face, lanes = 1, kind = .f32), Accessor(domain = .face, lanes = 1, kind = .f64),
+    Accessor(domain = .face, lanes = 1, kind = .i32), Accessor(domain = .face, lanes = 1, kind = .i64),
+    Accessor(domain = .face, lanes = 2, kind = .f32), Accessor(domain = .face, lanes = 4, kind = .f32),
+    Accessor(domain = .face, lanes = 4, kind = .f32),
+]
+## Components an accessor stores (vec3: 3 of its 4 lanes).
+let accessor_components: usize[7] = [1, 1, 1, 1, 2, 3, 4]
+
+## Register every Geometry method of `host`.
+func bind_geometry(host: Host*) -> !:
+    try host.handle("Kernel", "input")
+    let one = [Kind.i64]
+    let index = [Kind.i64, Kind.i32]
+    let pair = [Kind.i64, Kind.i32, Kind.i32]
+    let point4 = [Kind.i64, Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+    let four = [Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+    try host.builtin("Geometry", "point_count", engine.Builtin.of("point_count", one, [Kind.i32], count_points))
+    try host.builtin("Geometry", "prim_count", engine.Builtin.of("prim_count", one, [Kind.i32], count_prims))
+    try host.builtin("Geometry", "point_P", engine.Builtin.of("point_P", index, four, read_position))
+    for (at, name) in accessor_names.indexed():
+        var room: u8[32]
+        let lanes = accessor_lanes[at] if accessor_lanes[at] != 3 else 4
+        var results: Kind[4]
+        for k in 0..<lanes: results[k] = accessor_kinds[at]
+        let point_name = try strings.format(room, f"point_{name}")
+        try host.builtin("Geometry", point_name, engine.Builtin.of(point_name, index, results[..<lanes], read_attribute, (void*)&point_accessors[at]))
+        var prim_room: u8[32]
+        let prim_name = try strings.format(prim_room, f"prim_{name}")
+        try host.builtin("Geometry", prim_name, engine.Builtin.of(prim_name, index, results[..<lanes], read_attribute, (void*)&prim_accessors[at]))
+    try host.builtin("Geometry", "prim_point_count", engine.Builtin.of("prim_point_count", index, [Kind.i32], prim_point_count))
+    try host.builtin("Geometry", "prim_point", engine.Builtin.of("prim_point", pair, [Kind.i32], prim_point))
+    try host.builtin("Geometry", "point_prim_count", engine.Builtin.of("point_prim_count", index, [Kind.i32], point_prim_count))
+    try host.builtin("Geometry", "point_prim", engine.Builtin.of("point_prim", pair, [Kind.i32], point_prim))
+    try host.builtin("Geometry", "neighbor_count", engine.Builtin.of("neighbor_count", index, [Kind.i32], neighbor_count))
+    try host.builtin("Geometry", "neighbor", engine.Builtin.of("neighbor", pair, [Kind.i32], neighbor))
+    try host.builtin("Geometry", "nearpoint", engine.Builtin.of("nearpoint", [Kind.i64, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32], [Kind.i32], nearpoint))
+    var near: Kind[17]
+    for k in 0..<17: near[k] = .i32
+    try host.builtin("Geometry", "nearpoints", engine.Builtin.of("nearpoints", [Kind.i64, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.i32], near, nearpoints))
+    try host.builtin("Geometry", "xyzdist", engine.Builtin.of("xyzdist", point4, [Kind.f32], xyzdist))
+    try host.builtin("Geometry", "closest_prim", engine.Builtin.of("closest_prim", point4, [Kind.i32], closest_prim))
+    try host.builtin("Geometry", "closest_uv", engine.Builtin.of("closest_uv", point4, [Kind.f32, Kind.f32], closest_uv))
+    try host.builtin("Geometry", "primuv_f32", engine.Builtin.of("primuv_f32", [Kind.i64, Kind.i32, Kind.f32, Kind.f32], [Kind.f32], primuv, (void*)&primuv_lanes[0]))
+    try host.builtin("Geometry", "primuv_vec3", engine.Builtin.of("primuv_vec3", [Kind.i64, Kind.i32, Kind.f32, Kind.f32], four, primuv, (void*)&primuv_lanes[1]))
+    let ray = [Kind.i64, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+    let hit = [Kind.i32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+    try host.builtin("Geometry", "intersect", engine.Builtin.of("intersect", ray, hit, intersect))
+    var box: Kind[16]
+    for k in 0..<16: box[k] = .f32
+    try host.builtin("Geometry", "bounds", engine.Builtin.of("bounds", one, box, bounds))
+
+let primuv_lanes: usize[2] = [1, 3]
+
+# mark: Counts and attributes =================================================================
+
+func count_points(call: engine.Call*):
+    let counts = call.i32_result(0)
+    let state = state_of(call) else return
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        counts[lane] = (i32)source.points()
+
+func count_prims(call: engine.Call*):
+    let counts = call.i32_result(0)
+    let state = state_of(call) else return
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        counts[lane] = (i32)source.prims()
+
+## The element `index` names among `count`; a bounds fault at `lane` when it is out of
+## range.
+func element_or_fail(call: engine.Call*, lane: usize, index: i32, count: usize) -> usize?:
+    if index < 0 or (usize)index >= count:
+        call.fail_as(lane, .bounds)
+        return none
+    return (usize)index
+
+## The input lane `lane` names; a bounds fault for a number other than 0 or 1.
+func source_or_fail(state: CookState*, call: engine.Call*, lane: usize) -> Source*?:
+    let found = source_at(state, call, lane)
+    if found == none: call.fail_as(lane, .bounds)
+    return found
+
+## A source's mesh; a bounds fault when the input is empty.
+func mesh_or_fail(source: const Source*, call: engine.Call*, lane: usize) -> const Mesh*?:
+    let found = source.mesh
+    if found == none: call.fail_as(lane, .bounds)
+    return found
+
+func read_position(call: engine.Call*):
+    let state = state_of(call) else return
+    let indices = call.i32_argument(1)
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let index = element_or_fail(call, lane, indices[lane], source.points()) else continue
+        write_vector(call, 0, lane, source.position(index))
+
+## Lanes `first..first + 3` of the results = `value` (lane `first + 3` = 0).
+func write_vector(call: engine.Call*, first: usize, lane: usize, value: Vector3):
+    call.f32_result(first)[lane] = (f32)value.x
+    call.f32_result(first + 1)[lane] = (f32)value.y
+    call.f32_result(first + 2)[lane] = (f32)value.z
+    call.f32_result(first + 3)[lane] = 0.0
+
+func read_attribute(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let accessor = (const Accessor*)context
+    let name = call.text(0)
+    let indices = call.i32_argument(1)
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let count = source.points() if accessor.domain == .point else source.prims()
+        let index = element_or_fail(call, lane, indices[lane], count) else continue
+        var values: f64[4]
+        if let mesh = source.mesh:
+            let found = mesh.find_attribute(name, (i64)(u8)accessor.domain)
+            if found >= 0:
+                let entry = mesh.attribute_entry(found) catch failure: continue
+                for k in 0..<accessor.lanes:
+                    if k < entry.width: values[k] = entry.number(index, k)
+        for k in 0..<accessor.lanes:
+            put_lane(call, k, accessor.kind, lane, values[k])
+
+## Result `index`, lane `lane` = `value` in `kind`.
+func put_lane(call: engine.Call*, index: usize, kind: Kind, lane: usize, value: f64):
+    match kind:
+        .f32: call.f32_result(index)[lane] = (f32)value
+        .f64: call.f64_result(index)[lane] = value
+        .i32: call.i32_result(index)[lane] = (i32)value
+        _: call.i64_result(index)[lane] = (i64)value
+
+# mark: Topology ==============================================================================
+
+func prim_point_count(call: engine.Call*):
+    let state = state_of(call) else return
+    let prims = call.i32_argument(1)
+    let counts = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let mesh = mesh_or_fail(source, call, lane) else continue
+        let prim = element_or_fail(call, lane, prims[lane], source.prims()) else continue
+        let offsets = mesh.offset_span()
+        counts[lane] = offsets[prim + 1] - offsets[prim]
+
+func prim_point(call: engine.Call*):
+    let state = state_of(call) else return
+    let prims = call.i32_argument(1)
+    let ats = call.i32_argument(2)
+    let points = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let mesh = mesh_or_fail(source, call, lane) else continue
+        let prim = element_or_fail(call, lane, prims[lane], source.prims()) else continue
+        let offsets = mesh.offset_span()
+        let at = element_or_fail(call, lane, ats[lane], (usize)(offsets[prim + 1] - offsets[prim])) else continue
+        points[lane] = mesh.corner_span()[(usize)offsets[prim] + at]
+
+func point_prim_count(call: engine.Call*):
+    let state = state_of(call) else return
+    let indices = call.i32_argument(1)
+    let counts = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let point = element_or_fail(call, lane, indices[lane], source.points()) else continue
+        if not source.with_incidence():
+            call.fail(lane)
+            continue
+        counts[lane] = source.incidence_offsets[point + 1] - source.incidence_offsets[point]
+
+func point_prim(call: engine.Call*):
+    let state = state_of(call) else return
+    let indices = call.i32_argument(1)
+    let ats = call.i32_argument(2)
+    let prims = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let point = element_or_fail(call, lane, indices[lane], source.points()) else continue
+        if not source.with_incidence():
+            call.fail(lane)
+            continue
+        let first = (usize)source.incidence_offsets[point]
+        let at = element_or_fail(call, lane, ats[lane], (usize)source.incidence_offsets[point + 1] - first) else continue
+        prims[lane] = source.incidence_faces[first + at]
+
+func neighbor_count(call: engine.Call*):
+    let state = state_of(call) else return
+    let indices = call.i32_argument(1)
+    let counts = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let point = element_or_fail(call, lane, indices[lane], source.points()) else continue
+        if not source.with_topology():
+            call.fail(lane)
+            continue
+        let topology = source.topology else continue
+        counts[lane] = topology.point_edge_offsets[point + 1] - topology.point_edge_offsets[point]
+
+func neighbor(call: engine.Call*):
+    let state = state_of(call) else return
+    let indices = call.i32_argument(1)
+    let ats = call.i32_argument(2)
+    let points = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let point = element_or_fail(call, lane, indices[lane], source.points()) else continue
+        if not source.with_topology():
+            call.fail(lane)
+            continue
+        let topology = source.topology else continue
+        let first = (usize)topology.point_edge_offsets[point]
+        let at = element_or_fail(call, lane, ats[lane], (usize)topology.point_edge_offsets[point + 1] - first) else continue
+        let edge = (usize)topology.point_edges[first + at]
+        let a = topology.edge_points[edge * 2]
+        points[lane] = topology.edge_points[edge * 2 + 1] if (usize)a == point else a

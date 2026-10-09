@@ -1,0 +1,261 @@
+# Applying a cook's queued edits to the mesh the run made: new points and polygons in lane
+# order, attribute sets, then removals; attributes follow their elements (new ones start
+# at zero), and a removed point takes the polygons using it.
+
+func point_before(a: PointAdd, b: PointAdd) -> bool:
+    return a.key < b.key
+
+func prim_before(a: PrimAdd, b: PrimAdd) -> bool:
+    return a.key < b.key
+
+func set_before(a: AttributeSet, b: AttributeSet) -> bool:
+    return a.key < b.key
+
+## The index a provisional number `number` is among `adds` (ascending), or none.
+func added_point(adds: const PointAdd[], number: i64) -> usize?:
+    var low: usize = 0
+    var high = adds.length
+    while low < high:
+        let middle = (low + high) // 2
+        if adds[middle].provisional < number: low = middle + 1
+        else: high = middle
+    if low < adds.length and adds[low].provisional == number: return low
+    return none
+
+func added_prim(adds: const PrimAdd[], number: i64) -> usize?:
+    var low: usize = 0
+    var high = adds.length
+    while low < high:
+        let middle = (low + high) // 2
+        if adds[middle].provisional < number: low = middle + 1
+        else: high = middle
+    if low < adds.length and adds[low].provisional == number: return low
+    return none
+
+## Old element numbers, then new ones in lane order: where a snippet's number lands
+## before removals, or none.
+struct Numbering:
+    let old_points: usize
+    let old_prims: usize
+    let point_adds: const PointAdd[]
+    let prim_adds: const PrimAdd[]
+
+    func point(number: i64) -> usize?:
+        if number >= 0 and (usize)number < self.old_points: return (usize)number
+        let at = added_point(self.point_adds, number) else return none
+        return self.old_points + at
+
+    func prim(number: i64) -> usize?:
+        if number >= 0 and (usize)number < self.old_prims: return (usize)number
+        let at = added_prim(self.prim_adds, number) else return none
+        return self.old_prims + at
+
+## The mesh `edits` make of `source` (none: no input mesh).
+func applied(source: const Mesh*?, edits: Edits*) -> Mesh*!:
+    sort.stable(edits.point_adds.items(), point_before)
+    sort.stable(edits.prim_adds.items(), prim_before)
+    sort.stable(edits.sets.items(), set_before)
+    var old_points: usize = 0
+    var old_prims: usize = 0
+    var origin = Vector3()
+    var old_offsets = no_ints()
+    var old_corners = no_ints()
+    var old_triangles = no_ints()
+    var old_positions = no_floats()
+    if let old = source:
+        old_points = (usize)old.point_count()
+        old_prims = (usize)old.face_count()
+        origin = old.position_origin()
+        old_offsets = old.offset_span()
+        old_corners = old.corner_span()
+        old_triangles = old.triangle_span()
+        old_positions = old.point_span()
+    let numbering = Numbering(old_points = old_points, old_prims = old_prims, point_adds = edits.point_adds.view(), prim_adds = edits.prim_adds.view())
+    let all_points = old_points + edits.point_adds.length()
+    let all_prims = old_prims + edits.prim_adds.length()
+    var scratch = Scratch()
+    defer scratch.close()
+    let point_gone = try scratch.bytes(all_points)
+    let prim_gone = try scratch.bytes(all_prims)
+    if edits.masked.load(.acquire):
+        memory.copy(point_gone, edits.points_gone, old_points)
+        memory.copy(prim_gone, edits.prims_gone, old_prims)
+    # Removals of added elements (any order: removing is idempotent).
+    for removal in edits.removals.view():
+        if removal.domain == .point:
+            let at = numbering.point(removal.index) else error(errors.invalid, "remove_point names a point that does not exist")
+            point_gone[at] = 1
+        else:
+            let at = numbering.prim(removal.index) else error(errors.invalid, "remove_prim names a primitive that does not exist")
+            prim_gone[at] = 1
+    # The new polygons' points, before removals.
+    let prim_points = i64_view(try scratch.bytes(edits.prim_adds.length() * 16 * 8))
+    for (at, add) in edits.prim_adds.view().indexed():
+        for k in 0..<add.count:
+            let point = numbering.point((i64)add.points[k]) else error(errors.invalid, "add_prim names a point that does not exist")
+            prim_points[at * 16 + k] = (i64)point
+    # Which points and polygons stay, and their new numbers.
+    let point_map = i64_view(try scratch.bytes(all_points * 8))
+    var points: usize = 0
+    for at in 0..<all_points:
+        point_map[at] = -1 if point_gone[at] != 0 else (i64)points
+        if point_gone[at] == 0: points += 1
+    # Input polygons losing a point go too (in parallel: there may be millions).
+    var dropping = Dropping(old_offsets, old_corners, point_map, prim_gone)
+    try parallel.for_each_range(old_prims, 32768, (void*)&dropping, drop_polygons)
+    var faces: usize = 0
+    var corners: usize = 0
+    var triangle_entries: usize = 0
+    for face in 0..<all_prims:
+        if prim_gone[face] != 0: continue
+        let size = prim_size(face, old_prims, old_offsets, edits.prim_adds.view())
+        if face >= old_prims and not prim_kept(face, old_prims, old_offsets, old_corners, prim_points, size, point_map):
+            prim_gone[face] = 1
+            continue
+        faces += 1
+        corners += size
+        triangle_entries += (size - 2) * 3
+    let prim_map = i64_view(try scratch.bytes(all_prims * 8))
+    var survivors: i64 = 0
+    for face in 0..<all_prims:
+        prim_map[face] = -1 if prim_gone[face] != 0 else survivors
+        if prim_gone[face] == 0: survivors += 1
+    var positions = try SharedColumn[Float3].allocate(points)
+    errdefer positions.release()
+    var offsets = try SharedColumn[i32].allocate(faces + 1)
+    errdefer offsets.release()
+    var corner_column = try SharedColumn[i32].allocate(corners)
+    errdefer corner_column.release()
+    var triangles = try SharedColumn[i32].allocate(triangle_entries)
+    errdefer triangles.release()
+    let point_parents = i32_view(try scratch.bytes(points * 4))
+    let face_parents = i32_view(try scratch.bytes(faces * 4))
+    let corner_parents = i32_view(try scratch.bytes(corners * 4))
+    for at in 0..<all_points:
+        let to = point_map[at]
+        if to < 0: continue
+        if at < old_points:
+            positions.span()[(usize)to] = old_positions[at]
+            point_parents[(usize)to] = (i32)at
+        else:
+            positions.span()[(usize)to] = Float3.of(edits.point_adds.at(at - old_points).position.subtract(origin))
+            point_parents[(usize)to] = -1
+    var face_at: usize = 0
+    var corner_at: usize = 0
+    var triangle_at: usize = 0
+    for face in 0..<all_prims:
+        if prim_gone[face] != 0: continue
+        let size = prim_size(face, old_prims, old_offsets, edits.prim_adds.view())
+        offsets.span()[face_at] = (i32)corner_at
+        for k in 0..<size:
+            if face < old_prims:
+                let old = (usize)old_offsets[face] + k
+                corner_column.span()[corner_at + k] = (i32)point_map[(usize)old_corners[old]]
+                corner_parents[corner_at + k] = (i32)old
+            else:
+                corner_column.span()[corner_at + k] = (i32)point_map[(usize)prim_points[(face - old_prims) * 16 + k]]
+                corner_parents[corner_at + k] = -1
+        if face < old_prims:
+            # Keep the old triangulation, its corners renumbered.
+            let start = (usize)old_offsets[face]
+            let base = (start - face * 2) * 3
+            for entry in 0..<(size - 2) * 3:
+                triangles.span()[triangle_at + entry] = old_triangles[base + entry] - (i32)start + (i32)corner_at
+            face_parents[face_at] = (i32)face
+        else:
+            # A first index of -1 asks assembly to triangulate the new polygon.
+            for entry in 0..<(size - 2) * 3: triangles.span()[triangle_at + entry] = -1
+            face_parents[face_at] = -1
+        face_at += 1
+        corner_at += size
+        triangle_at += (size - 2) * 3
+    offsets.span()[faces] = (i32)corners
+    let made = try assembled(positions.take(), origin, offsets.take(), corner_column.take(), triangles.take(), SharedColumn[Float3](), SharedColumn[Vector3]())
+    errdefer mesh_dispose(made)
+    if let old = source:
+        try transfer_attributes(old, made, point_parents, face_parents, corner_parents, true)
+    try apply_sets(made, edits, &numbering, point_map, prim_map)
+    return made
+
+func prim_size(face: usize, old_prims: usize, offsets: const i32[], adds: const PrimAdd[]) -> usize:
+    if face < old_prims: return (usize)(offsets[face + 1] - offsets[face])
+    return adds[face - old_prims].count
+
+## Whether every point of polygon `face` stays.
+func prim_kept(face: usize, old_prims: usize, offsets: const i32[], corners: const i32[], prim_points: const i64[], size: usize, point_map: const i64[]) -> bool:
+    for k in 0..<size:
+        let point = (usize)corners[(usize)offsets[face] + k] if face < old_prims else (usize)prim_points[(face - old_prims) * 16 + k]
+        if point_map[point] < 0: return false
+    return true
+
+struct Dropping:
+    let offsets: const i32[]
+    let corners: const i32[]
+    let point_map: const i64[]
+    let prim_gone: u8[]
+
+func drop_polygons(context: void*, first: usize, end: usize, worker: usize):
+    let work = (Dropping*)context
+    for face in first..<end:
+        if work.prim_gone[face] != 0: continue
+        for corner in (usize)work.offsets[face]..<(usize)work.offsets[face + 1]:
+            if work.point_map[(usize)work.corners[corner]] < 0:
+                work.prim_gone[face] = 1
+                break
+
+func no_floats() -> const Float3[]:
+    var none_given: const Float3[]
+    return none_given
+
+## Each attribute the sets name, made (or widened) on `mesh` and written in set order.
+func apply_sets(mesh: Mesh*, edits: const Edits*, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[]) -> !:
+    let sets = edits.sets.view()
+    # The distinct (domain, name) pairs, in first-set order: a few, however many sets.
+    var named: collections.List[usize]
+    defer named.destroy()
+    for (at, set) in sets.indexed():
+        var seen = false
+        for first in named.view():
+            if sets[first].domain == set.domain and sets[first].name == set.name:
+                seen = true
+                break
+        if not seen: try named.append(at)
+    for first in named.view():
+        try apply_named(mesh, sets, first, numbering, point_map, prim_map)
+
+## The sets of the attribute set `first` names, in set order.
+func apply_named(mesh: Mesh*, sets: const AttributeSet[], first: usize, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[]) -> !:
+    let set = sets[first]
+    # The attribute: the existing one, widened to the widest set, or a new one.
+    var width = set.width
+    var kind = set.kind
+    for later in sets[first..]:
+        if later.domain == set.domain and later.name == set.name and later.width > width: width = later.width
+    let elements = try mesh.domain_size(set.domain)
+    let found = mesh.find_attribute(set.name, (i64)(u8)set.domain)
+    var existing: const Attribute*? = none
+    if found >= 0:
+        let entry = try mesh.attribute_entry(found)
+        if let stored = kind_of_data(entry.kind):
+            kind = stored
+            if entry.width > width: width = entry.width
+            existing = entry
+    let data_type = data_type_of(kind) else error(errors.invalid, "a set of a type no attribute stores")
+    var attribute = try Attribute.create(set.name, set.domain, data_type, width, elements)
+    errdefer attribute.release()
+    let bytes = attribute.data.span()
+    if let entry = existing:
+        fill_from(bytes, kind, width, elements, entry)
+    for later in sets[first..]:
+        if later.domain != set.domain or later.name != set.name: continue
+        var target: i64 = -1
+        if later.domain == .point:
+            if let at = numbering.point(later.index): target = point_map[at]
+            else: error(errors.invalid, "a set_point names a point that does not exist")
+        else:
+            if let at = numbering.prim(later.index):
+                target = prim_map[at]
+            else: error(errors.invalid, "a set_prim names a primitive that does not exist")
+        if target < 0: continue
+        for k in 0..<later.width: put_number(bytes, kind, (usize)target * width + k, later.values[k])
+    try put_attribute(mesh, attribute)

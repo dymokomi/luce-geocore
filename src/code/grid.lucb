@@ -1,0 +1,174 @@
+# A uniform point grid for nearpoint and nearpoints: cells about one point each, the
+# points of each cell listed contiguously (compressed rows), built once per input.
+
+## Points bucketed by cell.
+struct PointGrid:
+    var low: Vector3 = Vector3()
+    var cell: f64
+    var nx: usize
+    var ny: usize
+    var nz: usize
+    ## Cell c's points are order[starts[c]..<starts[c + 1]]; positions are world, in f64.
+    var starts: u32[]
+    var order: u32[]
+    var positions: Vector3[]
+    var built: bool
+
+    func close():
+        if not self.built: return
+        free(self.starts) in memory.heap
+        free(self.order) in memory.heap
+        free(self.positions) in memory.heap
+        self.built = false
+
+    func build(mesh: const Mesh*) -> !:
+        let count = (usize)mesh.point_count()
+        self.positions = try new Vector3[count] --- in memory.heap
+        errdefer free(self.positions) in memory.heap
+        # World positions and per-block bounds in parallel, then the box.
+        let blocks = (count + grid_block - 1) // grid_block
+        let lows = try new Vector3[blocks] --- in memory.heap
+        defer free(lows) in memory.heap
+        let highs = try new Vector3[blocks] --- in memory.heap
+        defer free(highs) in memory.heap
+        var gather = GatherWork(mesh.point_span(), mesh.position_origin(), self.positions, lows, highs)
+        try parallel.for_each_range(count, grid_block, (void*)&gather, gather_positions)
+        var low = Vector3(1.0e300, 1.0e300, 1.0e300)
+        var high = Vector3(-1.0e300, -1.0e300, -1.0e300)
+        for block in 0..<blocks:
+            low = lower_of(low, lows[block])
+            high = higher_of(high, highs[block])
+        if count == 0:
+            low = Vector3()
+            high = Vector3()
+        # Cells of about one point each over the box, a flat box keeping one cell across.
+        let size = high.subtract(low)
+        let longest = math.max(size.x, math.max(size.y, size.z))
+        let floor_size = longest * 0.001 + 1.0e-9
+        let volume = math.max(size.x, floor_size) * math.max(size.y, floor_size) * math.max(size.z, floor_size)
+        self.cell = math.max(math.cbrt(volume / (f64)(count if count > 0 else 1)), 1.0e-9)
+        self.nx = axis_cells(size.x, self.cell)
+        self.ny = axis_cells(size.y, self.cell)
+        self.nz = axis_cells(size.z, self.cell)
+        while self.nx * self.ny * self.nz > 16777216:
+            self.cell *= 1.5
+            self.nx = axis_cells(size.x, self.cell)
+            self.ny = axis_cells(size.y, self.cell)
+            self.nz = axis_cells(size.z, self.cell)
+        self.low = low
+        # Each point's cell in parallel; the counting sort over them stays serial
+        # (sequential, so the order within a cell is by point number).
+        let cell_ids = try new u32[count] --- in memory.heap
+        defer free(cell_ids) in memory.heap
+        var bucket = BucketWork(&self, cell_ids)
+        try parallel.for_each_range(count, grid_block, (void*)&bucket, bucket_points)
+        let cells = self.nx * self.ny * self.nz
+        self.starts = try new u32[cells + 1] in memory.heap
+        errdefer free(self.starts) in memory.heap
+        self.order = try new u32[count] --- in memory.heap
+        for at in 0..<count: self.starts[(usize)cell_ids[at] + 1] += 1
+        for c in 0..<cells: self.starts[c + 1] += self.starts[c]
+        var filled = try new u32[cells] in memory.heap
+        defer free(filled) in memory.heap
+        for at in 0..<count:
+            let c = (usize)cell_ids[at]
+            self.order[(usize)self.starts[c] + (usize)filled[c]] = (u32)at
+            filled[c] += 1
+        self.built = true
+
+    func axis(value: f64, cells: usize) -> usize:
+        let at = math.floor(value / self.cell)
+        if not (at > 0.0): return 0
+        if at >= (f64)(cells - 1): return cells - 1
+        return (usize)at
+
+    func cell_of(p: Vector3) -> usize:
+        let x = self.axis(p.x - self.low.x, self.nx)
+        let y = self.axis(p.y - self.low.y, self.ny)
+        let z = self.axis(p.z - self.low.z, self.nz)
+        return (z * self.ny + y) * self.nx + x
+
+    ## The nearest `most` points (up to 16) within `reach` of `p`, nearest first (ties by
+    ## number): into `found`, how many.
+    func nearest(p: Vector3, reach: f64, most: usize, found: u32[]) -> usize:
+        if not self.built or most == 0 or not (reach >= 0.0):
+            return 0
+        var distances: f64[16]
+        var count: usize = 0
+        let limit = reach * reach
+        let x0 = self.axis(p.x - reach - self.low.x, self.nx)
+        let x1 = self.axis(p.x + reach - self.low.x, self.nx)
+        let y0 = self.axis(p.y - reach - self.low.y, self.ny)
+        let y1 = self.axis(p.y + reach - self.low.y, self.ny)
+        let z0 = self.axis(p.z - reach - self.low.z, self.nz)
+        let z1 = self.axis(p.z + reach - self.low.z, self.nz)
+        for z in z0..<z1 + 1:
+            for y in y0..<y1 + 1:
+                for x in x0..<x1 + 1:
+                    let c = (z * self.ny + y) * self.nx + x
+                    for at in (usize)self.starts[c]..<(usize)self.starts[c + 1]:
+                        let index = self.order[at]
+                        let d = self.positions[(usize)index].subtract(p)
+                        let distance = d.x * d.x + d.y * d.y + d.z * d.z
+                        if distance > limit:
+                            continue
+                        # Insert into the sorted list, keeping the `most` nearest.
+                        var slot = count
+                        while slot > 0 and (distances[slot - 1] > distance or (distances[slot - 1] == distance and found[slot - 1] > index)):
+                            slot -= 1
+                        if slot >= most:
+                            continue
+                        var move = count if count < most else most - 1
+                        while move > slot:
+                            distances[move] = distances[move - 1]
+                            found[move] = found[move - 1]
+                            move -= 1
+                        distances[slot] = distance
+                        found[slot] = index
+                        if count < most: count += 1
+        return count
+
+## Points per parallel block of the build.
+let grid_block: usize = 65536
+
+struct GatherWork:
+    let points: const Float3[]
+    let origin: Vector3
+    let positions: Vector3[]
+    let lows: Vector3[]
+    let highs: Vector3[]
+
+## World positions of one block, and its bounds.
+func gather_positions(context: void*, first: usize, end: usize, worker: usize):
+    let work = (GatherWork*)context
+    var low = Vector3(1.0e300, 1.0e300, 1.0e300)
+    var high = Vector3(-1.0e300, -1.0e300, -1.0e300)
+    for at in first..<end:
+        let p = work.points[at].vector().add(work.origin)
+        work.positions[at] = p
+        low = lower_of(low, p)
+        high = higher_of(high, p)
+    work.lows[first // grid_block] = low
+    work.highs[first // grid_block] = high
+
+struct BucketWork:
+    let grid: const PointGrid*
+    let cells: u32[]
+
+## The cell of each point of one block.
+func bucket_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (BucketWork*)context
+    for at in first..<end:
+        work.cells[at] = (u32)work.grid.cell_of(work.grid.positions[at])
+
+func lower_of(a: Vector3, b: Vector3) -> Vector3:
+    return Vector3(math.min(a.x, b.x), math.min(a.y, b.y), math.min(a.z, b.z))
+
+func higher_of(a: Vector3, b: Vector3) -> Vector3:
+    return Vector3(math.max(a.x, b.x), math.max(a.y, b.y), math.max(a.z, b.z))
+
+func axis_cells(extent: f64, cell: f64) -> usize:
+    let cells = math.floor(extent / cell) + 1.0
+    if not (cells > 1.0): return 1
+    if cells > 4096.0: return 4096
+    return (usize)cells

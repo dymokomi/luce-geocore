@@ -1,0 +1,146 @@
+# The geometries a snippet reads (`k.input(0)`, `k.input(1)`) for one cook, and what each
+# builds on first use: its topology, its point-to-primitive incidence, its spatial index
+# and a point grid. Builtins reach them through the run's context.
+
+## One input: its mesh (none when the input is empty) and what was built for it.
+struct Source:
+    var mesh: const Mesh*?
+    var lock: sync.Mutex
+    var failed: @bool
+    var topology_ready: @bool
+    var topology: Topology?
+    var incidence_ready: @bool
+    var incidence_offsets: const i32[]
+    var incidence_faces: const i32[]
+    var queries_ready: @bool
+    var index: const TriangleIndex*?
+    var grid_ready: @bool
+    var grid: PointGrid
+
+    func close():
+        self.grid.close()
+
+    func points() -> usize:
+        let mesh = self.mesh else return 0
+        return (usize)mesh.point_count()
+
+    func prims() -> usize:
+        let mesh = self.mesh else return 0
+        return (usize)mesh.face_count()
+
+    ## Point `index`'s world position.
+    func position(index: usize) -> Vector3:
+        let mesh = self.mesh else return Vector3()
+        return mesh.point_span()[index].vector().add(mesh.position_origin())
+
+    ## The topology, built on first use (false when it could not be).
+    func with_topology() -> bool:
+        if self.topology_ready.load(.acquire):
+            return not self.failed.load(.acquire)
+        self.lock.lock()
+        defer self.lock.unlock()
+        if not self.topology_ready.load(.acquire):
+            if let mesh = self.mesh:
+                self.topology = Topology.of(mesh) catch failure:
+                    _ = failure
+                    self.failed.store(true, .release)
+                    recover none
+            self.topology_ready.store(true, .release)
+        return not self.failed.load(.acquire)
+
+    ## The primitives around each point, built on first use.
+    func with_incidence() -> bool:
+        if self.incidence_ready.load(.acquire):
+            return not self.failed.load(.acquire)
+        self.lock.lock()
+        defer self.lock.unlock()
+        if not self.incidence_ready.load(.acquire):
+            if let mesh = self.mesh:
+                let spans = mesh.point_face_span() catch failure:
+                    _ = failure
+                    self.failed.store(true, .release)
+                    recover (no_ints(), no_ints())
+                self.incidence_offsets = spans.0
+                self.incidence_faces = spans.1
+            self.incidence_ready.store(true, .release)
+        return not self.failed.load(.acquire)
+
+    ## The spatial index of the faces, built on first use.
+    func with_queries() -> bool:
+        if self.queries_ready.load(.acquire):
+            return not self.failed.load(.acquire)
+        self.lock.lock()
+        defer self.lock.unlock()
+        if not self.queries_ready.load(.acquire):
+            if let mesh = self.mesh:
+                self.index = mesh.query_index() catch failure:
+                    _ = failure
+                    self.failed.store(true, .release)
+                    recover none
+            self.queries_ready.store(true, .release)
+        return not self.failed.load(.acquire)
+
+    ## The point grid, built on first use.
+    func with_grid() -> bool:
+        if self.grid_ready.load(.acquire):
+            return not self.failed.load(.acquire)
+        self.lock.lock()
+        defer self.lock.unlock()
+        if not self.grid_ready.load(.acquire):
+            if let mesh = self.mesh:
+                self.grid.build(mesh) catch failure:
+                    _ = failure
+                    self.failed.store(true, .release)
+            self.grid_ready.store(true, .release)
+        return not self.failed.load(.acquire)
+
+func no_ints() -> const i32[]:
+    var none_given: const i32[]
+    return none_given
+
+## A cook's state for its builtins: the inputs and the queued edits.
+struct CookState:
+    var first: Source
+    var second: Source
+    var edits: Edits
+
+    func close():
+        self.first.close()
+        self.second.close()
+        self.edits.close()
+
+## The builtins that need each structure, by what they need.
+let grid_users: str[2] = ["nearpoint", "nearpoints"]
+let index_users: str[4] = ["xyzdist", "closest_prim", "closest_uv", "intersect"]
+let topology_users: str[2] = ["neighbor_count", "neighbor"]
+let incidence_users: str[2] = ["point_prim_count", "point_prim"]
+
+## Build, on the cook's thread before the run, what `program`'s calls may need of each
+## input: built inside the run, one worker builds while the others wait on the lock.
+## A structure that fails here fails again lazily, as a fault on the lanes asking for it.
+func prepare_sources(state: CookState*, program: const Program*):
+    for handle: i64 in 0..<2:
+        let source = &state.first if handle == 0 else &state.second
+        if source.mesh == none: continue
+        if calls_any(program, grid_users, handle): _ = source.with_grid()
+        if calls_any(program, index_users, handle): _ = source.with_queries()
+        if calls_any(program, topology_users, handle): _ = source.with_topology()
+        if calls_any(program, incidence_users, handle): _ = source.with_incidence()
+
+func calls_any(program: const Program*, names: const str[], handle: i64) -> bool:
+    for name in names:
+        if program.may_pass(name, 0, handle): return true
+    return false
+
+## The cook state of a builtin call (trap-free: an absent context reads as no state).
+func state_of(call: const engine.Call*) -> CookState*?:
+    let context = call.run_context else return none
+    return (CookState*)context
+
+## The input lane `lane` names (argument 0 of every Geometry method), or none for a
+## number other than 0 or 1.
+func source_at(state: CookState*, call: const engine.Call*, lane: usize) -> Source*?:
+    let index = call.i64_argument(0)[lane]
+    if index == 0: return &state.first
+    if index == 1: return &state.second
+    return none

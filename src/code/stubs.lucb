@@ -228,7 +228,169 @@ pub struct Vertex:
         _ = member
         self.written = true
 
-## The node: the timeline, its spare parameters and the detail attributes.
+## The box around a geometry, in world space (lane 3 is 0).
+pub struct Bounds:
+    pub let min: f32[4]
+    pub let max: f32[4]
+    pub let center: f32[4]
+    pub let size: f32[4]
+
+## Where a ray met a geometry: the primitive (-1 for a miss), its parametric uv (for
+## `primuv_*`), the world position and the distance along the ray.
+pub struct Hit:
+    pub let prim: i32
+    pub let uv: f32[2]
+    pub let position: f32[4]
+    pub let distance: f32
+
+## Up to 16 point numbers, nearest first.
+pub struct Near:
+    pub let count: i32
+    pub let points: i32[16]
+
+## A geometry the snippet reads: `k.input(0)` (the node's input as it was before this
+## run) or `k.input(1)` (the second input; empty when not connected). Numbers out of
+## range fail the cook at the element.
+pub struct Geometry:
+    var unused: i32
+
+    ## How many points and primitives there are.
+    pub func point_count() -> i32:
+        return 0
+    pub func prim_count() -> i32:
+        return 0
+    ## Point `index`'s world position.
+    pub func point_P(index: i32) -> f32[4]:
+        _ = index
+        return [0.0, 0.0, 0.0, 0.0]
+    ## Point attribute `name` of point `index` (0 when the geometry lacks it).
+    pub func point_f32(index: i32, name: str) -> f32:
+        _ = index
+        _ = name
+        return 0.0
+    pub func point_f64(index: i32, name: str) -> f64:
+        _ = index
+        _ = name
+        return 0.0
+    pub func point_i32(index: i32, name: str) -> i32:
+        _ = index
+        _ = name
+        return 0
+    pub func point_i64(index: i32, name: str) -> i64:
+        _ = index
+        _ = name
+        return 0
+    pub func point_vec2(index: i32, name: str) -> f32[2]:
+        _ = index
+        _ = name
+        return [0.0, 0.0]
+    pub func point_vec3(index: i32, name: str) -> f32[4]:
+        _ = index
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    pub func point_vec4(index: i32, name: str) -> f32[4]:
+        _ = index
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    ## Primitive attribute `name` of primitive `index`.
+    pub func prim_f32(index: i32, name: str) -> f32:
+        _ = index
+        _ = name
+        return 0.0
+    pub func prim_f64(index: i32, name: str) -> f64:
+        _ = index
+        _ = name
+        return 0.0
+    pub func prim_i32(index: i32, name: str) -> i32:
+        _ = index
+        _ = name
+        return 0
+    pub func prim_i64(index: i32, name: str) -> i64:
+        _ = index
+        _ = name
+        return 0
+    pub func prim_vec2(index: i32, name: str) -> f32[2]:
+        _ = index
+        _ = name
+        return [0.0, 0.0]
+    pub func prim_vec3(index: i32, name: str) -> f32[4]:
+        _ = index
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    pub func prim_vec4(index: i32, name: str) -> f32[4]:
+        _ = index
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    ## The points of primitive `prim`, in order: how many, and the `at`-th.
+    pub func prim_point_count(prim: i32) -> i32:
+        _ = prim
+        return 0
+    pub func prim_point(prim: i32, at: i32) -> i32:
+        _ = prim
+        _ = at
+        return 0
+    ## The primitives using point `point`: how many, and the `at`-th.
+    pub func point_prim_count(point: i32) -> i32:
+        _ = point
+        return 0
+    pub func point_prim(point: i32, at: i32) -> i32:
+        _ = point
+        _ = at
+        return 0
+    ## The points sharing an edge with point `point`: how many, and the `at`-th.
+    pub func neighbor_count(point: i32) -> i32:
+        _ = point
+        return 0
+    pub func neighbor(point: i32, at: i32) -> i32:
+        _ = point
+        _ = at
+        return 0
+    ## The nearest point within `maxdist` of `position` (-1 for none).
+    pub func nearpoint(position: f32[4], maxdist: f32) -> i32:
+        _ = position
+        _ = maxdist
+        return -1
+    ## The nearest points (at most `max_count`, up to 16) within `maxdist`, nearest first.
+    pub func nearpoints(position: f32[4], maxdist: f32, max_count: i32) -> Near:
+        _ = position
+        _ = maxdist
+        _ = max_count
+        return Near(count = 0, points = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+    ## The distance from `position` to the surface, and the closest primitive and its uv.
+    ## A uv is (t + u, v) for barycentric (u, v) on the primitive's display triangle t
+    ## (a triangle's is plain (u, v)); feed it to `primuv_*` as it is.
+    pub func xyzdist(position: f32[4]) -> f32:
+        _ = position
+        return 0.0
+    pub func closest_prim(position: f32[4]) -> i32:
+        _ = position
+        return -1
+    pub func closest_uv(position: f32[4]) -> f32[2]:
+        _ = position
+        return [0.0, 0.0]
+    ## Point attribute `name` ("P" for positions) interpolated at `uv` on primitive `prim`.
+    pub func primuv_f32(prim: i32, uv: f32[2], name: str) -> f32:
+        _ = prim
+        _ = uv
+        _ = name
+        return 0.0
+    pub func primuv_vec3(prim: i32, uv: f32[2], name: str) -> f32[4]:
+        _ = prim
+        _ = uv
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    ## The first surface hit along the ray from `origin` in `direction`.
+    pub func intersect(origin: f32[4], direction: f32[4]) -> Hit:
+        _ = origin
+        _ = direction
+        return Hit(prim = -1, uv = [0.0, 0.0], position = [0.0, 0.0, 0.0, 0.0], distance = -1.0)
+    ## The box around the points.
+    pub func bounds() -> Bounds:
+        return Bounds(min = [0.0, 0.0, 0.0, 0.0], max = [0.0, 0.0, 0.0, 0.0], center = [0.0, 0.0, 0.0, 0.0], size = [0.0, 0.0, 0.0, 0.0])
+
+## The node: the timeline, its spare parameters, the detail attributes, the inputs, and
+## edits queued for after the run (new points and primitives, attribute sets, removals:
+## applied in element order, so the result is the same on any number of threads).
 pub struct Kernel:
     ## The timeline's frame, seconds (frame 1 is 0) and frames per second.
     pub let frame: f64
@@ -236,6 +398,83 @@ pub struct Kernel:
     pub let fps: f64
     var written: bool
 
+    ## Input `index`: 0 the node's own input, 1 its second.
+    pub func input(index: i32) -> const Geometry*:
+        _ = index
+        return (const Geometry*)(void*)4096
+    ## Queue a new point at world position `position`; its number, for add_prim and the
+    ## set_point_ accessors (an element adds at most 1024 points and 1024 primitives).
+    pub func add_point(position: f32[4]) -> i32:
+        _ = position
+        return 0
+    ## Queue a new polygon through the first `count` of `points` (3 or more); its number.
+    pub func add_prim(points: i32[16], count: i32) -> i32:
+        _ = points
+        _ = count
+        return 0
+    ## Queue removing point `index` (and the primitives using it), or primitive `index`.
+    pub func remove_point(index: i32):
+        _ = index
+    pub func remove_prim(index: i32):
+        _ = index
+    ## Queue setting attribute `name` of point `index` (a new point's number too); it wins over writes through `p`.
+    pub func set_point_f32(index: i32, name: str, value: f32):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_point_f64(index: i32, name: str, value: f64):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_point_i32(index: i32, name: str, value: i32):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_point_i64(index: i32, name: str, value: i64):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_point_vec2(index: i32, name: str, value: f32[2]):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_point_vec3(index: i32, name: str, value: f32[4]):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_point_vec4(index: i32, name: str, value: f32[4]):
+        _ = index
+        _ = name
+        _ = value
+    ## Queue setting attribute `name` of primitive `index`.
+    pub func set_prim_f32(index: i32, name: str, value: f32):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_prim_f64(index: i32, name: str, value: f64):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_prim_i32(index: i32, name: str, value: i32):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_prim_i64(index: i32, name: str, value: i64):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_prim_vec2(index: i32, name: str, value: f32[2]):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_prim_vec3(index: i32, name: str, value: f32[4]):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_prim_vec4(index: i32, name: str, value: f32[4]):
+        _ = index
+        _ = name
+        _ = value
     ## Spare parameter `name` (a row on the node, created on first use) and its default.
     pub func f32(name: str, default: f32 = 0.0) -> f32:
         _ = name

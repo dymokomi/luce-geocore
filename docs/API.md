@@ -16,6 +16,7 @@ attribute domains, topology operators, primitive generators and BVH picking.
 | `Mesh.moved_points(selection,delta)` / `merged(other)` | Return a new displaced or concatenated mesh without modifying either input. |
 | `Mesh.ray_face(origin,direction)` / `ray_distance(origin,direction)` | Fallible nearest two-sided intersection, or `-1`. Normalize direction for world-space distances. |
 | `Mesh.surface_distance(point)` / `closest_face(point)` | BVH nearest surface distance / primitive ID; `-1` for empty geometry. Points must be finite. |
+| `Mesh.query_index()` | The shared triangle BVH (`TriangleIndex`: `nearest`, `nearest_within`, `ray`) for kernels that query it many times; positions relative to `position_origin()`. |
 | `Mesh.prepare_queries()` | Builds the shared spatial index before first use, e.g. on a worker before handing a final viewport mesh to the UI. Idempotent and fallible; no topology change. |
 | `MeshBuilder(precise=false)` | Bounded Base topology staging: `point`, `face`, `corner`, `finish`, `close`. Importers and operators share the same mesh limits. Copying a precise mesh's points makes the result precise. |
 | `PolygonTopology` | Borrowed read interface for points, polygon corners and edge endpoints. Numbering/lifetime are defined by the implementation. |

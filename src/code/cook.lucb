@@ -11,7 +11,7 @@ struct Settings:
 
 ## Run the snippet over `set` on `threads` workers (0: every core): the new set, or an
 ## error naming the line, column and element (see `fault_message`).
-pub func run_code(set: const GeometrySet*, run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, threads: usize) -> GeometrySet*!:
+pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, threads: usize) -> GeometrySet*!:
     let mode = try RunOver.of(run_over)
     _ = try groups.GroupType.of(group_type)
     if names.length != values.length:
@@ -38,16 +38,35 @@ pub func run_code(set: const GeometrySet*, run_over: i64, header: str, body: str
     let settings = Settings(names = names, values = values, frame = frame, time = time, fps = fps)
     var cook = Cook(mode = mode, mesh = mesh, set = set, lanes = lanes, program = &compiled.program)
     defer cook.close()
+    # What the snippet's k.input() reads and the edits it queues.
+    var state: CookState
+    defer state.close()
+    state.first.mesh = mesh
+    if let other = input1:
+        state.second.mesh = set_mesh(other)
+    var old_points: usize = 0
+    var old_prims: usize = 0
+    if let source = mesh:
+        old_points = (usize)source.point_count()
+        old_prims = (usize)source.face_count()
+    try state.edits.prepare(lanes, old_points, old_prims)
+    prepare_sources(&state, &compiled.program)
     try cook.bind_inputs(&layout)
     try cook.bind_outputs(&layout)
     try cook.bind_uniforms(&settings)
     if not groups.is_blank(group) and mode != .detail and mode != .numbers:
         try cook.restrict(group, group_type)
-    let request = Request(count = lanes, inputs = cook.inputs.view(), outputs = cook.engine_outputs.view(), uniforms = cook.uniforms.view(), threads = threads, active = cook.active)
+    let request = Request(count = lanes, inputs = cook.inputs.view(), outputs = cook.engine_outputs.view(), uniforms = cook.uniforms.view(), threads = threads, active = cook.active, context = (void*)&state)
     if let fault = try engine.run(&compiled.program, &request):
         var room: u8[1024]
         error(errors.invalid, fault_message(room, compiled, fault, mode, header, body))
-    return try cook.output()
+    let storage = try cook.output()
+    if not state.edits.any():
+        return storage
+    errdefer dispose_set(storage)
+    let made = try applied(set_mesh(storage), &state.edits)
+    try storage.put(&mesh_component, (void*)made)
+    return storage
 
 ## One cook's columns and buffers.
 struct Cook:

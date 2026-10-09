@@ -1,0 +1,288 @@
+# Spatial reads: nearest points (a point grid), the closest surface point and its uv
+# (the faces' spatial index), interpolation at a uv, ray hits and bounds.
+#
+# A primitive's uv is parametric over its display triangles: `u = t + a`, `v = b` on its
+# triangle `t` (corners A, B, C) for the point `A + a (B - A) + b (C - A)`, so a triangle's
+# uv is its barycentric one and every uv `closest_uv` or `intersect` gives reads back
+# with `primuv_*` at the same place.
+
+## The position argument starting at argument `first` (four lanes), as f64.
+func position_argument(call: const engine.Call*, first: usize, lane: usize) -> Vector3:
+    return Vector3((f64)call.f32_argument(first)[lane], (f64)call.f32_argument(first + 1)[lane], (f64)call.f32_argument(first + 2)[lane])
+
+func nearpoint(call: engine.Call*):
+    let state = state_of(call) else return
+    let reach = call.f32_argument(5)
+    let points = call.i32_result(0)
+    var found: u32[16]
+    for lane in 0..<call.lanes:
+        points[lane] = -1
+        let source = source_or_fail(state, call, lane) else continue
+        if source.mesh == none: continue
+        if not source.with_grid():
+            call.fail(lane)
+            continue
+        if source.grid.nearest(position_argument(call, 1, lane), (f64)reach[lane], 1, found) > 0:
+            points[lane] = (i32)found[0]
+
+func nearpoints(call: engine.Call*):
+    let state = state_of(call) else return
+    let reach = call.f32_argument(5)
+    let most = call.i32_argument(6)
+    var found: u32[16]
+    for lane in 0..<call.lanes:
+        var count: usize = 0
+        if let source = source_or_fail(state, call, lane):
+            if source.mesh != none:
+                if source.with_grid():
+                    let limit = 0 if most[lane] < 0 else (16 if most[lane] > 16 else (usize)most[lane])
+                    count = source.grid.nearest(position_argument(call, 1, lane), (f64)reach[lane], limit, found)
+                else:
+                    call.fail(lane)
+        call.i32_result(0)[lane] = (i32)count
+        for k: usize in 0..<16:
+            call.i32_result(1 + k)[lane] = (i32)found[k] if k < count else -1
+
+## The nearest face to `p` and its distance, or (-1, -1.0) with no surface. With
+## `bound` >= 0 (an upper bound on the answer, as a neighboring lane's distance plus
+## how far `p` is from it) the search prunes with it and `hint`, the face at most
+## `bound` away, answers when nothing is closer; a tie may then answer with either face.
+func nearest_face(source: Source*, p: Vector3, hint: i64, bound: f64) -> (i64, f64)!:
+    let mesh = source.mesh else return (-1, -1.0)
+    if mesh.face_count() == 0: return (-1, -1.0)
+    if not source.with_queries(): error(errors.invalid, "the surface index could not be built")
+    let index = source.index else return (-1, -1.0)
+    let local = p.subtract(mesh.position_origin())
+    if hint >= 0 and bound >= 0.0:
+        let hit = index.nearest_within(local, bound * 1.000001 + 1.0e-12)
+        if hit.face >= 0: return (hit.face, hit.distance)
+        let (near, _, _) = closest_on_face(mesh, (usize)hint, p)
+        let d = near.subtract(p)
+        return (hint, math.sqrt(d.dot(d)))
+    let hit = index.nearest(local)
+    return (hit.face, hit.distance)
+
+## The closest surface point to `p`: its face (-1 for no surface), distance, and uv.
+func closest(source: Source*, p: Vector3) -> (i64, f64, f64, f64)!:
+    let mesh = source.mesh else return (-1, -1.0, 0.0, 0.0)
+    let (face, _) = try nearest_face(source, p, -1, -1.0)
+    if face < 0: return (-1, -1.0, 0.0, 0.0)
+    let (point, u, v) = closest_on_face(mesh, (usize)face, p)
+    let d = point.subtract(p)
+    return (face, math.sqrt(d.dot(d)), u, v)
+
+## Distances to the surface; consecutive lanes are usually neighbors, so each
+## search is bounded by the last answer plus the step between the points.
+func xyzdist(call: engine.Call*):
+    let state = state_of(call) else return
+    let distances = call.f32_result(0)
+    var hint: i64 = -1
+    var last_distance = -1.0
+    var last_point = Vector3()
+    for lane in 0..<call.lanes:
+        distances[lane] = -1.0
+        let source = source_or_fail(state, call, lane) else continue
+        let p = position_argument(call, 1, lane)
+        let step = p.subtract(last_point)
+        let bound = last_distance + math.sqrt(step.dot(step)) if hint >= 0 else -1.0
+        let (face, distance) = nearest_face(source, p, hint, bound) catch failure:
+            _ = failure
+            call.fail(lane)
+            continue
+        hint = face
+        last_distance = distance
+        last_point = p
+        distances[lane] = (f32)distance
+
+func closest_prim(call: engine.Call*):
+    let state = state_of(call) else return
+    let prims = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        prims[lane] = -1
+        let source = source_or_fail(state, call, lane) else continue
+        let found = closest(source, position_argument(call, 1, lane)) catch failure:
+            _ = failure
+            call.fail(lane)
+            continue
+        prims[lane] = (i32)found.0
+
+func closest_uv(call: engine.Call*):
+    let state = state_of(call) else return
+    for lane in 0..<call.lanes:
+        call.f32_result(0)[lane] = 0.0
+        call.f32_result(1)[lane] = 0.0
+        let source = source_or_fail(state, call, lane) else continue
+        let found = closest(source, position_argument(call, 1, lane)) catch failure:
+            _ = failure
+            call.fail(lane)
+            continue
+        call.f32_result(0)[lane] = (f32)found.2
+        call.f32_result(1)[lane] = (f32)found.3
+
+## The closest point of face `face` to `p` (world) over its display triangles, and its uv.
+func closest_on_face(mesh: const Mesh*, face: usize, p: Vector3) -> (Vector3, f64, f64):
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
+    let triangles = mesh.triangle_span()
+    let start = (usize)offsets[face]
+    let size = (usize)offsets[face + 1] - start
+    let base = (start - face * 2) * 3
+    var best = Vector3()
+    var best_distance: f64 = 1.0e300
+    var best_u: f64 = 0.0
+    var best_v: f64 = 0.0
+    for t in 0..<size - 2:
+        let a = world_point(mesh, corners[(usize)triangles[base + t * 3]])
+        let b = world_point(mesh, corners[(usize)triangles[base + t * 3 + 1]])
+        let c = world_point(mesh, corners[(usize)triangles[base + t * 3 + 2]])
+        let (point, u, v) = closest_on_triangle(p, a, b, c)
+        let d = point.subtract(p)
+        let distance = d.dot(d)
+        if distance < best_distance:
+            best_distance = distance
+            best = point
+            best_u = (f64)t + math.min(u, 0.999999)
+            best_v = v
+    return (best, best_u, best_v)
+
+func world_point(mesh: const Mesh*, point: i32) -> Vector3:
+    return mesh.point_span()[(usize)point].vector().add(mesh.position_origin())
+
+## The closest point of triangle ABC to `p` and its barycentric (u, v): `A + u (B - A) +
+## v (C - A)` (Ericson, Real-Time Collision Detection 5.1.5).
+func closest_on_triangle(p: Vector3, a: Vector3, b: Vector3, c: Vector3) -> (Vector3, f64, f64):
+    let ab = b.subtract(a)
+    let ac = c.subtract(a)
+    let ap = p.subtract(a)
+    let d1 = ab.dot(ap)
+    let d2 = ac.dot(ap)
+    if d1 <= 0.0 and d2 <= 0.0: return (a, 0.0, 0.0)
+    let bp = p.subtract(b)
+    let d3 = ab.dot(bp)
+    let d4 = ac.dot(bp)
+    if d3 >= 0.0 and d4 <= d3: return (b, 1.0, 0.0)
+    let vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        let u = d1 / (d1 - d3)
+        return (a.add(ab.multiply_scalar(u)), u, 0.0)
+    let cp = p.subtract(c)
+    let d5 = ab.dot(cp)
+    let d6 = ac.dot(cp)
+    if d6 >= 0.0 and d5 <= d6: return (c, 0.0, 1.0)
+    let vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        let v = d2 / (d2 - d6)
+        return (a.add(ac.multiply_scalar(v)), 0.0, v)
+    let va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6))
+        return (b.add(c.subtract(b).multiply_scalar(w)), 1.0 - w, w)
+    let denominator = 1.0 / (va + vb + vc)
+    let v = vb * denominator
+    let w = vc * denominator
+    return (a.add(ab.multiply_scalar(v)).add(ac.multiply_scalar(w)), v, w)
+
+## `name` ("P": positions) interpolated at `uv` on face `face`: point and vertex
+## attributes over the uv's triangle, a primitive attribute as it is.
+func interpolated(mesh: const Mesh*, face: usize, u: f64, v: f64, name: str, out: f64[]):
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
+    let triangles = mesh.triangle_span()
+    let start = (usize)offsets[face]
+    let size = (usize)offsets[face + 1] - start
+    let base = (start - face * 2) * 3
+    let raw = math.floor(u)
+    var t: usize = 0
+    if raw > 0.0: t = (usize)raw if raw < (f64)(size - 2) else size - 3
+    let a = u - (f64)t
+    let weights: f64[3] = [1.0 - a - v, a, v]
+    let three: usize[3] = [(usize)triangles[base + t * 3], (usize)triangles[base + t * 3 + 1], (usize)triangles[base + t * 3 + 2]]
+    for k in 0..<out.length: out[k] = 0.0
+    if name == "P":
+        for (at, corner) in three.indexed():
+            let point = world_point(mesh, corners[corner])
+            out[0] += weights[at] * point.x
+            if out.length > 1:
+                out[1] += weights[at] * point.y
+                out[2] += weights[at] * point.z
+        return
+    for domain in [Domain.point, Domain.corner, Domain.face]:
+        let found = mesh.find_attribute(name, (i64)(u8)domain)
+        if found < 0: continue
+        let entry = mesh.attribute_entry(found) catch failure: return
+        let lanes = out.length if out.length < entry.width else entry.width
+        if domain == .face:
+            for k in 0..<lanes: out[k] = entry.number(face, k)
+            return
+        for (at, corner) in three.indexed():
+            let element = (usize)corners[corner] if domain == .point else corner
+            for k in 0..<lanes: out[k] += weights[at] * entry.number(element, k)
+        return
+
+func primuv(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let lanes = *(const usize*)context
+    let prims = call.i32_argument(1)
+    let us = call.f32_argument(2)
+    let vs = call.f32_argument(3)
+    let name = call.text(0)
+    var values: f64[3]
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let mesh = mesh_or_fail(source, call, lane) else continue
+        let face = element_or_fail(call, lane, prims[lane], source.prims()) else continue
+        interpolated(mesh, face, (f64)us[lane], (f64)vs[lane], name, values[..<lanes])
+        if lanes == 1:
+            call.f32_result(0)[lane] = (f32)values[0]
+        else:
+            write_vector(call, 0, lane, Vector3(values[0], values[1], values[2]))
+
+func intersect(call: engine.Call*):
+    let state = state_of(call) else return
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = -1
+        call.f32_result(1)[lane] = 0.0
+        call.f32_result(2)[lane] = 0.0
+        write_vector(call, 3, lane, Vector3())
+        call.f32_result(7)[lane] = -1.0
+        let source = source_or_fail(state, call, lane) else continue
+        let mesh = source.mesh else continue
+        if mesh.face_count() == 0: continue
+        if not source.with_queries():
+            call.fail(lane)
+            continue
+        let origin = position_argument(call, 1, lane)
+        let toward = position_argument(call, 5, lane)
+        let length = math.sqrt(toward.dot(toward))
+        if not (length > 0.0): continue
+        let direction = toward.multiply_scalar(1.0 / length)
+        let index = source.index else continue
+        let hit = index.ray(origin.subtract(mesh.position_origin()), direction)
+        let face = hit.face
+        let distance = hit.distance
+        if face < 0: continue
+        let position = origin.add(direction.multiply_scalar(distance))
+        let (point, u, v) = closest_on_face(mesh, (usize)face, position)
+        _ = point
+        call.i32_result(0)[lane] = (i32)face
+        call.f32_result(1)[lane] = (f32)u
+        call.f32_result(2)[lane] = (f32)v
+        write_vector(call, 3, lane, position)
+        call.f32_result(7)[lane] = (f32)distance
+
+func bounds(call: engine.Call*):
+    let state = state_of(call) else return
+    for lane in 0..<call.lanes:
+        var low = Vector3()
+        var high = Vector3()
+        if let source = source_or_fail(state, call, lane):
+            if let mesh = source.mesh:
+                if mesh.point_count() > 0:
+                    let box = mesh.bounds()
+                    low = box.minimum
+                    high = box.maximum
+        write_vector(call, 0, lane, low)
+        write_vector(call, 4, lane, high)
+        write_vector(call, 8, lane, low.add(high).multiply_scalar(0.5))
+        write_vector(call, 12, lane, high.subtract(low))

@@ -318,7 +318,9 @@ extend Mesh:
     pub func edges_id() -> u64:
         return self.corners.id()
 
-    func query_index() -> const TriangleIndex*!:
+    ## The faces' spatial index, built on first use and shared (for Base kernels that
+    ## query it many times: positions there are relative to position_origin()).
+    pub func query_index() -> const TriangleIndex*!:
         let faces = try self.corner_faces()
         return try self.queries.get(self.positions.view(), self.corners.view(), self.triangles.view(), faces)
 

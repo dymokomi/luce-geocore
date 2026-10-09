@@ -100,7 +100,7 @@ pub func parameters() -> !:
     let values: f64[2] = [2.0, -4.0]
     let given = try support.mesh_of(try support.run_with(set, support.points_mode, "", body, "", names, values))
     expect(try support.value(given, "a", 0, 0) == 2.0 and try support.value(given, "d", 0, 0, 1) == -4.0 and try support.value(given, "d", 0, 0, 0) == 1.0, "parameter values")
-    let later = try geocore_kernel.run_code(try set.get(), support.points_mode, "", body, "", 0, names, values, 7.0, 0.25, 30.0, 0, 0)
+    let later = try geocore_kernel.run_code(try set.get(), none, support.points_mode, "", body, "", 0, names, values, 7.0, 0.25, 30.0, 0, 0)
     let timed = try support.mesh_of(try geocore_kernel.adopt_set(later))
     expect(try support.value(timed, "t", 0, 0) == 0.25 + 70.0 + 3000.0, "a later frame")
     expect(geocore_kernel.code_compiles() == compiles, "new values and frames do not check again")

@@ -1,0 +1,281 @@
+# Geometry edits from parallel code (VEX's addpoint, addprim, removepoint, removeprim,
+# setpointattrib): each call queues its active lanes' edits, keyed by lane and call; after
+# the run they apply in that order, so the result is the same on any number of threads.
+# Creations first, then attribute sets, then removals (a removed point takes the
+# primitives using it with it).
+#
+# A new point's or primitive's number is provisional during the run: the input's count,
+# plus 1024 per lane before it, plus the lane's adds before this one. After the run new
+# elements are numbered in lane order; provisional numbers in later primitives and sets
+# are mapped to them.
+
+## The most points, and the most primitives, one element may add.
+let most_adds: usize = 1024
+
+## A queued new point.
+struct PointAdd:
+    let key: u64
+    let provisional: i64
+    let position: Vector3
+
+## A queued new polygon.
+struct PrimAdd:
+    let key: u64
+    let provisional: i64
+    let count: usize
+    let points: i32[16]
+
+## A queued removal of an added point or primitive (provisional number `index`).
+struct Removal:
+    let domain: Domain
+    let index: i64
+
+## A queued attribute set.
+struct AttributeSet:
+    let key: u64
+    let domain: Domain
+    let name: str
+    let kind: Kind
+    let width: usize
+    let index: i64
+    let values: f64[4]
+
+## Every queued edit of one cook.
+struct Edits:
+    var lock: sync.Mutex
+    var calls: @u64
+    var point_adds: collections.List[PointAdd]
+    var prim_adds: collections.List[PrimAdd]
+    var removals: collections.List[Removal]
+    var sets: collections.List[AttributeSet]
+    var texts: collections.TextPool
+    ## Adds so far per lane (lanes of the run), and the input's counts.
+    var point_counts: u16[]
+    var prim_counts: u16[]
+    var base_points: i64
+    var base_prims: i64
+    var lanes: usize
+    var counted: @bool
+    ## Removed input points and primitives (1: removed), made on the first removal;
+    ## removals of elements the run added go to `removals`.
+    var points_gone: u8[]
+    var prims_gone: u8[]
+    var masked: @bool
+
+    func close():
+        self.point_adds.destroy()
+        self.prim_adds.destroy()
+        self.removals.destroy()
+        self.sets.destroy()
+        self.texts.destroy()
+        if self.point_counts.length > 0: free(self.point_counts) in memory.heap
+        if self.prim_counts.length > 0: free(self.prim_counts) in memory.heap
+        if self.points_gone.length > 0: free(self.points_gone) in memory.heap
+        if self.prims_gone.length > 0: free(self.prims_gone) in memory.heap
+
+    func any() -> bool:
+        return self.masked.load(.acquire) or self.point_adds.length() + self.prim_adds.length() + self.removals.length() + self.sets.length() > 0
+
+    ## The run's lanes and the input's counts, before the run.
+    func prepare(lanes: usize, points: usize, prims: usize) -> !:
+        self.lanes = lanes
+        self.base_points = (i64)points
+        self.base_prims = (i64)prims
+
+    ## The per-lane add counters, made on the first add (a run that adds nothing pays
+    ## nothing); false when there was no memory for them.
+    func with_counters() -> bool:
+        if self.counted.load(.acquire): return self.point_counts.length > 0
+        self.lock.lock()
+        defer self.lock.unlock()
+        if not self.counted.load(.acquire):
+            self.point_counts = new u16[self.lanes] in memory.heap catch failure: recover no_counts()
+            self.prim_counts = new u16[self.lanes] in memory.heap catch failure: recover no_counts()
+            self.counted.store(true, .release)
+        return self.point_counts.length > 0 and self.prim_counts.length > 0
+
+    ## The removal masks of the input's elements, made zeroed on the first removal;
+    ## false when there was no memory for them.
+    func with_masks() -> bool:
+        if not self.masked.load(.acquire):
+            self.lock.lock()
+            defer self.lock.unlock()
+            if not self.masked.load(.acquire):
+                self.points_gone = new u8[(usize)self.base_points + 1] in memory.heap catch failure: recover no_bytes()
+                self.prims_gone = new u8[(usize)self.base_prims + 1] in memory.heap catch failure: recover no_bytes()
+                self.masked.store(true, .release)
+        return self.points_gone.length > 0 and self.prims_gone.length > 0
+
+func no_bytes() -> u8[]:
+    var none_given: u8[]
+    return none_given
+
+func no_counts() -> u16[]:
+    var none_given: u16[]
+    return none_given
+
+## The order key of lane `lane` of the call numbered `call`.
+func key_of(lane: usize, call: u64) -> u64:
+    return ((u64)lane << 32) | (call & 0xFFFFFFFF)
+
+## Register the Kernel's edit methods.
+func bind_edits(host: Host*) -> !:
+    let four = [Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+    try host.builtin("Kernel", "add_point", engine.Builtin.of("add_point", four, [Kind.i32], add_point))
+    var prim: Kind[17]
+    for k in 0..<17: prim[k] = .i32
+    try host.builtin("Kernel", "add_prim", engine.Builtin.of("add_prim", prim, [Kind.i32], add_prim))
+    try host.builtin("Kernel", "remove_point", engine.Builtin.of("remove_point", [Kind.i32], [Kind.i32], remove_element, (void*)&edit_domains[0]))
+    try host.builtin("Kernel", "remove_prim", engine.Builtin.of("remove_prim", [Kind.i32], [Kind.i32], remove_element, (void*)&edit_domains[1]))
+    for (at, name) in accessor_names.indexed():
+        let lanes = accessor_lanes[at] if accessor_lanes[at] != 3 else 4
+        var arguments: Kind[5]
+        arguments[0] = .i32
+        for k in 0..<lanes: arguments[1 + k] = accessor_kinds[at]
+        var room: u8[40]
+        let point_name = try strings.format(room, f"set_point_{name}")
+        try host.builtin("Kernel", point_name, engine.Builtin.of(point_name, arguments[..<1 + lanes], [Kind.i32], set_attribute, (void*)&point_setters[at]))
+        var prim_room: u8[40]
+        let prim_name = try strings.format(prim_room, f"set_prim_{name}")
+        try host.builtin("Kernel", prim_name, engine.Builtin.of(prim_name, arguments[..<1 + lanes], [Kind.i32], set_attribute, (void*)&prim_setters[at]))
+
+let edit_domains: Domain[2] = [.point, .face]
+
+## What an attribute setter writes: its domain, kind, lanes and stored components.
+struct Setter:
+    let domain: Domain
+    let kind: Kind
+    let lanes: usize
+    let components: usize
+
+let point_setters: Setter[7] = [
+    Setter(domain = .point, kind = .f32, lanes = 1, components = 1), Setter(domain = .point, kind = .f64, lanes = 1, components = 1),
+    Setter(domain = .point, kind = .i32, lanes = 1, components = 1), Setter(domain = .point, kind = .i64, lanes = 1, components = 1),
+    Setter(domain = .point, kind = .f32, lanes = 2, components = 2), Setter(domain = .point, kind = .f32, lanes = 4, components = 3),
+    Setter(domain = .point, kind = .f32, lanes = 4, components = 4),
+]
+let prim_setters: Setter[7] = [
+    Setter(domain = .face, kind = .f32, lanes = 1, components = 1), Setter(domain = .face, kind = .f64, lanes = 1, components = 1),
+    Setter(domain = .face, kind = .i32, lanes = 1, components = 1), Setter(domain = .face, kind = .i64, lanes = 1, components = 1),
+    Setter(domain = .face, kind = .f32, lanes = 2, components = 2), Setter(domain = .face, kind = .f32, lanes = 4, components = 3),
+    Setter(domain = .face, kind = .f32, lanes = 4, components = 4),
+]
+
+## Lane `lane`'s next provisional number (`counts` of its adds so far), or none past the
+## limit (a limit fault).
+func provisional(call: engine.Call*, lane: usize, counts: u16[], base: i64) -> i64?:
+    let element = call.first + lane
+    if element >= counts.length:
+        return none
+    let made = (usize)counts[element]
+    let number = base + (i64)element * (i64)most_adds + (i64)made
+    if made >= most_adds or number > 2147483647:
+        call.fail_as(lane, .limit)
+        return none
+    counts[element] = (u16)(made + 1)
+    return number
+
+func add_point(call: engine.Call*):
+    let results = call.i32_result(0)
+    for lane in 0..<call.lanes: results[lane] = -1
+    let state = state_of(call) else return
+    if not state.edits.with_counters():
+        for lane in 0..<call.lanes: call.fail(lane)
+        return
+    var made: collections.List[PointAdd]
+    defer made.destroy()
+    let order = state.edits.calls.add(1, .relaxed)
+    for lane in 0..<call.lanes:
+        if not call.active(lane): continue
+        let number = provisional(call, lane, state.edits.point_counts, state.edits.base_points) else continue
+        let position = Vector3((f64)call.f32_argument(0)[lane], (f64)call.f32_argument(1)[lane], (f64)call.f32_argument(2)[lane])
+        made.append(PointAdd(key = key_of(call.first + lane, order), provisional = number, position = position)) catch failure:
+            call.fail(lane)
+            continue
+        results[lane] = (i32)number
+    state.edits.lock.lock()
+    defer state.edits.lock.unlock()
+    for add in made.view():
+        state.edits.point_adds.append(add) catch failure: return
+
+func add_prim(call: engine.Call*):
+    let results = call.i32_result(0)
+    for lane in 0..<call.lanes: results[lane] = -1
+    let state = state_of(call) else return
+    if not state.edits.with_counters():
+        for lane in 0..<call.lanes: call.fail(lane)
+        return
+    var made: collections.List[PrimAdd]
+    defer made.destroy()
+    let order = state.edits.calls.add(1, .relaxed)
+    let counts = call.i32_argument(16)
+    for lane in 0..<call.lanes:
+        if not call.active(lane): continue
+        if counts[lane] < 3 or counts[lane] > 16:
+            call.fail_as(lane, .bounds)
+            continue
+        let number = provisional(call, lane, state.edits.prim_counts, state.edits.base_prims) else continue
+        var points: i32[16]
+        for k: usize in 0..<16: points[k] = call.i32_argument(k)[lane]
+        made.append(PrimAdd(key = key_of(call.first + lane, order), provisional = number, count = (usize)counts[lane], points = points)) catch failure:
+            call.fail(lane)
+            continue
+        results[lane] = (i32)number
+    state.edits.lock.lock()
+    defer state.edits.lock.unlock()
+    for add in made.view():
+        state.edits.prim_adds.append(add) catch failure: return
+
+## Removals: an input element is marked in its mask at once (every writer stores the
+## same 1, read only after the run); an element the run added is queued, numbered when
+## the adds are; a negative number is a bounds fault.
+func remove_element(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let domain = *(const Domain*)context
+    let indices = call.i32_argument(0)
+    let base = state.edits.base_points if domain == .point else state.edits.base_prims
+    if not state.edits.with_masks():
+        for lane in 0..<call.lanes: call.fail(lane)
+        return
+    let mask = state.edits.points_gone if domain == .point else state.edits.prims_gone
+    var queued = false
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = 0
+        if not call.active(lane): continue
+        let index = (i64)indices[lane]
+        if index < 0: call.fail_as(lane, .bounds)
+        elif index < base: mask[(usize)index] = 1
+        else: queued = true
+    if not queued: return
+    state.edits.lock.lock()
+    defer state.edits.lock.unlock()
+    for lane in 0..<call.lanes:
+        if not call.active(lane) or (i64)indices[lane] < base: continue
+        state.edits.removals.append(Removal(domain = domain, index = (i64)indices[lane])) catch failure:
+            call.fail(lane)
+
+func set_attribute(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let setter = *(const Setter*)context
+    let indices = call.i32_argument(0)
+    let order = state.edits.calls.add(1, .relaxed)
+    state.edits.lock.lock()
+    defer state.edits.lock.unlock()
+    let name = state.edits.texts.keep_text(call.text(0).bytes) catch failure:
+        call.fail(0)
+        return
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = 0
+        if not call.active(lane): continue
+        var values: f64[4]
+        for k in 0..<setter.components:
+            values[k] = match setter.kind:
+                .f32 => (f64)call.f32_argument(1 + k)[lane]
+                .f64 => call.f64_argument(1 + k)[lane]
+                .i32 => (f64)call.i32_argument(1 + k)[lane]
+                _ => (f64)call.i64_argument(1 + k)[lane]
+        let set = AttributeSet(key = key_of(call.first + lane, order), domain = setter.domain, name = name, kind = setter.kind, width = setter.components, index = (i64)indices[lane], values = values)
+        state.edits.sets.append(set) catch failure:
+            call.fail(lane)

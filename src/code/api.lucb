@@ -112,13 +112,18 @@ pub struct Code:
         return try interop.Reference[CodeCheck].adopt(storage.data, code_check_type, memory.heap)
 
     ## Run `body` (and `header`) over `set` for Run Over `run_over`, on the elements of
-    ## `group` (a group expression on the mode's domain; empty: all). Spare parameters
-    ## take `values[i]` by `names[i]` (a vector's components are named `name[0]`,
-    ## `name[1]`, ...; a parameter not named keeps its default). `count` is the lane count
-    ## of Run Over Numbers. A fault or a snippet that does not check fails with
+    ## `group` (a group expression read on `group_type`'s domain, 0 guessing; empty: all).
+    ## `k.input(0)` reads `set` as it was, `k.input(1)` reads `input1` (none: an empty
+    ## geometry, as when the second input is not connected); edits the snippet queues
+    ## apply after the run. Spare parameters take
+    ## `values[i]` by `names[i]` (a vector's components are named `name[0]`, `name[1]`,
+    ## ...; a parameter not named keeps its default). `count` is the lane count of Run
+    ## Over Numbers. A fault or a snippet that does not check fails with
     ## "line L, column C: message (point N)" (`header line ...` in the header).
-    pub static func run(set: interop.Reference[GeometrySet], run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64) -> interop.Reference[GeometrySet]!:
-        let made = try run_code(try set.get(), run_over, header, body, group, group_type, names, values, frame, time, fps, count, 0)
+    pub static func run(set: interop.Reference[GeometrySet], run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, input1: interop.Reference[GeometrySet]? = none) -> interop.Reference[GeometrySet]!:
+        var second: const GeometrySet*? = none
+        if let given = input1: second = try given.get()
+        let made = try run_code(try set.get(), second, run_over, header, body, group, group_type, names, values, frame, time, fps, count, 0)
         return try adopt_set(made)
 
 ## Copy a compiled snippet's diagnostics and parameters into `check`.
