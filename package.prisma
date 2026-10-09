@@ -6,7 +6,7 @@ def package "luce-geocore" {
     str language = "luce-base"
     str description = "Shared geometry for Luce: polygon meshes, attributes, modeling kernels and CPU spatial queries, with no GPU or UI dependency."
     str readme = "README.md"
-    str[] public = ["geocore", "core.growing", "kernel", "core.parallel", "core.shared"]
+    str[] public = ["geocore", "core.growing", "kernel", "core.shared"]
 
     def dependency "luce-kernel" {
         str owner = "dymokomi"

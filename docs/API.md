@@ -34,7 +34,7 @@ i32 face offsets and corner points, f32 face normals and i32 display
 triangles. The origin is the bounds center when coordinates exceed 4096 or 8×
 the model's size, else zero, so f32 positions keep about 1e-7 of the model's
 size. Construction validates and computes normals and triangles in parallel on
-the `luce_geocore.core.parallel` pool (`parallel_for`, `run`, `warm`).
+luce-std's process-wide `parallel` pool.
 
 What connectivity alone determines (the face of each corner, the edges, numbered
 by first corner in a deterministic parallel build, point-to-face incidence and
