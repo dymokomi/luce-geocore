@@ -23,6 +23,11 @@ def dependency "luce-geocore" {
 }
 ```
 
+The Code node runs per-element Luce Base snippets over a set (Houdini's Attribute
+Wrangle) through [luce-kernel](https://github.com/dymokomi/luce-kernel): `Code.check`
+for the editor and `Code.run` for the cook; the API a snippet sees is in
+`src/code/stubs.lucb`, and `tests/code` times whole cooks with `--bench`.
+
 Import `geocore` (`from luce_geocore.geocore import Mesh, MeshBuilder,
 Vector3`). Base code in other packages also has `luce_geocore.kernel` (bit
 sets and groups, mesh assembly and its size limits, the geometry set's
