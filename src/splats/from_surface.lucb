@@ -1,0 +1,228 @@
+## GSplats from Polygons' kernel: Gaussian splats made with no training, as
+## flat discs lying on a surface (GSOPs' gaussian_splats_from_polygons).
+##
+## The surface is a mesh's display triangles. Each triangle gets its share of
+## `density` × area splats: the whole part, plus one more with the chance of
+## the fraction, so the expected count is exact and a triangle's count does
+## not depend on any other's. Points are uniform over the triangle
+## (barycentrics from √u, the standard area-uniform map). Every draw comes
+## from a hash of the seed, the triangle and the point, so the result is the
+## same on any number of threads.
+##
+## A splat is a disc in the triangle's plane: `orient` turns local x and y
+## onto the plane (x along the triangle's first edge) and local z onto the
+## face's normal; `scale` is (σ, σ, σ · thickness), where σ defaults to
+## 0.6 / √density, wide enough for neighboring discs (about 1/√density apart)
+## to overlap into a closed surface. `N` is the face normal, and `Cd` is the
+## mesh's `Cd` (point, vertex or primitive) at the point, else the default
+## color.
+import errors
+
+## What GSplats from Polygons makes.
+pub struct SurfaceSplatOptions:
+    ## Splats per unit of area.
+    pub let density: f64
+    ## The discs' σ across the surface (0: 0.6 / √density).
+    pub let size: f64
+    ## The σ along the normal over the σ across.
+    pub let thickness: f64
+    ## Every splat's opacity.
+    pub let opacity: f64
+    ## The color where the mesh has no `Cd` (linear).
+    pub let color: Vector3
+    ## Varies the points.
+    pub let seed: i64
+
+## Where a mesh keeps its `Cd`.
+pub enum SurfaceColor as u8:
+    absent = 0
+    point = 1
+    corner = 2
+    face = 3
+
+## The mesh GSplats from Polygons covers, as its Base arrays.
+pub struct SurfaceMesh:
+    ## Positions relative to `origin`.
+    pub let points: const Float3[]
+    pub let origin: Vector3
+    ## The point of every corner, the face of every corner, and the display
+    ## triangles (three corners each).
+    pub let corner_points: const i32[]
+    pub let corner_faces: const i32[]
+    pub let triangles: const i32[]
+    ## The mesh's `Cd`, read on `color_domain`.
+    pub let color: Floats
+    pub let color_domain: SurfaceColor
+
+## The splats made: positions relative to the mesh's origin, and the point
+## attributes orient, scale, opacity, Cd and N.
+pub struct SurfaceSplats:
+    pub var positions: Column[Float3]
+    pub var store: AttributeStore
+
+    pub func close():
+        self.positions.release()
+        self.store.close()
+
+## The most splats one run makes.
+let most_surface_splats: usize = 200000000
+
+## Splats covering `mesh` as `options` say.
+pub func surface_splats(mesh: const SurfaceMesh*, options: const SurfaceSplatOptions*) -> SurfaceSplats!:
+    if not (options.density > 0.0 and options.density < 1.0e12): error(errors.invalid, "the density must be positive")
+    let triangles = mesh.triangles.length // 3
+    # Each triangle's count, then where its splats start.
+    let starts = try new usize[triangles + 1] in memory.heap
+    defer free(starts) in memory.heap
+    var counting: SurfaceWork
+    counting.mesh = *mesh
+    counting.options = *options
+    counting.starts = starts
+    ranges.each_range(triangles, 4096, (void*)&counting, count_triangle_splats)
+    var total: usize = 0
+    for at in 0..<triangles:
+        let count = starts[at]
+        starts[at] = total
+        total += count
+        if total > most_surface_splats: error(errors.limit, "the density makes too many splats for this surface")
+    starts[triangles] = total
+    var positions = try Column[Float3].allocate(total)
+    errdefer positions.release()
+    var orient = try float32_points(orient_name, 4, total)
+    defer orient.release()
+    var scale = try float32_points(scale_name, 3, total)
+    defer scale.release()
+    var opacity = try float32_points(opacity_name, 1, total)
+    defer opacity.release()
+    var color = try float32_points(color_name, 3, total)
+    defer color.release()
+    var normal = try float32_points("N", 3, total)
+    defer normal.release()
+    var filling: SurfaceWork
+    filling.mesh = *mesh
+    filling.options = *options
+    filling.starts = starts
+    filling.positions = positions.span()
+    filling.orient = float32_values(&orient)
+    filling.scale = float32_values(&scale)
+    filling.opacity = float32_values(&opacity)
+    filling.color = float32_values(&color)
+    filling.normal = float32_values(&normal)
+    filling.sigma = options.size if options.size > 0.0 else 0.6 / math.sqrt(options.density)
+    ranges.each_range(triangles, 1024, (void*)&filling, fill_triangle_splats)
+    var store = AttributeStore()
+    errdefer store.close()
+    try store.put(orient.share())
+    try store.put(scale.share())
+    try store.put(opacity.share())
+    try store.put(color.share())
+    try store.put(normal.share())
+    return SurfaceSplats(positions, store)
+
+struct SurfaceWork:
+    ## Copies of the caller's (slices and numbers).
+    var mesh: SurfaceMesh
+    var options: SurfaceSplatOptions
+    var starts: usize[]
+    var positions: Float3[]
+    var orient: f32[]
+    var scale: f32[]
+    var opacity: f32[]
+    var color: f32[]
+    var normal: f32[]
+    var sigma: f64 = 0.0
+
+    ## Corner `k` (0..2) of triangle `t`, and its position (relative to the origin).
+    func corner(t: usize, k: usize) -> usize:
+        return (usize)self.mesh.triangles[t * 3 + k]
+
+    func position(t: usize, k: usize) -> Vector3:
+        return self.mesh.points[(usize)self.mesh.corner_points[self.corner(t, k)]].vector()
+
+    ## The color at barycentrics (a, b, c) of triangle `t`.
+    func color_at(t: usize, a: f64, b: f64, c: f64) -> Vector3:
+        let mesh = &self.mesh
+        if mesh.color_domain == SurfaceColor.absent: return self.options.color
+        if mesh.color_domain == SurfaceColor.face:
+            let face = (usize)mesh.corner_faces[self.corner(t, 0)]
+            return Vector3(mesh.color.at(face, 0), mesh.color.at(face, 1), mesh.color.at(face, 2))
+        var elements: usize[3]
+        for k in 0..<(usize)3:
+            let corner = self.corner(t, k)
+            elements[k] = (usize)mesh.corner_points[corner] if mesh.color_domain == SurfaceColor.point else corner
+        var out: f64[3]
+        for channel in 0..<(usize)3:
+            out[channel] = a * mesh.color.at(elements[0], channel) + b * mesh.color.at(elements[1], channel) + c * mesh.color.at(elements[2], channel)
+        return Vector3(out[0], out[1], out[2])
+
+func count_triangle_splats(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (SurfaceWork*)context
+    for t in first..<end:
+        let a = work.position(t, 0)
+        let area = 0.5 * work.position(t, 1).subtract(a).cross(work.position(t, 2).subtract(a)).length()
+        let expected = area * work.options.density
+        if not (expected > 0.0 and expected < 1.0e12):
+            work.starts[t] = 0
+            continue
+        let whole = math.floor(expected)
+        let extra = 1 if draw(work.options.seed, t, 0xFFFFFFFF, 0) < expected - whole else 0
+        work.starts[t] = (usize)whole + (usize)extra
+
+func fill_triangle_splats(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (SurfaceWork*)context
+    let sigma = work.sigma
+    let thin = sigma * math.max(work.options.thickness, 0.0)
+    let alpha = (f32)math.clamp(work.options.opacity, 0.0, 1.0)
+    for t in first..<end:
+        let from_splat = work.starts[t]
+        let count = work.starts[t + 1] - from_splat
+        if count == 0: continue
+        let p0 = work.position(t, 0)
+        let e1 = work.position(t, 1).subtract(p0)
+        let e2 = work.position(t, 2).subtract(p0)
+        # The disc frame: x along the first edge, z the face normal.
+        let z = unit_or(e1.cross(e2), Vector3(0.0, 1.0, 0.0))
+        let x = unit_or(e1.subtract(z.multiply_scalar(e1.dot(z))), Vector3(1.0, 0.0, 0.0) if math.abs(z.x) < 0.9 else Vector3(0.0, 1.0, 0.0))
+        let y = z.cross(x)
+        let q = Quat.of_matrix(Mat3.of_columns(x, y, z)).normalized()
+        for k in 0..<count:
+            let at = from_splat + k
+            # Area-uniform barycentrics.
+            let r = math.sqrt(draw(work.options.seed, t, (u64)k, 1))
+            let s = draw(work.options.seed, t, (u64)k, 2)
+            let a = 1.0 - r
+            let b = r * (1.0 - s)
+            let c = r * s
+            work.positions[at] = Float3.of(p0.add(e1.multiply_scalar(b)).add(e2.multiply_scalar(c)))
+            work.orient[at * 4] = (f32)q.x
+            work.orient[at * 4 + 1] = (f32)q.y
+            work.orient[at * 4 + 2] = (f32)q.z
+            work.orient[at * 4 + 3] = (f32)q.w
+            work.scale[at * 3] = (f32)sigma
+            work.scale[at * 3 + 1] = (f32)sigma
+            work.scale[at * 3 + 2] = (f32)thin
+            work.opacity[at] = alpha
+            let color = work.color_at(t, a, b, c)
+            work.color[at * 3] = (f32)color.x
+            work.color[at * 3 + 1] = (f32)color.y
+            work.color[at * 3 + 2] = (f32)color.z
+            work.normal[at * 3] = (f32)z.x
+            work.normal[at * 3 + 1] = (f32)z.y
+            work.normal[at * 3 + 2] = (f32)z.z
+
+## A uniform draw in [0, 1) for (seed, triangle, point, stream): splitmix64's
+## finalizer over the four mixed together.
+func draw(seed: i64, triangle: usize, point: u64, stream: u64) -> f64:
+    var h = (u64)seed *% 0x9E3779B97F4A7C15
+    h = splitmix(h ^ (u64)triangle)
+    h = splitmix(h ^ point)
+    h = splitmix(h ^ stream)
+    return (f64)(h >> 11) * (1.0 / 9007199254740992.0)
+
+func splitmix(value: u64) -> u64:
+    var z = value +% 0x9E3779B97F4A7C15
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB
+    return z ^ (z >> 31)

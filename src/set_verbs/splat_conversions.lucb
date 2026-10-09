@@ -1,0 +1,124 @@
+## GSplats conversions (stage 7): splats from a mesh's surface, splats into a
+## fog volume (then Convert to Mesh for a surface), and splat normals.
+## Houdini 22 has Labs Normals from GSplats; the other two follow GSOPs'
+## from_polygons and density bake. Kernels: splats/from_surface.lucb,
+## fields/splat_density.lucb and splats/normals.lucb.
+
+# mark: GSplats from Polygons
+
+let from_polygons_parms: ParmSpec[7] = [
+    ParmSpec("Density", ParmKind.number, 400.0, 0.000001, 100000000.0, 1, "", "Splats per unit of area.", 4000.0),
+    ParmSpec("Size", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "The discs' size across the surface (σ); 0 sizes them to overlap their neighbors: 0.6 / √Density.", 1.0),
+    ParmSpec("Thickness", ParmKind.number, 0.1, 0.0, 1.0, 1, "", "The discs' size along the normal, as a fraction of their size across: 0 is perfectly flat."),
+    ParmSpec("Opacity", ParmKind.number, 1.0, 0.0, 1.0, 1, "", "Every splat's opacity."),
+    ParmSpec("Color", ParmKind.vector, 0.8, 0.0, 1.0, 3, "", "The splats' color where the mesh has no Cd."),
+    ParmSpec("Seed", ParmKind.integer, 0.0, 0.0, 1000000.0, 1, "", "Varies where the splats fall.", 100.0),
+    ParmSpec("Keep Input", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep the mesh beside the splats.")]
+
+func gsplats_from_polygons_verb() -> SetVerb:
+    return SetVerb("GSplats from Polygons", gsplats_category, "Gaussian splats with no training: flat discs scattered over a mesh's surface, colored by its Cd", 1, false, false, from_polygons_parms, cook_from_polygons)
+
+func cook_from_polygons(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let found = set_mesh(input.set)
+    if found == none: output.warning = "The input has no mesh; it passes through"
+    let mesh = found else return
+    let p = input.parms
+    var color = Floats.empty()
+    var domain = SurfaceColor.absent
+    let on_points = mesh.attribute_on(color_name, Domain.point)
+    let on_corners = mesh.attribute_on(color_name, Domain.corner)
+    let on_faces = mesh.attribute_on(color_name, Domain.face)
+    if on_points >= 0: domain = SurfaceColor.point
+    elif on_corners >= 0: domain = SurfaceColor.corner
+    elif on_faces >= 0: domain = SurfaceColor.face
+    let index = on_points if on_points >= 0 else (on_corners if on_corners >= 0 else on_faces)
+    if index >= 0:
+        let colors = try mesh.attribute_entry(index)
+        if colors.width >= 3 and not colors.is_ragged() and colors.kind != DataType.text: color = Floats.of(colors)
+        else: domain = SurfaceColor.absent
+    let surface = SurfaceMesh(mesh.point_span(), mesh.position_origin(), mesh.corner_span(), try mesh.corner_face_span(), mesh.triangle_span(), color, domain)
+    let options = SurfaceSplatOptions(p.at(0), p.at(1), p.at(2), p.at(3), Vector3(p.at(4), p.at(5), p.at(6)), (i64)p.at(7))
+    var made = try surface_splats(&surface, &options)
+    defer made.close()
+    let positions = made.positions.share()
+    let attributes = made.store
+    made.store = AttributeStore()
+    let cloud = try cloud_assembled(positions, mesh.position_origin(), attributes)
+    let storage = input.set.storage() catch failure:
+        close_cloud_storage(cloud)
+        error(failure.code, failure.message)
+    errdefer dispose_set(storage)
+    storage.put(&points_component, (void*)cloud) catch failure:
+        close_cloud_storage(cloud)
+        error(failure.code, failure.message)
+    if p.at(8) == 0.0: storage.remove(&mesh_component)
+    # The colors are linear; export encodes them as sRGB, as captures are.
+    try put_detail_text(storage, color_space_name, color_space_text(ColorSpace.srgb))
+    output.set = storage
+
+# mark: GSplats to Volume
+
+let to_volume_parms: ParmSpec[4] = [
+    ParmSpec("Voxel Size", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "Distance between voxels; 0 is the splats' median size (largest σ).", 1.0),
+    ParmSpec("Density Scale", ParmKind.number, 1.0, 0.0, 1000000.0, 1, "", "Multiplies every density. At 1 a splat a few voxels wide peaks near its opacity, and the grid's integral is the splats' mass.", 10.0),
+    ParmSpec("Cutoff", ParmKind.number, 3.0, 2.0, 8.0, 1, "", "How many standard deviations each splat reaches."),
+    ParmSpec("Keep Input", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep the splats beside the volume.")]
+
+func gsplats_to_volume_verb() -> SetVerb:
+    return SetVerb("GSplats to Volume", gsplats_category, "The splats' density as a fog volume; Convert to Mesh after it makes a surface", 1, false, false, to_volume_parms, cook_to_volume, "Name")
+
+func cook_to_volume(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let cloud = input_cloud(input, output) else return
+    let store = cloud_store(cloud)
+    if not is_splat_store(store):
+        output.warning = "The input's points are not splats (no orient, scale and opacity); it passes through"
+        return
+    let p = input.parms
+    var voxel = p.at(0)
+    if not (voxel > 0.0):
+        var sizes = Floats.of(store.entry((usize)float_attribute(store, scale_name, 3)))
+        voxel = try median_largest(&sizes, cloud.count())
+    if not (voxel > 0.0): error(errors.invalid, "the splats have no size: set a Voxel Size")
+    var name = strings.trim(input.group)
+    if name.length == 0: name = "density"
+    let options = SplatDensityOptions(voxel, p.at(2), p.at(1))
+    let grid = try splat_density(cloud_positions(cloud), cloud_origin(cloud), store, &options, name)
+    try with_grid(input, grid, output, none if p.at(3) != 0.0 else &points_component)
+
+# mark: Normals from GSplats
+
+let normals_parms: ParmSpec[5] = [
+    ParmSpec("Search Radius", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "How far a splat's neighbors are looked for (its 16 nearest): they tell outside from inside and refine the normals. 0 is ten times the splats' median size.", 1.0),
+    ParmSpec("Refine Normals", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Smooth and sharpen the normals with their neighbors' (a k-NN bilateral filter)."),
+    ParmSpec("Smooth Amount", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "0 keeps each splat's own normal, 1 takes its neighbors' weighted mean."),
+    ParmSpec("Sharpen Amount", ParmKind.number, 0.5, 0.0, 10.0, 1, "", "How strongly neighbors whose normals differ are left out of the mean, keeping creases sharp.", 2.0),
+    ParmSpec("Visualize Normals", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Color the splats by their normals (N · 0.5 + 0.5, gamma-corrected), overwriting Cd.")]
+
+func normals_from_gsplats_verb() -> SetVerb:
+    return SetVerb("Normals from GSplats", gsplats_category, "Each splat's normal N: its shortest axis, turned to point outward", 1, false, false, normals_parms, cook_normals)
+
+func cook_normals(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let cloud = input_cloud(input, output) else return
+    let store = cloud_store(cloud)
+    if not is_splat_store(store):
+        output.warning = "The input's points are not splats (no orient, scale and opacity); it passes through"
+        return
+    let p = input.parms
+    let count = cloud.count()
+    let options = NormalOptions(p.at(0), p.at(1) != 0.0, p.at(2), p.at(3))
+    var normal = try Attribute.create("N", Domain.point, DataType.float32, 3, count)
+    defer normal.release()
+    let values = float32_values(&normal)
+    try splat_normals(cloud_positions(cloud), store, &options, values)
+    var result = try store.shared()
+    errdefer result.close()
+    try result.put(normal.share())
+    if p.at(4) != 0.0:
+        var shown = try Attribute.create(color_name, Domain.point, DataType.float32, 3, count)
+        defer shown.release()
+        let colors = float32_values(&shown)
+        for at in 0..<count * 3: colors[at] = (f32)to_linear(0.5 * (f64)values[at] + 0.5, ColorSpace.srgb)
+        try result.put(shown.share())
+    let handed = result
+    result = AttributeStore()
+    try with_cloud_store(input, cloud, handed, output)

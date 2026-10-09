@@ -1,0 +1,234 @@
+## GSplats to Volume's kernel: a splat cloud's density as a fog grid (GSOPs'
+## density bake; Houdini's Labs Normals from GSplats surfaces splats through
+## a VDB the same way). Convert to Mesh on the result is splats to mesh.
+##
+## Splat i adds wᵢ · exp(-½ dᵀΣᵢ'⁻¹d) at offset d from its center, out to
+## `cutoff` standard deviations. Σᵢ' is its covariance widened by (h/2)² on
+## every axis (h the voxel size), the smallest Gaussian a grid of spacing h
+## can sample, so splats far smaller than a voxel still land on it (Mip-
+## Splatting's 3D filter does the same for training). wᵢ makes the voxels'
+## sum, times h³, exactly the splat's mass: opacity · (2π)^{3/2} σ₁σ₂σ₃ (its
+## Gaussian's integral at peak opacity), times `scale`. So the grid's
+## integral is the cloud's mass whatever the voxel size and cutoff. A splat
+## several voxels wide peaks at its opacity over P(χ²₃ ≤ cutoff²), the share
+## of a Gaussian inside the cutoff: 3% over at 3σ, 0.1% at 4σ.
+##
+## Work goes in passes, each parallel: per splat its kernel and voxel box;
+## per splat the sum that normalizes it; per splat the leaves its box meets,
+## as (leaf, splat) pairs sorted by leaf; then per leaf, the sum of the
+## splats that reach it, so each leaf is written by one thread.
+import core.ranges
+from splats import Floats, Quat, float_attribute, orient_name, scale_name, opacity_name
+
+## What GSplats to Volume makes.
+pub struct SplatDensityOptions:
+    ## The voxel size h.
+    pub let voxel: f64
+    ## Standard deviations each splat reaches (at least 2).
+    pub let cutoff: f64
+    ## Multiplies every density.
+    pub let scale: f64
+
+## Most voxels all splats' boxes may hold together, and most (leaf, splat) pairs.
+let most_splat_voxels: f64 = 8.0e9
+let most_splat_leaves: usize = 400000000
+
+## A fog grid named `name` of the density of a splat cloud (`points` relative
+## to `origin`, point attributes `store`, a splat cloud).
+pub func splat_density(points: const Float3[], origin: Vector3, store: const AttributeStore*, options: const SplatDensityOptions*, name: str) -> SparseGrid*!:
+    let h = options.voxel
+    if not (h > 0.0 and h < 1.0e6): error(errors.invalid, "the voxel size must be positive")
+    let count = points.length
+    var work: DensityWork
+    work.points = points
+    work.origin = origin
+    work.orient = Floats.of(store.entry((usize)float_attribute(store, orient_name, 4)))
+    work.scale = Floats.of(store.entry((usize)float_attribute(store, scale_name, 3)))
+    work.alpha = Floats.of(store.entry((usize)float_attribute(store, opacity_name, 1)))
+    work.h = h
+    work.cutoff = math.max(options.cutoff, 2.0)
+    work.density_scale = options.scale
+    work.kernels = try new SplatKernel[count + 1] --- in memory.heap
+    defer free(work.kernels) in memory.heap
+    work.leaf_counts = try new usize[count + 1] --- in memory.heap
+    defer free(work.leaf_counts) in memory.heap
+    ranges.each_range(count, 4096, (void*)&work, kernel_range)
+    # Guard the work before doing it: boxes far wider than voxels are slow.
+    var voxels: f64 = 0.0
+    var pairs: usize = 0
+    for at in 0..<count:
+        voxels += work.kernels[at].box_voxels()
+        let leaves = work.leaf_counts[at]
+        work.leaf_counts[at] = pairs
+        pairs += leaves
+        if voxels > most_splat_voxels or pairs > most_splat_leaves:
+            error(errors.limit, "the voxels are too small for these splats: raise the Voxel Size, or remove huge splats with Clean GSplats")
+    work.leaf_counts[count] = pairs
+    ranges.each_range(count, 256, (void*)&work, normalize_range)
+    # (leaf, splat) pairs, sorted by leaf.
+    let keys = try new u64[pairs + 1] --- in memory.heap
+    defer free(keys) in memory.heap
+    let splats = try new u64[pairs + 1] --- in memory.heap
+    defer free(splats) in memory.heap
+    work.pair_keys = keys[..<pairs]
+    work.pair_splats = splats[..<pairs]
+    ranges.each_range(count, 4096, (void*)&work, pair_range)
+    try sort_pairs(work.pair_keys, work.pair_splats)
+    let leaves = try new u64[pairs + 1] --- in memory.heap
+    defer free(leaves) in memory.heap
+    memory.copy(leaves[..<pairs], work.pair_keys, pairs)
+    let unique = unique_keys(leaves[..<pairs])
+    return try grid_of_leaves(name, GridClass.fog, 0.0, voxel_transform(h), leaves[..<unique], fill_density_leaf, (void*)&work)
+
+## One splat's density kernel: center (world), Σ'⁻¹ (upper triangle xx, xy,
+## xz, yy, yz, zz), weight, and the voxel box it reaches (empty when low >
+## high: a splat with no mass or broken values).
+struct SplatKernel:
+    var center: Vector3
+    var inverse: f64[6]
+    var weight: f64
+    var low: i64[3]
+    var high: i64[3]
+
+    func box_voxels() -> f64:
+        if self.low[0] > self.high[0]: return 0.0
+        return (f64)(self.high[0] - self.low[0] + 1) * (f64)(self.high[1] - self.low[1] + 1) * (f64)(self.high[2] - self.low[2] + 1)
+
+    ## The exponent's argument q = dᵀΣ'⁻¹d at voxel (i, j, k) of size `h`.
+    func q_at(i: i64, j: i64, k: i64, h: f64) -> f64:
+        let x = (f64)i * h - self.center.x
+        let y = (f64)j * h - self.center.y
+        let z = (f64)k * h - self.center.z
+        let m = self.inverse
+        return m[0] * x * x + m[3] * y * y + m[5] * z * z + 2.0 * (m[1] * x * y + m[2] * x * z + m[4] * y * z)
+
+struct DensityWork:
+    var points: const Float3[]
+    var origin: Vector3
+    var orient: Floats
+    var scale: Floats
+    var alpha: Floats
+    var h: f64
+    var cutoff: f64
+    var density_scale: f64
+    var kernels: SplatKernel[]
+    ## Per splat its leaf count, then where its pairs start.
+    var leaf_counts: usize[]
+    var pair_keys: u64[]
+    var pair_splats: u64[]
+
+## Pass 1: kernels, voxel boxes and leaf counts; weights hold the mass for now.
+func kernel_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (DensityWork*)context
+    let widen = 0.25 * work.h * work.h
+    for at in first..<end:
+        var kernel: SplatKernel
+        kernel.center = work.points[at].vector().add(work.origin)
+        kernel.weight = 0.0
+        kernel.low = [1, 1, 1]
+        kernel.high = [0, 0, 0]
+        work.leaf_counts[at] = 0
+        let s = Vector3(math.abs(work.scale.at(at, 0)), math.abs(work.scale.at(at, 1)), math.abs(work.scale.at(at, 2)))
+        let mass = math.max(work.alpha.at(at, 0), 0.0) * 15.749609945653303 * s.x * s.y * s.z
+        let q = Quat(work.orient.at(at, 0), work.orient.at(at, 1), work.orient.at(at, 2), work.orient.at(at, 3))
+        let usable = mass > 0.0 and math.is_finite(mass) and kernel.center.is_finite() and (q.x != 0.0 or q.y != 0.0 or q.z != 0.0 or q.w != 0.0)
+        if not usable:
+            work.kernels[at] = kernel
+            continue
+        # Σ' = R diag(σ² + h²/4) Rᵀ; its inverse has the reciprocal variances.
+        let r = q.normalized().matrix()
+        let variance: f64[3] = [s.x * s.x + widen, s.y * s.y + widen, s.z * s.z + widen]
+        var covariance: f64[6] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        let pairs: usize[12] = [0, 0, 0, 1, 0, 2, 1, 1, 1, 2, 2, 2]
+        for e in 0..<(usize)6:
+            let a = pairs[e * 2]
+            let b = pairs[e * 2 + 1]
+            var inverse: f64 = 0.0
+            var sigma_ab: f64 = 0.0
+            for axis in 0..<(usize)3:
+                let product = r.at(a, axis) * r.at(b, axis)
+                inverse += product / variance[axis]
+                sigma_ab += product * variance[axis]
+            kernel.inverse[e] = inverse
+            covariance[e] = sigma_ab
+        # The box: cutoff·√Σ'ₐₐ on each world axis.
+        let diagonal: f64[3] = [covariance[0], covariance[3], covariance[5]]
+        let mid: f64[3] = [kernel.center.x, kernel.center.y, kernel.center.z]
+        var leaves: usize = 1
+        for axis in 0..<(usize)3:
+            let reach = work.cutoff * math.sqrt(diagonal[axis])
+            kernel.low[axis] = (i64)math.ceil((mid[axis] - reach) / work.h)
+            kernel.high[axis] = (i64)math.floor((mid[axis] + reach) / work.h)
+            leaves *= (usize)(leaf_of(kernel.high[axis]) - leaf_of(kernel.low[axis]) + 1)
+        kernel.weight = mass
+        work.kernels[at] = kernel
+        work.leaf_counts[at] = leaves
+
+## Pass 2: each weight becomes scale · mass / (h³ · its voxels' sum).
+func normalize_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (DensityWork*)context
+    let limit = work.cutoff * work.cutoff
+    let cell = work.h * work.h * work.h
+    for at in first..<end:
+        let kernel = &work.kernels[at]
+        if kernel.low[0] > kernel.high[0]: continue
+        var sum: f64 = 0.0
+        for k in kernel.low[2]..=kernel.high[2]:
+            for j in kernel.low[1]..=kernel.high[1]:
+                for i in kernel.low[0]..=kernel.high[0]:
+                    let q = kernel.q_at(i, j, k, work.h)
+                    if q <= limit: sum += math.exp(-0.5 * q)
+        # With σ' ≥ h/2 and a cutoff of 2 or more, the nearest voxel is always in.
+        kernel.weight = work.density_scale * kernel.weight / (sum * cell) if sum > 0.0 else 0.0
+
+## Pass 3: every splat's (leaf, splat) pairs.
+func pair_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (DensityWork*)context
+    for at in first..<end:
+        let kernel = &work.kernels[at]
+        if kernel.low[0] > kernel.high[0]: continue
+        var slot = work.leaf_counts[at]
+        for z in leaf_of(kernel.low[2])..=leaf_of(kernel.high[2]):
+            for y in leaf_of(kernel.low[1])..=leaf_of(kernel.high[1]):
+                for x in leaf_of(kernel.low[0])..=leaf_of(kernel.high[0]):
+                    work.pair_keys[slot] = leaf_key(x, y, z)
+                    work.pair_splats[slot] = (u64)at
+                    slot += 1
+
+## Pass 4: one leaf's densities, from the splats whose pairs name it.
+func fill_density_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[]):
+    _ = leaf
+    let work = (DensityWork*)(context else return)
+    let (lx, ly, lz) = key_leaf(key)
+    let limit = work.cutoff * work.cutoff
+    var sums: f64[512]
+    for at in 0..<leaf_voxels: sums[at] = 0.0
+    # The first pair of this leaf.
+    var low: usize = 0
+    var high = work.pair_keys.length
+    while low < high:
+        let middle = (low + high) // 2
+        if work.pair_keys[middle] < key: low = middle + 1
+        else: high = middle
+    var pair = low
+    while pair < work.pair_keys.length and work.pair_keys[pair] == key:
+        let kernel = &work.kernels[(usize)work.pair_splats[pair]]
+        pair += 1
+        let i0 = math.imax(kernel.low[0], lx * 8)
+        let i1 = math.imin(kernel.high[0], lx * 8 + 7)
+        let j0 = math.imax(kernel.low[1], ly * 8)
+        let j1 = math.imin(kernel.high[1], ly * 8 + 7)
+        let k0 = math.imax(kernel.low[2], lz * 8)
+        let k1 = math.imin(kernel.high[2], lz * 8 + 7)
+        for k in k0..=k1:
+            for j in j0..=j1:
+                for i in i0..=i1:
+                    let q = kernel.q_at(i, j, k, work.h)
+                    if q <= limit: sums[local_index(i, j, k)] += kernel.weight * math.exp(-0.5 * q)
+    for at in 0..<mask_words: mask[at] = 0
+    for at in 0..<leaf_voxels:
+        values[at] = (f32)sums[at]
+        if sums[at] > 0.0: mask[at >> 6] = mask[at >> 6] | ((u64)1 << (u64)(at & 63))

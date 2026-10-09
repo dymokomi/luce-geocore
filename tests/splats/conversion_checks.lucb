@@ -1,0 +1,294 @@
+## Stage 7, conversions: GSplats from Polygons makes coplanar discs on a
+## plane (colored by the mesh's Cd), GSplats to Volume's density integrates
+## to the splats' mass at any voxel size (and Convert to Mesh surfaces it
+## where expected), and Normals from GSplats points outward on sphere and
+## torus captures (concave on the inner ring) and through flat facets, where
+## only its consistency pass can tell the side.
+import interop
+import memory
+from luce_std import math
+from luce_geocore.geocore import Vector3, GeometrySet, MeshPrimitives
+from luce_geocore.kernel import find_set_verb, run_set_verb, adopt_set, set_volume, set_mesh, set_detail, Domain
+from luce_geocore.splats import Quat, Mat3, splat_masses
+import clouds
+import draws
+
+pub func run() -> !:
+    try plane_discs()
+    try density_mass(0.05)
+    try density_mass(0.2)
+    try density_surface()
+    try capture_normals()
+    try torus_normals()
+    try polygon_sphere_normals()
+
+## Run set verb `name` on `set` with `numbers` and the text row `text`.
+func run_with(name: str, set: interop.Reference[GeometrySet], numbers: const f64[], text: str = "") -> interop.Reference[GeometrySet]!:
+    let verb = find_set_verb(name) else trap("a GSplats verb is missing")
+    var output = try run_set_verb(&verb, set.value(), none, text, 0, numbers)
+    let made = output.set else trap("a set verb made no set")
+    output.set = none
+    return try adopt_set(made)
+
+func count_of(set: interop.Reference[GeometrySet]) -> usize:
+    return (usize)set.value().cloud_count()
+
+# mark: GSplats from Polygons
+
+## A 2 × 2 grid in XZ at 100 splats per unit area: about 400 discs, every
+## center on the plane, every shortest axis along Y, sized 0.6 / √100 across
+## and a tenth of that through, all facing one way, colored by the grid's Cd.
+func plane_discs() -> !:
+    let plain = try MeshPrimitives.grid(2.0, 4)
+    defer plain.release()
+    let mesh = try plain.value().with_single_attribute("Cd", 0, [0.2, 0.4, 0.6])
+    defer mesh.release()
+    let grid = try GeometrySet.of_mesh(mesh)
+    defer grid.release()
+    let discs = try run_with("GSplats from Polygons", grid, [100.0])
+    defer discs.release()
+    let count = count_of(discs)
+    assert(count >= 360 and count <= 440, "the density sets the count (about 400)")
+    assert(set_mesh(discs.value()) == none, "the mesh goes unless kept")
+    let store = clouds.points_of(discs.value())
+    var facing: f64 = 0.0
+    for p in 0..<count:
+        let at = clouds.point_of(discs.value(), p)
+        assert(at.y == 0.0 and math.abs(at.x) <= 1.0 and math.abs(at.z) <= 1.0, "centers lie on the plane, inside it")
+        let axis = clouds.quat_of(store, "orient", p).matrix().column(2)
+        assert(math.abs(math.abs(axis.y) - 1.0) <= 1.0e-6, "the shortest axis is the plane's normal")
+        let s = clouds.vector_of(store, "scale", p)
+        assert(math.abs(s.x - 0.06) <= 1.0e-6 and math.abs(s.y - 0.06) <= 1.0e-6 and math.abs(s.z - 0.006) <= 1.0e-6, "discs are 0.6/√density across and a tenth through")
+        let n = clouds.vector_of(store, "N", p)
+        assert(math.abs(n.dot(axis) - 1.0) <= 1.0e-6, "N is the disc's axis")
+        if p == 0: facing = n.y
+        assert(n.y == facing, "every disc faces the same way")
+        let c = clouds.vector_of(store, "Cd", p)
+        assert(math.abs(c.x - 0.2) <= 1.0e-6 and math.abs(c.y - 0.4) <= 1.0e-6 and math.abs(c.z - 0.6) <= 1.0e-6, "Cd comes from the mesh")
+        assert(clouds.attribute(store, "opacity").number(p, 0) == 1.0, "opacity as set")
+    # The same seed gives the same splats; another seed others.
+    let again = try run_with("GSplats from Polygons", grid, [100.0])
+    defer again.release()
+    assert(count_of(again) == count and clouds.point_of(again.value(), 7).x == clouds.point_of(discs.value(), 7).x, "the seed fixes the splats")
+    let other = try run_with("GSplats from Polygons", grid, [100.0, 0.0, 0.0, 1.0, 0.8, 0.8, 0.8, 5.0, 1.0])
+    defer other.release()
+    assert(clouds.point_of(other.value(), 7).x != clouds.point_of(discs.value(), 7).x, "another seed moves them")
+    assert(set_mesh(other.value()) != none, "Keep Input keeps the mesh")
+
+# mark: GSplats to Volume
+
+## Thirty random splats: the grid's sum times h³ is their total mass,
+## opacity · (2π)^{3/2} σ₁σ₂σ₃ each, at a fine and a coarse voxel size, and
+## twice that at Density Scale 2.
+func density_mass(voxel: f64) -> !:
+    let source = try random_splats(30, 5)
+    defer source.release()
+    let count = count_of(source)
+    let masses = try new f64[count] in memory.heap
+    defer free(masses) in memory.heap
+    splat_masses(clouds.points_of(source.value()), masses)
+    var mass: f64 = 0.0
+    for m in masses[..<count]: mass += m * 15.749609945653303
+    let volume = try run_with("GSplats to Volume", source, [voxel])
+    defer volume.release()
+    assert(count_of(volume) == 0, "the splats go unless kept")
+    let total = grid_sum(volume, "density") * voxel * voxel * voxel
+    assert(math.abs(total - mass) <= 1.0e-4 * mass, "the density integrates to the splats' mass")
+    let doubled = try run_with("GSplats to Volume", source, [voxel, 2.0, 3.0, 1.0], "fog")
+    defer doubled.release()
+    assert(count_of(doubled) == count, "Keep Input keeps the splats")
+    let twice = grid_sum(doubled, "fog") * voxel * voxel * voxel
+    assert(math.abs(twice - 2.0 * mass) <= 2.0e-4 * mass, "Density Scale multiplies it")
+
+## One round splat of σ 0.5 at opacity 1: Convert to Mesh at isovalue 0.5
+## gives a sphere where the Gaussian halves, r = σ'·√(2 ln(2 · peak)),
+## σ' the splat widened by half a voxel and peak (σ/σ')³ / P(χ²₃ ≤ 9).
+func density_surface() -> !:
+    var builder = clouds.CloudBuilder(1)
+    defer builder.close()
+    try builder.floats("orient", 4, [0.0, 0.0, 0.0, 1.0])
+    try builder.floats("scale", 3, [0.5, 0.5, 0.5])
+    try builder.floats("opacity", 1, [1.0])
+    let one = try builder.finish([Vector3(0.3, 1.0, -0.2)])
+    defer one.release()
+    let volume = try run_with("GSplats to Volume", one, [0.05])
+    defer volume.release()
+    let mesh_set = try run_with("Convert to Mesh", volume, [0.0, 0.5])
+    defer mesh_set.release()
+    let mesh = set_mesh(mesh_set.value()) else trap("Convert to Mesh made no mesh")
+    let widened = math.sqrt(0.25 + 0.05 * 0.05 / 4.0)
+    # Cut off at 3σ', the kernel is raised by 1 / P(χ²₃ ≤ 9) to keep the mass.
+    let peak = math.pow(0.5 / widened, 3.0) / 0.9707091134651118
+    let expected = widened * math.sqrt(2.0 * math.log(2.0 * peak))
+    let origin = mesh.position_origin()
+    # Surface nets places vertices within a fraction of a voxel; on average closer.
+    var spread: f64 = 0.0
+    var mean: f64 = 0.0
+    for p in mesh.point_span():
+        let r = p.vector().add(origin).subtract(Vector3(0.3, 1.0, -0.2)).length()
+        spread = math.max(spread, math.abs(r - expected))
+        mean += r
+    mean = mean / (f64)mesh.point_span().length
+    assert(mesh.point_span().length > 100 and spread <= 0.4 * 0.05 and math.abs(mean - expected) <= 0.005, "the surface lies where the density is the isovalue")
+
+## The sum of grid `name`'s voxels.
+func grid_sum(set: interop.Reference[GeometrySet], name: str) -> f64:
+    let volume = set_volume(set.value()) else trap("no volume")
+    assert(volume.grid_count() == 1 and volume.grid(0).name() == name, "one grid, named as asked")
+    var sum: f64 = 0.0
+    for value in volume.grid(0).values.view(): sum += (f64)value
+    return sum
+
+## `count` splats of random orient, sizes 0.05..0.2 and opacity 0.1..0.9.
+func random_splats(count: usize, seed: u64) -> interop.Reference[GeometrySet]!:
+    var state = draws.Draws(seed)
+    var builder = clouds.CloudBuilder(count)
+    defer builder.close()
+    let orient = try new f64[count * 4] in memory.heap
+    defer free(orient) in memory.heap
+    let scale = try new f64[count * 3] in memory.heap
+    defer free(scale) in memory.heap
+    let opacity = try new f64[count] in memory.heap
+    defer free(opacity) in memory.heap
+    let positions = try new Vector3[count] --- in memory.heap
+    defer free(positions) in memory.heap
+    for p in 0..<count:
+        let q = state.rotation()
+        orient[p * 4] = q.x
+        orient[p * 4 + 1] = q.y
+        orient[p * 4 + 2] = q.z
+        orient[p * 4 + 3] = q.w
+        for k in 0..<(usize)3: scale[p * 3 + k] = state.between(0.05, 0.2)
+        opacity[p] = state.between(0.1, 0.9)
+        positions[p] = Vector3(state.between(-1.0, 1.0), state.between(-1.0, 1.0), state.between(-1.0, 1.0))
+    try builder.floats("orient", 4, orient)
+    try builder.floats("scale", 3, scale)
+    try builder.floats("opacity", 1, opacity)
+    return try builder.finish(positions[..<count])
+
+# mark: Normals from GSplats
+
+## A synthetic capture of a sphere: thin discs on it, the short axis any of
+## the three local axes and pointing either way, centers off the surface by
+## up to 1% of the radius. Every normal points out of the sphere.
+func capture_normals() -> !:
+    let count: usize = 1500
+    let center = Vector3(1.0, 2.0, 3.0)
+    var state = draws.Draws(17)
+    let positions = try new Vector3[count] --- in memory.heap
+    defer free(positions) in memory.heap
+    let normals = try new Vector3[count] --- in memory.heap
+    defer free(normals) in memory.heap
+    for p in 0..<count:
+        let d = state.direction()
+        positions[p] = center.add(d.multiply_scalar(2.0 + state.between(-0.02, 0.02)))
+        normals[p] = d
+    let capture = try disc_capture(positions[..<count], normals[..<count], 0.06, 0.1, 17)
+    defer capture.release()
+    # Unrefined: exactly the shortest axis, outward.
+    let raw = try run_with("Normals from GSplats", capture, [0.0, 0.0])
+    defer raw.release()
+    assert(agreeing(raw, normals[..<count], 0.999) == count, "every raw normal is the disc's axis, pointing out")
+    # Refined: still outward and close to the true normal.
+    let refined = try run_with("Normals from GSplats", capture, [0.0, 1.0, 0.5, 0.5, 1.0])
+    defer refined.release()
+    assert(agreeing(refined, normals[..<count], 0.98) == count, "refined normals point out")
+    let shown = clouds.vector_of(clouds.points_of(refined.value()), "Cd", 0)
+    assert(shown.x >= 0.0 and shown.x <= 1.0, "Visualize Normals writes Cd")
+
+## A torus capture (major radius 1, tube 0.6): around the inner equator the
+## surface bends inward more across the ring than it bends out around the
+## tube, so the neighbors' centroid lies outside there and the local vote
+## points in. Propagation over the neighbor graph must still turn every
+## normal out.
+func torus_normals() -> !:
+    let count: usize = 3000
+    var state = draws.Draws(23)
+    let positions = try new Vector3[count] --- in memory.heap
+    defer free(positions) in memory.heap
+    let normals = try new Vector3[count] --- in memory.heap
+    defer free(normals) in memory.heap
+    for p in 0..<count:
+        let u = state.between(0.0, 6.283185307179586)
+        let v = state.between(0.0, 6.283185307179586)
+        let n = Vector3(math.cos(v) * math.cos(u), math.sin(v), math.cos(v) * math.sin(u))
+        positions[p] = Vector3(math.cos(u), 0.0, math.sin(u)).add(n.multiply_scalar(0.6))
+        normals[p] = n
+    let capture = try disc_capture(positions[..<count], normals[..<count], 0.04, 0.07, 23)
+    defer capture.release()
+    let raw = try run_with("Normals from GSplats", capture, [0.0, 0.0])
+    defer raw.release()
+    assert(agreeing(raw, normals[..<count], 0.999) == count, "every normal of the torus points out, the inner ring too")
+
+## Thin discs at `positions` facing `normals` (σ low..high across, 0.004
+## through), the short axis any of the three local axes and its sign random.
+func disc_capture(positions: const Vector3[], normals: const Vector3[], low: f64, high: f64, seed: u64) -> interop.Reference[GeometrySet]!:
+    let count = positions.length
+    var state = draws.Draws(seed)
+    var builder = clouds.CloudBuilder(count)
+    defer builder.close()
+    let orient = try new f64[count * 4] in memory.heap
+    defer free(orient) in memory.heap
+    let scale = try new f64[count * 3] in memory.heap
+    defer free(scale) in memory.heap
+    let opacity = try new f64[count] in memory.heap
+    defer free(opacity) in memory.heap
+    for p in 0..<count:
+        let d = normals[p]
+        # A frame whose column `short` is ±d, right-handed.
+        let short = (usize)math.min(math.floor(state.between(0.0, 3.0)), 2.0)
+        let sign = 1.0 if state.unit() < 0.5 else -1.0
+        let helper = Vector3(1.0, 0.0, 0.0) if math.abs(d.x) < 0.9 else Vector3(0.0, 1.0, 0.0)
+        let a = d.multiply_scalar(sign)
+        let b = try a.cross(helper).normalized()
+        let c = a.cross(b)
+        var columns: Vector3[3] = [a, b, c]
+        if short == 1: columns = [c, a, b]
+        elif short == 2: columns = [b, c, a]
+        let q = Quat.of_matrix(Mat3.of_columns(columns[0], columns[1], columns[2])).normalized()
+        orient[p * 4] = q.x
+        orient[p * 4 + 1] = q.y
+        orient[p * 4 + 2] = q.z
+        orient[p * 4 + 3] = q.w
+        for k in 0..<(usize)3: scale[p * 3 + k] = 0.004 if k == short else state.between(low, high)
+        opacity[p] = state.between(0.3, 1.0)
+    try builder.floats("orient", 4, orient)
+    try builder.floats("scale", 3, scale)
+    try builder.floats("opacity", 1, opacity)
+    return try builder.finish(positions)
+
+## How many of a set's splats have N · normal above `least`.
+func agreeing(set: interop.Reference[GeometrySet], normals: const Vector3[], least: f64) -> usize:
+    let store = clouds.points_of(set.value())
+    var good: usize = 0
+    for p in 0..<count_of(set):
+        let n = clouds.vector_of(store, "N", p)
+        if n.dot(normals[p]) > least * n.length(): good += 1
+    return good
+
+## How many of a set's splats have N · (p - center)/|p - center| above `least`.
+func outward_share(set: interop.Reference[GeometrySet], center: Vector3, least: f64) -> usize:
+    let store = clouds.points_of(set.value())
+    var good: usize = 0
+    for p in 0..<count_of(set):
+        let out = clouds.point_of(set.value(), p).subtract(center)
+        let n = clouds.vector_of(store, "N", p)
+        if n.dot(out) / out.length() > least * n.length(): good += 1
+    return good
+
+## Splats from a 24-segment polygon sphere: most splats see only their own
+## flat facet, where the centroid vote is zero, so the consistency pass must
+## carry the side in from the facet edges. Every normal ends up outward.
+func polygon_sphere_normals() -> !:
+    let mesh = try MeshPrimitives.sphere(1.0, 24)
+    defer mesh.release()
+    let ball = try GeometrySet.of_mesh(mesh)
+    defer ball.release()
+    let discs = try run_with("GSplats from Polygons", ball, [300.0])
+    defer discs.release()
+    let center = Vector3(0.0, 1.0, 0.0)
+    let count = count_of(discs)
+    let normals = try run_with("Normals from GSplats", discs, [0.0, 0.0])
+    defer normals.release()
+    let found = outward_share(normals, center, 0.9)
+    assert(found == count, "Normals from GSplats turns every facet's discs outward")

@@ -1,0 +1,120 @@
+## Consistent sides for unsigned axes over a neighbor graph, Hoppe et al.'s
+## (1992) propagation: in each connected part of the graph, start anywhere
+## and grow a minimum spanning tree by edge cost 1 - |aᵤ·aᵥ| (Prim's, with a
+## binary heap), each new node taking its tree parent's side. Nearly parallel
+## neighbors are joined first, so the side crosses creases and saddles last
+## and seldom wrong. Each part then keeps or flips its sides as a whole, by
+## the sum of the nodes' own votes for their axis (positive: as it points).
+## Normals from GSplats uses it so concave regions, whose local votes point
+## inward, still follow the rest of the surface.
+##
+## The k-NN lists are not symmetric, so the graph takes every listed pair
+## both ways.
+from core.growing import Growing
+
+## Into `signs` (±1 per node), the side of each axis in `axes`; `neighbors`
+## holds `k` slots per node, the first `found[i]` used; `votes` are the
+## nodes' own preferences.
+pub func propagated_sides(axes: const Vector3[], neighbors: const u32[], found: const u8[], k: usize, votes: const f64[], signs: f64[]) -> !:
+    let count = axes.length
+    # The symmetric graph as compressed rows.
+    let starts = try new usize[count + 1] in memory.heap
+    defer free(starts) in memory.heap
+    for node in 0..<count:
+        starts[node + 1] += (usize)found[node]
+        for slot in 0..<(usize)found[node]: starts[(usize)neighbors[node * k + slot] + 1] += 1
+    for node in 0..<count: starts[node + 1] += starts[node]
+    let edges = try new u32[starts[count] + 1] --- in memory.heap
+    defer free(edges) in memory.heap
+    let filled = try new usize[count + 1] in memory.heap
+    defer free(filled) in memory.heap
+    for node in 0..<count:
+        for slot in 0..<(usize)found[node]:
+            let other = (usize)neighbors[node * k + slot]
+            edges[starts[node] + filled[node]] = (u32)other
+            filled[node] += 1
+            edges[starts[other] + filled[other]] = (u32)node
+            filled[other] += 1
+    # Prim's growth, part by part; `order` lists the nodes as they join.
+    let best = try new f64[count + 1] --- in memory.heap
+    defer free(best) in memory.heap
+    for node in 0..<count:
+        best[node] = 2.0
+        signs[node] = 0.0
+    let order = try new u32[count + 1] --- in memory.heap
+    defer free(order) in memory.heap
+    var heap = Growing[u64]()
+    defer heap.close()
+    var joined: usize = 0
+    for seed in 0..<count:
+        if signs[seed] != 0.0: continue
+        let first = joined
+        signs[seed] = 1.0
+        order[joined] = (u32)seed
+        joined += 1
+        try offer(&heap, best, signs, axes, edges[starts[seed]..<starts[seed + 1]], seed)
+        while heap.count > 0:
+            let node = (usize)(heap_pop(&heap) & 0xFFFFFFFF)
+            if signs[node] != 0.0: continue
+            # The parent: the joined neighbor whose axis is most nearly parallel.
+            let axis = axes[node]
+            var parent_dot: f64 = 0.0
+            var side: f64 = 1.0
+            for other in edges[starts[node]..<starts[node + 1]]:
+                let s = signs[(usize)other]
+                if s == 0.0: continue
+                let d = axis.dot(axes[(usize)other])
+                if math.abs(d) > math.abs(parent_dot):
+                    parent_dot = d
+                    side = s if d >= 0.0 else -s
+            signs[node] = side
+            order[joined] = (u32)node
+            joined += 1
+            try offer(&heap, best, signs, axes, edges[starts[node]..<starts[node + 1]], node)
+        # The part's own votes decide which way it faces.
+        var total: f64 = 0.0
+        for at in first..<joined: total += votes[(usize)order[at]] * signs[(usize)order[at]]
+        if total < 0.0:
+            for at in first..<joined: signs[(usize)order[at]] = -signs[(usize)order[at]]
+
+## Push the not yet joined neighbors `others` of `node` whose edge is cheaper
+## than any seen for them. A key is the cost in its high half, the node in its low.
+func offer(heap: Growing[u64]*, best: f64[], signs: const f64[], axes: const Vector3[], others: const u32[], node: usize) -> !:
+    let axis = axes[node]
+    for other in others:
+        let at = (usize)other
+        if signs[at] != 0.0: continue
+        let cost = math.clamp(1.0 - math.abs(axis.dot(axes[at])), 0.0, 1.0)
+        if cost >= best[at]: continue
+        best[at] = cost
+        try heap_push(heap, ((u64)(cost * 2147483647.0) << 32) | (u64)other)
+
+## A binary min-heap over `heap.items[..<heap.count]`.
+func heap_push(heap: Growing[u64]*, key: u64) -> !:
+    try heap.push(key)
+    let items = heap.items
+    var at = heap.count - 1
+    while at > 0:
+        let up = (at - 1) // 2
+        if items[up] <= key: break
+        items[at] = items[up]
+        at = up
+    items[at] = key
+
+func heap_pop(heap: Growing[u64]*) -> u64:
+    let items = heap.items
+    let top = items[0]
+    heap.count -= 1
+    let count = heap.count
+    if count == 0: return top
+    let last = items[count]
+    var at: usize = 0
+    while true:
+        var child = at * 2 + 1
+        if child >= count: break
+        if child + 1 < count and items[child + 1] < items[child]: child += 1
+        if items[child] >= last: break
+        items[at] = items[child]
+        at = child
+    items[at] = last
+    return top

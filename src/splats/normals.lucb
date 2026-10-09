@@ -1,0 +1,161 @@
+## Normals from GSplats' kernel (Houdini 22's Labs Normals from GSplats,
+## by its fast method): a trained splat on a surface is a flat disc, so its
+## shortest axis is the surface normal up to sign.
+##
+## 1. Axis: the column of `orient`'s rotation with the smallest |σ|.
+## 2. Side: the axis points away from the centroid of the splat's 16 nearest
+##    neighbors (opacity-weighted) within the search radius. On a curved
+##    surface the neighbors lie behind the tangent plane, on the inside of
+##    the bend, so this points outward; on a flat patch the vote is near
+##    zero, and in a concave region it points inward.
+## 3. Consistency (orientation.lucb): sides propagate over the neighbor
+##    graph along a minimum spanning tree of 1 - |aᵢ·aⱼ|, so every splat of a
+##    connected surface agrees with its neighbors, and each connected part
+##    faces the way most of its votes say, so convex regions outvote concave
+##    ones.
+## 4. Refine (optional): a bilateral k-NN filter. A splat's normal blends,
+##    by `smooth`, toward the weighted mean of its neighbors' normals, each
+##    weighted by ((1 + nᵢ·nⱼ) / 2)^(1 + 4·sharpen), so creases stay sharp.
+## Splats without neighbors keep their axis as it points.
+
+## What Normals from GSplats does.
+pub struct NormalOptions:
+    ## How far neighbors are looked for (0: ten times the median largest σ).
+    pub let radius: f64
+    ## Smooth and sharpen the normals with their neighbors'.
+    pub let refine: bool
+    ## How far the refined normal moves toward its neighbors' (0..1).
+    pub let smooth: f64
+    ## How strongly unlike normals are kept out of the mean (0..).
+    pub let sharpen: f64
+
+## Neighbors each splat keeps (PointHash.nearest's most).
+let normal_neighbors: usize = 16
+
+## Each splat's normal of a cloud (`points` relative to their origin, point
+## attributes `store`, a splat cloud) into `out` (x, y, z per point).
+pub func splat_normals(points: const Float3[], store: const AttributeStore*, options: const NormalOptions*, out: f32[]) -> !:
+    let count = points.length
+    if count == 0: return
+    var work: NormalWork
+    work.points = points
+    work.orient = Floats.of(store.entry((usize)float_attribute(store, orient_name, 4)))
+    work.scale = Floats.of(store.entry((usize)float_attribute(store, scale_name, 3)))
+    let alpha = float_attribute(store, opacity_name, 1)
+    work.alpha = Floats.of(store.entry((usize)alpha)) if alpha >= 0 else Floats.empty()
+    work.options = options
+    var radius = options.radius
+    if not (radius > 0.0): radius = 10.0 * (try median_largest(&work.scale, count))
+    if not (radius > 0.0): radius = 3.0 * mean_spacing(points)
+    work.radius = radius
+    work.axes = try new Vector3[count] --- in memory.heap
+    defer free(work.axes) in memory.heap
+    work.votes = try new f64[count] --- in memory.heap
+    defer free(work.votes) in memory.heap
+    work.sides = try new f64[count] --- in memory.heap
+    defer free(work.sides) in memory.heap
+    work.neighbors = try new u32[count * normal_neighbors] --- in memory.heap
+    defer free(work.neighbors) in memory.heap
+    work.found = try new u8[count] --- in memory.heap
+    defer free(work.found) in memory.heap
+    work.normals = try new Vector3[count] --- in memory.heap
+    defer free(work.normals) in memory.heap
+    # Splats all at one place have no radius to search: each keeps its axis.
+    work.hash = none
+    var hash = try PointHash.for_radius(points, radius if radius > 0.0 else 1.0)
+    defer hash.close()
+    if radius > 0.0: work.hash = &hash
+    ranges.each_range(count, 2048, (void*)&work, axis_range)
+    try propagated_sides(work.axes, work.neighbors, work.found, normal_neighbors, work.votes, work.sides)
+    ranges.each_range(count, 8192, (void*)&work, orient_range)
+    # Refine writes into `axes`, which are no longer needed.
+    let refine = options.refine and options.smooth > 0.0
+    if refine: ranges.each_range(count, 4096, (void*)&work, refine_range)
+    let result = work.axes if refine else work.normals
+    for at in 0..<count:
+        let n = result[at]
+        out[at * 3] = (f32)n.x
+        out[at * 3 + 1] = (f32)n.y
+        out[at * 3 + 2] = (f32)n.z
+
+struct NormalWork:
+    var points: const Float3[]
+    var orient: Floats
+    var scale: Floats
+    var alpha: Floats
+    var options: const NormalOptions*?
+    var radius: f64
+    var hash: const PointHash*?
+    ## Per splat: its shortest axis (refine's output too), its own vote, its
+    ## side (±1), its neighbors and how many, its normal.
+    var axes: Vector3[]
+    var votes: f64[]
+    var sides: f64[]
+    var neighbors: u32[]
+    var found: u8[]
+    var normals: Vector3[]
+
+    func neighbor_list(element: usize) -> const u32[]:
+        return self.neighbors[element * normal_neighbors..<element * normal_neighbors + (usize)self.found[element]]
+
+## Step 1 and 2: axes, neighbors and votes.
+func axis_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (NormalWork*)context
+    for at in first..<end:
+        let q = Quat(work.orient.at(at, 0), work.orient.at(at, 1), work.orient.at(at, 2), work.orient.at(at, 3)).normalized()
+        let sx = math.abs(work.scale.at(at, 0))
+        let sy = math.abs(work.scale.at(at, 1))
+        let sz = math.abs(work.scale.at(at, 2))
+        var column: usize = 2
+        if sx <= sy and sx <= sz: column = 0
+        elif sy <= sz: column = 1
+        let axis = q.matrix().column(column)
+        work.axes[at] = axis
+        work.votes[at] = 0.0
+        work.found[at] = 0
+        let hash = work.hash else continue
+        let list = work.neighbors[at * normal_neighbors..<(at + 1) * normal_neighbors]
+        let found = hash.nearest(at, normal_neighbors, work.radius, list)
+        work.found[at] = (u8)found
+        if found == 0: continue
+        # The weighted centroid's offset along the axis, over the neighbors' mean distance.
+        let p = work.points[at].vector()
+        var along: f64 = 0.0
+        var weight: f64 = 0.0
+        var spread: f64 = 0.0
+        for k in 0..<found:
+            let other = (usize)list[k]
+            let d = work.points[other].vector().subtract(p)
+            let w = math.max(work.alpha.at(other, 0), 0.0) if work.alpha.present() else 1.0
+            along += w * d.dot(axis)
+            weight += w
+            spread += d.length()
+        if weight > 0.0 and spread > 0.0:
+            # Neighbors in front of the plane (positive) mean the axis points inward.
+            work.votes[at] = -(along / weight) / (spread / (f64)found)
+
+## Each splat's axis turned to its side.
+func orient_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (NormalWork*)context
+    for at in first..<end:
+        let axis = work.axes[at]
+        work.normals[at] = axis.multiply_scalar(-1.0) if work.sides[at] < 0.0 else axis
+
+## Step 4: the bilateral blend, into `axes`.
+func refine_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (NormalWork*)context
+    let options = work.options else return
+    let power = 1.0 + 4.0 * math.max(options.sharpen, 0.0)
+    let smooth = math.clamp(options.smooth, 0.0, 1.0)
+    for at in first..<end:
+        let n = work.normals[at]
+        var sum = n
+        for other in work.neighbor_list(at):
+            let m = work.normals[(usize)other]
+            let w = math.pow(math.max(0.5 * (1.0 + n.dot(m)), 0.0), power)
+            sum = sum.add(m.multiply_scalar(w))
+        let mean = unit_or(sum, n)
+        work.axes[at] = unit_or(n.multiply_scalar(1.0 - smooth).add(mean.multiply_scalar(smooth)), n)

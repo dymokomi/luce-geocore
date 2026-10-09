@@ -18,12 +18,12 @@ from math.matrix import Matrix4
 from geometries.polygon import Mesh, MeshPart, concatenated, mesh_share, mesh_dispose
 from core.strings import TableBuilder
 from geometry_set import GeometrySet, ComponentType, PointCloud, points_component, cloud_origin, cloud_positions, cloud_store, cloud_with_store, cloud_subset, cloud_mesh, cloud_assembled, cloud_half_turned, cloud_of_mesh, set_cloud, set_mesh, empty_storage, dispose_set, adopt_set, geometry_set_type, mesh_component, set_put_detail
-from splats import BakeOptions, ColorSpace, SplatNaming, baked_store, splat_naming, with_sh_degree, is_splat_store, color_space_name, color_space_text, up_axis_name, y_down_text, CropRegion, crop_flags, CleanOptions, clean_flags, ReduceOptions, reduced_cloud
+from splats import BakeOptions, ColorSpace, SplatNaming, baked_store, splat_naming, with_sh_degree, is_splat_store, color_space_name, color_space_text, up_axis_name, y_down_text, CropRegion, crop_flags, CleanOptions, clean_flags, ReduceOptions, reduced_cloud, Floats, float_attribute, float32_values, median_largest, to_linear, scale_name, color_name, SurfaceMesh, SurfaceColor, SurfaceSplatOptions, surface_splats, NormalOptions, splat_normals
 from groups import GroupReport, GroupType, group_bits, guess_domain, is_blank
 from verbs import ParmSpec, ParmKind, Parms, filled_parms, Verbs, verb_at, verb_count
 import curves
 from curves import Curves, curves_with_store, curve_domain, set_curves, with_curves, curves_dispose, curves_type, curve_group_bits, guess_curve_domain, convert_curve_bits
-from fields import Sdf, SdfOp, SparseGrid, GridClass, box_grid, share_grid, primitive_sdf, combined_sdf, modified_sdf, release_sdf, sdf_type, set_sdf, release_grid, new_volume, add_grid, release_volume, volume_type, set_volume, sampled_sdf, mesh_level_set, points_level_set, surface_mesh, slice_mesh, push_mesh, VolumeLook, put_volume_look
+from fields import Sdf, SdfOp, SparseGrid, GridClass, box_grid, share_grid, primitive_sdf, combined_sdf, modified_sdf, release_sdf, sdf_type, set_sdf, release_grid, new_volume, add_grid, release_volume, volume_type, set_volume, sampled_sdf, mesh_level_set, points_level_set, surface_mesh, slice_mesh, push_mesh, VolumeLook, put_volume_look, SplatDensityOptions, splat_density
 
 ## What a set verb reads.
 pub struct SetVerbInput:

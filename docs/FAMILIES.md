@@ -299,6 +299,21 @@ them, and the design is luced-3d's `docs/research/GAUSSIAN-SPLATS.md`.
   neighbor search, the candidate pairs (each once), a parallel merge sort of
   their costs, the gathers and the merges; only the greedy matching is
   sequential (halving a 1.16M-splat capture takes about 0.5 s).
+- **Conversions** (`set_verbs/splat_conversions.lucb`). **GSplats from
+  Polygons** (`splats/from_surface.lucb`) scatters flat discs over a mesh's
+  display triangles, density × area each (the fraction by a seeded hash), each
+  disc in its triangle's plane with σ = 0.6 / √density across and a fraction
+  of that through, `N` the face normal and `Cd` the mesh's (point, vertex or
+  primitive). **GSplats to Volume** (`fields/splat_density.lucb`) sums each
+  splat's Gaussian, widened by half a voxel and cut off at 3σ, into a fog
+  grid, each splat normalized so the grid integrates to its mass, opacity ·
+  (2π)^{3/2} σ₁σ₂σ₃; Convert to Mesh after it is splats to mesh. **Normals
+  from GSplats** (`splats/normals.lucb`, Houdini's Labs node by its fast
+  method) takes each splat's shortest axis, votes its side by its 16 nearest
+  neighbors' centroid, makes the sides consistent along a minimum spanning
+  tree of the k-NN graph (`splats/orientation.lucb`; each connected part
+  faces the way its votes sum, so concave regions face out too), and
+  optionally refines with a bilateral k-NN filter.
 - **Point nodes on clouds.** `SetAttributes` deletes cloud points by a group
   expression (Blast, Delete), groups them (Selection Group) and promotes point
   and detail attributes. A cloud's expressions are read through a faceless mesh
