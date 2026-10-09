@@ -1,0 +1,93 @@
+# Editor help for the Code node's text editor: completions at the caret and the hover
+# text of a word, from luce-kernel's `lower.complete` and `lower.hover` over this
+# package's stubs (whose `##` docs are the API's docs). Positions are 1-based lines and
+# character columns, as `Code.check` gives them.
+
+## The stub modules editor help reads, besides the lib.
+let help_stubs: str[1] = [stub_text]
+
+## What may come at the caret: each item's label, kind ("function", "method", "field",
+## "type", "keyword" or "local"), detail (a signature such as `snoise(p: f32[4]) -> f32`,
+## or a type) and `##` doc, and the column where the word being completed starts (the
+## chosen label replaces the text from there to the caret). Out-of-range indices answer "".
+pub struct CodeCompletion:
+    var completion: lower.Completion
+    var start_column: i64
+
+    pub func count() -> i64:
+        return (i64)self.completion.items().length
+
+    pub func start() -> i64:
+        return self.start_column
+
+    pub func label(index: i64) -> str:
+        let item = self.item(index) else return ""
+        return item.label
+
+    pub func kind(index: i64) -> str:
+        let item = self.item(index) else return ""
+        return lower.kind_name(item.kind)
+
+    pub func detail(index: i64) -> str:
+        let item = self.item(index) else return ""
+        return item.detail
+
+    pub func doc(index: i64) -> str:
+        let item = self.item(index) else return ""
+        return item.doc
+
+    func item(index: i64) -> lower.Item?:
+        let items = self.completion.items()
+        if index < 0 or (usize)index >= items.length: return none
+        return items[(usize)index]
+
+    ## Give back the items (Luce calls it when the last owner goes).
+    pub func close():
+        self.completion.destroy()
+
+pub let code_completion_type: interop.Type[CodeCompletion] = interop.Type[CodeCompletion]("CodeCompletion", CodeCompletion.close, closeable = true)
+
+## The completions at `line`, `column` (characters) of `part` (0 body, 1 header).
+func complete_code(run_over: i64, header: str, body: str, part: i64, line: i64, column: i64) -> interop.Reference[CodeCompletion]!:
+    let mode = try RunOver.of(run_over)
+    let (which, text) = help_part(part, header, body)
+    let row = line_of(text, (u32)(line if line > 0 else 1))
+    let root = try locked_root()
+    var completion = try lower.complete(root, mode.wrapper(), header, body, which, (u32)(line if line > 0 else 1), byte_column(row, column), help_stubs[..<1])
+    let storage = new CodeCompletion[1] --- in memory.heap catch failure:
+        completion.destroy()
+        error(failure.code, failure.message)
+    storage[0] = CodeCompletion(completion = completion, start_column = (i64)character_column(row, completion.start))
+    return try interop.Reference[CodeCompletion].adopt(storage.data, code_completion_type, memory.heap)
+
+## The hover text of the word at `line`, `column` (characters) of `part`: its signature
+## or type, then its doc on the next line; "" when nothing there has help.
+func hover_code(run_over: i64, header: str, body: str, part: i64, line: i64, column: i64) -> interop.Owned[str]!:
+    let mode = try RunOver.of(run_over)
+    let (which, text) = help_part(part, header, body)
+    let row = line_of(text, (u32)(line if line > 0 else 1))
+    let root = try locked_root()
+    var said = collections.List[u8]()
+    defer said.destroy()
+    try lower.hover(root, mode.wrapper(), header, body, which, (u32)(line if line > 0 else 1), byte_column(row, column), help_stubs[..<1], &said)
+    return try interop.copy_text((str)said.view())
+
+func help_part(part: i64, header: str, body: str) -> (lower.Part, str):
+    if part == 1: return (lower.Part.header, header)
+    return (lower.Part.body, body)
+
+## The snippet root, laid out under the cache's lock.
+func locked_root() -> str!:
+    cache_lock.lock()
+    defer cache_lock.unlock()
+    return try snippet_root()
+
+## The 1-based byte column of 1-based character column `column` of `line` (past its end:
+## just past the end).
+func byte_column(line: str, column: i64) -> u32:
+    var characters: i64 = 1
+    for index in 0..<line.length:
+        if (line.bytes[index] & 0xC0) == 0x80: continue
+        if characters >= column: return (u32)index + 1
+        characters += 1
+    return (u32)line.length + 1

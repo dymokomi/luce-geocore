@@ -151,6 +151,19 @@ pub struct Code:
             error(failure.code, failure.message)
         return try interop.Reference[CodeCheck].adopt(storage.data, code_check_type, memory.heap)
 
+    ## What may come at line `line`, column `column` (1-based, in characters; the caret
+    ## sits before that column) of `part` (0 body, 1 header) of the snippet for Run Over
+    ## `run_over`: after `p.`, `k.`, `g.` or any value's `.` that type's members, else the
+    ## locals in scope, the header's helpers, the lib and Base's keywords. Half-typed code
+    ## still completes (see CodeCompletion).
+    pub static func complete(run_over: i64, header: str, body: str, part: i64, line: i64, column: i64) -> interop.Reference[CodeCompletion]!:
+        return try complete_code(run_over, header, body, part, line, column)
+
+    ## The signature and doc of the word at `line`, `column` of `part` (a lib function, an
+    ## API member, a local's type), "" when nothing applies.
+    pub static func hover(run_over: i64, header: str, body: str, part: i64, line: i64, column: i64) -> interop.Owned[str]!:
+        return try hover_code(run_over, header, body, part, line, column)
+
     ## Run `body` (and `header`) over `set` for Run Over `run_over`, on the elements of
     ## `group` (a group expression read on `group_type`'s domain, 0 guessing; empty: all).
     ## `k.input(0)` reads `set` as it was, `k.input(1)` reads `input1` (none: an empty

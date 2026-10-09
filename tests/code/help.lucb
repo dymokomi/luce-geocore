@@ -1,0 +1,59 @@
+## Editor help through Code.complete and Code.hover, with the stubs' docs.
+import interop
+import time
+from luce_std import collections
+from luce_geocore.geocore import Code, CodeCompletion
+
+func expect(condition: bool, what: str):
+    if not condition:
+        print(f"FAIL  {what}")
+        trap("editor help checks")
+
+pub func run_all() -> !:
+    # Points: `p.` lists the point's members, with their stub docs.
+    let point = try Code.complete(1, "", "p.", 0, 1, 3)
+    try expect_labels(point, ["P", "N", "Cd", "ptnum", "f32_array", "set_text"], "p. completes the point's members")
+    let points = try point.get()
+    expect(points.start() == 3, "the word starts after the dot")
+    for at: i64 in 0..<points.count():
+        if points.label(at) == "Cd": expect(points.kind(at) == "field" and points.detail(at) == "Cd: f32[4]" and points.doc(at) == "Color; writing creates it.", "Cd's detail and doc")
+        if points.label(at) == "numpt": expect(points.doc(at) == "This point's number and how many points there are.", "a doc shared down a group")
+    try expect_labels(try Code.complete(1, "", "p.P[1] = k.", 0, 1, 12), ["f32", "ramp", "input", "printf", "time"], "k. completes the kernel's members")
+    try expect_labels(try Code.complete(3, "", "f.", 0, 1, 3), ["primnum", "f32_array"], "f. completes the primitive's members")
+    try expect_labels(try Code.complete(1, "", "let g = k.input(0)\nlet near = g.nearpoints(p.P, 0.1, 8)\nnear.", 0, 3, 6), ["count", "points"], "a struct value's fields")
+    let named = try Code.complete(1, "", "p.P[1] = sno", 0, 1, 13)
+    try expect_labels(named, ["snoise"], "sno completes snoise")
+    let open = try named.get()
+    for at: i64 in 0..<open.count():
+        if open.label(at) == "snoise": expect(open.kind(at) == "function" and open.detail(at) == "snoise(p: f32[4]) -> f32", "snoise's signature")
+    # A half-typed line above still leaves the dot completing.
+    try expect_labels(try Code.complete(1, "", "let g = k.input(0)\np.P = g.point_P(\ng.", 0, 3, 3), ["point_P", "nearpoints", "neighbor_count"], "a half-typed line still completes")
+    # Hover: a lib function, an API member, a local.
+    expect((try Code.hover(1, "", "p.P[1] = snoise(p.P)\n", 0, 1, 12)).value == "snoise(p: f32[4]) -> f32\nSigned 3D noise of lanes 0 to 2.", "hovering snoise")
+    expect(strings_start((try Code.hover(1, "", "p.Cd = p.P\n", 0, 1, 4)).value, "Cd: f32[4]\nColor"), "hovering a member")
+    let local = try Code.hover(1, "", "let g = k.input(0)\n", 0, 1, 5)
+    if local.value != "g: Geometry": print(f"  got [{local.value}]")
+    expect(local.value == "g: Geometry", "hovering a local")
+    expect((try Code.hover(1, "", "p.P = p.P\n", 0, 1, 6)).value == "", "nothing on an operator")
+    # A keystroke's cost: a completion in a 40-line snippet, after the first.
+    var body = collections.List[u8]()
+    defer body.destroy()
+    for _ in 0..<40:
+        for byte in "let n = snoise(p.P * 2.0)\np.P[1] += n * 0.1\n".bytes: try body.append(byte)
+    for byte in "p.".bytes: try body.append(byte)
+    let started = time.now()
+    for _ in 0..<10: _ = try Code.complete(1, "", (str)body.view(), 0, 81, 3)
+    let spent = (f64)time.since(started) / 10000000.0
+    print(f"ok    editor help: p., k., f., struct values, lib names, half-typed lines, hover ({spent} ms a completion)")
+
+func expect_labels(completion: interop.Reference[CodeCompletion], wanted: const str[], what: str) -> !:
+    let items = try completion.get()
+    for name in wanted:
+        var found = false
+        for at: i64 in 0..<items.count():
+            if items.label(at) == name: found = true
+        if not found: print(f"  missing {name} of {items.count()}")
+        expect(found, what)
+
+func strings_start(text: str, prefix: str) -> bool:
+    return text.length >= prefix.length and (str)text.bytes[..<prefix.length] == prefix

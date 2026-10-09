@@ -84,6 +84,9 @@ pub type Sketches = curves.Sketches
 pub let invalid: ErrorCode = errors.invalid
 pub let busy: ErrorCode = errors.busy
 pub let limit: ErrorCode = errors.limit
-## The Code node: snippets checked (`Code.check`) and run over a set (`Code.run`).
+## The Code node: snippets checked (`Code.check`), helped (`Code.complete`, `Code.hover`)
+## and run over a set (`Code.run`).
 pub type Code = code.Code
 pub type CodeCheck = code.CodeCheck
+## Editor help for the Code node's text: `Code.complete`'s items and `Code.hover`.
+pub type CodeCompletion = code.CodeCompletion
