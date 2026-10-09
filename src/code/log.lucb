@@ -1,0 +1,215 @@
+# What a snippet tells the node: `k.printf(format, ...)` lines for the node's console,
+# `k.warning("text")` for the node's warning, and `k.error("text")`, which fails the
+# cook at the line and element like a trap. Messages come back in element order (within
+# an element, in the order the snippet made them), the first `kept_messages` of them
+# plus how many there were in all; the warning is the first one, plus a count.
+
+## The most printf messages a cook keeps (the first in element order).
+let kept_messages: usize = 200
+
+## One message: its order key (element, then the worker's call order) and text.
+struct Message:
+    var key: u64
+    var text: str
+
+## One worker's messages and warnings.
+struct WorkerLog:
+    var messages: collections.List[Message]
+    var texts: collections.TextPool
+    var calls: u64
+    var printed: u64
+    var warned: u64
+    var warning_key: u64 = 0xFFFFFFFFFFFFFFFF
+    var warning: str = ""
+
+    func close():
+        self.messages.destroy()
+        self.texts.destroy()
+
+    ## Keep at most `kept_messages` of the smallest keys (the list grows to twice that
+    ## between trims).
+    func trim():
+        if self.messages.length() < kept_messages * 2: return
+        sort.stable(self.messages.items(), message_before)
+        self.messages.truncate(kept_messages)
+
+func message_before(a: Message, b: Message) -> bool:
+    return a.key < b.key
+
+## Every worker's log, and the merged result after the run.
+struct Log:
+    var workers: collections.List[WorkerLog]
+
+    func close():
+        for at in 0..<self.workers.length(): self.workers.items()[at].close()
+        self.workers.destroy()
+
+    func prepare(workers: usize) -> !:
+        for _ in 0..<workers: try self.workers.append(WorkerLog())
+
+    ## The printed text, the first `kept_messages` messages in order, a last line saying
+    ## how many more there were; how many messages there were in all.
+    func output(into: collections.List[u8]*) -> u64!:
+        var all: collections.List[Message]
+        defer all.destroy()
+        var total: u64 = 0
+        for worker in self.workers.view():
+            total += worker.printed
+            for message in worker.messages.view(): try all.append(message)
+        sort.stable(all.items(), message_before)
+        let shown = all.length() if all.length() < kept_messages else kept_messages
+        for message in all.view()[..<shown]:
+            for byte in message.text.bytes: try into.append(byte)
+        if total > (u64)shown:
+            var room: u8[96]
+            let more = strings.format(room, f"... and {total - (u64)shown} more messages\n") else ""
+            for byte in more.bytes: try into.append(byte)
+        return total
+
+    ## The first warning in element order and how many there were.
+    func warning() -> (str, u64):
+        var best_key: u64 = 0xFFFFFFFFFFFFFFFF
+        var best = ""
+        var total: u64 = 0
+        for worker in self.workers.view():
+            total += worker.warned
+            if worker.warned > 0 and worker.warning_key < best_key:
+                best_key = worker.warning_key
+                best = worker.warning
+        return (best, total)
+
+## Register printf, warning and error on the Kernel.
+func bind_log(host: Host*) -> !:
+    try host.builtin("Kernel", "printf", engine.Builtin.of("printf", [Kind.f32, Kind.f32, Kind.f32, Kind.f32], [Kind.i32], printf_lanes))
+    try host.builtin("Kernel", "warning", engine.Builtin.of("warning", no_kinds(), [Kind.i32], warning_lanes))
+    try host.builtin("Kernel", "error", engine.Builtin.of("error", no_kinds(), [Kind.i32], error_lanes))
+
+func no_kinds() -> const Kind[]:
+    var none_given: const Kind[]
+    return none_given
+
+## The worker log of a call, or none.
+func worker_log(call: const engine.Call*) -> WorkerLog*?:
+    let state = state_of(call) else return none
+    let worker = call.worker_number()
+    if worker >= state.log.workers.length(): return none
+    return &state.log.workers.items()[worker]
+
+func order_key(element: usize, call: u64) -> u64:
+    return ((u64)element << 24) | (call & 0xFFFFFF)
+
+func printf_lanes(call: engine.Call*):
+    let log = worker_log(call) else return
+    let order = log.calls
+    log.calls = order + 1
+    let format = call.text(0)
+    var values: f32[4]
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = 0
+        if not call.active(lane): continue
+        for k: usize in 0..<4: values[k] = call.f32_argument(k)[lane]
+        var room: u8[1024]
+        let text = formatted(room, format, values)
+        log.printed += 1
+        let kept = log.texts.keep_text(text.bytes) catch failure: continue
+        log.messages.append(Message(key = order_key(call.first + lane, order), text = kept)) catch failure: continue
+        log.trim()
+
+func warning_lanes(call: engine.Call*):
+    let log = worker_log(call) else return
+    let order = log.calls
+    log.calls = order + 1
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = 0
+        if not call.active(lane): continue
+        log.warned += 1
+        let key = order_key(call.first + lane, order)
+        if key < log.warning_key:
+            log.warning_key = key
+            log.warning = call.text(0)
+
+func error_lanes(call: engine.Call*):
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = 0
+        call.fail_with(lane, call.text(0))
+
+## `format` with its `%` directives filled from `values` in order (C's printf, as VEX's
+## takes it): `%d` and `%i` round to a whole number, `%f`, `%e` and `%g` take an optional
+## precision (`%.3f`), `%%` is a percent sign. Directives past the fourth value read 0.
+func formatted(room: u8[], format: str, values: f32[4]) -> str:
+    var used: usize = 0
+    var next: usize = 0
+    var at: usize = 0
+    let bytes = format.bytes
+    while at < bytes.length and used < room.length:
+        let byte = bytes[at]
+        if byte != '%' or at + 1 >= bytes.length:
+            room[used] = byte
+            used += 1
+            at += 1
+            continue
+        at += 1
+        if bytes[at] == '%':
+            room[used] = '%'
+            used += 1
+            at += 1
+            continue
+        var precision: i64 = -1
+        if bytes[at] == '.':
+            at += 1
+            precision = 0
+            while at < bytes.length and bytes[at] >= '0' and bytes[at] <= '9':
+                precision = precision * 10 + (i64)(bytes[at] - '0')
+                at += 1
+        if at >= bytes.length: break
+        let kind = bytes[at]
+        at += 1
+        let value = (f64)values[next] if next < 4 else 0.0
+        next += 1
+        var piece: u8[64]
+        let digits = precision if precision >= 0 else 6
+        let text = match kind:
+            'd', 'i' => strings.format(piece, f"{(i64)math.round(value)}") else ""
+            'e' => scientific(piece, value, digits)
+            'g' => strings.format(piece, f"{value}") else ""
+            _ => fixed(piece, value, digits)
+        for b in text.bytes:
+            if used < room.length:
+                room[used] = b
+                used += 1
+    return (str)room[..<used]
+
+## `value` with `digits` decimals.
+func fixed(room: u8[], value: f64, digits: i64) -> str:
+    let places = digits if digits < 12 else 12
+    var scale: f64 = 1.0
+    for _ in 0..<places: scale *= 10.0
+    let rounded = math.round(math.abs(value) * scale)
+    let whole = math.floor(rounded / scale)
+    let part = (i64)(rounded - whole * scale)
+    let sign = "-" if value < 0.0 and rounded != 0.0 else ""
+    if places == 0:
+        return strings.format(room, f"{sign}{(i64)whole}") else ""
+    var digits_room: u8[16]
+    var written: usize = (usize)places
+    var rest = part
+    while written > 0:
+        written -= 1
+        digits_room[written] = (u8)('0' + (u8)(rest % 10))
+        rest = rest // 10
+    return strings.format(room, f"{sign}{(i64)whole}.{(str)digits_room[..<(usize)places]}") else ""
+
+## `value` as `d.ddde±xx` with `digits` decimals.
+func scientific(room: u8[], value: f64, digits: i64) -> str:
+    if value == 0.0 or not math.is_finite(value):
+        return fixed(room, value, digits)
+    var exponent: i64 = (i64)math.floor(math.log10(math.abs(value)))
+    var mantissa = value / math.pow(10.0, (f64)exponent)
+    if math.abs(mantissa) >= 10.0:
+        mantissa /= 10.0
+        exponent += 1
+    var mantissa_room: u8[48]
+    let head = fixed(mantissa_room, mantissa, digits)
+    let sign = "-" if exponent < 0 else "+"
+    let magnitude = -exponent if exponent < 0 else exponent
+    return strings.format(room, f"{head}e{sign}{magnitude // 10}{magnitude % 10}") else ""

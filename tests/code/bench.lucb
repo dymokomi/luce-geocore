@@ -26,6 +26,7 @@ pub func run_all() -> !:
     try measure("empty", "", 3.0)
     try measure("curlnoise", "p.P = p.P + curlnoise(p.P * 3.0) * 0.01\n", 0.0)
     try measure("wnoise", "let w = wnoise(p.P * 8.0)\np.Cd = [w.f1, w.f2, 0.0, 0.0]\n", 0.0)
+    try measure("pcopen + pcfilter smoothing (20 points)", "p.P = k.input(0).pcopen(p.P, 0.006, 20).filter_vec3(\"P\")\n", 0.0)
     try measure("twist (a Mat3 per point)", "let m = Mat3.rotation(p.P[1] * 2.0, [0.0, 1.0, 0.0, 0.0])\np.P = m.transform(p.P)\n", 0.0)
     _ = geocore_kernel.code_compiles()
     try grid_build()

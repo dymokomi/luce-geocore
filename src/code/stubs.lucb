@@ -248,6 +248,39 @@ pub struct Near:
     pub let count: i32
     pub let points: i32[16]
 
+## A point cloud an input's `pcopen` found: up to 64 points near a position, nearest
+## first. VEX's pcnumfound is `count()`, pcimport is `f32(i, name)` / `vec3(i, name)`, and
+## pcfilter is `filter_f32(name)` / `filter_vec3(name)`.
+pub struct PointCloud:
+    var unused: i32
+    ## How many points were found (VEX `pcnumfound`).
+    pub func count() -> i32:
+        return 0
+    ## The `i`-th found point's number and its distance from the position.
+    pub func point(i: i32) -> i32:
+        return i
+    pub func distance(i: i32) -> f32:
+        _ = i
+        return 0.0
+    ## Point attribute `name` ("P" the position) of the `i`-th found point (VEX
+    ## `pcimport`).
+    pub func f32(i: i32, name: str) -> f32:
+        _ = i
+        _ = name
+        return 0.0
+    pub func vec3(i: i32, name: str) -> f32[4]:
+        _ = i
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    ## Point attribute `name` averaged over the found points with weights
+    ## `1 - (distance / radius)^2`, normalized (VEX `pcfilter`): one call smooths.
+    pub func filter_f32(name: str) -> f32:
+        _ = name
+        return 0.0
+    pub func filter_vec3(name: str) -> f32[4]:
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+
 ## A geometry the snippet reads: `k.input(0)` (the node's input as it was before this
 ## run) or `k.input(1)` (the second input; empty when not connected). Numbers out of
 ## range fail the cook at the element.
@@ -512,6 +545,68 @@ pub struct Geometry:
     pub func windingnumber(position: f32[4]) -> f32:
         _ = position
         return 0.0
+    ## Open a point cloud (VEX `pcopen`): the nearest `max_count` points (up to 64) within
+    ## `radius` of `position`, nearest first, read through the PointCloud's methods. A
+    ## later open at the same place in the snippet (a loop) replaces this one's points.
+    pub func pcopen(position: f32[4], radius: f32, max_count: i32) -> const PointCloud*:
+        _ = position
+        _ = radius
+        _ = max_count
+        return (const PointCloud*)(void*)4096
+    ## The same search as `pcopen` (VEX `pcfind`, whose point numbers are `pc.point(i)`).
+    pub func pcfind(position: f32[4], radius: f32, max_count: i32) -> const PointCloud*:
+        _ = position
+        _ = radius
+        _ = max_count
+        return (const PointCloud*)(void*)4096
+    ## The points within `radius` whose own radius, point attribute `radius_name` times
+    ## `scale`, reaches `position` (VEX `pcfind_radius`), nearest first, up to `max_count`.
+    pub func pcfind_radius(position: f32[4], radius_name: str, scale: f32, radius: f32, max_count: i32) -> const PointCloud*:
+        _ = position
+        _ = radius_name
+        _ = scale
+        _ = radius
+        _ = max_count
+        return (const PointCloud*)(void*)4096
+    ## The trilinear value of volume grid `name` at `position` (VEX `volumesample`): ""
+    ## names the first grid, "#2" the third, anything else a grid by name; an input with
+    ## an SDF (and no grid of that name) samples the SDF exactly. 0 when there is neither.
+    pub func volume_sample(name: str, position: f32[4]) -> f32:
+        _ = name
+        _ = position
+        return 0.0
+    ## A vector volume, grids `name.x`, `name.y` and `name.z` (VEX `volumesamplev`).
+    pub func volume_sample_vec3(name: str, position: f32[4]) -> f32[4]:
+        _ = name
+        return position
+    ## The gradient at `position` by central differences a voxel apart (VEX
+    ## `volumegradient`); for an SDF a thousandth of its extent apart.
+    pub func volume_gradient(name: str, position: f32[4]) -> f32[4]:
+        _ = name
+        return position
+    ## Voxel (i, j, k)'s stored value, the grid's background outside its leaves (VEX
+    ## `volumeindex`).
+    pub func volume_index(name: str, i: i32, j: i32, k: i32) -> f32:
+        _ = name
+        return (f32)(i + j + k)
+    ## The nearest voxel's (i, j, k) to `position`, whole numbers in lanes 0 to 2 (VEX
+    ## `volumepostoindex`).
+    pub func volume_pos_to_index(name: str, position: f32[4]) -> f32[4]:
+        _ = name
+        return position
+    ## Voxel (i, j, k)'s center (VEX `volumeindextopos`).
+    pub func volume_index_to_pos(name: str, i: i32, j: i32, k: i32) -> f32[4]:
+        _ = name
+        return [(f32)i, (f32)j, (f32)k, 0.0]
+    ## The voxels the grid's leaves span along each axis (VEX `volumeres`; a sparse grid
+    ## has no fixed resolution); zero without a grid.
+    pub func volume_res(name: str) -> f32[4]:
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    ## The grid's voxel edge length (VEX `volumevoxeldiameter` over the square root of 3).
+    pub func volume_voxel_size(name: str) -> f32:
+        _ = name
+        return 0.0
 
 ## The node: the timeline, its spare parameters, the detail attributes, the inputs, and
 ## edits queued for after the run (new points and primitives, attribute sets, removals:
@@ -537,6 +632,22 @@ pub struct Kernel:
     pub func ramp_color(name: str, t: f32) -> f32[4]:
         _ = name
         return [t, t, t, 0.0]
+    ## Print to the node's console (VEX `printf`): `format` with `%d`/`%i` (rounded),
+    ## `%f`, `%e`, `%g` (optional precision, `%.3f`) and `%%` filled from `a` to `d` in
+    ## order; a newline ends a line. Messages appear in element order, the first 200.
+    pub func printf(format: str, a: f32 = 0.0, b: f32 = 0.0, c: f32 = 0.0, d: f32 = 0.0):
+        _ = format
+        _ = a
+        _ = b
+        _ = c
+        _ = d
+    ## Add `message` to the node's warnings; the cook succeeds (the node shows the first
+    ## warning in element order and how many there were).
+    pub func warning(message: str):
+        _ = message
+    ## Fail the cook with `message` at this line and element, as a trap does.
+    pub func error(message: str):
+        _ = message
     ## Queue a new point at world position `position`; its number, for add_prim and the
     ## set_point_ accessors (an element adds at most 1024 points and 1024 primitives).
     pub func add_point(position: f32[4]) -> i32:

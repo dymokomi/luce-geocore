@@ -15,6 +15,7 @@ func nearpoint(call: engine.Call*):
     let reach = call.f32_argument(5)
     let points = call.i32_result(0)
     var found: u32[16]
+    var distances: f64[16]
     for lane in 0..<call.lanes:
         points[lane] = -1
         let source = source_or_fail(state, call, lane) else continue
@@ -22,7 +23,7 @@ func nearpoint(call: engine.Call*):
         if not source.with_grid():
             call.fail(lane)
             continue
-        if source.grid.nearest(position_argument(call, 1, lane), (f64)reach[lane], 1, found) > 0:
+        if source.grid.nearest(position_argument(call, 1, lane), (f64)reach[lane], 1, found, distances) > 0:
             points[lane] = (i32)found[0]
 
 func nearpoints(call: engine.Call*):
@@ -30,13 +31,14 @@ func nearpoints(call: engine.Call*):
     let reach = call.f32_argument(5)
     let most = call.i32_argument(6)
     var found: u32[16]
+    var distances: f64[16]
     for lane in 0..<call.lanes:
         var count: usize = 0
         if let source = source_or_fail(state, call, lane):
             if source.mesh != none:
                 if source.with_grid():
                     let limit = 0 if most[lane] < 0 else (16 if most[lane] > 16 else (usize)most[lane])
-                    count = source.grid.nearest(position_argument(call, 1, lane), (f64)reach[lane], limit, found)
+                    count = source.grid.nearest(position_argument(call, 1, lane), (f64)reach[lane], limit, found, distances)
                 else:
                     call.fail(lane)
         call.i32_result(0)[lane] = (i32)count

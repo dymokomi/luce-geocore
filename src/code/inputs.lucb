@@ -7,6 +7,8 @@
 ## One input: its mesh (none when the input is empty) and what was built for it.
 struct Source:
     var mesh: const Mesh*?
+    ## The whole input (its volumes and SDF), none for an unconnected one.
+    var set: const GeometrySet*?
     var lock: sync.Mutex
     var failed: @bool
     var topology_ready: @bool
@@ -159,15 +161,19 @@ struct CookState:
     var second: Source
     var edits: Edits
     var ramps: Ramps
+    var clouds: Clouds
+    var log: Log
 
     func close():
         self.first.close()
         self.second.close()
         self.edits.close()
         self.ramps.close()
+        self.clouds.close()
+        self.log.close()
 
 ## The builtins that need each structure, by what they need.
-let grid_users: str[2] = ["nearpoint", "nearpoints"]
+let grid_users: str[5] = ["nearpoint", "nearpoints", "pcopen", "pcfind", "pcfind_radius"]
 let index_users: str[4] = ["xyzdist", "closest_prim", "closest_uv", "intersect"]
 let topology_users: str[2] = ["neighbor_count", "neighbor"]
 let incidence_users: str[2] = ["point_prim_count", "point_prim"]

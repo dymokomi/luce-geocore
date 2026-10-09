@@ -88,12 +88,12 @@ struct PointGrid:
         let z = self.axis(p.z - self.low.z, self.nz)
         return (z * self.ny + y) * self.nx + x
 
-    ## The nearest `most` points (up to 16) within `reach` of `p`, nearest first (ties by
-    ## number): into `found`, how many.
-    func nearest(p: Vector3, reach: f64, most: usize, found: u32[]) -> usize:
-        if not self.built or most == 0 or not (reach >= 0.0):
+    ## The nearest `most` points within `reach` of `p`, nearest first (ties by number):
+    ## their numbers into `found` and squared distances into `distances` (both at least
+    ## `most` long); how many.
+    func nearest(p: Vector3, reach: f64, most: usize, found: u32[], distances: f64[]) -> usize:
+        if not self.built or most == 0 or not (reach >= 0.0) or found.length < most or distances.length < most:
             return 0
-        var distances: f64[16]
         var count: usize = 0
         let limit = reach * reach
         let x0 = self.axis(p.x - reach - self.low.x, self.nx)

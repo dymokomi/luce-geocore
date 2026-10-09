@@ -1,0 +1,278 @@
+# Point clouds (VEX's pcopen family): `g.pcopen(P, radius, max)` finds up to 64 points
+# of an input near `P`, nearest first, and gives a `PointCloud` value; its methods read
+# the found points, their distances and attributes, and filter an attribute over them.
+#
+# The found points live with the worker running the element, one block per call site
+# (a later call at the same site, as in a loop, replaces the element's points). A
+# PointCloud value names its site, worker and element; it is good for the element's
+# run. Up to 64 points per open.
+
+## The most points one open finds.
+let most_cloud: usize = 64
+
+## One call site's open point clouds on one worker: per lane of its current chunk the
+## input read, the radius, how many were found, and their numbers and distances.
+struct CloudBlock:
+    var site: usize
+    var first: usize
+    var lanes: usize
+    var inputs: i32[]
+    var radii: f32[]
+    var counts: i32[]
+    var points: i32[]
+    var distances: f32[]
+
+    func close():
+        if self.inputs.length == 0: return
+        free(self.inputs) in memory.heap
+        free(self.radii) in memory.heap
+        free(self.counts) in memory.heap
+        free(self.points) in memory.heap
+        free(self.distances) in memory.heap
+
+    ## Room for `lanes` lanes, starting at element `first`.
+    func ready(first: usize, lanes: usize) -> !:
+        if self.inputs.length < lanes:
+            self.close()
+            self.inputs = try new i32[lanes] in memory.heap
+            self.radii = try new f32[lanes] in memory.heap
+            self.counts = try new i32[lanes] in memory.heap
+            self.points = try new i32[lanes * most_cloud] --- in memory.heap
+            self.distances = try new f32[lanes * most_cloud] --- in memory.heap
+        self.first = first
+        self.lanes = lanes
+
+## Every worker's blocks.
+struct Clouds:
+    var workers: collections.List[collections.List[CloudBlock]]
+
+    func close():
+        for at in 0..<self.workers.length():
+            let blocks = &self.workers.items()[at]
+            for block in blocks.items(): block.close()
+            blocks.destroy()
+        self.workers.destroy()
+
+    ## One empty list of blocks per worker.
+    func prepare(workers: usize) -> !:
+        for _ in 0..<workers: try self.workers.append(collections.List[CloudBlock]())
+
+    ## Worker `worker`'s block for `site`, made on first use.
+    func block(worker: usize, site: usize) -> CloudBlock*?!:
+        if worker >= self.workers.length(): return none
+        let blocks = &self.workers.items()[worker]
+        for at in 0..<blocks.length():
+            if blocks.items()[at].site == site: return &blocks.items()[at]
+        try blocks.append(CloudBlock(site = site, first = 0, lanes = 0, inputs = no_ints32(), radii = no_floats32(), counts = no_ints32(), points = no_ints32(), distances = no_floats32()))
+        return &blocks.items()[blocks.length() - 1]
+
+    ## The block and lane a PointCloud value names, or none for a stale or made-up one.
+    func named(handle: i64) -> (CloudBlock*, usize)?:
+        if handle < 0: return none
+        let site = (usize)(handle >> 40)
+        let worker = (usize)((handle >> 32) & 0xFF)
+        let element = (usize)(handle & 0xFFFFFFFF)
+        if worker >= self.workers.length(): return none
+        let blocks = &self.workers.items()[worker]
+        for at in 0..<blocks.length():
+            let block = &blocks.items()[at]
+            if block.site == site and element >= block.first and element < block.first + block.lanes:
+                return (block, element - block.first)
+        return none
+
+func no_ints32() -> i32[]:
+    var none_given: i32[]
+    return none_given
+
+func no_floats32() -> f32[]:
+    var none_given: f32[]
+    return none_given
+
+## The PointCloud value of `element` at `site` on `worker`.
+func cloud_handle(site: usize, worker: usize, element: usize) -> i64:
+    return ((i64)site << 40) | ((i64)worker << 32) | (i64)element
+
+let cloud_names: str[3] = ["pcopen", "pcfind", "pcfind_radius"]
+
+## Register the point-cloud reads.
+func bind_clouds(host: Host*) -> !:
+    let near = [Kind.i64, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.i32]
+    try host.builtin("Geometry", "pcopen", engine.Builtin.of("pcopen", near, [Kind.i64], open_lanes))
+    try host.builtin("Geometry", "pcfind", engine.Builtin.of("pcfind", near, [Kind.i64], open_lanes))
+    try host.builtin("Geometry", "pcfind_radius", engine.Builtin.of("pcfind_radius", [Kind.i64, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.f32, Kind.i32], [Kind.i64], open_lanes, (void*)&radius_mode))
+    try host.builtin("PointCloud", "count", engine.Builtin.of("pc_count", [Kind.i64], [Kind.i32], cloud_count))
+    try host.builtin("PointCloud", "point", engine.Builtin.of("pc_point", [Kind.i64, Kind.i32], [Kind.i32], cloud_point))
+    try host.builtin("PointCloud", "distance", engine.Builtin.of("pc_distance", [Kind.i64, Kind.i32], [Kind.f32], cloud_distance))
+    try host.builtin("PointCloud", "f32", engine.Builtin.of("pc_f32", [Kind.i64, Kind.i32], [Kind.f32], cloud_value, (void*)&one_lane))
+    try host.builtin("PointCloud", "vec3", engine.Builtin.of("pc_vec3", [Kind.i64, Kind.i32], [Kind.f32, Kind.f32, Kind.f32, Kind.f32], cloud_value, (void*)&three_lanes))
+    try host.builtin("PointCloud", "filter_f32", engine.Builtin.of("pc_filter_f32", [Kind.i64], [Kind.f32], cloud_filter, (void*)&one_lane))
+    try host.builtin("PointCloud", "filter_vec3", engine.Builtin.of("pc_filter_vec3", [Kind.i64], [Kind.f32, Kind.f32, Kind.f32, Kind.f32], cloud_filter, (void*)&three_lanes))
+
+let radius_mode: bool = true
+let one_lane: usize = 1
+let three_lanes: usize = 3
+
+## `pcopen(P, radius, max)` and `pcfind`: the nearest `max` (up to 64) points within
+## `radius`; `pcfind_radius(P, "attribute", scale, radius, max)` keeps those whose own
+## radius (`attribute` times `scale`) reaches `P`.
+func open_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let by_radius = call.context != none
+    let worker = call.worker_number()
+    let block = state.clouds.block(worker, call.site_number()) catch failure:
+        _ = failure
+        recover none
+    if block == none:
+        for lane in 0..<call.lanes: call.fail(lane)
+        return
+    let cloud = block else return
+    cloud.ready(call.first, call.lanes) catch failure:
+        _ = failure
+        for lane in 0..<call.lanes: call.fail(lane)
+        return
+    let scales = call.f32_argument(5)
+    let radii = call.f32_argument(6) if by_radius else call.f32_argument(5)
+    let limits = call.i32_argument(7) if by_radius else call.i32_argument(6)
+    let name = call.text(0)
+    let out = call.i64_result(0)
+    var found: u32[64]
+    var squared: f64[64]
+    for lane in 0..<call.lanes:
+        out[lane] = cloud_handle(call.site_number(), worker, call.first + lane)
+        cloud.counts[lane] = 0
+        cloud.inputs[lane] = (i32)call.i64_argument(0)[lane]
+        cloud.radii[lane] = radii[lane]
+        let source = source_or_fail(state, call, lane) else continue
+        if source.mesh == none: continue
+        if not source.with_grid():
+            call.fail(lane)
+            continue
+        let most = 0 if limits[lane] < 0 else (most_cloud if limits[lane] > (i32)most_cloud else (usize)limits[lane])
+        let p = position_argument(call, 1, lane)
+        # By radius, look at every point in reach and keep the ones whose own radius
+        # reaches; otherwise the nearest `most`.
+        let count = source.grid.nearest(p, (f64)radii[lane], most_cloud if by_radius else most, found, squared)
+        var kept: usize = 0
+        for at in 0..<count:
+            let d = math.sqrt(squared[at])
+            if by_radius:
+                if kept >= most: break
+                let own = point_number(source, name, (usize)found[at], 0) * (f64)scales[lane]
+                if d > own: continue
+            cloud.points[lane * most_cloud + kept] = (i32)found[at]
+            cloud.distances[lane * most_cloud + kept] = (f32)d
+            kept += 1
+        cloud.counts[lane] = (i32)kept
+
+## Component `component` of point attribute `name` at `point` of `source` ("P" the
+## position); 0 when the input lacks it.
+func point_number(source: const Source*, name: str, point: usize, component: usize) -> f64:
+    let mesh = source.mesh else return 0.0
+    if name == "P":
+        let p = source.position(point)
+        return p.x if component == 0 else (p.y if component == 1 else (p.z if component == 2 else 0.0))
+    let found = mesh.find_attribute(name, (i64)(u8)Domain.point)
+    if found < 0: return 0.0
+    let entry = mesh.attribute_entry(found) catch failure: return 0.0
+    if component >= entry.width: return 0.0
+    return entry.number(point, component)
+
+## The cloud a call's lane names: its block and lane, or a fault.
+func cloud_of(state: CookState*, call: engine.Call*, lane: usize) -> (CloudBlock*, usize)?:
+    let found = state.clouds.named(call.i64_argument(0)[lane])
+    if found == none: call.fail_as(lane, .bounds)
+    return found
+
+func cloud_count(call: engine.Call*):
+    let state = state_of(call) else return
+    let out = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        out[lane] = 0
+        let named = cloud_of(state, call, lane) else continue
+        let block = named.0
+        let at = named.1
+        out[lane] = block.counts[at]
+
+## The `i`-th found point's slot in `block`'s lane `at`, or a bounds fault.
+func found_slot(block: const CloudBlock*, at: usize, i: i32, call: engine.Call*, lane: usize) -> usize?:
+    if i < 0 or i >= block.counts[at]:
+        call.fail_as(lane, .bounds)
+        return none
+    return at * most_cloud + (usize)i
+
+func cloud_point(call: engine.Call*):
+    let state = state_of(call) else return
+    let indices = call.i32_argument(1)
+    let out = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        out[lane] = -1
+        let named = cloud_of(state, call, lane) else continue
+        let block = named.0
+        let at = named.1
+        let slot = found_slot(block, at, indices[lane], call, lane) else continue
+        out[lane] = block.points[slot]
+
+func cloud_distance(call: engine.Call*):
+    let state = state_of(call) else return
+    let indices = call.i32_argument(1)
+    let out = call.f32_result(0)
+    for lane in 0..<call.lanes:
+        out[lane] = 0.0
+        let named = cloud_of(state, call, lane) else continue
+        let block = named.0
+        let at = named.1
+        let slot = found_slot(block, at, indices[lane], call, lane) else continue
+        out[lane] = block.distances[slot]
+
+## The source a cloud lane read.
+func cloud_source(state: CookState*, block: const CloudBlock*, at: usize) -> Source*:
+    return &state.first if block.inputs[at] == 0 else &state.second
+
+## `pc.f32(i, "name")` and `pc.vec3(i, "name")`: an attribute of the `i`-th found point
+## (VEX `pcimport` by iteration index).
+func cloud_value(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let components = *(const usize*)context
+    let indices = call.i32_argument(1)
+    let name = call.text(0)
+    for lane in 0..<call.lanes:
+        for k in 0..<(components if components == 1 else 4): call.f32_result(k)[lane] = 0.0
+        let named = cloud_of(state, call, lane) else continue
+        let block = named.0
+        let at = named.1
+        let slot = found_slot(block, at, indices[lane], call, lane) else continue
+        let source = cloud_source(state, block, at)
+        for k in 0..<components: call.f32_result(k)[lane] = (f32)point_number(source, name, (usize)block.points[slot], k)
+
+## `pc.filter_f32("name")` and `pc.filter_vec3("name")`: the found points' attribute
+## averaged with weights `1 - (d / radius)^2`, normalized (VEX `pcfilter`); the plain mean
+## when every weight is 0, and 0 when nothing was found.
+func cloud_filter(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let components = *(const usize*)context
+    let name = call.text(0)
+    for lane in 0..<call.lanes:
+        for k in 0..<(components if components == 1 else 4): call.f32_result(k)[lane] = 0.0
+        let named = cloud_of(state, call, lane) else continue
+        let block = named.0
+        let at = named.1
+        let count = (usize)block.counts[at]
+        if count == 0: continue
+        let source = cloud_source(state, block, at)
+        let radius = (f64)block.radii[at]
+        var sums: f64[3]
+        var plain: f64[3]
+        var weight: f64 = 0.0
+        for i in 0..<count:
+            let slot = at * most_cloud + i
+            let d = (f64)block.distances[slot] / radius if radius > 0.0 else 1.0
+            let w = math.max(1.0 - d * d, 0.0)
+            weight += w
+            for k in 0..<components:
+                let value = point_number(source, name, (usize)block.points[slot], k)
+                sums[k] += w * value
+                plain[k] += value
+        for k in 0..<components:
+            call.f32_result(k)[lane] = (f32)(sums[k] / weight if weight > 0.0 else plain[k] / (f64)count)

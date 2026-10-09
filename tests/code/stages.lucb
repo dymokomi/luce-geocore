@@ -5,7 +5,7 @@ import memory
 import strings
 from luce_std import math, math32, ramp
 from luce_geocore import kernel as geocore_kernel
-from luce_geocore.geocore import Code, Mesh, GeometrySet, MeshPrimitives, Vector3, Matrix4, mesh_overlay_points
+from luce_geocore.geocore import Code, GeometryVerbs, Mesh, GeometrySet, MeshPrimitives, Vector3, Matrix4, mesh_overlay_points
 import support
 
 func expect(condition: bool, what: str):
@@ -319,3 +319,81 @@ pub func topology_and_measure() -> !:
     let faulted = failure(grid, support.points_mode, "p.set_f32(\"x\", (f32)k.input(0).vertex_prim(p.ptnum + 1000))\n")
     expect(strings.ends_with(faulted, "index out of bounds (point 0)"), "a vertex out of range faults")
     print("ok    topology and measure: half-edge walks, vertex chains, neighbors, winding numbers, normals, relbbox, surfacedist, groups, arc lengths, minpos")
+
+## Point clouds (CODE-NODE item 6): counts against brute force, nearest first, imports,
+## pcfilter against the same weighted mean written out, pcfind_radius by pscale.
+pub func point_clouds() -> !:
+    let set = try support.big_grid_set(60)
+    let radius: f32 = 0.08
+    let body = "let g = k.input(0)\nlet pc = g.pcopen(p.P, 0.08, 20)\nvar sum: f32[4] = [0.0, 0.0, 0.0, 0.0]\nvar total: f32 = 0.0\nvar ordered: f32 = 1.0\nfor i in 0..<pc.count():\n    let d = pc.distance(i) / 0.08\n    let w = math32.max(1.0 - d * d, 0.0)\n    sum = sum + pc.vec3(i, \"P\") * w\n    total += w\n    if i > 0 and pc.distance(i) < pc.distance(i - 1): ordered = 0.0\n    if pc.point(i) != g.pcfind(p.P, 0.08, 20).point(i): ordered = 0.0\np.Cd = pc.filter_vec3(\"P\") - sum * (1.0 / total)\np.set_f32(\"count\", (f32)pc.count())\np.set_f32(\"first\", (f32)pc.point(0) + 1000.0 * pc.distance(0) + 10.0 * ordered)\np.set_f32(\"smooth\", pc.filter_f32(\"ptnum_copy\"))\n"
+    let numbered = try support.run(set, support.points_mode, "p.set_f32(\"ptnum_copy\", (f32)p.ptnum)\np.set_f32(\"pscale\", 0.02 + 0.06 * (f32)(p.ptnum % 2))\n")
+    let made = try support.mesh_of(try support.run(numbered, support.points_mode, body))
+    let m = try made.get()
+    for at: i64 in 0..<m.point_count():
+        let q = try m.point(at)
+        var within: i64 = 0
+        var by_radius: i64 = 0
+        for other: i64 in 0..<m.point_count():
+            let d = (try m.point(other)).subtract(q).length()
+            if d <= (f64)radius: within += 1
+            if d <= (f64)radius and d <= 0.02 + 0.06 * (f64)(other % 2): by_radius += 1
+        expect(try support.value(made, "count", 0, at) == (f64)(within if within < 20 else 20), "pcopen finds the nearest points within the radius, up to max")
+        expect(try support.value(made, "first", 0, at) == (f64)at + 10.0, "nearest first, the point itself at 0, pcfind the same")
+        for c: i64 in 0..<3:
+            expect(near(try support.value(made, "Cd", 0, at, c), 0.0, 0.00001), "pcfilter is the weighted mean written out")
+        _ = by_radius
+    let radii = try support.mesh_of(try support.run(numbered, support.points_mode, "p.set_f32(\"n\", (f32)k.input(0).pcfind_radius(p.P, \"pscale\", 1.0, 0.1, 64).count())\n"))
+    for at: i64 in 0..<m.point_count():
+        let q = try m.point(at)
+        var by_radius: i64 = 0
+        for other: i64 in 0..<m.point_count():
+            let d = (try m.point(other)).subtract(q).length()
+            if d <= 0.1 and d <= 0.02 + 0.06 * (f64)(other % 2): by_radius += 1
+        expect(try support.value(radii, "n", 0, at) == (f64)by_radius, "pcfind_radius keeps the points whose own radius reaches")
+    print("ok    point clouds: counts, nearest first, imports, pcfilter, pcfind, pcfind_radius")
+
+## Volumes (CODE-NODE item 7): luced-3d's path, an SDF Sphere sampled by SDF to Volume,
+## read against the exact sphere; snapping points onto the surface; the SDF itself.
+pub func volumes() -> !:
+    let none_numbers: f64[1] = [0.0]
+    _ = none_numbers
+    let sphere = try GeometryVerbs.run("SDF Sphere", try support.empty_set(), none, "", 0, [0.75, 0.0, 0.0, 0.0])
+    let field = try (try sphere.get()).geometry()
+    let sampled = try GeometryVerbs.run("SDF to Volume", field, none, "", 0, [0.05, 3.0, 0.0])
+    let volume = try (try sampled.get()).geometry()
+    let set = try support.big_grid_set(21)
+    let body = "let g = k.input(1)\nlet q = p.P * 0.9 + [0.0, 0.1, 0.0, 0.0]\nlet d = g.volume_sample(\"surface\", q)\nlet n = normalized(g.volume_gradient(\"surface\", q))\nlet snapped = q - n * d\np.Cd = [d, length(snapped), dot(n, normalized(q)), 0.0]\nlet index = g.volume_pos_to_index(\"surface\", q)\nlet center = g.volume_index_to_pos(\"\", (i32)index[0], (i32)index[1], (i32)index[2])\np.set_f32(\"back\", length(center - q))\np.set_f32(\"voxel\", g.volume_index(\"#0\", (i32)index[0], (i32)index[1], (i32)index[2]) - g.volume_sample(\"surface\", center))\np.set_f32(\"size\", g.volume_voxel_size(\"surface\"))\np.set_f32(\"res\", g.volume_res(\"surface\")[0])\np.set_f32(\"exact\", k.input(0).volume_sample(\"\", q))\n"
+    let read = try support.mesh_of(try support.run_inputs(set, volume, support.points_mode, body))
+    let exact = try support.mesh_of(try support.run_inputs(set, field, support.points_mode, "p.set_f32(\"sdf\", k.input(1).volume_sample(\"\", p.P * 0.9 + [0.0, 0.1, 0.0, 0.0]))\n"))
+    let m = try read.get()
+    for at: i64 in 0..<m.point_count():
+        let q = (try m.point(at)).multiply_scalar(0.9).add(Vector3(0.0, 0.1, 0.0))
+        let want = q.length() - 0.75
+        let d = try support.value(read, "Cd", 0, at, 0)
+        if math.abs(want) < 0.1:
+            expect(near(d, want, 0.01), "the level set near its surface")
+            expect(near(try support.value(read, "Cd", 0, at, 1), 0.75, 0.01), "snapped onto the surface")
+            expect(try support.value(read, "Cd", 0, at, 2) > 0.99, "the gradient points outward")
+        expect(near(try support.value(exact, "sdf", 0, at), want, 0.00001), "an SDF samples exactly")
+        expect(try support.value(read, "back", 0, at) <= 0.05 * 0.87 + 0.00001, "the nearest voxel's center is within half a voxel diagonal")
+        expect(near(try support.value(read, "voxel", 0, at), 0.0, 0.00001), "volume_index reads the voxel volume_sample reads at its center")
+        expect(near(try support.value(read, "size", 0, at), 0.05, 0.00001) and try support.value(read, "res", 0, at) >= 30.0, "voxel size and the leaves' span (the band around a 1.5 wide sphere)")
+    print("ok    volumes: level set against the exact sphere, gradients, snapping, index and position, the SDF itself")
+
+## printf, warning and error (CODE-NODE item 9) through Code.cook.
+pub func messages() -> !:
+    let set = try support.grid_set(4)
+    let run = try Code.cook(set, support.points_mode, "", "if p.ptnum < 3:\n    k.printf(\"point %d: %.2f%%\\n\", (f32)p.ptnum, 0.25 * (f32)p.ptnum)\nif p.ptnum % 5 == 0:\n    k.warning(\"careful\")\n", "", 0, support.no_names(), support.no_values(), 1.0, 0.0, 24.0, 0)
+    let r = try run.get()
+    expect(r.output() == "point 0: 0.00%\npoint 1: 0.25%\npoint 2: 0.50%\n" and r.output_count() == 3, "printf output in element order")
+    expect(r.warning() == "careful" and r.warning_count() == 5, "warnings: the first and a count")
+    expect((try (try r.geometry().get()).mesh()) != none, "the geometry")
+    let many = try Code.cook(try support.big_grid_set(200), support.points_mode, "", "k.printf(\"%d\\n\", (f32)p.ptnum)\n", "", 0, support.no_names(), support.no_values(), 1.0, 0.0, 24.0, 0)
+    let all = try many.get()
+    expect(all.output_count() == 40000, "every message counted")
+    let text = all.output()
+    expect(strings.starts_with(text, "0\n1\n2\n3\n") and strings.ends_with(text, "198\n199\n... and 39800 more messages\n"), "the first 200 in element order, the rest counted")
+    _ = Code.cook(set, support.points_mode, "", "if p.ptnum == 7:\n    k.error(\"bad point\")\n", "", 0, support.no_names(), support.no_values(), 1.0, 0.0, 24.0, 0) catch refusal:
+        expect(strings.starts_with(refusal.message, "line 2, column ") and strings.ends_with(refusal.message, "bad point (point 7)"), "k.error fails at its line and element")
+        recover run
+    print("ok    messages: printf in element order and capped, warnings counted, error fails at its element")

@@ -67,6 +67,9 @@ func make_host(mode: RunOver, layout: const Layout*?) -> Host!:
     try bind_named(&host)
     try bind_measure(&host)
     try bind_winding(&host)
+    try bind_clouds(&host)
+    try bind_volumes(&host)
+    try bind_log(&host)
     if let given = layout:
         host.missing_reads_zero()
         for column in given.columns.view():

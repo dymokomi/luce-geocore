@@ -100,6 +100,38 @@ pub struct CodeCheck:
 
 pub let code_check_type: interop.Type[CodeCheck] = interop.Type[CodeCheck]("CodeCheck", CodeCheck.close, closeable = true)
 
+## A cook's result for the node: the geometry, the snippet's printf output and its
+## warnings (from `Code.cook`).
+pub struct CodeRun:
+    var made: interop.Reference[GeometrySet]
+    var report: CookReport
+
+    ## The new geometry.
+    pub func geometry() -> interop.Reference[GeometrySet]:
+        return self.made.clone()
+
+    ## The printf output, element by element: the first 200 messages, then "... and N
+    ## more messages" when there were more ("" when nothing printed).
+    pub func output() -> str:
+        return (str)self.report.output.view()
+
+    ## How many printf messages the cook made, those cut off included.
+    pub func output_count() -> i64:
+        return (i64)self.report.printed
+
+    ## The first warning in element order ("" when none) and how many there were.
+    pub func warning() -> str:
+        return (str)self.report.warning.view()
+
+    pub func warning_count() -> i64:
+        return (i64)self.report.warnings
+
+    pub func close():
+        self.made.release()
+        self.report.close()
+
+pub let code_run_type: interop.Type[CodeRun] = interop.Type[CodeRun]("CodeRun", CodeRun.close, closeable = true)
+
 ## Luce's view of the Code node.
 pub struct Code:
     let reserved: u8 = 0
@@ -128,8 +160,28 @@ pub struct Code:
     ## default). A ramp's flat data (luce-std `ramp`) is the name `"<name>#ramp"` with the
     ## data's length L, then L entries named "" holding it; a ramp not sent reads its
     ## kind's default, and data `ramp.check` refuses fails at the line naming the ramp.
-    ## `count` is the lane count of Run Over Numbers. A fault or a snippet that does not check fails with
-    ## "line L, column C: message (point N)" (`header line ...` in the header).
+    ## `count` is the lane count of Run Over Numbers. A fault, `k.error("text")` or a
+    ## snippet that does not check fails with "line L, column C: message (point N)"
+    ## (`header line ...` in the header). The result: the geometry, the snippet's
+    ## `k.printf` output and its `k.warning`s (see CodeRun).
+    pub static func cook(set: interop.Reference[GeometrySet], run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, input1: interop.Reference[GeometrySet]? = none) -> interop.Reference[CodeRun]!:
+        var second: const GeometrySet*? = none
+        if let given = input1: second = try given.get()
+        var report = CookReport()
+        let made = run_code(try set.get(), second, run_over, header, body, group, group_type, names, values, frame, time, fps, count, 0, &report) catch failure:
+            report.close()
+            error(failure.code, failure.message)
+        let geometry = adopt_set(made) catch failure:
+            report.close()
+            error(failure.code, failure.message)
+        let storage = new CodeRun[1] --- in memory.heap catch failure:
+            geometry.release()
+            report.close()
+            error(failure.code, failure.message)
+        storage[0] = CodeRun(made = geometry, report = report)
+        return try interop.Reference[CodeRun].adopt(storage.data, code_run_type, memory.heap)
+
+    ## `cook`'s geometry alone (the printf output and warnings are dropped).
     pub static func run(set: interop.Reference[GeometrySet], run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, input1: interop.Reference[GeometrySet]? = none) -> interop.Reference[GeometrySet]!:
         var second: const GeometrySet*? = none
         if let given = input1: second = try given.get()

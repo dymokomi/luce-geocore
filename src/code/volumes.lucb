@@ -1,0 +1,158 @@
+# Volume reads (VEX's volumesample family) on an input's volumes and SDF. A volume is
+# named sparse grids of floats (level sets: signed distance, negative inside; fog:
+# density), each with its own voxel transform; voxel (i, j, k) is centered at the
+# transform of (i, j, k). A snippet names a grid by a literal: "" the first grid,
+# "#2" the third, anything else a grid's name. An input with an SDF and no grid of that
+# name samples the SDF exactly ("" reaches it when there is no grid). A grid or SDF
+# the input lacks reads 0. Vector volumes are three grids "name.x", "name.y", "name.z".
+
+let volume_sample_code: i32 = 0
+let volume_gradient_code: i32 = 1
+let volume_vec3_code: i32 = 2
+let volume_to_index_code: i32 = 3
+
+let volume_point_codes: i32[4] = [0, 1, 2, 3]
+
+## Register the volume reads.
+func bind_volumes(host: Host*) -> !:
+    let point4 = [Kind.i64, Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+    let index3 = [Kind.i64, Kind.i32, Kind.i32, Kind.i32]
+    let four = [Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+    try host.builtin("Geometry", "volume_sample", engine.Builtin.of("volume_sample", point4, [Kind.f32], volume_point_lanes, (void*)&volume_point_codes[0]))
+    try host.builtin("Geometry", "volume_gradient", engine.Builtin.of("volume_gradient", point4, four, volume_point_lanes, (void*)&volume_point_codes[1]))
+    try host.builtin("Geometry", "volume_sample_vec3", engine.Builtin.of("volume_sample_vec3", point4, four, volume_point_lanes, (void*)&volume_point_codes[2]))
+    try host.builtin("Geometry", "volume_pos_to_index", engine.Builtin.of("volume_pos_to_index", point4, four, volume_point_lanes, (void*)&volume_point_codes[3]))
+    try host.builtin("Geometry", "volume_index", engine.Builtin.of("volume_index", index3, [Kind.f32], volume_index_lanes))
+    try host.builtin("Geometry", "volume_index_to_pos", engine.Builtin.of("volume_index_to_pos", index3, four, volume_index_to_pos_lanes))
+    try host.builtin("Geometry", "volume_res", engine.Builtin.of("volume_res", [Kind.i64], four, volume_res_lanes))
+    try host.builtin("Geometry", "volume_voxel_size", engine.Builtin.of("volume_voxel_size", [Kind.i64], [Kind.f32], volume_voxel_lanes))
+
+## What a name reaches on an input: a grid, the SDF, or nothing.
+struct Field:
+    var grid: const SparseGrid*?
+    var sdf: const Sdf*?
+
+## The grid or SDF `name` names on `source`.
+func field_named(source: const Source*, name: str) -> Field:
+    let set = source.set else return Field(grid = none, sdf = none)
+    let sdf = set_sdf(set)
+    if let volume = set_volume(set):
+        let count = volume.grid_count()
+        if name.length == 0 and count > 0:
+            return Field(grid = volume.grid(0), sdf = none)
+        if name.length > 1 and name.bytes[0] == '#':
+            let at = strings.parse_i64((str)name.bytes[1..]) else return Field(grid = none, sdf = sdf)
+            if at >= 0 and (usize)at < count: return Field(grid = volume.grid((usize)at), sdf = none)
+        for at in 0..<count:
+            if volume.grid(at).name() == name: return Field(grid = volume.grid(at), sdf = none)
+    if name.length == 0 or name == "sdf": return Field(grid = none, sdf = sdf)
+    return Field(grid = none, sdf = none)
+
+## The field's value at world `p` (trilinear in a grid).
+func field_sample(field: Field, p: Vector3) -> f64:
+    if let grid = field.grid:
+        var sampler = GridSampler.of(grid)
+        return sampler.sample(p)
+    if let sdf = field.sdf:
+        return sdf.distance(p)
+    return 0.0
+
+## The field's gradient at `p`: central differences one voxel apart in a grid (VEX
+## `volumegradient`), a thousandth of the SDF's extent apart for an SDF.
+func field_gradient(field: Field, p: Vector3) -> Vector3:
+    var h: f64 = 0.0
+    if let grid = field.grid:
+        h = voxel_size(grid)
+    elif let sdf = field.sdf:
+        let box = sdf.bounds()
+        h = math.max(box.maximum.subtract(box.minimum).length() * 0.001, 1.0e-6)
+    if h == 0.0: return Vector3()
+    let dx = field_sample(field, p.add(Vector3(h, 0.0, 0.0))) - field_sample(field, p.subtract(Vector3(h, 0.0, 0.0)))
+    let dy = field_sample(field, p.add(Vector3(0.0, h, 0.0))) - field_sample(field, p.subtract(Vector3(0.0, h, 0.0)))
+    let dz = field_sample(field, p.add(Vector3(0.0, 0.0, h))) - field_sample(field, p.subtract(Vector3(0.0, 0.0, h)))
+    return Vector3(dx, dy, dz).multiply_scalar(0.5 / h)
+
+## A grid's voxel edge (the length its transform gives index X).
+func voxel_size(grid: const SparseGrid*) -> f64:
+    return grid.transform.transform_point(Vector3(1.0, 0.0, 0.0)).subtract(grid.transform.transform_point(Vector3())).length()
+
+## The name of component `k` of vector volume `name`.
+func component_name(room: u8[], name: str, k: usize) -> str:
+    let suffix = ".x" if k == 0 else (".y" if k == 1 else ".z")
+    return strings.format(room, f"{name}{suffix}") else name
+
+func volume_point_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let code = *(const i32*)context
+    let name = call.text(0)
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let p = position_argument(call, 1, lane)
+        if code == volume_sample_code:
+            call.f32_result(0)[lane] = (f32)field_sample(field_named(source, name), p)
+        elif code == volume_gradient_code:
+            write_vector(call, 0, lane, field_gradient(field_named(source, name), p))
+        elif code == volume_vec3_code:
+            var values: f64[3]
+            for k: usize in 0..<3:
+                var room: u8[128]
+                values[k] = field_sample(field_named(source, component_name(room, name, k)), p)
+            write_vector(call, 0, lane, Vector3(values[0], values[1], values[2]))
+        else:
+            var index = Vector3()
+            if let grid = field_named(source, name).grid:
+                let at = grid.inverse.transform_point(p)
+                index = Vector3(math.round(at.x), math.round(at.y), math.round(at.z))
+            write_vector(call, 0, lane, index)
+
+## `volume_index(name, i, j, k)`: voxel (i, j, k)'s stored value, the background outside
+## the leaves (VEX `volumeindex`).
+func volume_index_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let name = call.text(0)
+    let xs = call.i32_argument(1)
+    let ys = call.i32_argument(2)
+    let zs = call.i32_argument(3)
+    for lane in 0..<call.lanes:
+        call.f32_result(0)[lane] = 0.0
+        let source = source_or_fail(state, call, lane) else continue
+        if let grid = field_named(source, name).grid:
+            call.f32_result(0)[lane] = grid.value((i64)xs[lane], (i64)ys[lane], (i64)zs[lane])
+
+## `volume_index_to_pos(name, i, j, k)`: voxel (i, j, k)'s center in world space.
+func volume_index_to_pos_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let name = call.text(0)
+    let xs = call.i32_argument(1)
+    let ys = call.i32_argument(2)
+    let zs = call.i32_argument(3)
+    for lane in 0..<call.lanes:
+        write_vector(call, 0, lane, Vector3())
+        let source = source_or_fail(state, call, lane) else continue
+        if let grid = field_named(source, name).grid:
+            write_vector(call, 0, lane, grid.transform.transform_point(Vector3((f64)xs[lane], (f64)ys[lane], (f64)zs[lane])))
+
+## `volume_res(name)`: the voxels the grid's leaves span along each axis (a sparse grid has
+## no fixed resolution; VEX `volumeres` of its active box). Zero without a grid.
+func volume_res_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let name = call.text(0)
+    for lane in 0..<call.lanes:
+        write_vector(call, 0, lane, Vector3())
+        let source = source_or_fail(state, call, lane) else continue
+        let grid = field_named(source, name).grid else continue
+        let box = grid.bounds() else continue
+        let low = grid.inverse.transform_point(box.minimum)
+        let high = grid.inverse.transform_point(box.maximum)
+        write_vector(call, 0, lane, Vector3(math.round(math.abs(high.x - low.x)) + 1.0, math.round(math.abs(high.y - low.y)) + 1.0, math.round(math.abs(high.z - low.z)) + 1.0))
+
+## `volume_voxel_size(name)`: the grid's voxel edge, 0 without a grid.
+func volume_voxel_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let name = call.text(0)
+    for lane in 0..<call.lanes:
+        call.f32_result(0)[lane] = 0.0
+        let source = source_or_fail(state, call, lane) else continue
+        if let grid = field_named(source, name).grid:
+            call.f32_result(0)[lane] = (f32)voxel_size(grid)
