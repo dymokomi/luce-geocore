@@ -12,7 +12,50 @@ struct Settings:
 ## Run the snippet over `set` on `threads` workers (0: every core): the new set, or an
 ## error naming the line, column and element (see `fault_message`). Run Over Voxels runs
 ## over grid `volume` ("" the first), made dense over its leaves' box first when `dense`.
+## Point clouds run as meshes of their points (geometry_set.cloud_mesh): Run Over Points
+## on a set without a mesh runs over its cloud and gives a cloud back (a mesh, if the
+## snippet added polygons), and an input's cloud is what `k.input(i)` reads of it when
+## the input has no mesh.
 pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, threads: usize, report: CookReport*? = none, volume: str = "", dense: bool = false) -> GeometrySet*!:
+    var first: GeometrySet*? = none
+    defer:
+        if let made = first: dispose_set(made)
+    var second: GeometrySet*? = none
+    defer:
+        if let made = second: dispose_set(made)
+    if run_over == 1: first = try points_as_mesh(set)
+    if let other = input1: second = try points_as_mesh(other)
+    var source: const GeometrySet* = set
+    if let made = first: source = made
+    var other_source: const GeometrySet*? = input1
+    if let made = second: other_source = made
+    let result = try run_sets(source, other_source, run_over, header, body, group, group_type, names, values, frame, time, fps, count, threads, report, volume, dense)
+    if first == none: return result
+    let cloud = set_cloud(set) else return result
+    mesh_as_points(result, cloud) catch failure:
+        dispose_set(result)
+        error(failure.code, failure.message)
+    return result
+
+## A copy of `set` with its point cloud as a mesh of its points, when it has a cloud and
+## no mesh; else none.
+func points_as_mesh(set: const GeometrySet*) -> GeometrySet*?!:
+    if set_mesh(set) != none: return none
+    let cloud = set_cloud(set) else return none
+    let storage = try set.storage()
+    errdefer dispose_set(storage)
+    try storage.put(&mesh_component, (void*)(try cloud_mesh(cloud)))
+    storage.remove(&points_component)
+    return storage
+
+## Turn a run's faceless mesh back into a cloud, keeping `like`'s detail attributes.
+func mesh_as_points(storage: GeometrySet*, like: const PointCloud*) -> !:
+    let mesh = set_mesh(storage) else return
+    if mesh.face_count() > 0: return
+    try storage.put(&points_component, (void*)(try cloud_of_mesh(mesh, like)))
+    storage.remove(&mesh_component)
+
+func run_sets(set: const GeometrySet*, input1: const GeometrySet*?, run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, threads: usize, report: CookReport*?, volume: str, dense: bool) -> GeometrySet*!:
     let mode = try RunOver.of(run_over)
     _ = try groups.GroupType.of(group_type)
     if names.length != values.length:
@@ -64,6 +107,7 @@ pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over
     prepare_sources(&state, &compiled.program)
     state.ramps = try gather_ramps(compiled, names, values, header, body)
     try prepare_named(&state, compiled, header, body)
+    try prepare_sh(&state, &compiled.program, mode)
     try cook.bind_inputs(&layout)
     try cook.bind_outputs(&layout)
     try cook.bind_uniforms(&settings)
@@ -84,6 +128,9 @@ pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over
     if let told = report:
         try told.take(&state.log)
     let storage = try cook.output()
+    put_sh(&state, storage) catch failure:
+        dispose_set(storage)
+        error(failure.code, failure.message)
     if not state.edits.any():
         return storage
     errdefer dispose_set(storage)
@@ -208,6 +255,8 @@ struct Cook:
             output.attribute = try Attribute.create(name, self.mode.domain(), data_type, width, self.lanes)
             output.has_attribute = true
             output.bytes = output.attribute.data.span()
+            # Elements the run skips (outside its group) keep 0 in a new attribute.
+            memory.set(output.bytes, 0)
             if let column = existing:
                 if column.origin == .attribute or column.origin == .narrowed:
                     let source = self.mesh else return

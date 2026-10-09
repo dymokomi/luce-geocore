@@ -1,7 +1,9 @@
 ## GSplats nodes: Gaussian splat clouds (point clouds with orient, scale,
 ## opacity, Cd and sh; splats/conventions.lucb). Bake GSplats mirrors
 ## Houdini's Bake GSplats; GSplats SH Degree is its Compute SPH choice as a
-## node of its own. Kernels live in luce_geocore.splats.
+## node of its own; Crop, Clean and Reduce GSplats follow the GSOPs tools
+## (Crop also works on plain point clouds). Kernels live in
+## luce_geocore.splats.
 
 let gsplats_category: str = "GSplats"
 
@@ -30,19 +32,28 @@ func input_cloud(input: const SetVerbInput*, output: SetVerbOutput*) -> const Po
 
 # mark: Bake GSplats
 
-let bake_parms: ParmSpec[6] = [
+let bake_parms: ParmSpec[7] = [
     ParmSpec("Source", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Auto|Points", "Auto reads 3DGS PLY attributes (f_dc_0, rot_0, … or f_dc, rot, …) or Houdini's (GS_Alpha, GS_SPH_R, …); Points makes round splats from pscale and Cd."),
     ParmSpec("Color Space", ParmKind.menu, 0.0, 0.0, 1.0, 1, "sRGB|Linear", "How the source's colors and SH are encoded: sRGB for trained captures. Cd is decoded to linear; the SH bands keep the encoding, recorded in gsplat_color_space."),
     ParmSpec("SH Degree", ParmKind.integer, 3.0, 0.0, 3.0, 1, "", "The highest spherical harmonics degree kept: 0 is view-independent color, 3 is the most."),
     ParmSpec("Opacity", ParmKind.number, 1.0, 0.0, 1.0, 1, "", "Opacity of splats whose source has none."),
     ParmSpec("Point Scale", ParmKind.number, 0.05, 0.0, 100000.0, 1, "", "Size (one standard deviation) of splats made from points without pscale.", 1.0),
-    ParmSpec("Delete Original Attributes", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Remove the PLY or Houdini attributes the bake read.")]
+    ParmSpec("Delete Original Attributes", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Remove the PLY or Houdini attributes the bake read."),
+    ParmSpec("Up Axis", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Y Down (COLMAP)|Y Up", "Which way is up in a PLY file: Y Down for 3DGS captures (COLMAP poses), turned over exactly (a half turn about X); export turns them back.")]
 
 func bake_gsplats_verb() -> SetVerb:
-    return SetVerb("Bake GSplats", gsplats_category, "Turn PLY or Houdini splat attributes, or plain points, into Gaussian splats: orient, scale, opacity, linear Cd and sh", 1, false, false, bake_parms, cook_bake_gsplats)
+    return SetVerb("Bake GSplats", gsplats_category, "Turn PLY or Houdini splat attributes, or plain points (a mesh's too), into Gaussian splats: orient, scale, opacity, linear Cd and sh", 1, false, false, bake_parms, cook_bake_gsplats)
 
 func cook_bake_gsplats(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
-    let cloud = input_cloud(input, output) else return
+    # Without a cloud, a mesh's points are the points (Houdini bakes any points).
+    var from_mesh: PointCloud*? = none
+    defer:
+        if let made = from_mesh: close_cloud_storage(made)
+    if set_cloud(input.set) == none:
+        if let mesh = set_mesh(input.set): from_mesh = try cloud_of_mesh(mesh)
+    var found: const PointCloud*? = input_cloud(input, output) if from_mesh == none else none
+    if let made = from_mesh: found = made
+    let cloud = found else return
     let p = input.parms
     let space = ColorSpace.linear if p.at(1) == 1.0 else ColorSpace.srgb
     let options = BakeOptions(p.at(0) == 1.0, space, (usize)math.clamp(p.at(2), 0.0, 3.0), math.clamp(p.at(3), 0.0, 1.0), math.max(p.at(4), 0.0), p.at(5) != 0.0)
@@ -51,14 +62,25 @@ func cook_bake_gsplats(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     if naming == SplatNaming.plain and p.at(0) == 0.0: output.warning = "No splat attributes found; the points become round splats"
     try with_cloud_store(input, cloud, try baked_store(store, cloud.count(), &options), output)
     let made = output.set else return
+    if from_mesh != none: made.remove(&mesh_component)
+    # A PLY file's Y-down capture stands up; the turn is recorded for export.
+    let from_file = naming == SplatNaming.ply or naming == SplatNaming.ply_vectors
+    if from_file and p.at(6) == 0.0 and p.at(0) != 1.0:
+        let baked = set_cloud(made) else return
+        try made.put(&points_component, (void*)(try cloud_half_turned(baked)))
+        try put_detail_text(made, up_axis_name, y_down_text)
     # A cloud that was baked already keeps its recorded color space.
     if naming == SplatNaming.baked and made.has_detail(color_space_name): return
+    try put_detail_text(made, color_space_name, color_space_text(space))
+
+## Detail attribute `name` of `set` as the text `value`.
+func put_detail_text(set: GeometrySet*, name: str, value: str) -> !:
     var table = TableBuilder()
     defer table.close()
-    let index: i32[1] = [try table.intern(color_space_text(space))]
+    let index: i32[1] = [try table.intern(value)]
     var column = try table.finish()
     defer column.release()
-    try set_put_detail(made, try Attribute.text(color_space_name, Domain.detail, 1, column, index, Storage.single))
+    try set_put_detail(set, try Attribute.text(name, Domain.detail, 1, column, index, Storage.single))
 
 # mark: GSplats SH Degree
 
@@ -76,3 +98,128 @@ func cook_sh_degree(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
         return
     let degree = (usize)math.clamp(input.parms.at(0), 0.0, 3.0)
     try with_cloud_store(input, cloud, try with_sh_degree(store, cloud.count(), degree), output)
+
+## The input set with its point cloud replaced by the points `keep` holds (one
+## byte per point), and how many went.
+func kept_points(input: const SetVerbInput*, cloud: const PointCloud*, keep: const u8[], output: SetVerbOutput*) -> usize!:
+    var bits = try BitsBuilder.zeros(cloud.count())
+    defer bits.close()
+    for at in 0..<keep.length:
+        if keep[at] != 0: bits.set(at)
+    let removed = cloud.count() - bits.view().population()
+    let storage = try input.set.storage()
+    errdefer dispose_set(storage)
+    try storage.put(&points_component, (void*)(try cloud_subset(cloud, bits.view())))
+    output.set = storage
+    return removed
+
+## One byte per point of `cloud`, zeroed, for a filter's flags.
+func point_flags(cloud: const PointCloud*) -> u8[]!:
+    return try new u8[cloud.count() + 1] in memory.heap
+
+# mark: Crop GSplats
+
+let crop_parms: ParmSpec[6] = [
+    ParmSpec("Shape", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Box|Sphere|Bounds of Second Input", "The region: a box, a sphere, or the box around the second input."),
+    ParmSpec("Center", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "The box's or sphere's center."),
+    ParmSpec("Size", ParmKind.vector, 1.0, 0.0, 100000.0, 3, "", "The box's width, height and depth.", 10.0),
+    ParmSpec("Radius", ParmKind.number, 1.0, 0.0, 100000.0, 1, "", "The sphere's radius.", 10.0),
+    ParmSpec("Keep", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Inside|Outside", "Which side of the region stays."),
+    ParmSpec("Test", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Center|Extent (3σ)", "Inside by the splat's center, or when its 3σ ellipsoid reaches into the region (Keep Inside keeps partial splats; Keep Outside removes them).")]
+
+func crop_gsplats_verb() -> SetVerb:
+    return SetVerb("Crop GSplats", gsplats_category, "Keep the splats (or points) inside or outside a box, a sphere or the second input's bounds", 2, false, false, crop_parms, cook_crop_gsplats)
+
+func cook_crop_gsplats(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let cloud = input_cloud(input, output) else return
+    let p = input.parms
+    let shape = p.at(0)
+    var center = Vector3(p.at(1), p.at(2), p.at(3))
+    var half = Vector3(p.at(4) * 0.5, p.at(5) * 0.5, p.at(6) * 0.5)
+    if shape == 2.0:
+        let second = input.second else error(errors.invalid, "connect the second input, whose bounds crop")
+        if not (try second.has_bounds()):
+            output.warning = "The second input is empty; nothing is inside"
+            half = Vector3(-1.0, -1.0, -1.0)
+        else:
+            let box = try second.bounds()
+            center = box.minimum.add(box.maximum).multiply_scalar(0.5)
+            half = box.maximum.subtract(box.minimum).multiply_scalar(0.5)
+    let region = CropRegion(shape == 1.0, center, half, p.at(7), p.at(9) == 1.0, p.at(8) == 1.0)
+    let keep = try point_flags(cloud)
+    defer free(keep) in memory.heap
+    crop_flags(cloud_positions(cloud), cloud_origin(cloud), cloud_store(cloud), &region, keep[..<cloud.count()])
+    _ = try kept_points(input, cloud, keep[..<cloud.count()], output)
+
+# mark: Clean GSplats
+
+let clean_parms: ParmSpec[9] = [
+    ParmSpec("Min Opacity", ParmKind.number, 0.004, 0.0, 1.0, 1, "", "Splats fainter than this go (1/255 hardly shows)."),
+    ParmSpec("Max Scale", ParmKind.number, 20.0, 0.0, 100000.0, 1, "", "Splats whose largest size (σ) is past this go: huge blobs at a capture's edge (0: off).", 100.0),
+    ParmSpec("Relative to Median", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Max Scale is a multiple of the cloud's median largest size, else a distance."),
+    ParmSpec("Max Anisotropy", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "Needles go: a largest size over this many times the middle one (0: off; flat discs stay).", 100.0),
+    ParmSpec("Remove Degenerate", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Remove splats with NaN or infinite values, a zero orient, or no size at all."),
+    ParmSpec("Remove Floaters", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Remove isolated splats: fewer than Min Neighbors others within the Search Radius."),
+    ParmSpec("Search Radius", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "How far the floater test looks (0: five times the median splat size).", 10.0),
+    ParmSpec("Min Neighbors", ParmKind.integer, 4.0, 1.0, 64.0, 1, "", "A splat with fewer neighbors in the radius is a floater."),
+    ParmSpec("Output", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Delete|Group", "Delete the splats, or put them in the point group named by Group Name (\"cleaned\" when empty).")]
+
+func clean_gsplats_verb() -> SetVerb:
+    return SetVerb("Clean GSplats", gsplats_category, "Remove faint, huge, needle-like, broken and isolated splats, or group them", 1, false, false, clean_parms, cook_clean_gsplats, "Group Name")
+
+func cook_clean_gsplats(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let cloud = input_cloud(input, output) else return
+    let p = input.parms
+    let options = CleanOptions(p.at(0), p.at(1), p.at(2) != 0.0, p.at(3), p.at(4) != 0.0, p.at(5) != 0.0, p.at(6), (usize)math.clamp(p.at(7), 1.0, 64.0))
+    let count = cloud.count()
+    let keep = try point_flags(cloud)
+    defer free(keep) in memory.heap
+    let counts = try clean_flags(cloud_positions(cloud), cloud_origin(cloud), cloud_store(cloud), &options, keep[..<count])
+    if p.at(8) == 0.0:
+        _ = try kept_points(input, cloud, keep[..<count], output)
+        return
+    var bits = try BitsBuilder.zeros(count)
+    defer bits.close()
+    for at in 0..<count:
+        if keep[at] == 0: bits.set(at)
+    var store = try cloud_store(cloud).shared()
+    errdefer store.close()
+    let name = input.group if not is_blank(input.group) else "cleaned"
+    try store.put(try Attribute.group_of(name, Domain.point, count, bits.view().words))
+    let handed = store
+    store = AttributeStore()
+    try with_cloud_store(input, cloud, handed, output)
+    _ = counts
+
+# mark: Reduce GSplats
+
+let reduce_parms: ParmSpec[5] = [
+    ParmSpec("Target", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Ratio|Count", "Reach a fraction of the splats, or a count."),
+    ParmSpec("Ratio", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "The fraction of splats kept."),
+    ParmSpec("Count", ParmKind.integer, 100000.0, 0.0, 1000000000.0, 1, "", "The splats kept.", 10000000.0),
+    ParmSpec("Method", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Merge|Importance", "Merge near pairs into one splat each (keeps mass and centroid), or drop the lightest (opacity × volume)."),
+    ParmSpec("Keep Mass", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "After dropping splats, raise the others' opacity (to at most 1) so the total opacity-weighted mass stays as far as it can.")]
+
+func reduce_gsplats_verb() -> SetVerb:
+    return SetVerb("Reduce GSplats", gsplats_category, "Fewer splats with the same total mass and centroid: merge near pairs or drop the lightest", 1, false, false, reduce_parms, cook_reduce_gsplats)
+
+func cook_reduce_gsplats(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let cloud = input_cloud(input, output) else return
+    let p = input.parms
+    let count = cloud.count()
+    var target = (usize)math.max(math.round(math.clamp(p.at(1), 0.0, 1.0) * (f64)count), 0.0)
+    if p.at(0) == 1.0: target = (usize)math.max(p.at(2), 0.0)
+    if target >= count: return
+    let options = ReduceOptions(target, p.at(3) == 0.0, p.at(4) != 0.0)
+    var reduced = try reduced_cloud(cloud_positions(cloud), cloud_store(cloud), &options)
+    defer reduced.close()
+    let positions = reduced.positions.share()
+    let attributes = reduced.store
+    reduced.store = AttributeStore()
+    let made = try cloud_assembled(positions, cloud_origin(cloud), attributes)
+    let storage = input.set.storage() catch failure:
+        close_cloud_storage(made)
+        error(failure.code, failure.message)
+    errdefer dispose_set(storage)
+    try storage.put(&points_component, (void*)made)
+    output.set = storage

@@ -24,7 +24,7 @@
 ## Linearizing the bands instead (Houdini decodes only Cd and leaves them,
 ## which mixes encodings; scaling them by the curve's slope is approximate)
 ## would change the colors a capture shows.
-from luce_std import math
+from luce_std import math, sort
 import memory
 import strings
 from luce_color import transfer
@@ -34,6 +34,7 @@ import core.attribute_ops
 import core.ranges
 from math.vector import Vector3
 from math.matrix import Matrix4
+from core.float3 import Float3
 
 ## The splat attributes' names.
 pub let orient_name: str = "orient"

@@ -132,7 +132,8 @@ func check_ply_point(store: const AttributeStore*, p: usize, items: usize) -> !:
     for i in 0..<items:
         for k in 0..<(usize)3: assert(near((f64)sh[i * 3 + k], ply_rest(p, k * 15 + i), 1.0e-6), "sh interleaves the channel-major f_rest")
 
-func ply_cloud(vectors: bool) -> interop.Reference[GeometrySet]!:
+## Two points with 3DGS PLY properties (one attribute each, or vectors).
+pub func ply_cloud(vectors: bool) -> interop.Reference[GeometrySet]!:
     var builder = clouds.CloudBuilder(2)
     defer builder.close()
     var buffer: u8[16]
@@ -180,7 +181,8 @@ pub func run_verb(name: str, set: interop.Reference[GeometrySet], numbers: const
 func bake_from_ply() -> !:
     let source = try ply_cloud(false)
     defer source.release()
-    let baked = try run_verb("Bake GSplats", source, [0.0])
+    # Y Up: the file's values as they are (tests/splats/filter_checks.lucb turns them).
+    let baked = try run_verb("Bake GSplats", source, [0.0, 0.0, 3.0, 1.0, 0.05, 1.0, 1.0])
     defer baked.release()
     let store = clouds.points_of(baked.value())
     for p in 0..<(usize)2: try check_ply_point(store, p, 15)
@@ -199,7 +201,7 @@ func bake_from_ply() -> !:
     for p in 0..<(usize)2: try check_ply_point(clouds.points_of(loaded.value()), p, 15)
     assert(color_space(loaded.value()) == "srgb", "the color space survives the codec")
     # Keeping the original attributes, and linear colors at degree 1.
-    let kept = try run_verb("Bake GSplats", source, [0.0, 1.0, 1.0, 1.0, 0.05, 0.0])
+    let kept = try run_verb("Bake GSplats", source, [0.0, 1.0, 1.0, 1.0, 0.05, 0.0, 1.0])
     defer kept.release()
     let kept_store = clouds.points_of(kept.value())
     var items: f32[45]
@@ -211,7 +213,7 @@ func bake_from_ply() -> !:
 func bake_from_ply_vectors() -> !:
     let source = try ply_cloud(true)
     defer source.release()
-    let baked = try run_verb("Bake GSplats", source, [0.0, 0.0, 2.0])
+    let baked = try run_verb("Bake GSplats", source, [0.0, 0.0, 2.0, 1.0, 0.05, 1.0, 1.0])
     defer baked.release()
     let store = clouds.points_of(baked.value())
     for p in 0..<(usize)2: try check_ply_point(store, p, 8)

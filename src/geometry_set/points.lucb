@@ -58,16 +58,61 @@ pub func cloud_assembled(positions: Column[Float3], origin: Vector3, attributes:
     return storage.data
 
 ## A point cloud of `mesh`'s points: its positions and point attributes,
-## shared.
-pub func cloud_of_mesh(mesh: const Mesh*) -> PointCloud*!:
+## shared, and `like`'s other attributes (its detail ones), if given.
+pub func cloud_of_mesh(mesh: const Mesh*, like: const PointCloud*? = none) -> PointCloud*!:
     var attributes = AttributeStore()
     errdefer attributes.close()
     for index in 0..<(usize)mesh.attribute_count():
         let entry = try mesh.attribute_entry((i64)index)
         if entry.domain == Domain.point: try attributes.put(entry.share())
+    if let other = like:
+        for index in 0..<other.attributes.count():
+            let entry = other.attributes.entry(index)
+            if entry.domain != Domain.point: try attributes.put(entry.share())
     let storage = try new PointCloud[1] --- in memory.heap
     storage[0] = PointCloud(mesh_positions(mesh), mesh.position_origin(), attributes)
     return storage.data
+
+## The points of `cloud` whose bits `keep` holds (one per point), in order,
+## with their attributes; detail attributes are shared. What Blast, Delete and
+## the GSplats filters make.
+pub func cloud_subset(cloud: const PointCloud*, keep: Bits) -> PointCloud*!:
+    let count = keep.population()
+    let parents = try new i32[count + 1] --- in memory.heap
+    defer free(parents) in memory.heap
+    var at: usize = 0
+    for point in 0..<cloud.count():
+        if keep.get(point):
+            parents[at] = (i32)point
+            at += 1
+    var positions = try Column[Float3].allocate(count)
+    defer positions.release()
+    let out = positions.span()
+    let source = cloud.positions.view()
+    for index in 0..<count: out[index] = source[(usize)parents[index]]
+    var attributes = AttributeStore()
+    defer attributes.close()
+    for index in 0..<cloud.attributes.count():
+        let entry = cloud.attributes.entry(index)
+        if entry.domain != Domain.point:
+            try attributes.put(entry.share())
+            continue
+        try attributes.put(try attribute_ops.remapped(entry, parents[..<count], count))
+    let handed = attributes
+    attributes = AttributeStore()
+    return try cloud_assembled(positions.take(), cloud.origin, handed)
+
+## A mesh of `cloud`'s points and no faces, sharing its positions and point
+## attributes: how the group language and the Code node read a cloud. A
+## mesh without faces comes back as a cloud through `cloud_of_mesh`.
+pub func cloud_mesh(cloud: const PointCloud*) -> Mesh*!:
+    let offsets = try Column[i32].filled(1, 0)
+    let made = try assembled(cloud.positions.share(), cloud.origin, offsets, Column[i32](), Column[i32](), Column[Float3](), Column[Vector3]())
+    errdefer mesh_dispose(made)
+    for index in 0..<cloud.attributes.count():
+        let entry = cloud.attributes.entry(index)
+        if entry.domain == Domain.point: try put_attribute(made, entry.share())
+    return made
 
 ## The set's point cloud, splats or plain points, for renderers.
 pub func set_cloud(set: const GeometrySet*) -> const PointCloud*?:
@@ -90,12 +135,36 @@ pub func set_splats(set: const GeometrySet*) -> const PointCloud*?:
 pub func unbaked_set(set: const GeometrySet*) -> GeometrySet*!:
     let storage = try set.storage()
     errdefer dispose_set(storage)
-    let cloud = set_splats(set) else return storage
+    let found = set_splats(set) else return storage
+    var cloud = found
+    # A cloud stood up from a Y-down file goes back down (the turn is its own inverse).
+    var turned: PointCloud*? = none
+    defer:
+        if let made_turn = turned: close_cloud((void*)made_turn)
+    let up = set.detail.find(up_axis_name, Domain.detail)
+    if up >= 0 and set.detail.entry((usize)up).text_at(0) == y_down_text:
+        let made_turn = try cloud_half_turned(found, true)
+        turned = made_turn
+        cloud = made_turn
     let made = try cloud_with_store(cloud, try unbaked_store(&cloud.attributes, cloud.count(), detail_color_space(&set.detail)))
     try storage.put(&points_component, (void*)made)
     let index = storage.detail.find(color_space_name, Domain.detail)
     if index >= 0: storage.detail.remove((usize)index)
+    let up_index = storage.detail.find(up_axis_name, Domain.detail)
+    if up_index >= 0: storage.detail.remove((usize)up_index)
     return storage
+
+## `cloud` turned a half turn about X, (x, y, z) -> (x, -y, -z), exactly:
+## positions, origin and attributes (splats/axes.lucb); `back` undoes an
+## earlier turn bit for bit.
+pub func cloud_half_turned(cloud: const PointCloud*, back: bool = false) -> PointCloud*!:
+    var positions = try Column[Float3].copy_of(cloud.positions.view())
+    defer positions.release()
+    for at in 0..<positions.count():
+        let p = positions.view()[at]
+        positions.span()[at] = Float3(p.x, -p.y, -p.z)
+    let attributes = try half_turned_store(&cloud.attributes, cloud.count(), back)
+    return try cloud_assembled(positions.take(), Vector3(cloud.origin.x, -cloud.origin.y, -cloud.origin.z), attributes)
 
 extend GeometrySet:
     ## How many Gaussian splats the set holds: its point cloud's points when

@@ -1,0 +1,408 @@
+## Reduce GSplats' kernel: fewer splats that look and weigh about the same.
+## A splat's mass is its opacity times σ₁σ₂σ₃, its Gaussian's integral up to
+## a constant (plain points weigh 1), and a cloud's centroid is the
+## mass-weighted mean of its centers.
+##
+## - **Merge** (moment matching over a nearest-neighbor graph): each pass
+##   finds every splat's 6 nearest within a few splat sizes, orders the pairs
+##   by Ward's cost m₁m₂/(m₁+m₂)·d², and merges greedily, each splat at most
+##   once, as many pairs as the target still needs. A merged splat keeps the
+##   pair's mass and centroid: its center is the mass-weighted mean, its
+##   covariance the mass-weighted second moment Σ wₖ(Σₖ + dₖdₖᵀ), its opacity
+##   the mass over its new σ₁σ₂σ₃ (clamped to 1, the one way mass is lost),
+##   and its Cd and SH the mass-weighted means, the SH taken into the world
+##   frame first. Its other attributes come from the heavier splat. Passes
+##   repeat, widening the search when pairs run out, until the target is
+##   met; whatever remains is pruned by importance.
+## - **Importance**: the lightest splats go. With `keep_mass` the kept
+##   opacities are scaled by one factor, each clamped to 1, chosen so the total
+##   mass stays (unless every kept splat reaches opacity 1 first); the
+##   centroid moves only by what the removed splats held.
+
+## What Reduce GSplats does.
+pub struct ReduceOptions:
+    ## The splats left (no more than the cloud has).
+    pub let target: usize
+    ## Merge pairs, else prune by importance.
+    pub let merge: bool
+    ## After pruning, scale opacities so the total mass stays.
+    pub let keep_mass: bool
+
+## A reduced cloud: its positions (relative to the input's origin) and point
+## attributes (detail attributes shared), and what was done.
+pub struct Reduced:
+    pub var positions: Column[Float3]
+    pub var store: AttributeStore
+    ## Pairs merged and splats pruned.
+    pub var merged: usize
+    pub var pruned: usize
+
+    ## Release the positions and attributes.
+    pub func close():
+        self.positions.release()
+        self.store.close()
+
+## The mass of every point of a cloud's `store` into `out` (one per point).
+pub func splat_masses(store: const AttributeStore*, out: f64[]):
+    let opacity = float_attribute(store, opacity_name, 1)
+    let scale = float_attribute(store, scale_name, 3)
+    let alpha = Floats.of(store.entry((usize)opacity)) if opacity >= 0 else Floats.empty()
+    let sigma = Floats.of(store.entry((usize)scale)) if scale >= 0 else Floats.empty()
+    for at in 0..<out.length:
+        var m: f64 = 1.0
+        if opacity >= 0: m = alpha.at(at, 0)
+        if scale >= 0: m = m * math.abs(sigma.at(at, 0) * sigma.at(at, 1) * sigma.at(at, 2))
+        out[at] = m if math.is_finite(m) else 0.0
+
+## A cloud (`points` relative to `origin`, attributes `store`) reduced to
+## `options.target` points (see above). A target at or above the count
+## shares everything.
+pub func reduced_cloud(points: const Float3[], store: const AttributeStore*, options: const ReduceOptions*) -> Reduced!:
+    var positions = try Column[Float3].copy_of(points)
+    let attributes = store.shared() catch failure:
+        positions.release()
+        error(failure.code, failure.message)
+    var result = Reduced(positions, attributes, 0, 0)
+    errdefer result.close()
+    if options.target >= points.length: return result
+    if options.merge and is_splat_store(store):
+        let sizes = Floats.of(store.entry((usize)float_attribute(store, scale_name, 3)))
+        let median = try median_largest(&sizes, points.length)
+        var cell = 3.0 * median
+        if not (cell > 0.0): cell = 3.0 * mean_spacing(points)
+        var widenings: usize = 0
+        var samples = ShSamples.make()
+        while result.positions.count() > options.target and cell > 0.0 and widenings < 6:
+            let pairs = try merge_pass(&result, options.target, cell, &samples)
+            result.merged += pairs
+            # Few pairs found: the neighbors are farther apart than the search.
+            if pairs * 4 < result.positions.count() - options.target + pairs:
+                cell *= 2.0
+                widenings += 1
+    if result.positions.count() > options.target: try prune(&result, options.target, options.keep_mass)
+    return result
+
+# mark: Merging
+
+## A candidate pair and its cost.
+struct Pair:
+    let cost: f64
+    let a: u32
+    let b: u32
+
+func cheaper(x: Pair, y: Pair) -> bool:
+    return x.cost < y.cost or (x.cost == y.cost and (x.a < y.a or (x.a == y.a and x.b < y.b)))
+
+let graph_degree: usize = 6
+let unmatched: u32 = 0xFFFFFFFF
+
+## One merge pass over `reduced` with neighbors searched in cubes of `cell`:
+## up to count - target pairs merged; returns how many.
+func merge_pass(reduced: Reduced*, target: usize, cell: f64, samples: const ShSamples*) -> usize!:
+    let count = reduced.positions.count()
+    let need = count - target
+    let masses = try new f64[count] --- in memory.heap
+    defer free(masses) in memory.heap
+    splat_masses(&reduced.store, masses)
+    var hash = try PointHash.build(reduced.positions.view(), cell)
+    defer hash.close()
+    let neighbors = try new u32[count * graph_degree] --- in memory.heap
+    defer free(neighbors) in memory.heap
+    let found = try new u8[count] --- in memory.heap
+    defer free(found) in memory.heap
+    var search = SearchWork(&hash, neighbors, found)
+    ranges.each_range(count, 4096, (void*)&search, search_range)
+    var total: usize = 0
+    for at in 0..<count: total += (usize)found[at]
+    let pairs = try new Pair[total + 1] --- in memory.heap
+    defer free(pairs) in memory.heap
+    let points = reduced.positions.view()
+    var used: usize = 0
+    for a in 0..<count:
+        for slot in 0..<(usize)found[a]:
+            let b = (usize)neighbors[a * graph_degree + slot]
+            let ma = masses[a]
+            let mb = masses[b]
+            let weight = ma * mb / (ma + mb) if ma + mb > 0.0 else 0.0
+            let d = points[a].vector().subtract(points[b].vector())
+            pairs[used] = Pair(weight * d.dot(d), (u32)(a if a < b else b), (u32)(b if a < b else a))
+            used += 1
+    sort.by(pairs[..<used], cheaper)
+    let partner = try new u32[count] --- in memory.heap
+    defer free(partner) in memory.heap
+    for at in 0..<count: partner[at] = unmatched
+    var merged: usize = 0
+    for pair in pairs[..<used]:
+        if merged >= need: break
+        if partner[(usize)pair.a] != unmatched or partner[(usize)pair.b] != unmatched: continue
+        partner[(usize)pair.a] = pair.b
+        partner[(usize)pair.b] = pair.a
+        merged += 1
+    if merged == 0: return 0
+    # The new cloud in the old order: a pair takes its lower index's place,
+    # its attributes from the heavier splat.
+    let size = count - merged
+    let parents = try new i32[size] --- in memory.heap
+    defer free(parents) in memory.heap
+    let others = try new i32[size] --- in memory.heap
+    defer free(others) in memory.heap
+    var next: usize = 0
+    for at in 0..<count:
+        let other = partner[at]
+        if other != unmatched and (usize)other < at: continue
+        if other == unmatched:
+            parents[next] = (i32)at
+            others[next] = -1
+        else:
+            let heavier = at if masses[at] >= masses[(usize)other] else (usize)other
+            parents[next] = (i32)heavier
+            others[next] = (i32)(at + (usize)other - heavier)
+        next += 1
+    var made = try gathered(reduced, parents)
+    errdefer made.close()
+    try merge_into(reduced, &made, parents, others, masses, samples)
+    made.merged = reduced.merged
+    made.pruned = reduced.pruned
+    reduced.close()
+    *reduced = made
+    return merged
+
+struct SearchWork:
+    let hash: const PointHash*
+    let neighbors: u32[]
+    let found: u8[]
+
+func search_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (SearchWork*)context
+    for at in first..<end:
+        work.found[at] = (u8)work.hash.nearest(at, graph_degree, work.neighbors[at * graph_degree..<(at + 1) * graph_degree])
+
+## `reduced` through parent map `parents`: positions and point attributes
+## gathered, detail attributes shared.
+func gathered(reduced: const Reduced*, parents: const i32[]) -> Reduced!:
+    let size = parents.length
+    var positions = try Column[Float3].allocate(size)
+    errdefer positions.release()
+    let from_points = reduced.positions.view()
+    let out = positions.span()
+    for at in 0..<size: out[at] = from_points[(usize)parents[at]]
+    var attributes = AttributeStore()
+    errdefer attributes.close()
+    for index in 0..<reduced.store.count():
+        let entry = reduced.store.entry(index)
+        if entry.domain != Domain.point:
+            try attributes.put(entry.share())
+            continue
+        try attributes.put(try attribute_ops.remapped(entry, parents, size))
+    return Reduced(positions, attributes, 0, 0)
+
+## Write the merged splats of `made` (gathered from `reduced` by `parents`;
+## `others` names each merged element's second splat, -1 for none).
+func merge_into(reduced: const Reduced*, made: Reduced*, parents: const i32[], others: const i32[], masses: const f64[], samples: const ShSamples*) -> !:
+    let source = &reduced.store
+    let size = parents.length
+    var work: MergeWork
+    work.parents = parents
+    work.others = others
+    work.masses = masses
+    work.samples = samples
+    work.points = reduced.positions.view()
+    work.out_points = made.positions.span()
+    work.orient = Floats.of(source.entry((usize)float_attribute(source, orient_name, 4)))
+    work.scale = Floats.of(source.entry((usize)float_attribute(source, scale_name, 3)))
+    work.opacity = Floats.of(source.entry((usize)float_attribute(source, opacity_name, 1)))
+    let color_index = float_attribute(source, color_name, 3)
+    work.has_color = color_index >= 0
+    if work.has_color: work.color = Floats.of(source.entry((usize)color_index))
+    let rest_index = float_attribute(source, restorient_name, 4)
+    work.has_rest = rest_index >= 0
+    if work.has_rest: work.rest = Floats.of(source.entry((usize)rest_index))
+    let sh_index = sh_attribute(source)
+    if sh_index >= 0: work.sh = source.entry((usize)sh_index)
+    # The writable columns of the new cloud (copies of its own).
+    let store = &made.store
+    work.out_orient = try writable_float32(store, (usize)float_attribute(store, orient_name, 4), size)
+    work.out_scale = try writable_float32(store, (usize)float_attribute(store, scale_name, 3), size)
+    let opacity_out = (usize)float_attribute(store, opacity_name, 1)
+    work.opacity_kind = store.entry(opacity_out).kind
+    work.out_opacity = try store.writable(opacity_out)
+    if work.has_color:
+        let at = (usize)float_attribute(store, color_name, 3)
+        work.color_kind = store.entry(at).kind
+        work.out_color = try store.writable(at)
+    if work.has_rest: work.out_rest = try writable_float32(store, (usize)float_attribute(store, restorient_name, 4), size)
+    let out_sh = sh_attribute(store)
+    if out_sh >= 0:
+        work.out_sh = try writable_sh(store, (usize)out_sh)
+        work.out_sh_entry = store.entry((usize)out_sh)
+    ranges.each_range(size, 2048, (void*)&work, merge_range)
+
+struct MergeWork:
+    var parents: const i32[]
+    var others: const i32[]
+    var masses: const f64[]
+    var samples: const ShSamples*?
+    var points: const Float3[]
+    var out_points: Float3[]
+    var orient: Floats
+    var scale: Floats
+    var opacity: Floats
+    var color: Floats
+    var rest: Floats
+    var has_color: bool
+    var has_rest: bool
+    var sh: const Attribute*?
+    var out_orient: f32[]
+    var out_scale: f32[]
+    var out_opacity: u8[]
+    var opacity_kind: DataType
+    var out_color: u8[]
+    var color_kind: DataType
+    var out_rest: f32[]
+    var out_sh: f32[]
+    var out_sh_entry: const Attribute*?
+
+    func quat(values: const Floats*, at: usize) -> Quat:
+        return Quat(values.at(at, 0), values.at(at, 1), values.at(at, 2), values.at(at, 3)).normalized()
+
+    ## Element `at` of the new cloud, when it is a merged pair.
+    func merge(at: usize):
+        if self.others[at] < 0: return
+        let pair: usize[2] = [(usize)self.parents[at], (usize)self.others[at]]
+        let total = self.masses[pair[0]] + self.masses[pair[1]]
+        var weights: f64[2] = [0.5, 0.5]
+        if total > 0.0: weights = [self.masses[pair[0]] / total, self.masses[pair[1]] / total]
+        var center = Vector3()
+        for k in 0..<(usize)2: center = center.add(self.points[pair[k]].vector().multiply_scalar(weights[k]))
+        var sigma = Mat3.diagonal(Vector3())
+        var color = Vector3()
+        for k in 0..<(usize)2:
+            let s = pair[k]
+            let d = self.points[s].vector().subtract(center)
+            let own = compose_covariance(self.quat(&self.orient, s), Vector3(self.scale.at(s, 0), self.scale.at(s, 1), self.scale.at(s, 2)))
+            let spread = Mat3([d.x * d.x, d.x * d.y, d.x * d.z, d.y * d.x, d.y * d.y, d.y * d.z, d.z * d.x, d.z * d.y, d.z * d.z])
+            for e in 0..<(usize)9: sigma.m[e] = sigma.m[e] + weights[k] * (own.m[e] + spread.m[e])
+            if self.has_color: color = color.add(Vector3(self.color.at(s, 0), self.color.at(s, 1), self.color.at(s, 2)).multiply_scalar(weights[k]))
+        let shape = decompose_covariance(sigma)
+        let volume = shape.scale.x * shape.scale.y * shape.scale.z
+        var alpha = math.max(self.opacity.at(pair[0], 0), self.opacity.at(pair[1], 0))
+        if volume > 0.0: alpha = math.min(total / volume, 1.0)
+        self.out_points[at] = Float3.of(center)
+        write_quat(self.out_orient, at, shape.orient)
+        self.out_scale[at * 3] = (f32)shape.scale.x
+        self.out_scale[at * 3 + 1] = (f32)shape.scale.y
+        self.out_scale[at * 3 + 2] = (f32)shape.scale.z
+        attribute_ops.write_number(self.out_opacity, self.opacity_kind, at, alpha)
+        if self.has_color:
+            attribute_ops.write_number(self.out_color, self.color_kind, at * 3, color.x)
+            attribute_ops.write_number(self.out_color, self.color_kind, at * 3 + 1, color.y)
+            attribute_ops.write_number(self.out_color, self.color_kind, at * 3 + 2, color.z)
+        # The merged splat's SH are in the world frame.
+        if self.has_rest: write_quat(self.out_rest, at, shape.orient)
+        self.merge_sh(at, pair, weights)
+
+    ## The mass-weighted mean of the pair's SH, each turned into the world
+    ## frame, into the new element's items (as many as it has).
+    func merge_sh(at: usize, pair: usize[2], weights: f64[2]):
+        let source = self.sh else return
+        let target = self.out_sh_entry else return
+        let samples = self.samples else return
+        let items = target.item_count(at)
+        let first = target.first_item(at)
+        var sum: f64[45]
+        for k in 0..<(usize)2:
+            let s = pair[k]
+            var own: f32[45]
+            let have = source.item_count(s) if source.item_count(s) < 15 else 15
+            for item in 0..<have:
+                for channel in 0..<(usize)3: own[item * 3 + channel] = (f32)source.item(s, item, channel)
+            if self.has_rest:
+                let frame = sh_frame(self.quat(&self.orient, s), self.quat(&self.rest, s))
+                let turn = ShRotation.of(samples, frame)
+                turn.apply(own[..<have * 3], have)
+            for at_value in 0..<have * 3: sum[at_value] = sum[at_value] + weights[k] * (f64)own[at_value]
+        for value in 0..<(items if items < 15 else 15) * 3: self.out_sh[first * 3 + value] = (f32)sum[value]
+
+func merge_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (MergeWork*)context
+    for at in first..<end: work.merge(at)
+
+# mark: Pruning
+
+## A splat's mass and its index, heaviest first.
+struct Weighed:
+    let mass: f64
+    let index: u32
+
+func heavier_first(x: Weighed, y: Weighed) -> bool:
+    return x.mass > y.mass or (x.mass == y.mass and x.index < y.index)
+
+## Keep the `target` heaviest splats of `reduced` (in their order), scaling the
+## kept opacities by the lost mass when `keep_mass`.
+func prune(reduced: Reduced*, target: usize, keep_mass: bool) -> !:
+    let count = reduced.positions.count()
+    let masses = try new f64[count] --- in memory.heap
+    defer free(masses) in memory.heap
+    splat_masses(&reduced.store, masses)
+    let ranked = try new Weighed[count] --- in memory.heap
+    defer free(ranked) in memory.heap
+    var before: f64 = 0.0
+    for at in 0..<count:
+        ranked[at] = Weighed(masses[at], (u32)at)
+        before += masses[at]
+    sort.by(ranked, heavier_first)
+    let keep = try new u8[count] in memory.heap
+    defer free(keep) in memory.heap
+    var after: f64 = 0.0
+    for at in 0..<target:
+        keep[(usize)ranked[at].index] = 1
+        after += ranked[at].mass
+    let parents = try new i32[target + 1] --- in memory.heap
+    defer free(parents) in memory.heap
+    var next: usize = 0
+    for at in 0..<count:
+        if keep[at] == 0: continue
+        parents[next] = (i32)at
+        next += 1
+    var made = try gathered(reduced, parents[..<target])
+    errdefer made.close()
+    let opacity = float_attribute(&made.store, opacity_name, 1)
+    if keep_mass and opacity >= 0 and after > 0.0 and before > after:
+        let entry = made.store.entry((usize)opacity)
+        let kind = entry.kind
+        let alpha = Floats.of(entry)
+        # Each kept splat's mass per unit opacity (its σ₁σ₂σ₃), and the factor f
+        # whose clamped opacities min(f·α, 1) hold the lost mass, by bisection
+        # (the clamp makes the mass a monotone, piecewise linear function of f).
+        let kept_masses = try new f64[target + 1] --- in memory.heap
+        defer free(kept_masses) in memory.heap
+        splat_masses(&made.store, kept_masses[..<target])
+        var low: f64 = 1.0
+        var high: f64 = before / after
+        while clamped_mass(&alpha, kept_masses[..<target], high) < before and high < 1.0e12: high *= 2.0
+        for _ in 0..<(usize)60:
+            let middle = 0.5 * (low + high)
+            if clamped_mass(&alpha, kept_masses[..<target], middle) < before: low = middle
+            else: high = middle
+        let factor = high
+        var values = try new f64[target + 1] --- in memory.heap
+        defer free(values) in memory.heap
+        for at in 0..<target: values[at] = math.min(alpha.at(at, 0) * factor, 1.0)
+        let bytes = try made.store.writable((usize)opacity)
+        for at in 0..<target: attribute_ops.write_number(bytes, kind, at, values[at])
+    made.merged = reduced.merged
+    made.pruned = reduced.pruned + count - target
+    reduced.close()
+    *reduced = made
+
+## The mass of splats of `masses` (at opacities `alpha`) with every opacity
+## scaled by `factor` and clamped to 1.
+func clamped_mass(alpha: const Floats*, masses: const f64[], factor: f64) -> f64:
+    var total: f64 = 0.0
+    for at in 0..<masses.length:
+        let a = alpha.at(at, 0)
+        if not (a > 0.0): continue
+        total += masses[at] * math.min(a * factor, 1.0) / a
+    return total

@@ -19,6 +19,12 @@ pub struct Floats:
             elif attribute.kind == DataType.float64: wide = attribute_ops.typed[f64](attribute.data.view())
         return Floats(attribute, narrow, wide, attribute.width)
 
+    ## Reads of nothing: every value 0.
+    pub static func empty() -> Floats:
+        var narrow: const f32[]
+        var wide: const f64[]
+        return Floats(none, narrow, wide, 0)
+
     ## Whether it reads an attribute.
     pub func present() -> bool:
         return self.attribute != none

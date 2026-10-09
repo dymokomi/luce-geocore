@@ -1,0 +1,149 @@
+# Gaussian splats in snippets. `p.orient`, `p.scale` and `p.opacity` are column fields
+# (bindings.lucb). The SH array is ragged, so `p.sh(i)`, `p.set_sh(i, v)` and
+# `p.sh_count()` are builtins over the run's `sh` attribute: before the run a program
+# that writes SH gets a private copy of the array, each lane writes only its own point's
+# items (no locks), and the copy becomes the output's `sh`. The `gsplat` helper module
+# (`luce_geocore/gsplat.lucb` in the snippet root) is inlined like `lib`; two of its
+# functions are builtins here: `decomposed` (a covariance's orient and size, through
+# geocore's f64 eigensolver) and `turn_sh` (the running point's SH turned by a rotation).
+
+## The helper module's name, as the host knows it.
+let gsplat_module: str = "luce_geocore.gsplat"
+
+## A run's SH: the input's array and, when the program writes it, the copy it writes.
+struct ShValues:
+    var entry: const Attribute*?
+    var copy: SharedColumn[u8]
+    var copied: bool
+    var written: @bool
+    var samples: splats.ShSamples
+
+    func close():
+        if self.copied: self.copy.release()
+        self.copied = false
+
+    ## The items of point `element` (empty without SH).
+    func items(element: usize) -> (usize, usize):
+        let entry = self.entry else return (0, 0)
+        if element >= entry.elements: return (0, 0)
+        return (entry.first_item(element), entry.item_count(element))
+
+    ## The f32 values to read: the copy once there is one.
+    func values() -> const f32[]:
+        if self.copied: return f32_view(self.copy.view())
+        let entry = self.entry else return no_floats32()
+        return f32_view(entry.data.view())
+
+## The messages of SH faults (static: a fault's message outlasts the run).
+let sh_range: str = "the SH item is out of range (see p.sh_count())"
+
+## Find the run's `sh` (a ragged f32 × 3 point attribute of the mesh the run reads) when
+## the program reads SH, and copy it when the program writes it.
+func prepare_sh(state: CookState*, program: const Program*, mode: RunOver) -> !:
+    if mode != .points: return
+    var reads = false
+    var writes = false
+    for at in 0..<program.call_count():
+        let name = program.call_name(at)
+        if name == "splat_sh" or name == "splat_sh_count": reads = true
+        if name == "splat_set_sh" or name == "splat_turn_sh": writes = true
+    if not reads and not writes: return
+    let mesh = state.first.mesh else return
+    let found = mesh.find_attribute("sh", 0)
+    if found < 0: return
+    let entry = try mesh.attribute_entry(found)
+    if entry.storage != Storage.ragged or entry.kind != DataType.float32 or entry.width != 3: return
+    state.sh.entry = entry
+    if not writes: return
+    state.sh.copy = try SharedColumn[u8].copy_of(entry.data.view())
+    state.sh.copied = true
+    state.sh.samples = splats.ShSamples.make()
+
+## The output set with the written SH, when the run wrote any.
+func put_sh(state: const CookState*, storage: GeometrySet*) -> !:
+    if not state.sh.copied or not state.sh.written.load(.acquire): return
+    let entry = state.sh.entry else return
+    let source = set_mesh(storage) else return
+    let made = try mesh_share(source)
+    errdefer mesh_dispose(made)
+    try put_attribute(made, try Attribute.ragged("sh", Domain.point, DataType.float32, 3, entry.offsets.share(), state.sh.copy.share()))
+    try storage.put(&mesh_component, (void*)made)
+
+## Register the splat builtins.
+func bind_splats(host: Host*) -> !:
+    let four = [Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+    try host.builtin("Point", "sh", engine.Builtin.of("splat_sh", [Kind.i32], four, sh_lanes))
+    try host.builtin("Point", "set_sh", engine.Builtin.of("splat_set_sh", [Kind.i32, Kind.f32, Kind.f32, Kind.f32, Kind.f32], [Kind.i32], set_sh_lanes))
+    try host.builtin("Point", "sh_count", engine.Builtin.of("splat_sh_count", no_kinds(), [Kind.i32], sh_count_lanes))
+    try host.library(gsplat_module)
+    var rows: Kind[12]
+    for k in 0..<(usize)12: rows[k] = .f32
+    var axes: Kind[7]
+    for k in 0..<(usize)7: axes[k] = .f32
+    try host.builtin(gsplat_module, "decomposed", engine.Builtin.of("splat_decomposed", rows, axes, decomposed_lanes))
+    try host.builtin(gsplat_module, "turn_sh", engine.Builtin.of("splat_turn_sh", four, [Kind.i32], turn_sh_lanes))
+
+func sh_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let index = call.i32_argument(0)
+    let values = state.sh.values()
+    for lane in 0..<call.lanes:
+        for k in 0..<(usize)4: call.f32_result(k)[lane] = 0.0
+        if not call.active(lane): continue
+        let (first, count) = state.sh.items(call.first + lane)
+        let i = index[lane]
+        if i < 0 or (usize)i >= count:
+            call.fail_with(lane, sh_range)
+            continue
+        let at = (first + (usize)i) * 3
+        for k in 0..<(usize)3: call.f32_result(k)[lane] = values[at + k]
+
+func set_sh_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let index = call.i32_argument(0)
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = 0
+        if not call.active(lane): continue
+        let (first, count) = state.sh.items(call.first + lane)
+        let i = index[lane]
+        if i < 0 or (usize)i >= count or not state.sh.copied:
+            call.fail_with(lane, sh_range)
+            continue
+        let values = f32_view(state.sh.copy.view())
+        let at = (first + (usize)i) * 3
+        for k in 0..<(usize)3: values[at + k] = call.f32_argument(1 + k)[lane]
+        state.sh.written.store(true, .release)
+
+func sh_count_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    for lane in 0..<call.lanes:
+        let (_, count) = state.sh.items(call.first + lane)
+        call.i32_result(0)[lane] = (i32)count
+
+## The orient (x, y, z, w) and sizes of the covariance whose rows are the arguments
+## (lane 3 of each row ignored).
+func decomposed_lanes(call: engine.Call*):
+    for lane in 0..<call.lanes:
+        if not call.active(lane): continue
+        var m: f64[9]
+        for row in 0..<(usize)3:
+            for column in 0..<(usize)3: m[row * 3 + column] = (f64)call.f32_argument(row * 4 + column)[lane]
+        let shape = splats.decompose_covariance(splats.Mat3(m))
+        let q = shape.orient
+        let values: f64[7] = [q.x, q.y, q.z, q.w, shape.scale.x, shape.scale.y, shape.scale.z]
+        for k in 0..<(usize)7: call.f32_result(k)[lane] = (f32)values[k]
+
+## Turn the running point's SH by the rotation (x, y, z, w) given: the function they
+## describe becomes f(R⁻¹ d).
+func turn_sh_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = 0
+        if not call.active(lane): continue
+        let (first, count) = state.sh.items(call.first + lane)
+        if count == 0 or not state.sh.copied: continue
+        let q = splats.Quat((f64)call.f32_argument(0)[lane], (f64)call.f32_argument(1)[lane], (f64)call.f32_argument(2)[lane], (f64)call.f32_argument(3)[lane]).normalized()
+        let sh_turn = splats.ShRotation.of(&state.sh.samples, q)
+        let values = f32_view(state.sh.copy.view())
+        sh_turn.apply(values[first * 3..<(first + count) * 3], count)
+        state.sh.written.store(true, .release)

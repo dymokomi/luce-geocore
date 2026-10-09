@@ -6,6 +6,7 @@ import checks
 import help
 import stages
 import voxels
+import splat_code
 
 pub func main(arguments: str[]) -> i32!:
     if arguments.length > 1 and arguments[1] == "--bench":
@@ -40,4 +41,5 @@ pub func main(arguments: str[]) -> i32!:
     try array_attributes.run_all()
     try help.run_all()
     try voxels.run_all()
+    try splat_code.run_all()
     return 0

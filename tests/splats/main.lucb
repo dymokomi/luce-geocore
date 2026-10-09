@@ -11,6 +11,7 @@ import math_checks
 import placement_checks
 import verb_checks
 import unbake_checks
+import filter_checks
 
 ## Counts live blocks and fails the allocation after `remaining` more.
 ## Kernels allocate on pool workers too, so it takes a lock.
@@ -83,4 +84,6 @@ pub func main(arguments: str[]) -> i32!:
     print("PASS splat merge and verbs: degree padding, Bake GSplats from PLY, PLY vectors, Houdini and points, SH Degree, codec")
     inject(&tracker, unbake_checks.run)
     print("PASS splat unbake: luce-ply's raw form through bake and unbake bit for bit, restorient baked into f_rest")
+    inject(&tracker, filter_checks.run)
+    print("PASS splat filters: Up Axis turns exactly, Crop counts, Clean thresholds, Reduce keeps mass and centroid, cloud groups, Blast and Promote")
     return 0

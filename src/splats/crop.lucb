@@ -1,0 +1,70 @@
+## Crop GSplats' kernel: which points of a cloud a box or a sphere keeps.
+## A point is inside by its center, or with `by_extent` when its 3σ
+## ellipsoid reaches into the shape: against a box, the ellipsoid's
+## axis-aligned extent (3√Σᵢᵢ per axis) is tested; against a sphere, its
+## extent toward the sphere's center (3√(uᵀΣu)). A cloud without splat
+## attributes has no extent. Points with non-finite positions are never
+## inside.
+
+## The shape Crop GSplats tests, in world space.
+pub struct CropRegion:
+    ## A sphere of `radius`, else a box of half sizes `half`, about `center`.
+    pub let sphere: bool
+    pub let center: Vector3
+    pub let half: Vector3
+    pub let radius: f64
+    ## Test the 3σ ellipsoid rather than the center.
+    pub let by_extent: bool
+    ## Keep the points outside, else those inside.
+    pub let keep_outside: bool
+
+## Into `keep` (one byte per point), 1 for the points of a cloud (`points`
+## relative to `origin`, attributes `store`) that `region` keeps, else 0.
+pub func crop_flags(points: const Float3[], origin: Vector3, store: const AttributeStore*, region: const CropRegion*, keep: u8[]):
+    var work: CropWork
+    work.points = points
+    work.origin = origin
+    work.region = region
+    work.keep = keep
+    work.extent = region.by_extent and is_splat_store(store)
+    if work.extent:
+        work.orient = Floats.of(store.entry((usize)float_attribute(store, orient_name, 4)))
+        work.scale = Floats.of(store.entry((usize)float_attribute(store, scale_name, 3)))
+    ranges.each_range(points.length, 16384, (void*)&work, crop_range)
+
+struct CropWork:
+    var points: const Float3[]
+    var origin: Vector3
+    var region: const CropRegion*?
+    var keep: u8[]
+    ## Whether the test uses the splats' extent.
+    var extent: bool
+    var orient: Floats
+    var scale: Floats
+
+    func inside(element: usize) -> bool:
+        let region = self.region else return false
+        let c = self.points[element].vector().add(self.origin)
+        let d = c.subtract(region.center)
+        if not self.extent:
+            if region.sphere: return d.length() <= region.radius
+            return math.abs(d.x) <= region.half.x and math.abs(d.y) <= region.half.y and math.abs(d.z) <= region.half.z
+        let sigma = compose_covariance(Quat(self.orient.at(element, 0), self.orient.at(element, 1), self.orient.at(element, 2), self.orient.at(element, 3)).normalized(), Vector3(self.scale.at(element, 0), self.scale.at(element, 1), self.scale.at(element, 2)))
+        if region.sphere:
+            let distance = d.length()
+            if not (distance > 0.0): return distance == 0.0
+            let u = d.multiply_scalar(1.0 / distance)
+            let reach = 3.0 * math.sqrt(math.max(u.dot(sigma.transform(u)), 0.0))
+            return distance - reach <= region.radius
+        let rx = 3.0 * math.sqrt(math.max(sigma.at(0, 0), 0.0))
+        let ry = 3.0 * math.sqrt(math.max(sigma.at(1, 1), 0.0))
+        let rz = 3.0 * math.sqrt(math.max(sigma.at(2, 2), 0.0))
+        return math.abs(d.x) <= region.half.x + rx and math.abs(d.y) <= region.half.y + ry and math.abs(d.z) <= region.half.z + rz
+
+func crop_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (CropWork*)context
+    for element in first..<end:
+        let inside = work.inside(element)
+        let region = work.region else return
+        work.keep[element] = 1 if inside != region.keep_outside else 0

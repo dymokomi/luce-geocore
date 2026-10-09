@@ -1,0 +1,133 @@
+# The `gsplat` helper module snippets use (`gsplat.color(p, dir)`): `luce_geocore/
+# gsplat.lucb` in the snippet root. Its functions are Base helpers over the Point API,
+# inlined into the program like `lib`'s (Host.library); `decomposed` and `turn_sh` are
+# builtins (splat_bindings.lucb). The wrapper imports it only when the text names it.
+
+let gsplat_text: str = """# Gaussian splat helpers for Code snippets: activations, covariances, SH colors and
+# rotations of the running point (Run Over Points on a splat cloud).
+from luce_std import math32
+from luce_kernel.lib import Mat3, Quat, qconvert, normalized
+from luce_geocore.code import Point
+
+## A covariance's eigen decomposition: the rotation (x, y, z, w) and the sizes (σ).
+pub struct Axes:
+    pub var qx: f32 = 0.0
+    pub var qy: f32 = 0.0
+    pub var qz: f32 = 0.0
+    pub var qw: f32 = 1.0
+    pub var sx: f32 = 0.0
+    pub var sy: f32 = 0.0
+    pub var sz: f32 = 0.0
+
+## 3DGS's opacity activation: a PLY's logit to a linear opacity.
+pub func sigmoid(x: f32) -> f32:
+    return 1.0 / (1.0 + math32.exp(-x))
+
+## The inverse of `sigmoid`: a linear opacity (kept inside 1e-6 of 0 and 1) to a logit.
+pub func logit(y: f32) -> f32:
+    let c = math32.clamp(y, 0.000001, 0.999999)
+    return math32.log(c / (1.0 - c))
+
+## The splat's rotation: `p.orient` normalized (the identity when it is zero).
+pub func rotation(p: Point*) -> Quat:
+    let o = p.orient
+    return Quat(x = o[0], y = o[1], z = o[2], w = o[3]).normalized()
+
+## The splat's SH frame, orient · restorient⁻¹: the identity without a `restorient`.
+pub func rest(p: Point*) -> Quat:
+    let r = p.vec4("restorient")
+    if r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3] == 0.0:
+        return Quat.identity()
+    return rotation(p).multiply(Quat(x = r[0], y = r[1], z = r[2], w = r[3]).normalized().inverted())
+
+## The splat's covariance Σ = R diag(scale²) Rᵀ (symmetric, so either convention).
+pub func covariance(p: Point*) -> Mat3:
+    let m = qconvert(rotation(p))
+    let s = p.scale
+    return m.transposed().multiply(Mat3.scaling([s[0] * s[0], s[1] * s[1], s[2] * s[2], 0.0])).multiply(m)
+
+## The rotation and sizes of covariance `m` (a builtin: geocore's f64 eigensolver).
+pub func decomposed(x: f32[4], y: f32[4], z: f32[4]) -> Axes:
+    _ = x
+    _ = y
+    _ = z
+    return Axes()
+
+## Turn the running point's SH by rotation `q` given as x, y, z, w (a builtin; use
+## `rotate_sh`).
+pub func turn_sh(x: f32, y: f32, z: f32, w: f32):
+    _ = x
+    _ = y
+    _ = z
+    _ = w
+
+## Give the splat covariance `m`: a new orient and scale. Its colors stay where they
+## were in the world: with a `restorient` the SH turn by the frame's change.
+pub func set_covariance(p: Point*, m: Mat3):
+    let before = rotation(p)
+    let a = decomposed(m.x, m.y, m.z)
+    let after = Quat(x = a.qx, y = a.qy, z = a.qz, w = a.qw)
+    let r = p.vec4("restorient")
+    if r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3] != 0.0:
+        let back = Quat(x = r[0], y = r[1], z = r[2], w = r[3]).normalized()
+        # The frame goes from o·r⁻¹ to o'·r⁻¹: turn the SH by r·o'⁻¹·o·r⁻¹.
+        rotate_sh(p, back.multiply(after.inverted()).multiply(before).multiply(back.inverted()))
+    p.orient = after.vector()
+    p.scale = [a.sx, a.sy, a.sz, 0.0]
+
+## Turn the splat's SH by rotation `q`, in place (the colors it shows toward `d` move
+## to `q` applied to `d`).
+pub func rotate_sh(p: Point*, q: Quat):
+    _ = p
+    turn_sh(q.x, q.y, q.z, q.w)
+
+## Turn the whole splat by rotation `q`: its orient, and its SH with it (through the
+## SH frame when it has a `restorient`, else the coefficients themselves).
+pub func rotate(p: Point*, q: Quat):
+    let r = p.vec4("restorient")
+    if r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3] == 0.0:
+        rotate_sh(p, q)
+    p.orient = q.multiply(rotation(p)).vector()
+
+## sRGB's curve on one channel, and its inverse (mirrored for negatives).
+pub func srgb_encode(v: f32) -> f32:
+    let a = math32.abs(v)
+    var e = a * 12.92
+    if a > 0.0031308:
+        e = 1.055 * math32.pow(a, 1.0 / 2.4) - 0.055
+    return e if v >= 0.0 else -e
+
+pub func srgb_decode(v: f32) -> f32:
+    let a = math32.abs(v)
+    var d = a / 12.92
+    if a > 0.04045:
+        d = math32.pow((a + 0.055) / 1.055, 2.4)
+    return d if v >= 0.0 else -d
+
+## The splat's linear color seen along `direction` (from the viewer toward the splat,
+## 3DGS's convention; any length): `Cd` plus its SH bands, evaluated in the SH frame, as 3DGS clamps and,
+## for a capture (`srgb`, the default), decoded from sRGB. Lane 3 is zero.
+pub func color(p: Point*, direction: f32[4], srgb: bool = true) -> f32[4]:
+    let d = normalized(rest(p).inverted().rotate(direction))
+    let x = d[0]
+    let y = d[1]
+    let z = d[2]
+    let cd = p.Cd
+    var c: f32[4] = [cd[0], cd[1], cd[2], 0.0]
+    if srgb:
+        c = [srgb_encode(cd[0]), srgb_encode(cd[1]), srgb_encode(cd[2]), 0.0]
+    let n = p.sh_count()
+    if n >= 3:
+        c = c + p.sh(0) * (-0.4886025 * y) + p.sh(1) * (0.4886025 * z) + p.sh(2) * (-0.4886025 * x)
+    if n >= 8:
+        c = c + p.sh(3) * (1.0925484 * x * y) + p.sh(4) * (-1.0925484 * y * z) + p.sh(5) * (0.31539157 * (2.0 * z * z - x * x - y * y))
+        c = c + p.sh(6) * (-1.0925484 * x * z) + p.sh(7) * (0.54627422 * (x * x - y * y))
+    if n >= 15:
+        c = c + p.sh(8) * (-0.59004359 * y * (3.0 * x * x - y * y)) + p.sh(9) * (2.8906114 * x * y * z) + p.sh(10) * (-0.45704580 * y * (4.0 * z * z - x * x - y * y))
+        c = c + p.sh(11) * (0.37317633 * z * (2.0 * z * z - 3.0 * x * x - 3.0 * y * y)) + p.sh(12) * (-0.45704580 * x * (4.0 * z * z - x * x - y * y))
+        c = c + p.sh(13) * (1.4453057 * z * (x * x - y * y)) + p.sh(14) * (-0.59004359 * x * (x * x - 3.0 * y * y))
+    c = [math32.max(c[0], 0.0), math32.max(c[1], 0.0), math32.max(c[2], 0.0), 0.0]
+    if srgb:
+        c = [srgb_decode(c[0]), srgb_decode(c[1]), srgb_decode(c[2]), 0.0]
+    return c
+"""

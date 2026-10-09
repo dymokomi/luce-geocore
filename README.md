@@ -27,7 +27,8 @@ The Code node runs per-element Luce Base snippets over a set (Houdini's Attribut
 Wrangle, and with Run Over Voxels the Volume Wrangle) through
 [luce-kernel](https://github.com/dymokomi/luce-kernel): `Code.check`, `Code.complete`
 and `Code.hover` for the editor and `Code.run` for the cook; the API a snippet sees is in
-`src/code/stubs.lucb`, and `tests/code` times whole cooks with `--bench`.
+`src/code/stubs.lucb` (with the `gsplat` helpers for splat clouds in `src/code/gsplat.lucb`),
+and `tests/code` times whole cooks with `--bench`.
 
 Import `geocore` (`from luce_geocore.geocore import Mesh, MeshBuilder,
 Vector3`). Base code in other packages also has `luce_geocore.kernel` (bit

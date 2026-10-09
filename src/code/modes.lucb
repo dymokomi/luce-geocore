@@ -23,9 +23,10 @@ extend RunOver:
             error(errors.invalid, "Run Over is 0 (detail), 1 (points), 2 (vertices), 3 (primitives), 4 (numbers) or 5 (voxels)")
         return (RunOver)(u8)value
 
-    ## The entry function the snippet's body goes into.
-    func wrapper() -> lower.RunOver:
-        let imports = "from luce_geocore.code import Point, Prim, Vertex, Voxel, Kernel"
+    ## The entry function the snippet's body goes into; the `gsplat` helpers are imported
+    ## when the text uses them (an unused import is an error).
+    func wrapper(gsplat: bool = false) -> lower.RunOver:
+        let imports = "from luce_geocore.code import Point, Prim, Vertex, Voxel, Kernel\nfrom luce_geocore import gsplat" if gsplat else "from luce_geocore.code import Point, Prim, Vertex, Voxel, Kernel"
         return match self:
             .detail => lower.RunOver(entry = "detail", parameters = "k: Kernel*", imports = imports)
             .points => lower.RunOver(entry = "point", parameters = "p: Point*, k: const Kernel*", imports = imports)
@@ -60,3 +61,7 @@ extend RunOver:
             .primitives => "Prim"
             .voxels => "Voxel"
             _ => "Kernel"
+
+## Whether a snippet's text names the `gsplat` helpers.
+func uses_gsplat(header: str, body: str) -> bool:
+    return strings.contains(header, "gsplat.") or strings.contains(body, "gsplat.")

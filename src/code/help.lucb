@@ -4,7 +4,7 @@
 # character columns, as `Code.check` gives them.
 
 ## The stub modules editor help reads, besides the lib.
-let help_stubs: str[1] = [stub_text]
+let help_stubs: str[2] = [stub_text, gsplat_text]
 
 ## What may come at the caret: each item's label, kind ("function", "method", "field",
 ## "type", "keyword" or "local"), detail (a signature such as `snoise(p: f32[4]) -> f32`,
@@ -53,7 +53,7 @@ func complete_code(run_over: i64, header: str, body: str, part: i64, line: i64, 
     let (which, text) = help_part(part, header, body)
     let row = line_of(text, (u32)(line if line > 0 else 1))
     let root = try locked_root()
-    var completion = try lower.complete(root, mode.wrapper(), header, body, which, (u32)(line if line > 0 else 1), byte_column(row, column), help_stubs[..<1])
+    var completion = try lower.complete(root, mode.wrapper(uses_gsplat(header, body)), header, body, which, (u32)(line if line > 0 else 1), byte_column(row, column), help_stubs[..<2])
     let storage = new CodeCompletion[1] --- in memory.heap catch failure:
         completion.destroy()
         error(failure.code, failure.message)
@@ -69,7 +69,7 @@ func hover_code(run_over: i64, header: str, body: str, part: i64, line: i64, col
     let root = try locked_root()
     var said = collections.List[u8]()
     defer said.destroy()
-    try lower.hover(root, mode.wrapper(), header, body, which, (u32)(line if line > 0 else 1), byte_column(row, column), help_stubs[..<1], &said)
+    try lower.hover(root, mode.wrapper(uses_gsplat(header, body)), header, body, which, (u32)(line if line > 0 else 1), byte_column(row, column), help_stubs[..<2], &said)
     return try interop.copy_text((str)said.view())
 
 func help_part(part: i64, header: str, body: str) -> (lower.Part, str):

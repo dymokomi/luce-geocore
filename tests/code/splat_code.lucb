@@ -1,0 +1,300 @@
+## Stage 5: Run Over Points on point clouds (positions, attributes, groups, removals,
+## a cloud as the second input), the splat bindings (`p.orient`, `p.scale`,
+## `p.opacity`, `p.sh`), and the `gsplat` helpers, each checked against the same
+## edit done in geocore; faults name the point; a 1M-splat opacity edit is timed.
+import interop
+import memory
+import strings
+import time
+from luce_std import math
+from luce_geocore.geocore import GeometrySet, Vector3
+from luce_geocore import kernel as geocore_kernel
+from luce_geocore.kernel import Attribute, AttributeStore, Domain, DataType, Float3, PointCloud, cloud_assembled, cloud_store, points_component, set_cloud
+from luce_geocore.core.shared import Column
+from luce_geocore.splats import Quat, compose_covariance, display_color, ColorSpace, sh_frame
+import support
+
+pub func run_all() -> !:
+    try cloud_runs()
+    try splat_fields()
+    try gsplat_helpers()
+    try timing()
+
+func expect(condition: bool, what: str):
+    if not condition:
+        print(f"FAIL  {what}")
+        trap("splat code checks")
+
+func near(a: f64, b: f64, tolerance: f64) -> bool:
+    return math.abs(a - b) <= tolerance
+
+# mark: Clouds
+
+## A set holding a cloud of `count` points at `positions` with these f32 or f64 point
+## attributes (`widths` components each, values element-major) and an optional `sh`.
+struct CloudMaker:
+    var store: AttributeStore
+    var count: usize
+
+    func floats(name: str, width: usize, values: const f64[], wide: bool = false) -> !:
+        let made = try Attribute.create(name, Domain.point, DataType.float64 if wide else DataType.float32, width, self.count)
+        for at in 0..<self.count * width:
+            if wide: f64[]((f64*)made.data.span().data, self.count * width)[at] = values[at]
+            else: f32[]((f32*)made.data.span().data, self.count * width)[at] = (f32)values[at]
+        try self.store.put(made)
+
+    func sh(items: usize, values: const f64[]) -> !:
+        var offsets = try Column[u8].allocate((self.count + 1) * 4)
+        defer offsets.release()
+        let bounds = u32[]((u32*)offsets.span().data, self.count + 1)
+        for at in 0..<self.count + 1: bounds[at] = (u32)(at * items)
+        var data = try Column[u8].allocate(self.count * items * 12)
+        defer data.release()
+        let out = f32[]((f32*)data.span().data, self.count * items * 3)
+        for at in 0..<out.length: out[at] = (f32)values[at]
+        try self.store.put(try Attribute.ragged("sh", Domain.point, DataType.float32, 3, offsets.take(), data.take()))
+
+    func finish(positions: const Vector3[]) -> interop.Reference[GeometrySet]!:
+        var column = try Column[Float3].allocate(self.count)
+        for at in 0..<self.count: column.span()[at] = Float3.of(positions[at])
+        let attributes = self.store
+        self.store = AttributeStore()
+        let cloud = try cloud_assembled(column, Vector3(), attributes)
+        let storage = geocore_kernel.empty_set() catch failure:
+            let close = points_component().close
+            close((void*)cloud)
+            error(failure.code, failure.message)
+        storage.put(points_component(), (void*)cloud) catch failure:
+            geocore_kernel.dispose_set(storage)
+            error(failure.code, failure.message)
+        return try geocore_kernel.adopt_set(storage)
+
+## The point attributes of a set's cloud (trap without one).
+func points_of(set: interop.Reference[GeometrySet]) -> const AttributeStore*:
+    let cloud = set_cloud(set.value()) else trap("the set has no point cloud")
+    return cloud_store(cloud)
+
+func number(set: interop.Reference[GeometrySet], name: str, element: usize, component: usize = 0) -> f64:
+    let store = points_of(set)
+    let index = store.find(name, Domain.point)
+    if index < 0:
+        print(f"no attribute {name}")
+        trap("missing attribute")
+    return store.entry((usize)index).number(element, component)
+
+func position(set: interop.Reference[GeometrySet], element: usize) -> Vector3:
+    let cloud = set_cloud(set.value()) else trap("the set has no point cloud")
+    return cloud.point(element)
+
+## A plain cloud: a 10 × 10 × 10 lattice at 0..9 with `mass` = the point number.
+func lattice() -> interop.Reference[GeometrySet]!:
+    var maker = CloudMaker(AttributeStore(), 1000)
+    defer maker.store.close()
+    var masses: f64[1000]
+    var positions: Vector3[1000] = ---
+    for at in 0..<(usize)1000:
+        masses[at] = (f64)at
+        positions[at] = Vector3((f64)(at % 10), (f64)(at // 10 % 10), (f64)(at // 100))
+    try maker.floats("mass", 1, masses)
+    return try maker.finish(positions)
+
+func cloud_runs() -> !:
+    let cloud = try lattice()
+    let moved = try support.run(cloud, support.points_mode, "p.P[1] += 0.5\np.set_f32(\"double\", p.f32(\"mass\") * 2.0)\n")
+    expect(not moved.value().has("mesh") and moved.value().cloud_count() == 1000, "a cloud runs and stays a cloud")
+    expect(position(moved, 37).y == 3.5 and number(moved, "double", 37) == 74.0, "positions and new attributes on cloud points")
+    let grouped = try support.run_with(cloud, support.points_mode, "", "p.Cd = [1.0, 0.0, 0.0, 0.0]\n", "@P.x>5", support.no_names(), support.no_values())
+    expect(number(grouped, "Cd", 6) == 1.0 and number(grouped, "Cd", 5) == 0.0, "a group restricts the run on a cloud")
+    let halved = try support.run(cloud, support.points_mode, "if p.ptnum % 2 == 0:\n    k.remove_point(p.ptnum)\n")
+    expect(halved.value().cloud_count() == 500 and number(halved, "mass", 0) == 1.0, "removals on a cloud")
+    let added = try support.run(cloud, support.points_mode, "if p.ptnum == 0:\n    _ = k.add_point([0.0, -1.0, 0.0, 0.0])\n")
+    expect(added.value().cloud_count() == 1001, "added points join the cloud")
+    let counted = try support.run_inputs(try support.grid_set(2), cloud, support.points_mode, "p.set_i32(\"n\", k.input(1).point_count())\np.set_f32(\"near\", (f32)k.input(1).nearpoint(p.P, 100.0))\n")
+    expect(try support.value(try support.mesh_of(counted), "n", 0, 0) == 1000.0, "a cloud as the second input reads as its points")
+    let other = try support.run_inputs(cloud, cloud, support.points_mode, "p.set_i32(\"near\", k.input(1).nearpoint(p.P + [0.1, 0.0, 0.0, 0.0], 1.0))\n")
+    expect(number(other, "near", 12) == 12.0, "nearpoint over a cloud input")
+    print("ok    clouds: Run Over Points runs on point clouds (attributes, groups, removals, adds, inputs)")
+
+# mark: Splats
+
+let splats: usize = 64
+
+## A seeded splat cloud: f32 orient and restorient-free SH (degree 3), f64 scale,
+## opacity and Cd as Bake GSplats writes them.
+func splat_cloud(count: usize, rest: bool = false) -> interop.Reference[GeometrySet]!:
+    var maker = CloudMaker(AttributeStore(), count)
+    defer maker.store.close()
+    var seed: u64 = 12345
+    let orient = try new f64[count * 4] in memory.heap
+    defer free(orient) in memory.heap
+    let scale = try new f64[count * 3] in memory.heap
+    defer free(scale) in memory.heap
+    let opacity = try new f64[count] in memory.heap
+    defer free(opacity) in memory.heap
+    let color = try new f64[count * 3] in memory.heap
+    defer free(color) in memory.heap
+    let sh = try new f64[count * 45] in memory.heap
+    defer free(sh) in memory.heap
+    let positions = try new Vector3[count] --- in memory.heap
+    defer free(positions) in memory.heap
+    for p in 0..<count:
+        let q = Quat(draw(&seed) - 0.5, draw(&seed) - 0.5, draw(&seed) - 0.5, draw(&seed) - 0.5).normalized()
+        orient[p * 4] = q.x
+        orient[p * 4 + 1] = q.y
+        orient[p * 4 + 2] = q.z
+        orient[p * 4 + 3] = q.w
+        for k in 0..<(usize)3:
+            scale[p * 3 + k] = 0.02 + 0.2 * draw(&seed)
+            color[p * 3 + k] = draw(&seed)
+        opacity[p] = 0.05 + 0.9 * draw(&seed)
+        for k in 0..<(usize)45: sh[p * 45 + k] = 0.3 * (draw(&seed) - 0.5)
+        positions[p] = Vector3(4.0 * draw(&seed) - 2.0, 3.0 * draw(&seed), 4.0 * draw(&seed) - 2.0)
+    try maker.floats("orient", 4, orient)
+    if rest: try maker.floats("restorient", 4, orient)
+    try maker.floats("scale", 3, scale, true)
+    try maker.floats("opacity", 1, opacity, true)
+    try maker.floats("Cd", 3, color, true)
+    try maker.sh(15, sh)
+    return try maker.finish(positions)
+
+## A uniform number in [0, 1) from SplitMix64.
+func draw(state: u64*) -> f64:
+    *state = *state +% 0x9E3779B97F4A7C15
+    var z = *state
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB
+    z = z ^ (z >> 31)
+    return (f64)(z >> 11) / 9007199254740992.0
+
+func quat_of(set: interop.Reference[GeometrySet], name: str, p: usize) -> Quat:
+    return Quat(number(set, name, p, 0), number(set, name, p, 1), number(set, name, p, 2), number(set, name, p, 3))
+
+func scale_of(set: interop.Reference[GeometrySet], p: usize) -> Vector3:
+    return Vector3(number(set, "scale", p, 0), number(set, "scale", p, 1), number(set, "scale", p, 2))
+
+func color_of(set: interop.Reference[GeometrySet], p: usize) -> Vector3:
+    return Vector3(number(set, "Cd", p, 0), number(set, "Cd", p, 1), number(set, "Cd", p, 2))
+
+## Point `p`'s SH items into `out` (45 floats).
+func sh_of(set: interop.Reference[GeometrySet], p: usize, out: f32[]) -> usize:
+    let store = points_of(set)
+    let entry = store.entry((usize)store.find("sh", Domain.point))
+    let items = entry.item_count(p)
+    for item in 0..<items:
+        for channel in 0..<(usize)3: out[item * 3 + channel] = (f32)entry.item(p, item, channel)
+    return items
+
+func splat_fields() -> !:
+    let cloud = try splat_cloud(splats)
+    # The three example edits (examples/splats in luced-3d), against the same edits in f64.
+    let faded = try support.run(cloud, support.points_mode, "p.opacity *= 1.0 - math32.clamp(p.P[1] - 1.0, 0.0, 1.0)\n")
+    for p in 0..<splats:
+        let y = (f64)(f32)position(cloud, p).y
+        let expected = number(cloud, "opacity", p) * (1.0 - math.clamp(y - 1.0, 0.0, 1.0))
+        expect(near(number(faded, "opacity", p), expected, 1.0e-6), "fading opacity by height")
+    let gray = try support.run(cloud, support.points_mode, "let g = (p.Cd[0] + p.Cd[1] + p.Cd[2]) / 3.0\np.Cd = [g, g, g, 0.0]\n")
+    var before: f32[45]
+    var after: f32[45]
+    for p in 0..<splats:
+        let c = color_of(cloud, p)
+        let g = (c.x + c.y + c.z) / 3.0
+        expect(near(number(gray, "Cd", p, 1), g, 1.0e-6), "desaturating Cd")
+        _ = sh_of(cloud, p, before)
+        _ = sh_of(gray, p, after)
+        for at in 0..<(usize)45: expect(before[at] == after[at], "the view-dependent bands stay")
+    # SH reads and writes, and the count.
+    let doubled = try support.run(cloud, support.points_mode, "p.set_sh(4, p.sh(4) * 2.0)\np.set_i32(\"n\", p.sh_count())\n")
+    for p in 0..<splats:
+        _ = sh_of(cloud, p, before)
+        _ = sh_of(doubled, p, after)
+        expect(after[12] == before[12] * 2.0 and after[14] == before[14] * 2.0 and after[3] == before[3] and number(doubled, "n", p) == 15.0, "p.sh and p.set_sh")
+    let fault = fault_of(cloud, "p.set_vec3(\"x\", p.sh(15))\n")
+    expect(strings.contains(fault, "SH item is out of range") and strings.contains(fault, "(point 0)"), "an SH fault names the point")
+    let plain = fault_of(try lattice(), "p.set_vec3(\"x\", p.sh(0))\n")
+    expect(strings.contains(plain, "(point 0)"), "SH on a cloud without SH faults at its first point")
+    print("ok    splat fields: opacity, Cd, sh reads and writes against geocore, faults name the point")
+
+var failure_room: u8[512]
+
+func fault_of(set: interop.Reference[GeometrySet], body: str) -> str:
+    var text = ""
+    _ = support.run(set, support.points_mode, body) catch problem:
+        text = strings.format(failure_room, f"{problem.message}") else ""
+    return text
+
+## Σ of splat `p` of `set`.
+func sigma(set: interop.Reference[GeometrySet], p: usize) -> f64[9]:
+    return compose_covariance(quat_of(set, "orient", p).normalized(), scale_of(set, p)).m
+
+func gsplat_helpers() -> !:
+    let cloud = try splat_cloud(splats)
+    # A header helper takes the running point and writes through it.
+    let helped = try support.run_with(cloud, support.points_mode, "func dim(q: Point*, by: f32):\n    q.opacity *= by\n    q.Cd = [q.orient[3], 0.0, 0.0, 0.0]\n", "dim(p, 0.5)\n", "", support.no_names(), support.no_values())
+    for p in 0..<splats:
+        expect(near(number(helped, "opacity", p), 0.5 * number(cloud, "opacity", p), 1.0e-6) and near(number(helped, "Cd", p), number(cloud, "orient", p, 3), 1.0e-7), "a helper reads and writes the point it is given")
+    # Squash along Y through the covariance, and the same as a Transform.
+    let squashed = try support.run_with(cloud, support.points_mode, "", "let s = Mat3.scaling([1.0, 0.2, 1.0, 0.0])\ngsplat.set_covariance(p, s.multiply(gsplat.covariance(p)).multiply(s))\n", "", support.no_names(), support.no_values())
+    let placed = try cloud.value().transformed(Vector3(), Vector3(), Vector3(1.0, 0.2, 1.0))
+    for p in 0..<splats:
+        let a = sigma(squashed, p)
+        let b = sigma(placed, p)
+        var size: f64 = 0.0
+        for e in 0..<(usize)9: size = math.max(size, math.abs(b[e]))
+        for e in 0..<(usize)9: expect(near(a[e], b[e], 1.0e-5 * size), "squashing through the covariance equals the Transform")
+    # Activations round trip.
+    let activated = try support.run(cloud, support.points_mode, "p.set_f32(\"back\", gsplat.sigmoid(gsplat.logit(p.opacity)))\n")
+    for p in 0..<splats: expect(near(number(activated, "back", p), number(cloud, "opacity", p), 1.0e-5), "sigmoid undoes logit")
+    # Colors seen from a direction, against geocore's evaluation.
+    let body = "p.set_vec3(\"seen\", gsplat.color(p, [0.3, -0.5, 0.8, 0.0]))\n"
+    let seen = try support.run(cloud, support.points_mode, body)
+    var bands: f32[45]
+    let d = Vector3(0.3, -0.5, 0.8)
+    for p in 0..<splats:
+        _ = sh_of(cloud, p, bands)
+        let expected = display_color(color_of(cloud, p), bands, 15, d, ColorSpace.srgb)
+        expect(near(number(seen, "seen", p, 0), expected.x, 2.0e-5) and near(number(seen, "seen", p, 2), expected.z, 2.0e-5), "gsplat.color matches geocore's SH evaluation")
+    # Rotating splats in a snippet (the SH turned in place) equals a Transform (which
+    # turns the SH frame through restorient): the same colors from every side.
+    let turned = try support.run(cloud, support.points_mode, "gsplat.rotate(p, quaternion(0.7, [0.0, 1.0, 0.0, 0.0]))\np.P = qrotate(quaternion(0.7, [0.0, 1.0, 0.0, 0.0]), p.P)\n")
+    let rotated = try cloud.value().transformed(Vector3(), Vector3(0.0, 0.7, 0.0), Vector3(1.0, 1.0, 1.0))
+    let one = try support.run(turned, support.points_mode, body)
+    let two = try support.run(rotated, support.points_mode, body)
+    for p in 0..<splats:
+        for k in 0..<(usize)3: expect(near(number(one, "seen", p, k), number(two, "seen", p, k), 1.0e-4), "gsplat.rotate equals a Transform's rotation")
+        let qa = quat_of(one, "orient", p).normalized()
+        let qb = quat_of(two, "orient", p).normalized()
+        expect(math.abs(qa.x * qb.x + qa.y * qb.y + qa.z * qb.z + qa.w * qb.w) > 0.99999, "the same orient")
+    # With a restorient, a covariance edit keeps the colors where they were.
+    let framed = try splat_cloud(splats, true)
+    let framed_turned = try framed.value().transformed(Vector3(), Vector3(0.3, -0.4, 0.2), Vector3(1.0, 1.0, 1.0))
+    let kept_before = try support.run(framed_turned, support.points_mode, body)
+    let squashed_framed = try support.run(framed_turned, support.points_mode, "let s = Mat3.scaling([1.0, 0.5, 2.0, 0.0])\ngsplat.set_covariance(p, s.multiply(gsplat.covariance(p)).multiply(s))\np.set_vec3(\"seen\", gsplat.color(p, [0.3, -0.5, 0.8, 0.0]))\n")
+    for p in 0..<splats:
+        for k in 0..<(usize)3: expect(near(number(kept_before, "seen", p, k), number(squashed_framed, "seen", p, k), 1.0e-4), "a covariance edit keeps the world colors")
+    print("ok    gsplat: squash equals Transform, sigmoid/logit, color equals geocore, rotate equals Transform, frames kept")
+
+func timing() -> !:
+    let count: usize = 1000000
+    var maker = CloudMaker(AttributeStore(), count)
+    defer maker.store.close()
+    let values = try new f64[count * 4] in memory.heap
+    defer free(values) in memory.heap
+    let positions = try new Vector3[count] --- in memory.heap
+    defer free(positions) in memory.heap
+    for p in 0..<count:
+        values[p * 4 + 3] = 1.0
+        positions[p] = Vector3((f64)(p % 1000) * 0.01, (f64)(p // 1000) * 0.01, 0.0)
+    try maker.floats("orient", 4, values)
+    try maker.floats("scale", 3, values[..<count * 3], true)
+    try maker.floats("opacity", 1, values[..<count], true)
+    let cloud = try maker.finish(positions)
+    let body = "p.opacity *= 1.0 - math32.clamp(p.P[1] - 1.0, 0.0, 1.0)\n"
+    _ = try support.run(cloud, support.points_mode, body)
+    var best: u64 = 0xFFFFFFFFFFFFFFFF
+    for _ in 0..<5:
+        let started = time.now()
+        let made = try support.run(cloud, support.points_mode, body)
+        let spent = time.since(started)
+        expect(made.value().cloud_count() == (i64)count, "the 1M cloud stays whole")
+        if spent < best: best = spent
+    print(f"ok    timing: a 1M-splat opacity edit in {(f64)best / 1000000.0} ms (best of 5, whole cook)")

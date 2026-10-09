@@ -25,8 +25,9 @@ from core.attributes import Attribute, AttributeStore, Domain, DataType, Role
 import core.attribute_ops
 from math.vector import Vector3
 from math.matrix import Matrix4
-from splats import placed_point_store, conformed_for_join, is_splat_store, LinearPart, turn_rotations, unbaked_store, detail_color_space, color_space_name
-from geometries.polygon import Mesh, MeshPart, concatenated, mesh_share, mesh_dispose, mesh_adopt, mesh_unique_bytes, mesh_paths, mesh_filtered, positions_bounds, mesh_positions
+from splats import placed_point_store, conformed_for_join, is_splat_store, LinearPart, turn_rotations, unbaked_store, detail_color_space, color_space_name, half_turned_store, up_axis_name, y_down_text
+from geometries.polygon import Mesh, MeshPart, concatenated, mesh_share, mesh_dispose, mesh_adopt, mesh_unique_bytes, mesh_paths, mesh_filtered, positions_bounds, mesh_positions, assembled, put_attribute
+from core.bits import Bits
 
 ## Where a component is placed: the matrix, and the translation, rotation
 ## (XYZ radians) and scale it was composed from, which instances keep.

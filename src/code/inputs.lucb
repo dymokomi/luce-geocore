@@ -164,6 +164,7 @@ struct CookState:
     var clouds: Clouds
     var log: Log
     var values: ValueStore
+    var sh: ShValues
     ## The program running (literal texts are its call sites' texts).
     var program: const Program*?
 
@@ -175,6 +176,7 @@ struct CookState:
         self.clouds.close()
         self.log.close()
         self.values.close()
+        self.sh.close()
 
 ## The builtins that need each structure, by what they need.
 let grid_users: str[5] = ["nearpoint", "nearpoints", "pcopen", "pcfind", "pcfind_radius"]

@@ -50,7 +50,27 @@ pub struct Point:
     ## This point's number and how many points there are.
     pub let ptnum: i32
     pub let numpt: i32
+    ## A Gaussian splat's rotation, x, y, z, w (Houdini's `orient`); 0 without one.
+    pub var orient: f32[4]
+    ## A splat's size along its own axes (σ, Houdini's `scale`), lane 3 zero.
+    pub var scale: f32[4]
+    ## A splat's linear opacity, 0 to 1 (3DGS's sigmoid of the file's logit).
+    pub var opacity: f32
     var written: bool
+
+    ## SH coefficient `i` of a splat (0 to `sh_count() - 1`: bands 1 to 3 in order,
+    ## m = -l..l), RGB in lanes 0 to 2; an `i` out of range faults.
+    pub func sh(i: i32) -> f32[4]:
+        _ = i
+        return [0.0, 0.0, 0.0, 0.0]
+    ## Set SH coefficient `i` (lanes 0 to 2); the cloud's `sh` changes after the run.
+    pub func set_sh(i: i32, value: f32[4]):
+        _ = i
+        _ = value
+        self.written = true
+    ## How many SH coefficients a splat has: 0, 3, 8 or 15 (degree 0 to 3).
+    pub func sh_count() -> i32:
+        return 0
 
     ## Point attribute `name`, of its stored type.
     pub func f32(name: str) -> f32:

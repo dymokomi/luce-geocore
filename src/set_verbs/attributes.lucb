@@ -1,6 +1,8 @@
 ## Attribute nodes on the components meshes do not cover: curves (points,
 ## vertices as points, primitives as curves, detail) and point clouds
-## (points and detail). luced-3d runs the mesh kernels on the mesh and these
+## (points and detail), and Blast or Delete on point clouds. A cloud's group
+## expressions are read through a mesh of its points (`cloud_group_bits`),
+## so numbers, names, `@` tests and `@P` mean what they mean on a mesh. luced-3d runs the mesh kernels on the mesh and these
 ## on the rest, so an attribute node acts on every component with the
 ## domain. Domains are the node's menu values: 0 points, 1 vertices,
 ## 2 primitives, 3 detail.
@@ -47,7 +49,47 @@ pub struct SetAttributes:
         let edit = AttributeEdit(3, name, "", domain, none_values, false, false, 0.0, expression)
         return try adopt_set(try edited(try geometry.get(), &edit))
 
-## One attribute edit: 0 fill, 1 remove, 2 rename, 3 group.
+    ## Attribute `name` moved from `domain` to `target` (0 points, 3 detail) on the
+    ## point cloud: to the detail as the points' mean (an integer takes the first
+    ## point's), to the points as the detail's value. Curves pass through.
+    pub static func promoted(geometry: interop.Reference[GeometrySet], name: str, domain: i64, target: i64) -> interop.Reference[GeometrySet]!:
+        var none_values: f64[]
+        let edit = AttributeEdit(4, name, "", domain, none_values, false, false, (f64)target, "")
+        return try adopt_set(try edited(try geometry.get(), &edit))
+
+    ## The set without the point cloud's points `expression` selects (blank: all of
+    ## them), or with only those when `keep`.
+    pub static func deleted(geometry: interop.Reference[GeometrySet], expression: str, keep: bool) -> interop.Reference[GeometrySet]!:
+        return try adopt_set(try without_points(try geometry.get(), expression, keep))
+
+## A copy of `set` whose point cloud keeps the points `expression` does not
+## select (or, with `keep`, only those it does).
+func without_points(set: const GeometrySet*, expression: str, keep: bool) -> GeometrySet*!:
+    let storage = try set.storage()
+    errdefer dispose_set(storage)
+    let data = set.find(&points_component) else return storage
+    let cloud = (const PointCloud*)data
+    var report = GroupReport()
+    var bits = try cloud_group_bits(cloud, expression, &report)
+    defer bits.close()
+    if not keep: bits.invert()
+    try storage.put(&points_component, (void*)(try cloud_subset(cloud, bits.view())))
+    return storage
+
+## Bits over `cloud`'s points that group expression `text` selects (blank: every
+## point), evaluated on a mesh of its points; misses add to `report`.
+pub func cloud_group_bits(cloud: const PointCloud*, text: str, report: GroupReport*) -> BitsBuilder!:
+    if is_blank(text): return try BitsBuilder.ones(cloud.count())
+    let mesh = try cloud_mesh(cloud)
+    defer mesh_dispose(mesh)
+    var result = try group_bits(mesh, text, Domain.point)
+    defer result.bits.release()
+    report.misses += result.report.misses
+    report.unknown_names += result.report.unknown_names
+    return try BitsBuilder.copy_of(Bits(result.bits.view(), cloud.count()))
+
+## One attribute edit: 0 fill, 1 remove, 2 rename, 3 group, 4 promote (the
+## target domain in `seed`).
 struct AttributeEdit:
     let kind: u8
     let name: str
@@ -63,7 +105,9 @@ struct AttributeEdit:
 func edited(set: const GeometrySet*, edit: const AttributeEdit*) -> GeometrySet*!:
     let storage = try set.storage()
     errdefer dispose_set(storage)
-    if let found_curves = set_curves(set):
+    # Promotion is for clouds: curves pass through.
+    let curve_part: const Curves*? = set_curves(set) if edit.kind != 4 else none
+    if let found_curves = curve_part:
         let lines = found_curves
         # Curve vertices are their points; primitives are curves.
         let domain = Domain.point if edit.domain == 0 or edit.domain == 1 else (curve_domain if edit.domain == 2 else Domain.detail)
@@ -83,11 +127,20 @@ func edited(set: const GeometrySet*, edit: const AttributeEdit*) -> GeometrySet*
         try storage.put(curves_type(), (void*)(try curves_with_store(lines, handed)))
     if let data = set.find(&points_component):
         let cloud = (const PointCloud*)data
-        if edit.kind != 3 and (edit.domain == 0 or edit.domain == 3):
+        if edit.domain == 0 or (edit.domain == 3 and edit.kind != 3):
             let domain = Domain.point if edit.domain == 0 else Domain.detail
+            let count = cloud_positions(cloud).length
             var store = try cloud_store(cloud).shared()
             errdefer store.close()
-            try apply_edit(&store, edit, domain, cloud_positions(cloud).length if domain == Domain.point else 1)
+            if edit.kind == 3:
+                var report = GroupReport()
+                var bits = try cloud_group_bits(cloud, edit.expression, &report)
+                defer bits.close()
+                try store.put(try Attribute.group_of(edit.name, Domain.point, count, bits.view().words))
+            elif edit.kind == 4:
+                try promote(&store, edit.name, domain, Domain.point if edit.seed == 0.0 else Domain.detail, count)
+            else:
+                try apply_edit(&store, edit, domain, count if domain == Domain.point else 1)
             let handed = store
             store = AttributeStore()
             try storage.put(&points_component, (void*)(try cloud_with_store(cloud, handed)))
@@ -122,3 +175,35 @@ func apply_edit(store: AttributeStore*, edit: const AttributeEdit*, domain: Doma
                     let value = edit.values[component] * (random - math.floor(random))
                     generated[id * width + component] = math.floor(value) if edit.integer else value
             try store.put(try Attribute.from_numbers(edit.name, domain, width, generated, edit.integer))
+
+## Move `name` from `domain` to `target` (point or detail) within a cloud's
+## store of `count` points: the points' mean (an integer: the first point's) or the
+## detail's value on every point. Text and array attributes stay where they are.
+func promote(store: AttributeStore*, name: str, domain: Domain, target: Domain, count: usize) -> !:
+    if domain == target: return
+    let found = store.find(name, domain)
+    if found < 0: error(errors.invalid, "attribute to promote does not exist")
+    let source = store.entry((usize)found)
+    if source.kind == DataType.text or source.is_ragged(): error(errors.invalid, "text and array attributes are not promoted on point clouds")
+    let width = source.width
+    var values: f64[4]
+    let integer = source.integer()
+    if target == Domain.detail:
+        for component in 0..<width:
+            if integer:
+                values[component] = source.number(0, component) if count > 0 else 0.0
+                continue
+            var total: f64 = 0.0
+            for element in 0..<count: total += source.number(element, component)
+            values[component] = total / (f64)count if count > 0 else 0.0
+        var made = try Attribute.from_numbers(name, Domain.detail, width, values[..<width], integer)
+        made.role = source.role
+        store.remove((usize)found)
+        try store.put(made)
+        return
+    for component in 0..<width: values[component] = source.number(0, component)
+    var made = try Attribute.from_numbers(name, Domain.point, width, values[..<width], integer, Storage.single)
+    made.elements = count
+    made.role = source.role
+    store.remove((usize)found)
+    try store.put(made)

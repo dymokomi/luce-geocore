@@ -22,6 +22,9 @@ func make_host(mode: RunOver, layout: const Layout*?) -> Host!:
             try host.field("Point", "uv", "uv", 2)
             try host.element("Point", "ptnum")
             try host.uniform("Point", "numpt", "numpt")
+            try host.field("Point", "orient", "orient", 4)
+            try host.field("Point", "scale", "scale", 3)
+            try host.field("Point", "opacity", "opacity", 1)
         .primitives:
             try host.field("Prim", "Cd", "Cd", 3)
             try host.element("Prim", "primnum")
@@ -87,6 +90,7 @@ func make_host(mode: RunOver, layout: const Layout*?) -> Host!:
     try bind_text_sets(&host)
     try bind_arrays(&host)
     try bind_array_attributes(&host)
+    try bind_splats(&host)
     if let given = layout:
         host.missing_reads_zero()
         for column in given.columns.view():

@@ -6,7 +6,8 @@
 enum Origin:
     ## Attribute `index` of the mesh, in its stored kind.
     attribute
-    ## Attribute `index` stored as f64, read as f32 (P, N, Cd and uv are f32 to a snippet).
+    ## Attribute `index` stored as f64, read as f32 (N, Cd, uv and the splat fields are f32
+    ## to a snippet).
     narrowed
     ## Group attribute `index`'s bits, as a mask.
     group
@@ -102,7 +103,8 @@ func build_layout(mode: RunOver, mesh: const Mesh*?, set: const GeometrySet*, vo
             continue
         let kind = kind_of_data(entry.kind) else continue
         let name = entry.name()
-        let field = name == "N" or name == "Cd" or name == "uv"
+        # Fields a snippet sees as f32 even when stored wider (Bake GSplats keeps f64).
+        let field = name == "N" or name == "Cd" or name == "uv" or name == "orient" or name == "scale" or name == "opacity"
         if field and kind == .f64:
             try layout.add(name, .f32, entry.width, .narrowed, at)
         else:

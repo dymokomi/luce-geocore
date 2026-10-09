@@ -6,7 +6,7 @@
 
 ## Every set verb's constructor, in menu order: the array's length is the
 ## registry's size, so a set verb added here is counted.
-let set_makers: (func() -> SetVerb)[27] = [
+let set_makers: (func() -> SetVerb)[30] = [
     line_verb,
     circle_verb,
     arc_verb,
@@ -33,7 +33,10 @@ let set_makers: (func() -> SetVerb)[27] = [
     volume_verb,
     volume_visualization_verb,
     bake_gsplats_verb,
-    gsplats_sh_degree_verb]
+    gsplats_sh_degree_verb,
+    crop_gsplats_verb,
+    clean_gsplats_verb,
+    reduce_gsplats_verb]
 
 ## SetVerb `index` in menu order.
 pub func set_verb_at(index: usize) -> SetVerb:

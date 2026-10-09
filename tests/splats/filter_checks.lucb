@@ -1,0 +1,341 @@
+## Stage 4: Bake GSplats' Up Axis turns a Y-down file over exactly (and
+## export turns it back), Crop GSplats' counts on known layouts, Clean
+## GSplats' thresholds one by one, Reduce GSplats' target counts with mass
+## and centroid kept, and the attribute nodes, groups and Blast on clouds.
+import interop
+import memory
+from luce_std import math
+from luce_geocore.geocore import Vector3, GeometrySet, SetAttributes, MeshPrimitives
+from luce_geocore.kernel import AttributeStore, Domain, find_set_verb, run_set_verb, set_detail, adopt_set, unbaked_set
+from luce_geocore.splats import Quat, display_color, ColorSpace, splat_masses
+import clouds
+import draws
+import verb_checks
+
+pub func run() -> !:
+    try up_axis()
+    try crop_counts()
+    try clean_thresholds()
+    try reduce_keeps_mass(true)
+    try reduce_keeps_mass(false)
+    try cloud_nodes()
+    try bake_mesh_points()
+
+func near(a: f64, b: f64, tolerance: f64) -> bool:
+    return math.abs(a - b) <= tolerance
+
+## Run set verb `name` on `set` (and `second`) with `numbers` and `group`.
+func run_with(name: str, set: interop.Reference[GeometrySet], second: interop.Reference[GeometrySet]?, numbers: const f64[], group: str = "") -> interop.Reference[GeometrySet]!:
+    let verb = find_set_verb(name) else trap("a GSplats verb is missing")
+    var other: const GeometrySet*? = none
+    if let given = second: other = given.value()
+    var output = try run_set_verb(&verb, set.value(), other, group, 0, numbers)
+    let made = output.set else trap("a set verb made no set")
+    output.set = none
+    return try adopt_set(made)
+
+func cloud_count(set: interop.Reference[GeometrySet]) -> usize:
+    return (usize)set.value().cloud_count()
+
+# mark: Up Axis
+
+## A Y-down bake is the Y-up bake turned a half turn about X: positions
+## (x, -y, -z), orient i · q bit for bit, the same sizes, opacity and Cd, and
+## SH showing each direction's color at the turned direction; export turns
+## it back to the file's positions.
+func up_axis() -> !:
+    let source = try verb_checks.ply_cloud(false)
+    defer source.release()
+    let up = try run_with("Bake GSplats", source, none, [0.0, 0.0, 3.0, 1.0, 0.05, 1.0, 1.0])
+    defer up.release()
+    let down = try run_with("Bake GSplats", source, none, [0.0])
+    defer down.release()
+    let a = clouds.points_of(up.value())
+    let b = clouds.points_of(down.value())
+    var state = draws.Draws(5)
+    for p in 0..<(usize)2:
+        let pa = clouds.point_of(up.value(), p)
+        let pb = clouds.point_of(down.value(), p)
+        assert(pb.x == pa.x and pb.y == -pa.y and pb.z == -pa.z, "positions turn about X exactly")
+        let qa = clouds.quat_of(a, "orient", p)
+        let qb = clouds.quat_of(b, "orient", p)
+        assert(qb.x == qa.w and qb.y == -qa.z and qb.z == qa.y and qb.w == -qa.x, "orient becomes i · q exactly")
+        let sa = clouds.vector_of(a, "scale", p)
+        let sb = clouds.vector_of(b, "scale", p)
+        assert(sa.x == sb.x and sa.y == sb.y and sa.z == sb.z, "sizes stay")
+        let ca = clouds.vector_of(a, "Cd", p)
+        let cb = clouds.vector_of(b, "Cd", p)
+        assert(ca.x == cb.x and ca.y == cb.y and ca.z == cb.z, "Cd stays")
+        var sh_a: f32[45]
+        var sh_b: f32[45]
+        _ = clouds.sh_of(a, p, sh_a)
+        _ = clouds.sh_of(b, p, sh_b)
+        for _ in 0..<(usize)8:
+            let d = state.direction()
+            let seen = display_color(ca, sh_a, 15, d, ColorSpace.srgb)
+            let turned = display_color(cb, sh_b, 15, Vector3(d.x, -d.y, -d.z), ColorSpace.srgb)
+            assert(near(seen.x, turned.x, 1.0e-6) and near(seen.y, turned.y, 1.0e-6) and near(seen.z, turned.z, 1.0e-6), "the SH turn with the splat")
+    let detail = set_detail(down.value())
+    let index = detail.find("gsplat_up_axis", Domain.detail)
+    assert(index >= 0 and detail.entry((usize)index).text_at(0) == "y_down", "the turn is recorded")
+    assert(set_detail(up.value()).find("gsplat_up_axis", Domain.detail) < 0, "a Y-up bake records nothing")
+    let back = try adopt_set(try unbaked_set(down.value()))
+    defer back.release()
+    for p in 0..<(usize)2:
+        let original = clouds.point_of(source.value(), p)
+        let exported = clouds.point_of(back.value(), p)
+        assert(original.x == exported.x and original.y == exported.y and original.z == exported.z, "export turns the cloud back")
+    assert(set_detail(back.value()).find("gsplat_up_axis", Domain.detail) < 0, "export drops the record")
+
+# mark: Crop
+
+## A 10 × 10 × 10 lattice of plain points at 0..9.
+func lattice() -> interop.Reference[GeometrySet]!:
+    var builder = clouds.CloudBuilder(1000)
+    defer builder.close()
+    var ids: f64[1000]
+    var positions: Vector3[1000] = ---
+    for at in 0..<(usize)1000:
+        ids[at] = (f64)at
+        positions[at] = Vector3((f64)(at % 10), (f64)(at // 10 % 10), (f64)(at // 100))
+    try builder.floats("id_value", 1, ids)
+    return try builder.finish(positions)
+
+func crop_counts() -> !:
+    let grid = try lattice()
+    defer grid.release()
+    # Box at 4.5 of size 4: coordinates 3..6 on each axis.
+    let boxed = try run_with("Crop GSplats", grid, none, [0.0, 4.5, 4.5, 4.5, 4.0, 4.0, 4.0, 1.0, 0.0, 0.0])
+    defer boxed.release()
+    assert(cloud_count(boxed) == 64, "a box keeps the 4 × 4 × 4 points inside")
+    let outside = try run_with("Crop GSplats", grid, none, [0.0, 4.5, 4.5, 4.5, 4.0, 4.0, 4.0, 1.0, 1.0, 0.0])
+    defer outside.release()
+    assert(cloud_count(outside) == 936, "Keep Outside keeps the rest")
+    # Sphere of radius 2.5 at the corner: the lattice points within it.
+    var expected: usize = 0
+    for at in 0..<(usize)1000:
+        let x = (f64)(at % 10)
+        let y = (f64)(at // 10 % 10)
+        let z = (f64)(at // 100)
+        if x * x + y * y + z * z <= 6.25: expected += 1
+    let ball = try run_with("Crop GSplats", grid, none, [1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 2.5, 0.0, 0.0])
+    defer ball.release()
+    assert(cloud_count(ball) == expected and expected == 20, "a sphere keeps the points within its radius")
+    # The second input's bounds: 0..2 on each axis.
+    var corners = clouds.CloudBuilder(2)
+    defer corners.close()
+    let ends: Vector3[2] = [Vector3(0.0, 0.0, 0.0), Vector3(2.0, 2.0, 2.0)]
+    let bounds = try corners.finish(ends)
+    defer bounds.release()
+    let fenced = try run_with("Crop GSplats", grid, bounds, [2.0])
+    defer fenced.release()
+    assert(cloud_count(fenced) == 27, "the second input's bounds crop")
+    # Kept attributes follow their points.
+    let store = clouds.points_of(boxed.value())
+    assert(clouds.attribute(store, "id_value").number(0, 0) == 333.0, "attributes follow the kept points")
+    # A splat whose center is out but whose 3σ reaches in.
+    var builder = clouds.CloudBuilder(1)
+    defer builder.close()
+    try builder.floats("orient", 4, [0.0, 0.0, 0.0, 1.0])
+    try builder.floats("scale", 3, [0.5, 0.5, 0.5])
+    try builder.floats("opacity", 1, [1.0])
+    let at: Vector3[1] = [Vector3(5.0, 0.0, 0.0)]
+    let splat = try builder.finish(at)
+    defer splat.release()
+    for shape in 0..<(usize)2:
+        let by_center = try run_with("Crop GSplats", splat, none, [(f64)shape, 0.0, 0.0, 0.0, 8.0, 8.0, 8.0, 4.0, 0.0, 0.0])
+        defer by_center.release()
+        let by_extent = try run_with("Crop GSplats", splat, none, [(f64)shape, 0.0, 0.0, 0.0, 8.0, 8.0, 8.0, 4.0, 0.0, 1.0])
+        defer by_extent.release()
+        let cut = try run_with("Crop GSplats", splat, none, [(f64)shape, 0.0, 0.0, 0.0, 8.0, 8.0, 8.0, 4.0, 1.0, 1.0])
+        defer cut.release()
+        assert(cloud_count(by_center) == 0 and cloud_count(by_extent) == 1 and cloud_count(cut) == 0, "the 3σ extent reaches in")
+
+# mark: Clean
+
+## Seven test splats on a line 0.1 apart, then ten plain ones and a far one.
+func dirty_cloud() -> interop.Reference[GeometrySet]!:
+    let count: usize = 18
+    var builder = clouds.CloudBuilder(count)
+    defer builder.close()
+    var orient: f64[72]
+    var scale: f64[54]
+    var opacity: f64[18]
+    var positions: Vector3[18] = ---
+    for p in 0..<count:
+        orient[p * 4 + 3] = 1.0
+        for k in 0..<(usize)3: scale[p * 3 + k] = 0.1
+        opacity[p] = 0.5
+        positions[p] = Vector3(0.1 * (f64)p, 0.0, 0.0)
+    opacity[1] = 0.001
+    for k in 0..<(usize)3: scale[2 * 3 + k] = 5.0
+    opacity[3] = math.nan
+    for k in 0..<(usize)3: scale[4 * 3 + k] = 0.0
+    scale[5 * 3] = 1.0
+    scale[5 * 3 + 1] = 0.01
+    scale[5 * 3 + 2] = 0.01
+    scale[6 * 3 + 2] = 0.0
+    positions[17] = Vector3(100.0, 100.0, 100.0)
+    try builder.floats("orient", 4, orient)
+    try builder.floats("scale", 3, scale)
+    try builder.floats("opacity", 1, opacity)
+    var ids: f64[18]
+    for p in 0..<count: ids[p] = (f64)p
+    try builder.floats("id_value", 1, ids)
+    return try builder.finish(positions)
+
+func kept_ids(set: interop.Reference[GeometrySet], out: bool[]):
+    for at in 0..<out.length: out[at] = false
+    let store = clouds.points_of(set.value())
+    let ids = clouds.attribute(store, "id_value")
+    for at in 0..<ids.elements: out[(usize)ids.number(at, 0)] = true
+
+func clean_thresholds() -> !:
+    let dirty = try dirty_cloud()
+    defer dirty.release()
+    var kept: bool[18]
+    # Defaults: opacity, huge (20 × the median 0.1) and degenerate go.
+    let cleaned = try run_with("Clean GSplats", dirty, none, no_numbers())
+    defer cleaned.release()
+    kept_ids(cleaned, kept)
+    assert(kept[0] and not kept[1] and not kept[2] and not kept[3] and not kept[4] and kept[5] and kept[6] and kept[17], "defaults remove faint, huge and degenerate splats")
+    # Needles over 50:1 and floaters with fewer than 4 neighbors.
+    let strict = try run_with("Clean GSplats", dirty, none, [0.004, 20.0, 1.0, 50.0, 1.0, 1.0, 0.0, 4.0, 0.0])
+    defer strict.release()
+    kept_ids(strict, kept)
+    assert(not kept[5] and kept[6] and not kept[17] and kept[0] and cloud_count(strict) == 12, "needles and floaters go, flat discs stay")
+    # A world-unit limit, no degenerate test: the zero-sized splat stays.
+    let loose = try run_with("Clean GSplats", dirty, none, [0.0, 0.5, 0.0, 0.0, 0.0])
+    defer loose.release()
+    kept_ids(loose, kept)
+    assert(kept[1] and not kept[2] and kept[4] and not kept[5] and kept[3], "a world Max Scale; NaN opacity kept without the degenerate test")
+    # Grouped rather than deleted.
+    let grouped = try run_with("Clean GSplats", dirty, none, [0.004, 20.0, 1.0, 0.0, 1.0, 0.0, 0.0, 4.0, 1.0], "junk")
+    defer grouped.release()
+    assert(cloud_count(grouped) == 18, "Output Group keeps every splat")
+    let group = clouds.attribute(clouds.points_of(grouped.value()), "junk")
+    for p in 0..<(usize)18: assert((group.number(p, 0) != 0.0) == (p >= 1 and p <= 4), "the group holds what Delete would remove")
+
+func no_numbers() -> const f64[]:
+    var none_given: const f64[]
+    return none_given
+
+# mark: Reduce
+
+## A seeded capture-like cloud: 2000 splats in a 10 unit box, degree 1.
+func capture(count: usize) -> interop.Reference[GeometrySet]!:
+    var state = draws.Draws(31)
+    var builder = clouds.CloudBuilder(count)
+    defer builder.close()
+    let orient = try new f64[count * 4] in memory.heap
+    defer free(orient) in memory.heap
+    let scale = try new f64[count * 3] in memory.heap
+    defer free(scale) in memory.heap
+    let opacity = try new f64[count] in memory.heap
+    defer free(opacity) in memory.heap
+    let color = try new f64[count * 3] in memory.heap
+    defer free(color) in memory.heap
+    let sh = try new f64[count * 9] in memory.heap
+    defer free(sh) in memory.heap
+    let positions = try new Vector3[count] --- in memory.heap
+    defer free(positions) in memory.heap
+    for p in 0..<count:
+        let q = Quat.about(state.direction(), state.between(0.0, 3.0))
+        orient[p * 4] = q.x
+        orient[p * 4 + 1] = q.y
+        orient[p * 4 + 2] = q.z
+        orient[p * 4 + 3] = q.w
+        for k in 0..<(usize)3:
+            scale[p * 3 + k] = state.between(0.05, 0.2)
+            color[p * 3 + k] = state.between(0.0, 1.0)
+        opacity[p] = state.between(0.1, 0.6)
+        for k in 0..<(usize)9: sh[p * 9 + k] = state.between(-0.2, 0.2)
+        positions[p] = Vector3(state.between(0.0, 10.0), state.between(0.0, 10.0), state.between(0.0, 2.0))
+    try builder.floats("orient", 4, orient)
+    try builder.floats("restorient", 4, orient)
+    try builder.floats("scale", 3, scale)
+    try builder.floats("opacity", 1, opacity)
+    try builder.floats("Cd", 3, color)
+    try builder.array("sh", 3, 3, sh)
+    return try builder.finish(positions)
+
+## A cloud's total mass and mass-weighted centroid.
+func mass_of(set: interop.Reference[GeometrySet]) -> (f64, Vector3)!:
+    let store = clouds.points_of(set.value())
+    let count = cloud_count(set)
+    let masses = try new f64[count] in memory.heap
+    defer free(masses) in memory.heap
+    splat_masses(store, masses)
+    var total: f64 = 0.0
+    var center = Vector3()
+    for p in 0..<count:
+        total += masses[p]
+        center = center.add(clouds.point_of(set.value(), p).multiply_scalar(masses[p]))
+    return (total, center.multiply_scalar(1.0 / total))
+
+func reduce_keeps_mass(merge: bool) -> !:
+    let source = try capture(2000)
+    defer source.release()
+    let (mass, centroid) = try mass_of(source)
+    let method: f64 = 0.0 if merge else 1.0
+    let half = try run_with("Reduce GSplats", source, none, [0.0, 0.5, 0.0, method, 1.0])
+    defer half.release()
+    assert(cloud_count(half) == 1000, "Ratio 0.5 keeps half")
+    let (half_mass, half_centroid) = try mass_of(half)
+    let tolerance = 0.01 if merge else 0.05
+    assert(math.abs(half_mass - mass) <= tolerance * mass, "the total mass stays")
+    assert(half_centroid.subtract(centroid).length() <= tolerance * 10.0, "the centroid stays")
+    let few = try run_with("Reduce GSplats", source, none, [1.0, 0.5, 300.0, method, 1.0])
+    defer few.release()
+    assert(cloud_count(few) == 300, "Count reaches its target")
+    let (few_mass, few_centroid) = try mass_of(few)
+    if merge:
+        assert(math.abs(few_mass - mass) <= 0.01 * mass, "merging keeps the mass at a count of 300")
+        assert(few_centroid.subtract(centroid).length() <= 0.01, "merging keeps the centroid at a count of 300")
+    else:
+        # Kept at 15%, even fully opaque splats cannot hold the mass: they go to 1.
+        assert(few_mass <= mass and few_mass >= 0.75 * mass, "pruning to 300 keeps what opacity 1 can hold")
+    if merge:
+        # Merged splats keep a degree-1 SH and a valid restorient.
+        var sh: f32[45]
+        assert(clouds.sh_of(clouds.points_of(few.value()), 0, sh) == 3, "merged splats keep their SH items")
+
+# mark: Attribute nodes, groups and Blast on clouds
+
+func cloud_nodes() -> !:
+    let grid = try lattice()
+    defer grid.release()
+    let high = try SetAttributes.deleted(grid, "@P.z>4.5", false)
+    defer high.release()
+    assert(cloud_count(high) == 500, "Blast removes the points an expression names")
+    let kept = try SetAttributes.deleted(grid, "0-9", true)
+    defer kept.release()
+    assert(cloud_count(kept) == 10, "Delete Non Selected keeps the named points")
+    let grouped = try SetAttributes.grouped(grid, "low", 0, "@P.y<1")
+    defer grouped.release()
+    let group = clouds.attribute(clouds.points_of(grouped.value()), "low")
+    var members: usize = 0
+    for p in 0..<(usize)1000:
+        if group.number(p, 0) != 0.0: members += 1
+    assert(members == 100, "Selection Group groups cloud points")
+    let by_name = try SetAttributes.deleted(grouped, "low", false)
+    defer by_name.release()
+    assert(cloud_count(by_name) == 900, "a cloud group by name deletes")
+    let promoted = try SetAttributes.promoted(grid, "id_value", 0, 3)
+    defer promoted.release()
+    let store = clouds.points_of(promoted.value())
+    let index = store.find("id_value", Domain.detail)
+    assert(index >= 0 and store.find("id_value", Domain.point) < 0 and store.entry((usize)index).number(0, 0) == 499.5, "Promote to detail takes the mean")
+    let back = try SetAttributes.promoted(promoted, "id_value", 3, 0)
+    defer back.release()
+    assert(clouds.attribute(clouds.points_of(back.value()), "id_value").number(7, 0) == 499.5, "Promote to points spreads the value")
+
+## Bake GSplats on a mesh bakes its points into a cloud and drops the mesh.
+func bake_mesh_points() -> !:
+    let mesh = try MeshPrimitives.grid(2.0, 4)
+    defer mesh.release()
+    let grid = try GeometrySet.of_mesh(mesh)
+    defer grid.release()
+    let baked = try run_with("Bake GSplats", grid, none, [1.0])
+    defer baked.release()
+    assert(baked.value().splat_count() == 25 and not baked.value().has("mesh"), "a mesh's points bake into splats")

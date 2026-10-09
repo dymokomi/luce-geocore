@@ -72,7 +72,9 @@ func round_trip(linear: bool) -> !:
     assert(back.value().splat_count() == 0 and not back.value().has_detail("gsplat_color_space"), "an unbaked set is raw again")
 
 ## After a rotation the cloud has a restorient; unbaking turns `f_rest` into
-## the world frame, so the file shows the same colors.
+## the world frame, so the file shows the same colors. The bake stood the file
+## up (Y Down), and export turns it back: the file's direction d is the
+## world's (d.x, -d.y, -d.z).
 func turned_round_trip() -> !:
     let source = try raw_cloud()
     defer source.release()
@@ -94,7 +96,7 @@ func turned_round_trip() -> !:
         let frame = sh_frame(clouds.quat_of(store, "orient", p), clouds.quat_of(store, "restorient", p))
         for _ in 0..<(usize)3:
             let d = state.direction()
-            let shown = sh_bands(bands, 15, frame.conjugate().rotate(d))
+            let shown = sh_bands(bands, 15, frame.conjugate().rotate(Vector3(d.x, -d.y, -d.z)))
             let written = sh_bands(rest, 15, d)
             assert(near(shown.x, written.x) and near(shown.y, written.y) and near(shown.z, written.z), "f_rest shows the world-frame colors")
 

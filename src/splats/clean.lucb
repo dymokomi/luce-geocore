@@ -1,0 +1,182 @@
+## Clean GSplats' kernel: the splats a capture is better without.
+## - Low opacity: below `min_opacity` they hardly show and cost as much as any.
+## - Huge: a largest σ past `max_scale` (in world units, or times the
+##   cloud's median largest σ when `relative`): the sky-sized blobs training
+##   leaves at the scene's edge.
+## - Needles: a largest σ over `max_anisotropy` times the smallest of the
+##   two larger ones, so flat discs stay (0: off).
+## - Degenerate: a non-finite position, opacity, scale, orient or `Cd`, a
+##   zero-length `orient`, or no extent at all (every σ zero).
+## - Floaters: with `floaters`, fewer than `neighbors` other points within
+##   `radius` (0: five times the median largest σ, or for plain points three
+##   times the mean spacing over the bounds): an isolation test, the simplest
+##   form of statistical outlier removal.
+## Plain point clouds take the tests they have the attributes for.
+
+## What Clean GSplats removes.
+pub struct CleanOptions:
+    ## Splats fainter than this go.
+    pub let min_opacity: f64
+    ## The largest σ allowed (0: any), a distance or, with `relative`, a
+    ## multiple of the median largest σ.
+    pub let max_scale: f64
+    pub let relative: bool
+    ## The most a largest σ may be over the middle one (0: any).
+    pub let max_anisotropy: f64
+    ## Remove non-finite and sizeless splats.
+    pub let degenerate: bool
+    ## Remove points with fewer than `neighbors` others within `radius` (0: auto).
+    pub let floaters: bool
+    pub let radius: f64
+    pub let neighbors: usize
+
+## How many points each test removed (a point counts for the first that does,
+## in this order).
+pub struct CleanCounts:
+    ## Removed as degenerate, faint, huge, needle-like and isolated.
+    pub var degenerate: usize = 0
+    pub var low_opacity: usize = 0
+    pub var huge: usize = 0
+    pub var needles: usize = 0
+    pub var floaters: usize = 0
+
+    ## Every point removed.
+    pub func total() -> usize:
+        return self.degenerate + self.low_opacity + self.huge + self.needles + self.floaters
+
+## Into `keep` (one byte per point), 1 for the points of a cloud (`points`
+## relative to `origin`, attributes `store`) that `options` keep, else 0.
+pub func clean_flags(points: const Float3[], origin: Vector3, store: const AttributeStore*, options: const CleanOptions*, keep: u8[]) -> CleanCounts!:
+    let count = points.length
+    var work: CleanWork
+    work.points = points
+    work.origin = origin
+    work.options = options
+    work.reasons = keep
+    work.has_opacity = float_attribute(store, opacity_name, 1) >= 0
+    work.has_scale = float_attribute(store, scale_name, 3) >= 0
+    work.has_orient = float_attribute(store, orient_name, 4) >= 0
+    work.has_color = float_attribute(store, color_name, 3) >= 0
+    if work.has_opacity: work.opacity = Floats.of(store.entry((usize)float_attribute(store, opacity_name, 1)))
+    if work.has_scale: work.scale = Floats.of(store.entry((usize)float_attribute(store, scale_name, 3)))
+    if work.has_orient: work.orient = Floats.of(store.entry((usize)float_attribute(store, orient_name, 4)))
+    if work.has_color: work.color = Floats.of(store.entry((usize)float_attribute(store, color_name, 3)))
+    let median = try median_largest(&work.scale, count) if work.has_scale else 0.0
+    work.limit = options.max_scale * median if options.relative else options.max_scale
+    # Each byte holds its point's reason (0 kept), then becomes the keep flag.
+    ranges.each_range(count, 16384, (void*)&work, reason_range)
+    if options.floaters and options.neighbors > 0 and count > 1:
+        var radius = options.radius
+        if not (radius > 0.0): radius = 5.0 * median if median > 0.0 else 3.0 * mean_spacing(points)
+        if radius > 0.0:
+            var hash = try PointHash.build(points, radius)
+            defer hash.close()
+            work.hash = &hash
+            work.radius = radius
+            ranges.each_range(count, 4096, (void*)&work, floater_range)
+    var counts = CleanCounts()
+    for at in 0..<count:
+        let reason = keep[at]
+        if reason == reason_degenerate: counts.degenerate += 1
+        elif reason == reason_opacity: counts.low_opacity += 1
+        elif reason == reason_huge: counts.huge += 1
+        elif reason == reason_needle: counts.needles += 1
+        elif reason == reason_floater: counts.floaters += 1
+        keep[at] = 1 if reason == 0 else 0
+    return counts
+
+let reason_degenerate: u8 = 1
+let reason_opacity: u8 = 2
+let reason_huge: u8 = 3
+let reason_needle: u8 = 4
+let reason_floater: u8 = 5
+
+## The median over points of the largest σ (0 for no points).
+pub func median_largest(scale: const Floats*, count: usize) -> f64!:
+    if count == 0: return 0.0
+    let largest = try new f64[count] --- in memory.heap
+    defer free(largest) in memory.heap
+    for at in 0..<count:
+        let value = math.max(math.abs(scale.at(at, 0)), math.max(math.abs(scale.at(at, 1)), math.abs(scale.at(at, 2))))
+        largest[at] = value if math.is_finite(value) else 0.0
+    sort.sort(largest)
+    return largest[count // 2]
+
+## The mean spacing of `points` over their bounding box: the cube root of its
+## volume per point (its largest side per point for a flat or linear cloud).
+pub func mean_spacing(points: const Float3[]) -> f64:
+    var low = Vector3(math.infinity, math.infinity, math.infinity)
+    var high = Vector3(-math.infinity, -math.infinity, -math.infinity)
+    for p in points:
+        let v = p.vector()
+        if not v.is_finite(): continue
+        low = Vector3(math.min(low.x, v.x), math.min(low.y, v.y), math.min(low.z, v.z))
+        high = Vector3(math.max(high.x, v.x), math.max(high.y, v.y), math.max(high.z, v.z))
+    let size = high.subtract(low)
+    if not (size.x >= 0.0): return 0.0
+    let volume = size.x * size.y * size.z
+    let count = (f64)points.length
+    if volume > 0.0: return math.cbrt(volume / count)
+    return math.max(size.x, math.max(size.y, size.z)) / count
+
+struct CleanWork:
+    var points: const Float3[]
+    var origin: Vector3
+    var options: const CleanOptions*?
+    var reasons: u8[]
+    var has_opacity: bool
+    var has_scale: bool
+    var has_orient: bool
+    var has_color: bool
+    var opacity: Floats
+    var scale: Floats
+    var orient: Floats
+    var color: Floats
+    ## The largest σ allowed (0: any).
+    var limit: f64
+    var hash: const PointHash*?
+    var radius: f64
+
+    func reason(at: usize) -> u8:
+        let options = self.options else return 0
+        let p = self.points[at]
+        var finite = math.is_finite((f64)p.x) and math.is_finite((f64)p.y) and math.is_finite((f64)p.z)
+        var alpha: f64 = 1.0
+        if self.has_opacity:
+            alpha = self.opacity.at(at, 0)
+            finite = finite and math.is_finite(alpha)
+        var s = Vector3(1.0, 1.0, 1.0)
+        if self.has_scale:
+            s = Vector3(math.abs(self.scale.at(at, 0)), math.abs(self.scale.at(at, 1)), math.abs(self.scale.at(at, 2)))
+            finite = finite and s.is_finite()
+        if self.has_orient:
+            var length: f64 = 0.0
+            for k in 0..<(usize)4: length += self.orient.at(at, k) * self.orient.at(at, k)
+            finite = finite and math.is_finite(length) and length > 0.0
+        if self.has_color:
+            finite = finite and math.is_finite(self.color.at(at, 0)) and math.is_finite(self.color.at(at, 1)) and math.is_finite(self.color.at(at, 2))
+        let largest = math.max(s.x, math.max(s.y, s.z))
+        if options.degenerate and (not finite or not (largest > 0.0)): return reason_degenerate
+        if self.has_opacity and alpha < options.min_opacity: return reason_opacity
+        if self.has_scale and self.limit > 0.0 and largest > self.limit: return reason_huge
+        if self.has_scale and options.max_anisotropy > 0.0:
+            # The middle σ: the sum less the largest and the smallest.
+            let middle = s.x + s.y + s.z - largest - math.min(s.x, math.min(s.y, s.z))
+            if largest > options.max_anisotropy * middle: return reason_needle
+        return 0
+
+func reason_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (CleanWork*)context
+    for at in first..<end: work.reasons[at] = work.reason(at)
+
+## Mark kept points with too few neighbors (every point counts as a neighbor,
+## removed or not, so the result does not depend on the order).
+func floater_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (CleanWork*)context
+    let hash = work.hash else return
+    let options = work.options else return
+    for at in first..<end:
+        if work.reasons[at] != 0: continue
+        if hash.count_within(at, work.radius, options.neighbors) < options.neighbors: work.reasons[at] = reason_floater

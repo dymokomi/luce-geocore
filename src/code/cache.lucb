@@ -51,7 +51,7 @@ func acquire(mode: RunOver, header: str, body: str, layout: const Layout*?) -> E
     let root = try snippet_root()
     var host = try make_host(mode, layout)
     defer host.destroy()
-    var compiled = try lower.compile(root, mode.wrapper(), header, body, &host)
+    var compiled = try lower.compile(root, mode.wrapper(uses_gsplat(header, body)), header, body, &host)
     _ = compiles.add(1, .acq_rel)
     let entry = new Entry(key = key, compiled = compiled, users = 1, used = clock) in memory.heap catch failure:
         compiled.destroy()
@@ -97,6 +97,7 @@ func snippet_root() -> str!:
     root_text = try strings.format(root_room, f"{path.temp()}/luce-geocore-code-{os.pid()}")
     try lower.write_root(root_text)
     try lower.write_text(root_text, "luce_geocore/code.lucb", stub_text)
+    try lower.write_text(root_text, "luce_geocore/gsplat.lucb", gsplat_text)
     root_ready = true
     return root_text
 

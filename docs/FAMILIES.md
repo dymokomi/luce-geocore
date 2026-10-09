@@ -280,10 +280,29 @@ them, and the design is luced-3d's `docs/research/GAUSSIAN-SPLATS.md`.
 - **Nodes** (category GSplats): **Bake GSplats** reads the 3DGS PLY's raw names
   (`f_dc_*`, `opacity` logits, `scale_*` logs, `rot_*` w, x, y, z, with `f_rest`
   as `f_rest_*`, a channel-major array or luce-ply's coefficient-major vec3
-  array), Houdini's (`GS_Alpha`, `GS_SPH_R/G/B`), or plain points (round splats
-  from `pscale`). **GSplats SH Degree** truncates or pads the bands.
+  array), Houdini's (`GS_Alpha`, `GS_SPH_R/G/B`), or plain points, a mesh's
+  included (round splats from `pscale`). Its **Up Axis** defaults to Y Down:
+  COLMAP poses, and so nearly every capture, keep +Y down, and the bake turns a
+  PLY's cloud a half turn about X, exactly (positions and normals negate two
+  components, rotations become i · q, and without a `restorient` the SH items
+  odd in y and z change sign; `splats/axes.lucb`), recording
+  `gsplat_up_axis` = `y_down`. **GSplats SH Degree** truncates or pads the bands.
+- **Filters** (`splats/crop.lucb`, `clean.lucb`, `reduce.lucb`): **Crop
+  GSplats** keeps a box, a sphere or the second input's bounds, inside or out,
+  by center or by the 3σ extent (any cloud). **Clean GSplats** removes (or
+  groups) faint, huge, needle-like, non-finite and isolated splats; its
+  neighbor counts use `PointHash` (`splats/neighbors.lucb`). **Reduce GSplats**
+  reaches a count or ratio by merging nearest pairs with moment matching (mass
+  and mass-weighted centroid kept) or by dropping the lightest (opacity ·
+  σ₁σ₂σ₃) with the others' opacity raised to keep the mass.
+- **Point nodes on clouds.** `SetAttributes` deletes cloud points by a group
+  expression (Blast, Delete), groups them (Selection Group) and promotes point
+  and detail attributes. A cloud's expressions are read through a faceless mesh
+  of its points (`cloud_mesh`), which is also how the Code node runs over a
+  cloud (Run Over Points on a set without a mesh).
 - **Export.** `unbaked_set` (`GeometrySet.unbaked_splats` in Luce) gives the raw
-  names back, `restorient` baked into `f_rest`. Bake keeps `scale`, `opacity`
+  names back, turned back down for a `y_down` cloud, `restorient` baked into
+  `f_rest`. Bake keeps `scale`, `opacity`
   and `Cd` in f64 and the file's quaternion as it is, so a file's values come
   back bit for bit (`tests/splats`).
 - **Renderers** find a set's splats with `set_splats` (Base) or
