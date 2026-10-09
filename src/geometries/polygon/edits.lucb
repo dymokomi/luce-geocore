@@ -146,7 +146,7 @@ extend Mesh:
         # Once filled, the storage belongs to adopt, which disposes it on failure.
         return try adopt_storage(try self.repositioned_storage(fresh, origin, moved, rigid))
 
-    func repositioned_storage(fresh: Column[Float3], origin: Vector3, moved: const u32[], rigid: bool) -> Mesh*!:
+    func repositioned_storage(fresh: Column[Float3], origin: Vector3, moved: const u32[], rigid: bool, keep_normals: bool = false) -> Mesh*!:
         var owned = fresh.share()
         if moved.length == 0 and origin == self.origin:
             owned.release()
@@ -158,7 +158,7 @@ extend Mesh:
         errdefer edit.close()
         var attributes = try self.attributes.shared()
         errdefer attributes.close()
-        if not rigid:
+        if not rigid and not keep_normals:
             let surface = Surface(owned.view(), self.offsets.view(), self.corners.view(), edit.normals.view(), incidence.0, incidence.1)
             try refresh_normals(&attributes, &surface, moved)
         let reuse_triangles = edit.triangles.is_empty()

@@ -8,6 +8,11 @@ def package "luce-geocore" {
     str readme = "README.md"
     str[] public = ["geocore", "core.growing", "kernel", "core.parallel", "core.shared"]
 
+    def dependency "luce-kernel" {
+        str owner = "dymokomi"
+        str path = "../luce-kernel"
+    }
+
     def dependency "luce-std" {
         str owner = "dymokomi"
         str path = "../luce-std"

@@ -1,0 +1,160 @@
+# A run's columns: the mesh's columns handed to the engine in place where their layout
+# allows, converted copies where not, and the output columns the program writes,
+# starting as the input's values.
+
+## Heap blocks a run allocates, freed when it ends.
+struct Scratch:
+    var blocks: collections.List[u8[]]
+
+    ## `size` zeroed bytes, 64-byte aligned.
+    func bytes(size: usize) -> u8[]!:
+        let block = memory.heap.allocate(size if size > 0 else 64, 64) else error(memory.exhausted, "out of memory for a column")
+        memory.set(block, 0)
+        try self.blocks.append(block) catch failure:
+            free(block) in memory.heap
+            error(failure.code, failure.message)
+        return block[..<size]
+
+    func close():
+        for block in self.blocks.view():
+            free(block) in memory.heap
+        self.blocks.destroy()
+
+## A column the program writes, and where its values go when the run ends.
+struct Output:
+    let name: str
+    let kind: Kind
+    let width: usize
+    var bytes: u8[]
+    ## The attribute it becomes (attribute outputs).
+    var attribute: Attribute
+    var has_attribute: bool
+
+## Typed views of byte storage (64-byte aligned, or a column's own typed storage).
+func f32_view(bytes: const u8[]) -> f32[]:
+    return f32[]((f32*)bytes.data, bytes.length // 4)
+func f64_view(bytes: const u8[]) -> f64[]:
+    return f64[]((f64*)bytes.data, bytes.length // 8)
+func i32_view(bytes: const u8[]) -> i32[]:
+    return i32[]((i32*)bytes.data, bytes.length // 4)
+func i64_view(bytes: const u8[]) -> i64[]:
+    return i64[]((i64*)bytes.data, bytes.length // 8)
+
+## Store `value` as element `at` of `bytes` in `kind`.
+func put_number(bytes: u8[], kind: Kind, at: usize, value: f64):
+    match kind:
+        .f32: f32_view(bytes)[at] = (f32)value
+        .f64: f64_view(bytes)[at] = value
+        .i32: i32_view(bytes)[at] = (i32)value
+        .i64: i64_view(bytes)[at] = (i64)value
+        _: bytes[at] = (u8)(value != 0.0)
+
+## An engine input over `bytes` of `kind`.
+func input_column(name: str, kind: Kind, bytes: const u8[], components: usize) -> Column:
+    return match kind:
+        .f32 => Column.input_f32(name, f32_view(bytes), components)
+        .f64 => Column.input_f64(name, f64_view(bytes), components)
+        .i32 => Column.input_i32(name, i32_view(bytes), components)
+        .i64 => Column.input_i64(name, i64_view(bytes), components)
+        _ => Column.input_mask(name, bytes, components)
+
+## An engine output over `bytes` of `kind`.
+func output_column(name: str, kind: Kind, bytes: u8[], components: usize) -> Column:
+    return match kind:
+        .f32 => Column.output_f32(name, f32_view(bytes), components)
+        .f64 => Column.output_f64(name, f64_view(bytes), components)
+        .i32 => Column.output_i32(name, i32_view(bytes), components)
+        .i64 => Column.output_i64(name, i64_view(bytes), components)
+        _ => Column.output_mask(name, bytes, components)
+
+## Copy attribute `entry`'s values, element by element, into `elements` tuples of
+## `width` of `kind` in `bytes` (components it lacks stay 0).
+func fill_from(bytes: u8[], kind: Kind, width: usize, elements: usize, entry: const Attribute*):
+    if entry.storage == Storage.array and entry.width == width and kind_of_data(entry.kind) == kind and entry.data.view().length >= bytes.length:
+        memory.copy(bytes, entry.data.view(), bytes.length)
+        return
+    let overlap = width if width < entry.width else entry.width
+    for element in 0..<elements:
+        for k in 0..<overlap:
+            put_number(bytes, kind, element * width + k, entry.number(element, k))
+
+## The engine column for layout column `column`, borrowing the mesh's storage where it
+## can and filling a scratch copy where not.
+func input_of(column: LayoutColumn, mesh: const Mesh*?, set: const GeometrySet*, scratch: Scratch*) -> Column!:
+    if column.origin == .detail:
+        let entry = set_detail(set).entry(column.index)
+        let bytes = try scratch.bytes(column.kind.size() * column.components)
+        for k in 0..<column.components: put_number(bytes, column.kind, k, entry.number(0, k))
+        return input_column(column.name, column.kind, bytes, column.components)
+    let source = mesh else error(errors.invalid, "a mesh column without a mesh")
+    match column.origin:
+        .attribute, .narrowed:
+            let entry = try source.attribute_entry((i64)column.index)
+            if column.origin == .attribute and entry.storage == Storage.array:
+                return input_column(column.name, column.kind, entry.data.view(), column.components)
+            let bytes = try scratch.bytes(entry.elements * column.components * column.kind.size())
+            fill_from(bytes, column.kind, column.components, entry.elements, entry)
+            return input_column(column.name, column.kind, bytes, column.components)
+        .group:
+            let entry = try source.attribute_entry((i64)column.index)
+            let bytes = try scratch.bytes(entry.elements)
+            let members = Bits.of_bytes(entry.data.view(), entry.elements)
+            for at in 0..<entry.elements: bytes[at] = (u8)members.get(at)
+            return input_column(column.name, .mask, bytes, 1)
+        .positions:
+            let points = source.point_span()
+            let floats = f32[]((f32*)points.data, points.length * 3)
+            let origin = source.position_origin()
+            if origin.x == 0.0 and origin.y == 0.0 and origin.z == 0.0:
+                return Column.input_f32(column.name, floats, 3)
+            let world = f32_view(try scratch.bytes(points.length * 12))
+            for at in 0..<points.length:
+                world[at * 3] = (f32)((f64)points[at].x + origin.x)
+                world[at * 3 + 1] = (f32)((f64)points[at].y + origin.y)
+                world[at * 3 + 2] = (f32)((f64)points[at].z + origin.z)
+            return Column.input_f32(column.name, world, 3)
+        .face_normals:
+            let normals = source.face_normal_span()
+            return Column.input_f32(column.name, f32[]((f32*)normals.data, normals.length * 3), 3)
+        .face_areas, .face_centers:
+            let faces = (usize)source.face_count()
+            let areas = column.origin == .face_areas
+            let values = f32_view(try scratch.bytes(faces * (4 if areas else 12)))
+            face_measures(source, values, areas)
+            return Column.input_f32(column.name, values, 1 if areas else 3)
+        .corner_points:
+            return Column.input_i32(column.name, source.corner_span(), 1)
+        _:
+            error(errors.invalid, "a column of no known origin")
+
+## Each face's area (Newell's polygon area), or its center (the corners' mean, in world
+## space), into `values`.
+func face_measures(mesh: const Mesh*, values: f32[], areas: bool):
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
+    let points = mesh.point_span()
+    let origin = mesh.position_origin()
+    for face in 0..<offsets.length - 1:
+        let first = (usize)offsets[face]
+        let end = (usize)offsets[face + 1]
+        var x: f64 = 0.0
+        var y: f64 = 0.0
+        var z: f64 = 0.0
+        for at in first..<end:
+            let a = points[(usize)corners[at]].vector()
+            if areas:
+                let b = points[(usize)corners[first + (at - first + 1) % (end - first)]].vector()
+                x += (a.y - b.y) * (a.z + b.z)
+                y += (a.z - b.z) * (a.x + b.x)
+                z += (a.x - b.x) * (a.y + b.y)
+            else:
+                x += a.x
+                y += a.y
+                z += a.z
+        if areas:
+            values[face] = (f32)(0.5 * math.sqrt(x * x + y * y + z * z))
+        else:
+            let count = (f64)(end - first)
+            values[face * 3] = (f32)(x / count + origin.x)
+            values[face * 3 + 1] = (f32)(y / count + origin.y)
+            values[face * 3 + 2] = (f32)(z / count + origin.z)

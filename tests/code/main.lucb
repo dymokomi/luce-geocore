@@ -1,0 +1,16 @@
+## luce-geocore's Code node checks (`luc test` runs them); `--bench` times whole cooks
+## over 1M points instead (tests/code/bench.py).
+import bench
+import checks
+
+pub func main(arguments: str[]) -> i32!:
+    if arguments.length > 1 and arguments[1] == "--bench":
+        try bench.run_all()
+        return 0
+    try checks.points()
+    try checks.parameters()
+    try checks.other_modes()
+    try checks.faults()
+    try checks.determinism()
+    try checks.checking()
+    return 0

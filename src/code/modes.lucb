@@ -1,0 +1,57 @@
+# Run Over modes: Houdini's menu order, what each one's entry function declares, the
+# domain its lanes are elements of, and the word its messages name an element with.
+
+## What a Code node runs over.
+pub enum RunOver as u8:
+    ## Once, for the detail.
+    detail = 0
+    ## Once per point.
+    points = 1
+    ## Once per vertex (a face's corner).
+    vertices = 2
+    ## Once per primitive (face).
+    primitives = 3
+    ## `count` times, numbered.
+    numbers = 4
+
+extend RunOver:
+    ## The mode a menu value names.
+    static func of(value: i64) -> RunOver!:
+        if value < 0 or value > 4:
+            error(errors.invalid, "Run Over is 0 (detail), 1 (points), 2 (vertices), 3 (primitives) or 4 (numbers)")
+        return (RunOver)(u8)value
+
+    ## The entry function the snippet's body goes into.
+    func wrapper() -> lower.RunOver:
+        let imports = "from luce_geocore.code import Point, Prim, Vertex, Kernel"
+        return match self:
+            .detail => lower.RunOver(entry = "detail", parameters = "k: Kernel*", imports = imports)
+            .points => lower.RunOver(entry = "point", parameters = "p: Point*, k: const Kernel*", imports = imports)
+            .vertices => lower.RunOver(entry = "vertex", parameters = "v: Vertex*, k: const Kernel*", imports = imports)
+            .primitives => lower.RunOver(entry = "prim", parameters = "f: Prim*, k: const Kernel*", imports = imports)
+            _ => lower.RunOver(entry = "number", parameters = "n: i64, k: Kernel*", imports = imports)
+
+    ## The mesh domain its lanes are elements of (detail for Detail and Numbers).
+    func domain() -> Domain:
+        return match self:
+            .points => Domain.point
+            .vertices => Domain.corner
+            .primitives => Domain.face
+            _ => Domain.detail
+
+    ## The word a fault message names an element with.
+    func element() -> str:
+        return match self:
+            .points => "point"
+            .vertices => "vertex"
+            .primitives => "prim"
+            .numbers => "number"
+            _ => "detail"
+
+    ## The stub type a mode's element is.
+    func owner() -> str:
+        return match self:
+            .points => "Point"
+            .vertices => "Vertex"
+            .primitives => "Prim"
+            _ => "Kernel"

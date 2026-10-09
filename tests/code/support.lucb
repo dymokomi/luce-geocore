@@ -1,0 +1,73 @@
+## Helpers for the Code checks: grids as sets, running a snippet, reading results.
+import interop
+import memory
+from luce_geocore import geocore, kernel as geocore_kernel
+from luce_geocore.geocore import Mesh, MeshPrimitives, GeometrySet, Vector3
+
+pub let points_mode: i64 = 1
+pub let vertices_mode: i64 = 2
+pub let primitives_mode: i64 = 3
+pub let detail_mode: i64 = 0
+pub let numbers_mode: i64 = 4
+
+## A set holding a grid of `divisions` squared faces.
+pub func grid_set(divisions: i64) -> interop.Reference[GeometrySet]!:
+    return try GeometrySet.of_mesh(try MeshPrimitives.grid(2.0, divisions))
+
+## A set holding a flat grid of `side` by `side` points (any size, unlike the primitive).
+pub func big_grid_set(side: usize) -> interop.Reference[GeometrySet]!:
+    let points = try new Vector3[side * side] --- in memory.heap
+    defer free(points) in memory.heap
+    let faces = (side - 1) * (side - 1)
+    let sizes = try new i64[faces] in memory.heap
+    defer free(sizes) in memory.heap
+    let corners = try new i64[faces * 4] in memory.heap
+    defer free(corners) in memory.heap
+    for row in 0..<side:
+        for column in 0..<side:
+            points[row * side + column] = Vector3((f64)column / (f64)(side - 1) * 2.0 - 1.0, 0.0, (f64)row / (f64)(side - 1) * 2.0 - 1.0)
+    for row in 0..<side - 1:
+        for column in 0..<side - 1:
+            let face = row * (side - 1) + column
+            sizes[face] = 4
+            let first = (i64)(row * side + column)
+            corners[face * 4] = first
+            corners[face * 4 + 1] = first + (i64)side
+            corners[face * 4 + 2] = first + (i64)side + 1
+            corners[face * 4 + 3] = first + 1
+    let storage = try new Mesh[1] --- in memory.heap
+    storage[0] = Mesh(points, sizes, corners) catch failure:
+        free(storage) in memory.heap
+        error(failure.code, failure.message)
+    return try GeometrySet.of_mesh(try geocore_kernel.mesh_adopt(storage.data))
+
+pub func no_names() -> const str[]:
+    var none_given: const str[]
+    return none_given
+
+pub func no_values() -> const f64[]:
+    var none_given: const f64[]
+    return none_given
+
+## Run `body` over `set` (no header, group, parameters; frame 1, time 0, 24 fps).
+pub func run(set: interop.Reference[GeometrySet], mode: i64, body: str, threads: usize = 0) -> interop.Reference[GeometrySet]!:
+    return try run_with(set, mode, "", body, "", no_names(), no_values(), threads)
+
+pub func run_with(set: interop.Reference[GeometrySet], mode: i64, header: str, body: str, group: str, names: const str[], values: const f64[], threads: usize = 0, count: i64 = 0) -> interop.Reference[GeometrySet]!:
+    let made = try geocore_kernel.run_code(try set.get(), mode, header, body, group, 0, names, values, 1.0, 0.0, 24.0, count, threads)
+    return try geocore_kernel.adopt_set(made)
+
+## The mesh of a set (trap without one).
+pub func mesh_of(set: interop.Reference[GeometrySet]) -> interop.Reference[Mesh]!:
+    let found = try (try set.get()).mesh()
+    return found else trap("the set has no mesh")
+
+## Attribute `name` on domain `domain` (0 point, 1 corner, 2 face) of `mesh`, component
+## `component` of element `element`.
+pub func value(mesh: interop.Reference[Mesh], name: str, domain: i64, element: i64, component: i64 = 0) -> f64!:
+    let m = try mesh.get()
+    let index = m.find_attribute(name, domain)
+    if index < 0:
+        print(f"no attribute {name}")
+        trap("missing attribute")
+    return try m.attribute_value(index, element, component)

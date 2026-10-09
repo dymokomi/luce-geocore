@@ -1,0 +1,312 @@
+# The API a snippet is checked against: `luce_geocore/code.lucb` in the snippet root. The
+# bodies never run; what each member does is in `bindings.lucb`.
+
+let stub_text: str = """## The geometry a Code node's snippet runs against (luce-geocore). Positions, normals
+## and colors are f32[4] with lane 3 zero; uv is f32[2]. Accessors take the attribute's
+## name as a literal and read or write it in its stored type; reading an attribute the
+## geometry lacks gives 0, and writing one creates it.
+
+## The point a snippet runs for (Run Over Points).
+pub struct Point:
+    ## Position, in world space.
+    pub var P: f32[4]
+    ## Normal, 0 when the geometry has none; writing creates it.
+    pub var N: f32[4]
+    ## Color; writing creates it.
+    pub var Cd: f32[4]
+    ## Texture coordinates on points.
+    pub var uv: f32[2]
+    ## This point's number and how many points there are.
+    pub let ptnum: i32
+    pub let numpt: i32
+    var written: bool
+
+    ## Point attribute `name`, of its stored type.
+    pub func f32(name: str) -> f32:
+        _ = name
+        return 0.0
+    pub func f64(name: str) -> f64:
+        _ = name
+        return 0.0
+    pub func i32(name: str) -> i32:
+        _ = name
+        return 0
+    pub func i64(name: str) -> i64:
+        _ = name
+        return 0
+    pub func vec2(name: str) -> f32[2]:
+        _ = name
+        return [0.0, 0.0]
+    pub func vec3(name: str) -> f32[4]:
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    pub func vec4(name: str) -> f32[4]:
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    ## Set point attribute `name`, creating it with the setter's type.
+    pub func set_f32(name: str, value: f32):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_f64(name: str, value: f64):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_i32(name: str, value: i32):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_i64(name: str, value: i64):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_vec2(name: str, value: f32[2]):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_vec3(name: str, value: f32[4]):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_vec4(name: str, value: f32[4]):
+        _ = name
+        _ = value
+        self.written = true
+    ## Whether the point is in point group `name`; put it in or take it out.
+    pub func in_group(name: str) -> bool:
+        _ = name
+        return false
+    pub func set_group(name: str, member: bool):
+        _ = name
+        _ = member
+        self.written = true
+
+## The primitive (face) a snippet runs for (Run Over Primitives).
+pub struct Prim:
+    ## Color; writing creates it.
+    pub var Cd: f32[4]
+    ## This primitive's number and how many there are.
+    pub let primnum: i32
+    pub let numprim: i32
+    var written: bool
+
+    ## The face's area, center and unit normal.
+    pub func area() -> f32:
+        return 0.0
+    pub func center() -> f32[4]:
+        return [0.0, 0.0, 0.0, 0.0]
+    pub func normal() -> f32[4]:
+        return [0.0, 0.0, 0.0, 0.0]
+    ## Primitive attribute `name`, of its stored type.
+    pub func f32(name: str) -> f32:
+        _ = name
+        return 0.0
+    pub func f64(name: str) -> f64:
+        _ = name
+        return 0.0
+    pub func i32(name: str) -> i32:
+        _ = name
+        return 0
+    pub func i64(name: str) -> i64:
+        _ = name
+        return 0
+    pub func vec2(name: str) -> f32[2]:
+        _ = name
+        return [0.0, 0.0]
+    pub func vec3(name: str) -> f32[4]:
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    pub func vec4(name: str) -> f32[4]:
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    ## Set primitive attribute `name`, creating it with the setter's type.
+    pub func set_f32(name: str, value: f32):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_f64(name: str, value: f64):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_i32(name: str, value: i32):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_i64(name: str, value: i64):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_vec2(name: str, value: f32[2]):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_vec3(name: str, value: f32[4]):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_vec4(name: str, value: f32[4]):
+        _ = name
+        _ = value
+        self.written = true
+    ## Whether the primitive is in primitive group `name`; put it in or take it out.
+    pub func in_group(name: str) -> bool:
+        _ = name
+        return false
+    pub func set_group(name: str, member: bool):
+        _ = name
+        _ = member
+        self.written = true
+
+## The vertex (a face's corner) a snippet runs for (Run Over Vertices).
+pub struct Vertex:
+    ## Texture coordinates and normal on the vertex.
+    pub var uv: f32[2]
+    pub var N: f32[4]
+    ## This vertex's number, how many there are, and the point it uses.
+    pub let vtxnum: i32
+    pub let numvtx: i32
+    pub let ptnum: i32
+    var written: bool
+
+    ## Vertex attribute `name`, of its stored type.
+    pub func f32(name: str) -> f32:
+        _ = name
+        return 0.0
+    pub func f64(name: str) -> f64:
+        _ = name
+        return 0.0
+    pub func i32(name: str) -> i32:
+        _ = name
+        return 0
+    pub func i64(name: str) -> i64:
+        _ = name
+        return 0
+    pub func vec2(name: str) -> f32[2]:
+        _ = name
+        return [0.0, 0.0]
+    pub func vec3(name: str) -> f32[4]:
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    pub func vec4(name: str) -> f32[4]:
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    ## Set vertex attribute `name`, creating it with the setter's type.
+    pub func set_f32(name: str, value: f32):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_f64(name: str, value: f64):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_i32(name: str, value: i32):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_i64(name: str, value: i64):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_vec2(name: str, value: f32[2]):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_vec3(name: str, value: f32[4]):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_vec4(name: str, value: f32[4]):
+        _ = name
+        _ = value
+        self.written = true
+    ## Whether the vertex is in vertex group `name`; put it in or take it out.
+    pub func in_group(name: str) -> bool:
+        _ = name
+        return false
+    pub func set_group(name: str, member: bool):
+        _ = name
+        _ = member
+        self.written = true
+
+## The node: the timeline, its spare parameters and the detail attributes.
+pub struct Kernel:
+    ## The timeline's frame, seconds (frame 1 is 0) and frames per second.
+    pub let frame: f64
+    pub let time: f64
+    pub let fps: f64
+    var written: bool
+
+    ## Spare parameter `name` (a row on the node, created on first use) and its default.
+    pub func f32(name: str, default: f32 = 0.0) -> f32:
+        _ = name
+        return default
+    pub func f64(name: str, default: f64 = 0.0) -> f64:
+        _ = name
+        return default
+    pub func i32(name: str, default: i32 = 0) -> i32:
+        _ = name
+        return default
+    pub func i64(name: str, default: i64 = 0) -> i64:
+        _ = name
+        return default
+    pub func vec2(name: str, default: f32[2] = [0.0, 0.0]) -> f32[2]:
+        _ = name
+        return default
+    pub func vec3(name: str, default: f32[4] = [0.0, 0.0, 0.0, 0.0]) -> f32[4]:
+        _ = name
+        return default
+    pub func vec4(name: str, default: f32[4] = [0.0, 0.0, 0.0, 0.0]) -> f32[4]:
+        _ = name
+        return default
+    ## Detail attribute `name` (0 when the geometry lacks it).
+    pub func detail_f32(name: str) -> f32:
+        _ = name
+        return 0.0
+    pub func detail_f64(name: str) -> f64:
+        _ = name
+        return 0.0
+    pub func detail_i32(name: str) -> i32:
+        _ = name
+        return 0
+    pub func detail_i64(name: str) -> i64:
+        _ = name
+        return 0
+    pub func detail_vec2(name: str) -> f32[2]:
+        _ = name
+        return [0.0, 0.0]
+    pub func detail_vec3(name: str) -> f32[4]:
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    pub func detail_vec4(name: str) -> f32[4]:
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    ## Set detail attribute `name` (Run Over Detail and Numbers, whose `k` may change).
+    pub func set_detail_f32(name: str, value: f32):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_detail_f64(name: str, value: f64):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_detail_i32(name: str, value: i32):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_detail_i64(name: str, value: i64):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_detail_vec2(name: str, value: f32[2]):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_detail_vec3(name: str, value: f32[4]):
+        _ = name
+        _ = value
+        self.written = true
+    pub func set_detail_vec4(name: str, value: f32[4]):
+        _ = name
+        _ = value
+        self.written = true
+"""

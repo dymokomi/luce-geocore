@@ -1,0 +1,11 @@
+#prisma 4.0
+def package "luce_geocore_code_tests" {
+    str source = "."
+    def dependency "luce-geocore" {
+        str path = "../.."
+    }
+    def dependency "luce-std" {
+        str owner = "dymokomi"
+        str path = "../../../luce-std"
+    }
+}

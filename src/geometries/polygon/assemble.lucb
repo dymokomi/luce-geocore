@@ -177,8 +177,10 @@ pub func edge_parents(source: const Mesh*, output: const Mesh*, corner_parents: 
 
 ## `source` with new positions (relative to its origin) where `moved` points
 ## changed: topology, triangles and attributes shared (see repositioned).
-pub func moved_storage(source: const Mesh*, positions: Column[Float3], moved: const u32[]) -> Mesh*!:
-    return try source.repositioned_storage(positions, source.origin, moved, false)
+## With `keep_normals`, authored normals ("N") stay as they were instead of following
+## the new shape (the Code node's rule: a snippet writes N to change it).
+pub func moved_storage(source: const Mesh*, positions: Column[Float3], moved: const u32[], keep_normals: bool = false) -> Mesh*!:
+    return try source.repositioned_storage(positions, source.origin, moved, false, keep_normals)
 
 ## A display mesh over `source`'s topology with `positions` whose points
 ## `moved` changed: triangles kept, a collapsed face's normal zero (see

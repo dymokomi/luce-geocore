@@ -1,0 +1,67 @@
+# What the API's members mean, per Run Over mode, as a luce-kernel `Host`. Column names
+# a program uses: an attribute's own name on the mode's domain, `P` for positions,
+# `group:<name>` for a group, `detail:<name>` for a detail attribute, and `@area`,
+# `@center`, `@normal`, `@point` for values geocore computes or keeps outside attributes.
+
+## The accessor kinds: method suffix and lanes.
+let accessor_names: str[7] = ["f32", "f64", "i32", "i64", "vec2", "vec3", "vec4"]
+let accessor_lanes: usize[7] = [1, 1, 1, 1, 2, 3, 4]
+
+## The bindings of `mode`. With `layout`, the input's columns are declared and reads of
+## missing ones give 0; without it (checking with no geometry) every read is allowed.
+func make_host(mode: RunOver, layout: const Layout*?) -> Host!:
+    var host = Host()
+    errdefer host.destroy()
+    let owner = mode.owner()
+    match mode:
+        .points:
+            try host.field("Point", "P", "P", 3)
+            try host.field("Point", "N", "N", 3)
+            try host.field("Point", "Cd", "Cd", 3)
+            try host.field("Point", "uv", "uv", 2)
+            try host.element("Point", "ptnum")
+            try host.uniform("Point", "numpt", "numpt")
+        .primitives:
+            try host.field("Prim", "Cd", "Cd", 3)
+            try host.element("Prim", "primnum")
+            try host.uniform("Prim", "numprim", "numprim")
+            try host.computed("Prim", "area", "@area", 1)
+            try host.computed("Prim", "center", "@center", 3)
+            try host.computed("Prim", "normal", "@normal", 3)
+        .vertices:
+            try host.field("Vertex", "uv", "uv", 2)
+            try host.field("Vertex", "N", "N", 3)
+            try host.element("Vertex", "vtxnum")
+            try host.uniform("Vertex", "numvtx", "numvtx")
+            try host.field("Vertex", "ptnum", "@point", 1)
+        _:
+            _ = 0
+    if mode == .points or mode == .primitives or mode == .vertices:
+        for (at, name) in accessor_names.indexed():
+            var room: u8[32]
+            let setter = try strings.format(room, f"set_{name}")
+            try host.getter(owner, name, "", accessor_lanes[at])
+            try host.setter(owner, setter, "", accessor_lanes[at])
+        try host.getter(owner, "in_group", "group:", 1)
+        try host.setter(owner, "set_group", "group:", 1)
+    try host.uniform("Kernel", "frame", "frame")
+    try host.uniform("Kernel", "time", "time")
+    try host.uniform("Kernel", "fps", "fps")
+    for (at, name) in accessor_names.indexed():
+        try host.parameter("Kernel", name, accessor_lanes[at])
+        var reader_room: u8[32]
+        let reader = try strings.format(reader_room, f"detail_{name}")
+        var setter_room: u8[32]
+        let setter = try strings.format(setter_room, f"set_detail_{name}")
+        # Run Over Detail reads and writes the detail as its one element; the others read
+        # it as a uniform, and Numbers writes it from its lanes (the last writer wins).
+        if mode == .detail:
+            try host.getter("Kernel", reader, "detail:", accessor_lanes[at])
+        else:
+            try host.reader("Kernel", reader, "detail:")
+        try host.setter("Kernel", setter, "detail:", accessor_lanes[at])
+    if let given = layout:
+        host.missing_reads_zero()
+        for column in given.columns.view():
+            try host.column(column.name, column.kind, column.components)
+    return host

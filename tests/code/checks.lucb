@@ -1,0 +1,171 @@
+## The Code node's checks: every Run Over on a grid, fields and accessors, attribute
+## creation, groups, parameters, the timeline, faults, determinism, the cache and
+## Code.check.
+import interop
+import strings
+from luce_std import math, math32
+from luce_geocore import geocore, kernel as geocore_kernel
+from luce_geocore.geocore import Mesh, GeometrySet, Code
+import support
+
+func near(a: f64, b: f64) -> bool:
+    return math.abs(a - b) < 0.000001
+
+func same32(a: f64, b: f32) -> bool:
+    return (f32)a == b
+
+func expect(condition: bool, what: str):
+    if not condition:
+        print(f"FAIL  {what}")
+        trap("code checks")
+
+var failure_room: u8[512]
+
+## The error message a cook fails with ("" when it does not).
+func failure(set: interop.Reference[GeometrySet], mode: i64, header: str, body: str) -> str:
+    var text = ""
+    _ = support.run_with(set, mode, header, body, "", support.no_names(), support.no_values()) catch problem:
+        text = strings.format(failure_room, f"{problem.message}") else ""
+    return text
+
+pub func points() -> !:
+    let set = try support.grid_set(8)
+    let source = try support.mesh_of(set)
+    let count = (try source.get()).point_count()
+    let moved = try support.run(set, support.points_mode, "p.P[1] += math32.sin(p.P[0] * 4.0) * 0.1\n")
+    let mesh = try support.mesh_of(moved)
+    for at: i64 in 0..<count:
+        let before = try (try source.get()).point(at)
+        let after = try (try mesh.get()).point(at)
+        let x = (f32)before.x
+        expect((f32)after.y == (f32)before.y + math32.sin(x * 4.0) * 0.1 and after.x == before.x, "wave moves y by sin(x)")
+    print("ok    points: P read and written")
+
+    let colored = try support.run(set, support.points_mode, "p.Cd = [p.P[0], 1.0, 0.5, 0.0]\np.N = [0.0, 1.0, 0.0, 0.0]\np.uv = [p.P[0], p.P[2]]\n")
+    let painted = try support.mesh_of(colored)
+    let reread = try support.run(colored, support.points_mode, "p.set_f32(\"sum\", p.Cd[1] + p.N[1] + p.uv[0] - p.P[0])\n")
+    let summed = try support.mesh_of(reread)
+    for at: i64 in 0..<count:
+        let point = try (try source.get()).point(at)
+        expect(same32(try support.value(painted, "Cd", 0, at, 0), (f32)point.x), "Cd written")
+        expect(try support.value(painted, "N", 0, at, 1) == 1.0, "N written")
+        expect(same32(try support.value(painted, "uv", 0, at, 1), (f32)point.z), "uv written")
+        expect(try support.value(summed, "sum", 0, at) == 2.0, "Cd, N and uv read back")
+    print("ok    points: N, Cd and uv written and read")
+
+    let created = try support.run(set, support.points_mode, "p.set_f32(\"a\", 1.5)\np.set_f64(\"b\", 2.25)\np.set_i32(\"c\", p.ptnum)\np.set_i64(\"d\", (i64)p.numpt)\np.set_vec2(\"e\", [1.0, 2.0])\np.set_vec3(\"f\", [3.0, 4.0, 5.0, 0.0])\np.set_vec4(\"g\", [6.0, 7.0, 8.0, 9.0])\np.set_group(\"even\", p.ptnum % 2 == 0)\n")
+    let made = try support.mesh_of(created)
+    let m = try made.get()
+    let types: i64[7] = [4, 5, 2, 3, 4, 4, 4]
+    let widths: i64[7] = [1, 1, 1, 1, 2, 3, 4]
+    let names: str[7] = ["a", "b", "c", "d", "e", "f", "g"]
+    for at: usize in 0..<7:
+        let index = m.find_attribute(names[at], 0)
+        expect(index >= 0 and (try m.attribute_type(index)) == types[at] and (try m.attribute_width(index)) == widths[at], "an attribute of each type")
+    expect(try support.value(made, "c", 0, 5) == 5.0 and try support.value(made, "d", 0, 0) == (f64)count, "element numbers")
+    expect(try support.value(made, "g", 0, 3, 3) == 9.0 and try support.value(made, "b", 0, 1) == 2.25, "vector and f64 values")
+    expect(m.group_size("even", 0) == (count + 1) // 2, "a group")
+    print("ok    points: an attribute of every type, and a group")
+
+    let grouped = try support.run_with(set, support.points_mode, "", "p.P[1] = 5.0\n", "0-3", support.no_names(), support.no_values())
+    let lifted = try support.mesh_of(grouped)
+    for at: i64 in 0..<count:
+        let y = (try (try lifted.get()).point(at)).y
+        expect((y == 5.0) == (at <= 3), "a group restricts the run")
+    let regrouped = try support.run_with(created, support.points_mode, "", "p.set_i32(\"c\", -1)\n", "even", support.no_names(), support.no_values())
+    let marked = try support.mesh_of(regrouped)
+    for at: i64 in 0..<count:
+        expect((try support.value(marked, "c", 0, at) == -1.0) == (at % 2 == 0), "a group attribute restricts the run")
+    print("ok    points: groups restrict the run")
+
+pub func parameters() -> !:
+    let set = try support.grid_set(4)
+    let body = "p.set_f32(\"a\", k.f32(\"amount\", 0.5))\nlet d = k.vec3(\"dir\", [1.0, 2.0, 3.0, 0.0])\np.set_vec3(\"d\", d)\np.set_f64(\"t\", k.time + k.frame * 10.0 + k.fps * 100.0)\n"
+    let defaults = try support.mesh_of(try support.run(set, support.points_mode, body))
+    expect(try support.value(defaults, "a", 0, 0) == 0.5 and try support.value(defaults, "d", 0, 0, 2) == 3.0, "parameter defaults")
+    expect(try support.value(defaults, "t", 0, 0) == 0.0 + 10.0 + 2400.0, "frame, time and fps")
+    let compiles = geocore_kernel.code_compiles()
+    let names: str[2] = ["amount", "dir[1]"]
+    let values: f64[2] = [2.0, -4.0]
+    let given = try support.mesh_of(try support.run_with(set, support.points_mode, "", body, "", names, values))
+    expect(try support.value(given, "a", 0, 0) == 2.0 and try support.value(given, "d", 0, 0, 1) == -4.0 and try support.value(given, "d", 0, 0, 0) == 1.0, "parameter values")
+    let later = try geocore_kernel.run_code(try set.get(), support.points_mode, "", body, "", 0, names, values, 7.0, 0.25, 30.0, 0, 0)
+    let timed = try support.mesh_of(try geocore_kernel.adopt_set(later))
+    expect(try support.value(timed, "t", 0, 0) == 0.25 + 70.0 + 3000.0, "a later frame")
+    expect(geocore_kernel.code_compiles() == compiles, "new values and frames do not check again")
+    print("ok    parameters: defaults, values, the timeline; the cache kept the program")
+
+pub func other_modes() -> !:
+    let set = try support.grid_set(4)
+    let mesh = try support.mesh_of(set)
+    let m = try mesh.get()
+    let prims = try support.mesh_of(try support.run(set, support.primitives_mode, "f.Cd = f.normal()\nf.set_f32(\"area\", f.area())\nf.set_vec3(\"c\", f.center())\nf.set_i32(\"n\", f.primnum + f.numprim)\n"))
+    for face: i64 in 0..<m.face_count():
+        let normal = try m.face_normal(face)
+        let center = try m.face_center(face)
+        expect(same32(try support.value(prims, "Cd", 2, face, 1), (f32)normal.y), "face normals")
+        expect(near(try support.value(prims, "area", 2, face), 0.25), "face areas")
+        expect(near(try support.value(prims, "c", 2, face, 0), center.x) and near(try support.value(prims, "c", 2, face, 2), center.z), "face centers")
+        expect(try support.value(prims, "n", 2, face) == (f64)(face + m.face_count()), "primnum and numprim")
+    print("ok    primitives: normal, area, center, numbers")
+    let corners = try support.mesh_of(try support.run(set, support.vertices_mode, "v.set_i32(\"p\", v.ptnum)\nv.set_i32(\"i\", v.vtxnum)\nv.uv = [(f32)v.ptnum, 1.0]\n"))
+    for corner: i64 in 0..<m.vertex_count():
+        expect(try support.value(corners, "p", 1, corner) == (f64)(try m.corner_point(corner)), "a vertex's point")
+        expect(try support.value(corners, "i", 1, corner) == (f64)corner and try support.value(corners, "uv", 1, corner, 1) == 1.0, "vertex numbers and uv")
+    print("ok    vertices: ptnum, vtxnum, uv")
+    let detailed = try support.run(set, support.detail_mode, "k.set_detail_f32(\"h\", 3.0)\nk.set_detail_vec3(\"v\", [1.0, 2.0, 3.0, 0.0])\n")
+    let detail = try detailed.get()
+    expect(try detail.detail_value("h") == 3.0 and try detail.detail_value("v", 2) == 3.0, "detail writes")
+    let doubled = try support.run(detailed, support.detail_mode, "k.set_detail_f32(\"h\", k.detail_f32(\"h\") * 2.0)\n")
+    expect(try (try doubled.get()).detail_value("h") == 6.0, "detail reads its own value")
+    let reading = try support.mesh_of(try support.run(detailed, support.points_mode, "p.set_f32(\"h\", k.detail_f32(\"h\") + (f32)k.detail_vec3(\"v\")[1])\n"))
+    expect(try support.value(reading, "h", 0, 3) == 5.0, "points read detail values")
+    let numbered = try support.run_with(set, support.numbers_mode, "", "k.set_detail_i64(\"last\", n * 2)\nif n < 3:\n    k.set_detail_i64(\"early\", n)\n", "", support.no_names(), support.no_values(), count = 10)
+    let numbers = try numbered.get()
+    expect(try numbers.detail_value("last") == 18.0 and try numbers.detail_value("early") == 2.0, "numbers: the last writer wins")
+    let empty = try geocore_kernel.adopt_set(try geocore_kernel.empty_set())
+    let nothing = try support.run(empty, support.points_mode, "p.P[1] = 1.0\n")
+    expect(not (try nothing.get()).has_mesh(), "no mesh: points run on nothing")
+    let alone = try support.run(empty, support.detail_mode, "k.set_detail_f32(\"x\", 1.0)\n")
+    expect(try (try alone.get()).detail_value("x") == 1.0, "no mesh: detail still runs")
+    print("ok    detail and numbers: detail attributes read and written; no mesh")
+
+pub func faults() -> !:
+    let set = try support.grid_set(4)
+    expect(failure(set, support.points_mode, "", "let x = p.P[0]\nlet q = 100 // (p.ptnum - 5)\np.set_f32(\"q\", x + (f32)q)\n") == "line 2, column 13: division by zero (point 5)", "a fault's line, column and point")
+    let header_fault = failure(set, support.primitives_mode, "func check(x: i32) -> i32:\n    assert(x < 3, \"too big\")\n    return x\n", "f.set_i32(\"c\", check(f.primnum))\n")
+    _ = header_fault
+    expect(failure(set, support.primitives_mode, "func check(x: i32) -> i32:\n    assert(x < 3, \"too big\")\n    return x\n", "f.set_i32(\"c\", check(f.primnum))\n") == "header line 2, column 5: too big (prim 3)", "a fault in the header")
+    let checked = failure(set, support.points_mode, "", "p.set_f32(\"x\", p.ptnum)\n")
+    expect(strings.starts_with(checked, "line 1, column 18: "), "a check failure's position")
+    expect(strings.starts_with(failure(set, support.points_mode, "", "let x = p.Cd\nprint(\"no\")\n"), "line 2, column 1: `print` is not available"), "a lowering refusal's position")
+    print("ok    faults: positions and elements in the messages")
+
+pub func determinism() -> !:
+    let set = try support.big_grid_set(150)
+    let body = "let n = snoise(p.P * 3.0)\np.P = p.P + [0.0, n * 0.2, 0.0, 0.0]\np.Cd = rand3(p.ptnum)\np.set_i32(\"m\", p.ptnum % 7)\n"
+    let one = try support.mesh_of(try support.run(set, support.points_mode, body, threads = 1))
+    let many = try support.mesh_of(try support.run(set, support.points_mode, body, threads = 16))
+    let a = try one.get()
+    let b = try many.get()
+    for at: i64 in 0..<a.point_count():
+        let p = try a.point(at)
+        let q = try b.point(at)
+        expect(p.x.bits() == q.x.bits() and p.y.bits() == q.y.bits() and p.z.bits() == q.z.bits(), "the same positions at 1 and 16 workers")
+        expect(try support.value(one, "Cd", 0, at, 2) == try support.value(many, "Cd", 0, at, 2), "the same colors")
+    print("ok    determinism: identical bits at 1 and 16 workers")
+
+pub func checking() -> !:
+    let check = try Code.check(1, "", "let amount = k.f32(\"amount\", 0.2)\nlet d = k.vec3(\"dir\", [1.0, 2.0, 3.0, 0.0])\nlet n = k.i32(\"n\", 4)\np.P[1] += amount * d[1] + (f32)n + (f32)k.time\n")
+    let c = try check.get()
+    expect(c.ok() and c.parameter_count() == 3 and c.reads_time(), "a snippet with parameters checks")
+    expect(c.parameter_name(0) == "amount" and c.parameter_components(0) == 1 and not c.parameter_integer(0) and (f32)c.parameter_default(0, 0) == 0.2, "a scalar parameter")
+    expect(c.parameter_name(1) == "dir" and c.parameter_components(1) == 3 and c.parameter_default(1, 2) == 3.0, "a vector parameter")
+    expect(c.parameter_name(2) == "n" and c.parameter_integer(2) and c.parameter_default(2, 0) == 4.0, "an integer parameter")
+    let bad = try Code.check(1, "", "p.set_f32(\"é\", p.ptnum)\n")
+    let b = try bad.get()
+    expect(not b.ok() and b.diagnostic_count() >= 1, "a snippet that does not check")
+    expect(b.diagnostic_part(0) == 0 and b.diagnostic_line(0) == 1 and b.diagnostic_column(0) == 18 and b.diagnostic_end(0) == 23 and b.diagnostic_severity(0) == 0, "diagnostic positions in characters")
+    let unknown = try Code.check(1, "", "p.set_f32(\"x\", p.f32(\"never_made\") + 1.0)\n")
+    expect((try unknown.get()).ok(), "unknown attributes check against their accessor")
+    print(f"ok    check: parameters and character columns ({b.diagnostic_message(0)})")

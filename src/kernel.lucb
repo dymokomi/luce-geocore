@@ -22,6 +22,7 @@ import subdivision
 import curves
 import fields
 import geometry_files
+import code
 
 # mark: Attributes and bits
 
@@ -346,3 +347,10 @@ pub let validate_polygon_display = display_triangulation.validate
 ## For tests: faces of more than `limit` corners take the heap path (see
 ## face_scratch); set it before any work starts.
 pub let set_small_faces = face_scratch.set_small_faces
+
+# mark: The Code node
+
+## Run a Code snippet over a set on `threads` workers (0: every core); see `Code.run`.
+pub let run_code = code.run_code
+## How many snippets were checked and lowered (program cache misses).
+pub let code_compiles = code.code_compiles

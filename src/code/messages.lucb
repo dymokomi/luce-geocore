@@ -1,0 +1,76 @@
+# Positions and messages in the user's terms: lines of the body or header, columns in
+# characters (Unicode scalars), and the error text the node shows and the editor parses:
+# `line 7, column 3: index out of bounds (point 1204)`, `header line 2, column 5: ...`.
+
+## Line `line` (1-based) of `text`, without its newline; empty past the end.
+func line_of(text: str, line: u32) -> str:
+    var at: u32 = 1
+    var start: usize = 0
+    for index in 0..<text.length + 1:
+        if index < text.length and text.bytes[index] != '\n':
+            continue
+        if at == line:
+            return (str)text.bytes[start..<index]
+        at += 1
+        start = index + 1
+    return ""
+
+## The 1-based character column of 1-based byte column `column` of `line`.
+func character_column(line: str, column: u32) -> u32:
+    var characters: u32 = 1
+    let end = (usize)column - 1 if column > 0 else 0
+    for index in 0..<line.length:
+        if index >= end:
+            break
+        if (line.bytes[index] & 0xC0) != 0x80:
+            characters += 1
+    return characters
+
+## The character column just past the word (or the one character) at byte column `column`.
+func word_end(line: str, column: u32) -> u32:
+    let start = (usize)column - 1 if column > 0 else 0
+    if start >= line.length:
+        return character_column(line, column) + 1
+    var end = start
+    while end < line.length and is_word(line.bytes[end]):
+        end += 1
+    if end == start:
+        end = start + 1
+        while end < line.length and (line.bytes[end] & 0xC0) == 0x80:
+            end += 1
+    return character_column(line, (u32)end + 1)
+
+func is_word(byte: u8) -> bool:
+    return (byte >= 'a' and byte <= 'z') or (byte >= 'A' and byte <= 'Z') or (byte >= '0' and byte <= '9') or byte == '_'
+
+## The text of `part` (0 body, 1 header) a position is in.
+func part_text(part: lower.Part, header: str, body: str) -> str:
+    return header if part == .header else body
+
+## "line 7, column 3: " or "header line 2, column 5: " into `buffer`, from a user position
+## (byte column), or "line 1, column 1: " for one in the generated lines.
+func position_text(buffer: u8[], part: lower.Part, line: u32, column: u32, header: str, body: str) -> str:
+    if part == .wrapper:
+        return strings.format(buffer, f"line 1, column 1: ") else ""
+    let characters = character_column(line_of(part_text(part, header, body), line), column)
+    let prefix = "header line" if part == .header else "line"
+    return strings.format(buffer, f"{prefix} {line}, column {characters}: ") else ""
+
+## The message a check failure fails the cook with: its first error.
+func check_failure(buffer: u8[], compiled: const Compiled*, header: str, body: str) -> str:
+    for d in compiled.diagnostics():
+        if d.severity != .error:
+            continue
+        var room: u8[64]
+        let at = position_text(room, d.part, d.line, d.column, header, body)
+        return strings.format(buffer, f"{at}{d.message}") else d.message
+    return "line 1, column 1: the snippet did not compile"
+
+## The message a fault fails the cook with.
+func fault_message(buffer: u8[], compiled: const Compiled*, fault: Fault, mode: RunOver, header: str, body: str) -> str:
+    let (part, line, column) = compiled.locate(fault.line, fault.column)
+    var room: u8[64]
+    let at = position_text(room, part, line, column, header, body)
+    if mode == .detail:
+        return strings.format(buffer, f"{at}{fault.message}") else fault.message
+    return strings.format(buffer, f"{at}{fault.message} ({mode.element()} {fault.lane})") else fault.message

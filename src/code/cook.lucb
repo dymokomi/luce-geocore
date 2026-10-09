@@ -1,0 +1,328 @@
+# The cook: compile (or find) the program, bind the columns, run, and build the output
+# set from what the program wrote.
+
+## The timeline and the spare parameters' values for one cook.
+struct Settings:
+    let names: const str[]
+    let values: const f64[]
+    let frame: f64
+    let time: f64
+    let fps: f64
+
+## Run the snippet over `set` on `threads` workers (0: every core): the new set, or an
+## error naming the line, column and element (see `fault_message`).
+pub func run_code(set: const GeometrySet*, run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, threads: usize) -> GeometrySet*!:
+    let mode = try RunOver.of(run_over)
+    _ = try groups.GroupType.of(group_type)
+    if names.length != values.length:
+        error(errors.invalid, "every parameter name needs a value")
+    if count < 0:
+        error(errors.invalid, "Numbers runs a count of zero or more")
+    let mesh = set_mesh(set)
+    var lanes: usize = 1
+    if mode == .numbers:
+        lanes = (usize)count
+    elif mode != .detail:
+        let source = mesh else return try set.storage()
+        lanes = try source.domain_size(mode.domain())
+    var layout = try build_layout(mode, mesh, set)
+    defer layout.close()
+    let entry = try acquire(mode, header, body, &layout)
+    defer release(entry)
+    let compiled = &entry.compiled
+    if not compiled.ok():
+        var room: u8[1024]
+        error(errors.invalid, check_failure(room, compiled, header, body))
+    if lanes == 0:
+        return try set.storage()
+    let settings = Settings(names = names, values = values, frame = frame, time = time, fps = fps)
+    var cook = Cook(mode = mode, mesh = mesh, set = set, lanes = lanes, program = &compiled.program)
+    defer cook.close()
+    try cook.bind_inputs(&layout)
+    try cook.bind_outputs(&layout)
+    try cook.bind_uniforms(&settings)
+    if group.length > 0 and mode != .detail and mode != .numbers:
+        try cook.restrict(group)
+    let request = Request(count = lanes, inputs = cook.inputs.view(), outputs = cook.engine_outputs.view(), uniforms = cook.uniforms.view(), threads = threads, active = cook.active)
+    if let fault = try engine.run(&compiled.program, &request):
+        var room: u8[1024]
+        error(errors.invalid, fault_message(room, compiled, fault, mode, header, body))
+    return try cook.output()
+
+## One cook's columns and buffers.
+struct Cook:
+    let mode: RunOver
+    let mesh: const Mesh*?
+    let set: const GeometrySet*
+    let lanes: usize
+    let program: const Program*
+    var scratch: Scratch
+    var inputs: collections.List[Column]
+    var engine_outputs: collections.List[Column]
+    var outputs: collections.List[Output]
+    var uniforms: collections.List[Uniform]
+    var active: const u8[]
+    var positions: SharedColumn[Float3]
+    var has_positions: bool
+
+    func close():
+        for at in 0..<self.outputs.length():
+            var output = self.outputs.at(at)
+            if output.has_attribute: output.attribute.release()
+        if self.has_positions: self.positions.release()
+        self.scratch.close()
+        self.inputs.destroy()
+        self.engine_outputs.destroy()
+        self.outputs.destroy()
+        self.uniforms.destroy()
+
+    ## An engine column for every column the program reads.
+    func bind_inputs(layout: const Layout*) -> !:
+        for binding in self.program.inputs():
+            if self.has_input(binding.name):
+                continue
+            let column = layout.find(binding.name) else error(errors.invalid, "the program reads a column the input lacks")
+            try self.inputs.append(try input_of(column, self.mesh, self.set, &self.scratch))
+
+    func has_input(name: str) -> bool:
+        for column in self.inputs.view():
+            if column.name == name: return true
+        return false
+
+    ## A buffer for every column the program writes, holding the input's values first.
+    func bind_outputs(layout: const Layout*) -> !:
+        for binding in self.program.outputs():
+            var known = false
+            for output in self.outputs.view():
+                if output.name == binding.name: known = true
+            if known:
+                continue
+            var width: usize = 1
+            for other in self.program.outputs():
+                if other.name == binding.name and (usize)other.component + 1 > width:
+                    width = (usize)other.component + 1
+            let existing = layout.find(binding.name)
+            if let column = existing:
+                if column.components > width and column.kind == binding.kind: width = column.components
+            try self.add_output(binding.name, binding.kind, width, existing)
+
+    func add_output(name: str, kind: Kind, width: usize, existing: LayoutColumn?) -> !:
+        var none_yet: u8[]
+        var output = Output(name = name, kind = kind, width = width, bytes = none_yet, attribute = Attribute(), has_attribute = false)
+        if name == "P":
+            let source = self.mesh else error(errors.invalid, "positions without a mesh")
+            self.positions = try SharedColumn[Float3].copy_of(source.point_span())
+            self.has_positions = true
+            let span = self.positions.span()
+            output.bytes = u8[]((u8*)span.data, span.length * 12)
+            let origin = source.position_origin()
+            if origin.x != 0.0 or origin.y != 0.0 or origin.z != 0.0:
+                output.bytes = try self.scratch.bytes(span.length * 12)
+                let world = f32_view(output.bytes)
+                for at in 0..<span.length:
+                    world[at * 3] = (f32)((f64)span[at].x + origin.x)
+                    world[at * 3 + 1] = (f32)((f64)span[at].y + origin.y)
+                    world[at * 3 + 2] = (f32)((f64)span[at].z + origin.z)
+        elif strings.starts_with(name, "group:") or strings.starts_with(name, "detail:"):
+            output.bytes = try self.scratch.bytes(self.lanes * width * kind.size())
+            if let column = existing:
+                try self.prefill(&output, column)
+        else:
+            let data_type = data_type_of(kind) else error(errors.invalid, "a column type no attribute stores")
+            output.attribute = try Attribute.create(name, self.mode.domain(), data_type, width, self.lanes)
+            output.has_attribute = true
+            output.bytes = output.attribute.data.span()
+            if let column = existing:
+                if column.origin == .attribute or column.origin == .narrowed:
+                    let source = self.mesh else return
+                    fill_from(output.bytes, kind, width, self.lanes, try source.attribute_entry((i64)column.index))
+        try self.outputs.append(output)
+        try self.engine_outputs.append(output_column(name, kind, output.bytes, width))
+
+    ## Start a group or detail output with the input's values.
+    func prefill(output: Output*, column: LayoutColumn) -> !:
+        if column.origin == .group:
+            let source = self.mesh else return
+            let entry = try source.attribute_entry((i64)column.index)
+            let members = Bits.of_bytes(entry.data.view(), entry.elements)
+            for at in 0..<self.lanes: output.bytes[at] = (u8)members.get(at)
+        elif column.origin == .detail:
+            let entry = set_detail(self.set).entry(column.index)
+            let overlap = output.width if output.width < entry.width else entry.width
+            for lane in 0..<self.lanes:
+                for k in 0..<overlap:
+                    put_number(output.bytes, output.kind, lane * output.width + k, entry.number(0, k))
+
+    ## Every uniform's value: the timeline, the counts, detail values and parameters.
+    func bind_uniforms(settings: const Settings*) -> !:
+        for slot in self.program.uniforms():
+            let value = self.uniform_number(slot, settings)
+            try self.uniforms.append(Uniform(name = slot.name, kind = slot.kind, bits = number_bits(slot.kind, value, slot.default)))
+
+    func uniform_number(slot: engine.UniformSlot, settings: const Settings*) -> f64?:
+        let name = slot.name
+        if name == "frame": return settings.frame
+        if name == "time": return settings.time
+        if name == "fps": return settings.fps
+        if name == "numpt" or name == "numprim" or name == "numvtx": return (f64)self.lanes
+        if strings.starts_with(name, "detail:"):
+            let (base, component) = split_component((str)name.bytes[7..])
+            let store = set_detail(self.set)
+            let index = store.find(base, Domain.detail)
+            if index < 0: return 0.0
+            let entry = store.entry((usize)index)
+            return entry.number(0, component) if component < entry.width else 0.0
+        for (at, given) in settings.names.indexed():
+            if given == name: return settings.values[at]
+        return none
+
+    ## Run only on the elements of group expression `group`.
+    func restrict(group: str) -> !:
+        let source = self.mesh else return
+        var result = try groups.group_bits(source, group, self.mode.domain())
+        defer result.bits.release()
+        let mask = try self.scratch.bytes(self.lanes)
+        let members = Bits(words = result.bits.view(), count = self.lanes)
+        for at in 0..<self.lanes: mask[at] = (u8)members.get(at)
+        self.active = mask
+
+    ## The output set: the mesh with new positions and attributes, new detail values.
+    func output() -> GeometrySet*!:
+        let storage = try self.set.storage()
+        errdefer dispose_set(storage)
+        var mesh_changed = self.has_positions
+        for output in self.outputs.view():
+            if not strings.starts_with(output.name, "detail:"): mesh_changed = true
+        if mesh_changed:
+            let source = self.mesh else return storage
+            let made = try self.output_mesh(source)
+            try storage.put(&mesh_component, (void*)made)
+        for output in self.outputs.view():
+            if strings.starts_with(output.name, "detail:"):
+                try set_put_detail(storage, try self.detail_attribute(output))
+        return storage
+
+    func output_mesh(source: const Mesh*) -> Mesh*!:
+        let made = try self.moved_mesh(source)
+        errdefer mesh_dispose(made)
+        for at in 0..<self.outputs.length():
+            var output = self.outputs.at(at)
+            if output.has_attribute:
+                output.has_attribute = false
+                self.outputs.set(at, output)
+                try put_attribute(made, output.attribute)
+            elif strings.starts_with(output.name, "group:"):
+                try put_attribute(made, try self.group_attribute(output, source))
+        return made
+
+    ## The mesh with the written positions (or sharing the old ones).
+    func moved_mesh(source: const Mesh*) -> Mesh*!:
+        if not self.has_positions:
+            return try mesh_share(source)
+        let points = self.positions.span()
+        let origin = source.position_origin()
+        if origin.x != 0.0 or origin.y != 0.0 or origin.z != 0.0:
+            let world = f32_view(self.outputs.at(self.output_index("P")).bytes)
+            for at in 0..<points.length:
+                points[at] = Float3(x = (f32)((f64)world[at * 3] - origin.x), y = (f32)((f64)world[at * 3 + 1] - origin.y), z = (f32)((f64)world[at * 3 + 2] - origin.z))
+        let moved = try changed(source.point_span(), points)
+        defer free(moved) in memory.heap
+        return try moved_storage(source, self.positions, moved, keep_normals = true)
+
+    func output_index(name: str) -> usize:
+        for (at, output) in self.outputs.view().indexed():
+            if output.name == name: return at
+        return 0
+
+    ## A written group as a group attribute.
+    func group_attribute(output: Output, source: const Mesh*) -> Attribute!:
+        _ = source
+        let words = u64[]((u64*)(try self.scratch.bytes((self.lanes + 63) // 64 * 8)).data, (self.lanes + 63) // 64)
+        for at in 0..<self.lanes:
+            if output.bytes[at] != 0: words[at >> 6] |= (u64)1 << (u64)(at & 63)
+        return try Attribute.group_of((str)output.name.bytes[6..], self.mode.domain(), self.lanes, words)
+
+    ## A written detail value: Run Over Detail's one element, or for Numbers the highest
+    ## lane whose value differs from what the detail held (the last writer).
+    func detail_attribute(output: Output) -> Attribute!:
+        var lane = self.lanes - 1
+        if self.lanes > 1:
+            let width = output.width
+            let size = output.kind.size()
+            var found = false
+            var at = self.lanes
+            while at > 1 and not found:
+                at -= 1
+                for byte in 0..<width * size:
+                    if output.bytes[at * width * size + byte] != output.bytes[byte] and at > 0:
+                        found = true
+                if found: lane = at
+            if not found: lane = 0
+        var numbers: f64[4]
+        for k in 0..<output.width:
+            numbers[k] = number_at(output.bytes, output.kind, lane * output.width + k)
+        let integer = output.kind == .i32 or output.kind == .i64
+        return try Attribute.from_numbers((str)output.name.bytes[7..], Domain.detail, output.width, numbers[..<output.width], integer, float32 = output.kind == .f32)
+
+## The points whose positions changed, ascending, in one pass.
+func changed(previous: const Float3[], next: const Float3[]) -> u32[]!:
+    let count = next.length if next.length < previous.length else previous.length
+    let moved = try new u32[count] --- in memory.heap
+    var used: usize = 0
+    for at in 0..<count:
+        if differs(previous[at], next[at]):
+            moved[used] = (u32)at
+            used += 1
+    if used == count:
+        return moved
+    let exact = new u32[used] --- in memory.heap catch failure:
+        free(moved) in memory.heap
+        error(failure.code, failure.message)
+    for at in 0..<used: exact[at] = moved[at]
+    free(moved) in memory.heap
+    return exact
+
+func differs(a: Float3, b: Float3) -> bool:
+    return a.x.bits() != b.x.bits() or a.y.bits() != b.y.bits() or a.z.bits() != b.z.bits()
+
+## Element `at` of `bytes` of `kind`, as f64.
+func number_at(bytes: const u8[], kind: Kind, at: usize) -> f64:
+    return match kind:
+        .f32 => (f64)f32_view(bytes)[at]
+        .f64 => f64_view(bytes)[at]
+        .i32 => (f64)i32_view(bytes)[at]
+        .i64 => (f64)i64_view(bytes)[at]
+        _ => 1.0 if bytes[at] != 0 else 0.0
+
+## The bits of `value` (or `default` bits when there is none) as a uniform of `kind`.
+func number_bits(kind: Kind, value: f64?, default: u64) -> u64:
+    let number = value else return default
+    return match kind:
+        .f32 => (u64)((f32)number).bits()
+        .f64 => number.bits()
+        .i32 => (u64)(u32)(i32)number
+        .i64 => (u64)(i64)number
+        .u32 => (u64)(u32)number
+        .u64 => (u64)number
+        _ => 1 if number != 0.0 else 0
+
+## `name[2]` as ("name", 2); a plain name as (name, 0).
+func split_component(name: str) -> (str, usize):
+    if name.length >= 3 and name.bytes[name.length - 1] == ']':
+        var at = name.length - 1
+        while at > 0 and name.bytes[at] != '[': at -= 1
+        if at > 0:
+            var component: usize = 0
+            for byte in name.bytes[at + 1..<name.length - 1]:
+                component = component * 10 + (usize)(byte - '0')
+            return ((str)name.bytes[..<at], component)
+    return (name, 0)
+
+## The attribute type that stores `kind`.
+func data_type_of(kind: Kind) -> DataType?:
+    return match kind:
+        .f32 => DataType.float32
+        .f64 => DataType.float64
+        .i32 => DataType.int32
+        .i64 => DataType.int64
+        _ => none

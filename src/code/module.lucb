@@ -1,0 +1,45 @@
+#==============================================================================================
+#
+#   code - The Code node: per-element Base snippets over a geometry set
+#
+#   DESCRIPTION:
+#       A Code node runs the user's snippet once per point, vertex, primitive, number or
+#       once for the detail (Houdini's Attribute Wrangle). luce-kernel checks the snippet
+#       with the Base compiler's checker, lowers it to a column program and runs it over
+#       chunks of elements on every core; this module says what the snippet's API means
+#       for a mesh (`stubs.lucb` is the API the snippet is checked against, `bindings.lucb`
+#       what each member reads and writes), binds the mesh's columns, and builds the
+#       output set from the columns the program wrote.
+#
+#       Positions: geocore keeps f32 positions relative to an f64 origin. A snippet sees
+#       world positions as f32 (`P = position + origin`, rounded once); written positions
+#       go back as `(f32)((f64)P - origin)`. With the usual zero origin both are exact and
+#       the position column is read in place.
+#
+#==============================================================================================
+import interop
+import memory
+import os
+import strings
+import sync
+from io import path
+from luce_std import collections, math
+from luce_kernel import engine, lower
+from luce_kernel.engine import Kind, Column, Request, Uniform, Fault, Program
+from luce_kernel.lower import Host, Compiled
+import core.attributes
+import core.float3
+import core.shared
+import core.bits
+import geometries.polygon
+import geometry_set
+import groups
+import errors
+import math.vector
+from core.attributes import Attribute, AttributeStore, Domain, DataType, Storage
+from core.float3 import Float3
+from core.shared import Column as SharedColumn
+from core.bits import Bits
+from geometries.polygon import Mesh, mesh_share, mesh_dispose, moved_storage, put_attribute
+from geometry_set import GeometrySet, set_mesh, adopt_set, dispose_set, mesh_component, set_detail, set_put_detail
+from math.vector import Vector3

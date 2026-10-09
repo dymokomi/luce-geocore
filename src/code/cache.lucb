@@ -1,0 +1,109 @@
+# Compiled snippets, kept so re-cooking with new parameter values, frames or geometry of
+# the same layout neither checks nor lowers again. Keyed by the mode, the header, the body
+# and the input's layout; the least recently used unused entry goes when the cache is full.
+
+## A compiled snippet and who is running it.
+struct Entry:
+    var key: collections.List[u8]
+    var compiled: Compiled
+    var users: usize
+    var used: u64
+
+## The most snippets kept.
+let most_entries: usize = 32
+
+var cache_lock: sync.Mutex
+var entries: collections.List[Entry*]
+var clock: u64
+## How many snippets were checked and lowered (cache misses), for tests.
+var compiles: @u64
+## The snippet root: one directory for the process, laid out on first use.
+var root_room: u8[1024]
+var root_text: str
+var root_ready: bool
+
+## How many snippets have been checked and lowered so far.
+pub func code_compiles() -> u64:
+    return compiles.load(.acquire)
+
+## The compiled snippet of (mode, header, body, layout: none when checking without
+## geometry), compiling it on a miss. Give it back with `release`.
+func acquire(mode: RunOver, header: str, body: str, layout: const Layout*?) -> Entry*!:
+    var key: collections.List[u8]
+    defer key.destroy()
+    try key.append((u8)mode)
+    for byte in header.bytes: try key.append(byte)
+    try key.append(0)
+    for byte in body.bytes: try key.append(byte)
+    try key.append(0)
+    if let given = layout:
+        for byte in given.key.view(): try key.append(byte)
+    else:
+        try key.append(0xFF)
+    cache_lock.lock()
+    defer cache_lock.unlock()
+    clock += 1
+    for entry in entries.view():
+        if same_bytes(entry.key.view(), key.view()):
+            entry.users += 1
+            entry.used = clock
+            return entry
+    let root = try snippet_root()
+    var host = try make_host(mode, layout)
+    defer host.destroy()
+    var compiled = try lower.compile(root, mode.wrapper(), header, body, &host)
+    _ = compiles.add(1, .acq_rel)
+    let entry = new Entry(key = key, compiled = compiled, users = 1, used = clock) in memory.heap catch failure:
+        compiled.destroy()
+        error(failure.code, failure.message)
+    key = collections.List[u8]()
+    entries.append(entry) catch failure:
+        entry.compiled.destroy()
+        entry.key.destroy()
+        free(entry) in memory.heap
+        error(failure.code, failure.message)
+    evict()
+    return entry
+
+## Give back an entry `acquire` gave.
+func release(entry: Entry*):
+    cache_lock.lock()
+    entry.users -= 1
+    cache_lock.unlock()
+
+## Drop the least recently used unused entries past the limit; under the lock.
+func evict():
+    while entries.length() > most_entries:
+        var oldest: usize? = none
+        for (at, entry) in entries.view().indexed():
+            if entry.users > 0:
+                continue
+            if let found = oldest:
+                if entry.used < entries.at(found).used: oldest = at
+            else:
+                oldest = at
+        let at = oldest else return
+        let entry = entries.at(at)
+        entries.remove(at)
+        entry.compiled.destroy()
+        entry.key.destroy()
+        free(entry) in memory.heap
+
+## The process's snippet root, laid out on first use: lib, luce-std's math and the stubs.
+## Under the cache lock.
+func snippet_root() -> str!:
+    if root_ready:
+        return root_text
+    root_text = try strings.format(root_room, f"{path.temp()}/luce-geocore-code-{os.pid()}")
+    try lower.write_root(root_text)
+    try lower.write_text(root_text, "luce_geocore/code.lucb", stub_text)
+    root_ready = true
+    return root_text
+
+func same_bytes(a: const u8[], b: const u8[]) -> bool:
+    if a.length != b.length:
+        return false
+    for at in 0..<a.length:
+        if a[at] != b[at]:
+            return false
+    return true

@@ -23,6 +23,7 @@ import fields
 import curves
 import errors
 import core.attributes
+import code
 
 pub type Vector3 = vector.Vector3
 pub type Matrix4 = matrix.Matrix4
@@ -83,3 +84,6 @@ pub type Sketches = curves.Sketches
 pub let invalid: ErrorCode = errors.invalid
 pub let busy: ErrorCode = errors.busy
 pub let limit: ErrorCode = errors.limit
+## The Code node: snippets checked (`Code.check`) and run over a set (`Code.run`).
+pub type Code = code.Code
+pub type CodeCheck = code.CodeCheck

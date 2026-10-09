@@ -1,0 +1,170 @@
+# Luce's view: `Code.check` for the editor (diagnostics and spare parameters, no
+# geometry) and `Code.run` for the cook.
+
+## One diagnostic, in the user's terms.
+struct CheckLine:
+    let part: i64
+    let line: i64
+    let column: i64
+    let end: i64
+    let severity: i64
+    let message: str
+
+## One spare parameter: a uniform the snippet asks the node for.
+struct CheckParameter:
+    let name: str
+    var components: i64
+    let integer: bool
+    var defaults: f64[4]
+
+## What checking a snippet found: its diagnostics (positions in characters, 1-based),
+## its spare parameters in order of first use, and whether it reads the timeline.
+pub struct CodeCheck:
+    var passed: bool
+    var lines: collections.List[CheckLine]
+    var parameters: collections.List[CheckParameter]
+    var timeline: bool
+    var texts: collections.TextPool
+
+    ## Whether the snippet checked and lowered.
+    pub func ok() -> bool:
+        return self.passed
+
+    ## How many diagnostics there are, and each one's part (0 body, 1 header), line,
+    ## column and end column (characters, end exclusive), severity (0 error, 1 warning,
+    ## 2 info) and message. Out-of-range indices answer 0 or "".
+    pub func diagnostic_count() -> i64:
+        return (i64)self.lines.length()
+
+    pub func diagnostic_part(index: i64) -> i64:
+        return self.line_at(index).part
+
+    pub func diagnostic_line(index: i64) -> i64:
+        return self.line_at(index).line
+
+    pub func diagnostic_column(index: i64) -> i64:
+        return self.line_at(index).column
+
+    pub func diagnostic_end(index: i64) -> i64:
+        return self.line_at(index).end
+
+    pub func diagnostic_severity(index: i64) -> i64:
+        return self.line_at(index).severity
+
+    pub func diagnostic_message(index: i64) -> str:
+        return self.line_at(index).message
+
+    ## How many spare parameters there are, and each one's name, components (1 to 4),
+    ## whether it is an integer, and the default of a component.
+    pub func parameter_count() -> i64:
+        return (i64)self.parameters.length()
+
+    pub func parameter_name(index: i64) -> str:
+        if index < 0 or (usize)index >= self.parameters.length(): return ""
+        return self.parameters.at((usize)index).name
+
+    pub func parameter_components(index: i64) -> i64:
+        if index < 0 or (usize)index >= self.parameters.length(): return 0
+        return self.parameters.at((usize)index).components
+
+    pub func parameter_integer(index: i64) -> bool:
+        if index < 0 or (usize)index >= self.parameters.length(): return false
+        return self.parameters.at((usize)index).integer
+
+    pub func parameter_default(index: i64, component: i64) -> f64:
+        if index < 0 or (usize)index >= self.parameters.length() or component < 0 or component > 3: return 0.0
+        return self.parameters.at((usize)index).defaults[(usize)component]
+
+    ## Whether the snippet reads `k.frame`, `k.time` or `k.fps`.
+    pub func reads_time() -> bool:
+        return self.timeline
+
+    func line_at(index: i64) -> CheckLine:
+        if index < 0 or (usize)index >= self.lines.length():
+            return CheckLine(part = 0, line = 0, column = 0, end = 0, severity = 0, message = "")
+        return self.lines.at((usize)index)
+
+    ## Give back the diagnostics and parameters (Luce calls it when the last owner goes).
+    pub func close():
+        self.lines.destroy()
+        self.parameters.destroy()
+        self.texts.destroy()
+
+pub let code_check_type: interop.Type[CodeCheck] = interop.Type[CodeCheck]("CodeCheck", CodeCheck.close, closeable = true)
+
+## Luce's view of the Code node.
+pub struct Code:
+    let reserved: u8 = 0
+
+    ## Check and lower `body` (and `header`) for Run Over `run_over` (0 detail, 1 points,
+    ## 2 vertices, 3 primitives, 4 numbers) with no geometry: attribute reads take the
+    ## type their accessor names.
+    pub static func check(run_over: i64, header: str, body: str) -> interop.Reference[CodeCheck]!:
+        let mode = try RunOver.of(run_over)
+        let entry = try acquire(mode, header, body, none)
+        defer release(entry)
+        let storage = try new CodeCheck[1] --- in memory.heap
+        storage[0] = CodeCheck(passed = false, lines = collections.List[CheckLine](), parameters = collections.List[CheckParameter](), timeline = false, texts = collections.TextPool())
+        try fill_check(&storage[0], &entry.compiled, header, body) catch failure:
+            storage[0].close()
+            free(storage) in memory.heap
+            error(failure.code, failure.message)
+        return try interop.Reference[CodeCheck].adopt(storage.data, code_check_type, memory.heap)
+
+    ## Run `body` (and `header`) over `set` for Run Over `run_over`, on the elements of
+    ## `group` (a group expression on the mode's domain; empty: all). Spare parameters
+    ## take `values[i]` by `names[i]` (a vector's components are named `name[0]`,
+    ## `name[1]`, ...; a parameter not named keeps its default). `count` is the lane count
+    ## of Run Over Numbers. A fault or a snippet that does not check fails with
+    ## "line L, column C: message (point N)" (`header line ...` in the header).
+    pub static func run(set: interop.Reference[GeometrySet], run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64) -> interop.Reference[GeometrySet]!:
+        let made = try run_code(try set.get(), run_over, header, body, group, group_type, names, values, frame, time, fps, count, 0)
+        return try adopt_set(made)
+
+## Copy a compiled snippet's diagnostics and parameters into `check`.
+func fill_check(check: CodeCheck*, compiled: const Compiled*, header: str, body: str) -> !:
+    check.passed = compiled.ok()
+    for d in compiled.diagnostics():
+        let part: i64 = 1 if d.part == .header else 0
+        let text = line_of(part_text(d.part, header, body), d.line)
+        let wrapper = d.part == .wrapper
+        let severity: i64 = 0 if d.severity == .error else (1 if d.severity == .warning else 2)
+        let message = try check.texts.keep_text(d.message.bytes)
+        let column = 1 if wrapper else (i64)character_column(text, d.column)
+        let end = 2 if wrapper else (i64)word_end(text, d.column)
+        try check.lines.append(CheckLine(part = part, line = 1 if wrapper else (i64)d.line, column = column, end = end, severity = severity, message = message))
+    if not compiled.ok():
+        return
+    for slot in compiled.program.uniforms():
+        let name = slot.name
+        if name == "frame" or name == "time" or name == "fps":
+            check.timeline = true
+            continue
+        if name == "numpt" or name == "numprim" or name == "numvtx" or strings.starts_with(name, "detail:"):
+            continue
+        let (base, component) = split_component(name)
+        let value = default_number(slot.kind, slot.default)
+        var found = false
+        for at in 0..<check.parameters.length():
+            var parameter = check.parameters.at(at)
+            if parameter.name == base:
+                if component < 4:
+                    parameter.defaults[component] = value
+                    if (i64)component + 1 > parameter.components: parameter.components = (i64)component + 1
+                check.parameters.set(at, parameter)
+                found = true
+        if not found:
+            var defaults: f64[4]
+            if component < 4: defaults[component] = value
+            let kept = try check.texts.keep_text(base.bytes)
+            let integer = slot.kind == .i32 or slot.kind == .i64
+            try check.parameters.append(CheckParameter(name = kept, components = (i64)component + 1, integer = integer, defaults = defaults))
+
+## A uniform's default bits as a number.
+func default_number(kind: Kind, raw: u64) -> f64:
+    return match kind:
+        .f32 => (f64)f32.bits((u32)raw)
+        .f64 => f64.bits(raw)
+        .i32 => (f64)(i32)(u32)raw
+        .i64 => (f64)(i64)raw
+        _ => (f64)raw

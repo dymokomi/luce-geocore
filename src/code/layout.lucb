@@ -1,0 +1,106 @@
+# The input's column layout: every column a program may read, its kind and components,
+# and where its values come from. It keys the program cache (a program is lowered against
+# the kinds it reads) and drives binding.
+
+## Where an input column's values come from.
+enum Origin:
+    ## Attribute `index` of the mesh, in its stored kind.
+    attribute
+    ## Attribute `index` stored as f64, read as f32 (P, N, Cd and uv are f32 to a snippet).
+    narrowed
+    ## Group attribute `index`'s bits, as a mask.
+    group
+    ## The mesh's positions, in world space.
+    positions
+    ## The faces' normals, areas and centers.
+    face_normals
+    face_areas
+    face_centers
+    ## The point of every corner.
+    corner_points
+    ## Detail attribute `index` of the set, as the one element of Run Over Detail.
+    detail
+
+## One column the input has.
+struct LayoutColumn:
+    let name: str
+    let kind: Kind
+    let components: usize
+    let origin: Origin
+    let index: usize
+
+## Every column of the input, and the key of their names and kinds.
+struct Layout:
+    var columns: collections.List[LayoutColumn]
+    var texts: collections.TextPool
+    var key: collections.List[u8]
+
+    func find(name: str) -> LayoutColumn?:
+        for column in self.columns.view():
+            if column.name == name:
+                return column
+        return none
+
+    func close():
+        self.columns.destroy()
+        self.texts.destroy()
+        self.key.destroy()
+
+    func add(name: str, kind: Kind, components: usize, origin: Origin, index: usize) -> !:
+        let kept = try self.texts.keep_text(name.bytes)
+        try self.columns.append(LayoutColumn(name = kept, kind = kind, components = components, origin = origin, index = index))
+        for byte in name.bytes: try self.key.append(byte)
+        try self.key.append(':')
+        try self.key.append((u8)kind)
+        try self.key.append((u8)components)
+        try self.key.append(';')
+
+## The engine kind an attribute's scalars are read as, if a snippet can read them.
+func kind_of_data(kind: DataType) -> Kind?:
+    return match kind:
+        .float32 => Kind.f32
+        .float64 => Kind.f64
+        .int32 => Kind.i32
+        .int64 => Kind.i64
+        _ => none
+
+## The layout of `mesh` (when there is one) and `set` for `mode`.
+func build_layout(mode: RunOver, mesh: const Mesh*?, set: const GeometrySet*) -> Layout!:
+    var layout = Layout()
+    errdefer layout.close()
+    if mode == .detail:
+        let store = set_detail(set)
+        for at in 0..<store.count():
+            let entry = store.entry(at)
+            let kind = kind_of_data(entry.kind) else continue
+            var room: u8[96]
+            try layout.add(try strings.format(room, f"detail:{entry.name()}"), kind, entry.width, .detail, at)
+        return layout
+    let source = mesh else return layout
+    let domain = mode.domain()
+    if domain == .detail:
+        return layout
+    for at in 0..<(usize)source.attribute_count():
+        let entry = try source.attribute_entry((i64)at)
+        if entry.domain != domain:
+            continue
+        if entry.is_group():
+            var room: u8[96]
+            try layout.add(try strings.format(room, f"group:{entry.name()}"), .mask, 1, .group, at)
+            continue
+        let kind = kind_of_data(entry.kind) else continue
+        let name = entry.name()
+        let field = name == "N" or name == "Cd" or name == "uv"
+        if field and kind == .f64:
+            try layout.add(name, .f32, entry.width, .narrowed, at)
+        else:
+            try layout.add(name, kind, entry.width, .attribute, at)
+    match mode:
+        .points: try layout.add("P", .f32, 3, .positions, 0)
+        .primitives:
+            try layout.add("@normal", .f32, 3, .face_normals, 0)
+            try layout.add("@area", .f32, 1, .face_areas, 0)
+            try layout.add("@center", .f32, 3, .face_centers, 0)
+        .vertices: try layout.add("@point", .i32, 1, .corner_points, 0)
+        _: _ = 0
+    return layout

@@ -93,23 +93,8 @@ func chunk_extent(context: void*?, first: usize, end: usize):
 pub func reposition(shape: const Shape*, normals: Column[Float3], moved: const u32[], rigid: bool) -> Repositioned!:
     let extent = try bounds_of(shape.positions, shape.origin)
     let faces = shape.offsets.length - 1
-    let touched = try new bool[faces] --- in memory.heap
-    defer free(touched) in memory.heap
-    memory.set(u8[]((u8*)touched.data, touched.length), 0)
-    var count: usize = 0
-    for point in moved:
-        for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
-            let face = (usize)shape.incident_faces[at]
-            if not touched[face]:
-                touched[face] = true
-                count += 1
-    let list = try new u32[count] --- in memory.heap
+    let list = try touched_faces(shape, moved, faces)
     defer free(list) in memory.heap
-    var written: usize = 0
-    for face in 0..<faces:
-        if touched[face]:
-            list[written] = (u32)face
-            written += 1
     var fresh = normals.share()
     errdefer fresh.release()
     let output = try fresh.writable()
@@ -127,6 +112,31 @@ pub func reposition(shape: const Shape*, normals: Column[Float3], moved: const u
         for face in list:
             try retriangulate(shape, (usize)face, output[(usize)face].vector(), copy)
     return Repositioned(fresh, triangles, extent)
+
+## The faces around the `moved` points, ascending; every face when every point moved
+## (a deformation of the whole mesh), without walking the incidence.
+func touched_faces(shape: const Shape*, moved: const u32[], faces: usize) -> u32[]!:
+    if moved.length == shape.positions.length:
+        let all = try new u32[faces] --- in memory.heap
+        for face in 0..<faces: all[face] = (u32)face
+        return all
+    let touched = try new bool[faces] --- in memory.heap
+    defer free(touched) in memory.heap
+    memory.set(u8[]((u8*)touched.data, touched.length), 0)
+    var count: usize = 0
+    for point in moved:
+        for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
+            let face = (usize)shape.incident_faces[at]
+            if not touched[face]:
+                touched[face] = true
+                count += 1
+    let list = try new u32[count] --- in memory.heap
+    var written: usize = 0
+    for face in 0..<faces:
+        if touched[face]:
+            list[written] = (u32)face
+            written += 1
+    return list
 
 struct NormalWork:
     let shape: const Shape*

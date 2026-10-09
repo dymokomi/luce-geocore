@@ -1,0 +1,24 @@
+## Whole cooks through the Code node over a 1M-point grid: the Stage 1 targets.
+import time
+from luce_geocore import kernel as geocore_kernel
+import support
+
+func measure(name: str, body: str, target: f64) -> !:
+    # A grid of 1M points with point normals (up), as an imported mesh has.
+    let set = try support.run(try support.big_grid_set(1000), support.points_mode, "p.N = [0.0, 1.0, 0.0, 0.0]\n")
+    _ = try support.run(set, support.points_mode, body)
+    var best: u64 = 0xFFFFFFFFFFFFFFFF
+    for _ in 0..<5:
+        let started = time.now()
+        let made = try support.run_with(set, support.points_mode, "", body, "", support.no_names(), support.no_values())
+        let spent = time.since(started)
+        _ = made
+        if spent < best: best = spent
+    print(f"{name}\t{(f64)best / 1000000.0}\t{target}")
+
+pub func run_all() -> !:
+    try measure("wave", "p.P[1] += math32.sin(p.P[0] * 4.0) * 0.1\n", 10.0)
+    try measure("noise displacement", "let amount = k.f32(\"amount\", 0.2)\nlet scale = k.f32(\"scale\", 3.0)\nlet n = snoise(p.P * scale + [0.0, 0.0, (f32)k.time, 0.0])\np.P = p.P + p.N * (n * amount)\n", 25.0)
+    try measure("rand3", "p.Cd = rand3(p.ptnum)\n", 8.0)
+    try measure("empty", "", 3.0)
+    _ = geocore_kernel.code_compiles()
