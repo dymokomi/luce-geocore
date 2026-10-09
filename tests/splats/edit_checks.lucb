@@ -1,0 +1,234 @@
+## Stage 8, Edit GSplats: footprint selection on synthetic layouts seen from
+## a known camera (a grid of small splats under a box, a lasso and a brush;
+## large splats reached at their edge; needles picked along their length
+## only; faint splats by their centers; points behind the eye never), and the
+## edits on a selection (moves with exact covariances, recoloring, opacity,
+## deleting), the unselected splats left bit for bit.
+import interop
+import memory
+from luce_std import math
+from luce_geocore.geocore import Vector3, GeometrySet, SplatEdits, Selection, Mesh
+from luce_geocore.kernel import Domain
+from luce_geocore.splats import Quat, Mat3, compose_covariance
+import clouds
+from clouds import CloudBuilder
+
+pub func run() -> !:
+    try grid_box()
+    try grid_lasso_and_brush()
+    try footprint_edges()
+    try selection_operations()
+    try moves()
+    try colors_and_opacity()
+
+## The camera: at (0, 0, 10) looking down -Z, Y up, 100 units of focal length
+## on a 1000 × 1000 screen: world (x, y) on the z = 0 plane lands at
+## (500 + 10x, 500 - 10y).
+func view() -> f64[17]:
+    return [0.0, 0.0, 10.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0, 100.0, 100.0, 1000.0, 1000.0, 0.1]
+
+## The screen point of world (x, y) on the z = 0 plane.
+func sx(x: f64) -> f64:
+    return 500.0 + 10.0 * x
+
+func sy(y: f64) -> f64:
+    return 500.0 - 10.0 * y
+
+## A 10 × 10 grid of round splats (σ 0.05) on z = 0 at x, y = -4.5..4.5,
+## point i·10 + j at (i - 4.5, j - 4.5), and `extra` splats after it.
+func grid(extra: const Vector3[], extra_scale: const Vector3[], extra_orient: const Quat[], extra_opacity: const f64[]) -> interop.Reference[GeometrySet]!:
+    let count = 100 + extra.length
+    let positions = try new Vector3[count] --- in memory.heap
+    defer free(positions) in memory.heap
+    let orient = try new f64[count * 4] --- in memory.heap
+    defer free(orient) in memory.heap
+    let scale = try new f64[count * 3] --- in memory.heap
+    defer free(scale) in memory.heap
+    let opacity = try new f64[count] --- in memory.heap
+    defer free(opacity) in memory.heap
+    let color = try new f64[count * 3] --- in memory.heap
+    defer free(color) in memory.heap
+    for at in 0..<count:
+        var q = Quat.identity()
+        var s = Vector3(0.05, 0.05, 0.05)
+        var a = 0.9
+        if at < 100:
+            positions[at] = Vector3((f64)(at // 10) - 4.5, (f64)(at % 10) - 4.5, 0.0)
+        else:
+            positions[at] = extra[at - 100]
+            s = extra_scale[at - 100]
+            q = extra_orient[at - 100]
+            a = extra_opacity[at - 100]
+        let qs: f64[4] = [q.x, q.y, q.z, q.w]
+        for k in 0..<(usize)4: orient[at * 4 + k] = qs[k]
+        scale[at * 3] = s.x
+        scale[at * 3 + 1] = s.y
+        scale[at * 3 + 2] = s.z
+        opacity[at] = a
+        for k in 0..<(usize)3: color[at * 3 + k] = 0.5
+    var builder = CloudBuilder(count)
+    defer builder.close()
+    try builder.floats("orient", 4, orient)
+    try builder.floats("scale", 3, scale)
+    try builder.floats("opacity", 1, opacity)
+    try builder.floats("Cd", 3, color)
+    return try builder.finish(positions)
+
+func plain_grid() -> interop.Reference[GeometrySet]!:
+    var none_given: Vector3[]
+    var no_quats: Quat[]
+    var no_numbers: f64[]
+    return try grid(none_given, none_given, no_quats, no_numbers)
+
+## The selection made by one region on an empty selection of `set`'s pick mesh.
+func selected(set: interop.Reference[GeometrySet], shape: i64, points: const f64[], radius: f64 = 0.0, cut: f64 = 0.00392156862745098) -> interop.Reference[Selection]!:
+    let pick = try SplatEdits.pick_mesh(set)
+    defer pick.release()
+    let nothing = try Selection.empty(pick, 0)
+    defer nothing.release()
+    let v = view()
+    return try SplatEdits.select(pick, nothing, v, shape, points, radius, cut, 0)
+
+## A box's corners on screen from world corners (x0, y0)..(x1, y1).
+func box(x0: f64, y0: f64, x1: f64, y1: f64) -> f64[8]:
+    return [sx(x0), sy(y0), sx(x1), sy(y0), sx(x1), sy(y1), sx(x0), sy(y1)]
+
+## Whether grid point (i, j) is selected.
+func has(selection: interop.Reference[Selection], i: i64, j: i64) -> bool:
+    return selection.value().contains(i * 10 + j)
+
+## A box over world x -2..2, y -1..1 selects the eight grid splats inside it:
+## x = ±0.5, ±1.5 and y = ±0.5.
+func grid_box() -> !:
+    let set = try plain_grid()
+    defer set.release()
+    let corners = box(-2.0, -1.0, 2.0, 1.0)
+    let chosen = try selected(set, 0, corners)
+    defer chosen.release()
+    assert(chosen.value().count() == 8)
+    for i in [(i64)3, 4, 5, 6]:
+        for j in [(i64)4, 5]: assert(has(chosen, i, j))
+
+## An L-shaped lasso (concave) takes the splats inside the L and none in its
+## notch; a brush stroke along y = 0.5 from x = -2.8 to 2.8 (radius 3 px,
+## 0.3 units) takes that row's six splats from x = -2.5 to 2.5, and not the
+## ones at ±3.5, 0.7 past its ends (the radius and a footprint's 0.22 short).
+func grid_lasso_and_brush() -> !:
+    let set = try plain_grid()
+    defer set.release()
+    # The L: x -4..0 for y -4..4, plus x 0..4 for y -4..-1.
+    let lasso: f64[12] = [sx(-4.0), sy(-4.0), sx(4.0), sy(-4.0), sx(4.0), sy(-1.0), sx(0.0), sy(-1.0), sx(0.0), sy(4.0), sx(-4.0), sy(4.0)]
+    let inside_l = try selected(set, 0, lasso)
+    defer inside_l.release()
+    # Left part: x -3.5..-0.5 (4) × y -3.5..3.5 (8) = 32; foot: x 0.5..3.5 (4) × y -3.5..-1.5 (3) = 12.
+    assert(inside_l.value().count() == 44)
+    assert(has(inside_l, 1, 8) and has(inside_l, 7, 2) and not has(inside_l, 7, 6) and not has(inside_l, 5, 5))
+    # The brush: circles every 3 pixels along the row.
+    var stroke: f64[42]
+    for at in 0..<(usize)21:
+        stroke[at * 2] = sx(-2.8 + 0.28 * (f64)at)
+        stroke[at * 2 + 1] = sy(0.5)
+    let brushed = try selected(set, 1, stroke, 3.0)
+    defer brushed.release()
+    assert(brushed.value().count() == 6)
+    for i in [(i64)2, 3, 4, 5, 6, 7]: assert(has(brushed, i, 5))
+
+## Footprints: a large splat (σ 0.5, opaque: 1.5 units at 3σ) whose center
+## is 1 unit outside the box is selected by its edge, but not when the
+## footprint alpha is over its opacity (its center alone); a needle along X
+## (σ 1 by 0.01) 2 units right of the box reaches into it, the same needle
+## turned along Y does not; a splat behind the eye is never selected.
+func footprint_edges() -> !:
+    let turn = Quat(0.0, 0.0, math.sin(math.pi / 4.0), math.cos(math.pi / 4.0))
+    let extra: Vector3[4] = [Vector3(0.0, 2.0, 0.0), Vector3(4.0, -2.2, 0.0), Vector3(4.0, -3.2, 0.0), Vector3(0.0, 0.0, 20.0)]
+    let scales: Vector3[4] = [Vector3(0.5, 0.5, 0.5), Vector3(1.0, 0.01, 0.01), Vector3(1.0, 0.01, 0.01), Vector3(5.0, 5.0, 5.0)]
+    let turns: Quat[4] = [Quat.identity(), Quat.identity(), turn, Quat.identity()]
+    let opacities: f64[4] = [1.0, 1.0, 1.0, 1.0]
+    let set = try grid(extra, scales, turns, opacities)
+    defer set.release()
+    # The box: x -2..2, y -2.9..1 (center row y = 1.0 excluded, the big splat at y = 2 outside).
+    let corners = box(-2.0, -3.0, 2.0, 1.0)
+    let chosen = try selected(set, 0, corners)
+    defer chosen.release()
+    assert(chosen.value().contains(100), "a large splat is picked at its edge")
+    assert(chosen.value().contains(101), "a needle along X reaches the box")
+    assert(not chosen.value().contains(102), "the needle turned along Y stays out")
+    assert(not chosen.value().contains(103), "behind the eye: never")
+    let centers = try selected(set, 0, corners, 0.0, 0.999)
+    defer centers.release()
+    assert(not centers.value().contains(100) and not centers.value().contains(101))
+    # The grid inside: x ±0.5, ±1.5 (4) × y -2.5..0.5 (4) = 16, and the two edge picks.
+    assert(chosen.value().count() == 18 and centers.value().count() == 16)
+
+## Add (1) and remove (2) change a selection; replace (0) starts over.
+func selection_operations() -> !:
+    let set = try plain_grid()
+    defer set.release()
+    let pick = try SplatEdits.pick_mesh(set)
+    defer pick.release()
+    let nothing = try Selection.empty(pick, 0)
+    defer nothing.release()
+    let v = view()
+    let left = box(-5.0, -5.0, 0.0, 5.0)
+    let top = box(-5.0, 0.0, 5.0, 5.0)
+    let first = try SplatEdits.select(pick, nothing, v, 0, left, 0.0, 0.004, 0)
+    defer first.release()
+    let both = try SplatEdits.select(pick, first, v, 0, top, 0.0, 0.004, 1)
+    defer both.release()
+    let less = try SplatEdits.select(pick, both, v, 0, top, 0.0, 0.004, 2)
+    defer less.release()
+    let again = try SplatEdits.select(pick, both, v, 0, top, 0.0, 0.004, 0)
+    defer again.release()
+    assert(first.value().count() == 50 and both.value().count() == 75 and less.value().count() == 25 and again.value().count() == 50)
+
+## A move of the left half: translated and turned 90° about Z (centroid
+## pivot) and scaled 2×: its positions, orients and covariances follow
+## exactly; the right half is untouched bit for bit. Deleting the left half
+## leaves 50 splats.
+func moves() -> !:
+    let set = try plain_grid()
+    defer set.release()
+    let numbers: f64[13] = [1.0, 2.0, 0.0, 0.0, 0.0, 90.0, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0]
+    let group = "0-49"
+    let moved = try SplatEdits.transformed(set, group, numbers)
+    defer moved.release()
+    let before = clouds.points_of(set.value())
+    let after = clouds.points_of(moved.value())
+    # The left half's centroid is (-2.5, 0, 0): each of its points p goes to
+    # pivot + R·2·(p - pivot) + (1, 2, 0), R the quarter turn about Z.
+    let pivot = Vector3(-2.5, 0.0, 0.0)
+    for at in 0..<(usize)100:
+        let p = clouds.point_of(set.value(), at)
+        let q = clouds.point_of(moved.value(), at)
+        if at < 50:
+            let d = p.subtract(pivot)
+            let wanted = Vector3(-d.y * 2.0, d.x * 2.0, d.z * 2.0).add(pivot).add(Vector3(1.0, 2.0, 0.0))
+            assert(q.subtract(wanted).length() < 1.0e-5)
+            let sigma = compose_covariance(clouds.quat_of(after, "orient", at).normalized(), clouds.vector_of(after, "scale", at))
+            # A round σ 0.05 splat scaled 2×: σ 0.1 every way.
+            assert(sigma.distance(Mat3.identity().scaled(0.01)) < 1.0e-8)
+        else:
+            assert(q.x == p.x and q.y == p.y and q.z == p.z)
+            assert(clouds.quat_of(after, "orient", at).w == clouds.quat_of(before, "orient", at).w)
+            assert(clouds.vector_of(after, "scale", at).x == clouds.vector_of(before, "scale", at).x)
+    let kept = try SplatEdits.without(set, group)
+    defer kept.release()
+    let left = try SplatEdits.count(kept)
+    assert(left == 50 and clouds.point_of(kept.value(), 0).x == 0.5)
+
+## Recolor the first ten halfway to red; multiply the next ten's opacity by
+## 0.5 and set the ten after to 0.2; others keep theirs.
+func colors_and_opacity() -> !:
+    let set = try plain_grid()
+    defer set.release()
+    let red = try SplatEdits.recolored(set, "0-9", Vector3(1.0, 0.0, 0.0), 0.5)
+    defer red.release()
+    let store = clouds.points_of(red.value())
+    let color = clouds.vector_of(store, "Cd", 3)
+    assert(math.abs(color.x - 0.75) < 1.0e-6 and math.abs(color.y - 0.25) < 1.0e-6 and clouds.vector_of(store, "Cd", 10).x == 0.5)
+    let faded = try SplatEdits.with_opacity(set, "10-19", 0, 0.5)
+    defer faded.release()
+    let set_to = try SplatEdits.with_opacity(faded, "20-29", 1, 0.2)
+    defer set_to.release()
+    let opacity = clouds.attribute(clouds.points_of(set_to.value()), "opacity")
+    assert(math.abs(opacity.number(15, 0) - 0.45) < 1.0e-6 and math.abs(opacity.number(25, 0) - 0.2) < 1.0e-6 and math.abs(opacity.number(35, 0) - 0.9) < 1.0e-6)

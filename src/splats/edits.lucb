@@ -1,0 +1,175 @@
+## Edit GSplats' kernels: changes to the selected splats of a cloud, the
+## others left bit for bit (their columns are shared until written, and a
+## written column keeps its type, so a PLY round trip stays exact for them).
+## - transform: positions by a matrix, and each splat's orient, scale and SH
+##   frame exactly as a placement takes them (placement.lucb), normals and
+##   other vectors and rotations by role;
+## - recolor: Cd mixed toward a color, the SH bands faded by as much, so the
+##   new color shows from every side;
+## - opacity: multiplied or set.
+## Deleting is cloud_subset with the selection inverted.
+from core.bits import Bits
+
+## A float point attribute's values to write in place, whichever float type
+## it is (array storage; single storage becomes f32 first).
+struct Writable:
+    var narrow: f32[]
+    var wide: f64[]
+    let width: usize
+
+    func at(element: usize, component: usize) -> f64:
+        let index = element * self.width + component
+        return (f64)self.narrow[index] if self.narrow.length > 0 else self.wide[index]
+
+    func set(element: usize, component: usize, value: f64):
+        let index = element * self.width + component
+        if self.narrow.length > 0: self.narrow[index] = (f32)value
+        else: self.wide[index] = value
+
+func writable_floats(store: AttributeStore*, index: usize, count: usize) -> Writable!:
+    let entry = store.entry(index)
+    var narrow: f32[]
+    var wide: f64[]
+    if entry.storage == Storage.array and entry.kind == DataType.float64:
+        wide = attribute_ops.typed_mut[f64](try store.writable(index))
+        return Writable(narrow, wide, entry.width)
+    narrow = try writable_float32(store, index, count)
+    return Writable(narrow, wide, store.entry(index).width)
+
+# mark: Transform
+
+## `store` (a cloud's `count` point attributes) with its selected splats'
+## attributes placed by `matrix` (the positions are the caller's): orient,
+## scale and restorient exactly, a reflection's SH odd bands negated, and
+## other float vectors, normals and rotations by role. A splat cloud without
+## `restorient` gets one (orient, so unselected frames stay the identity)
+## when the matrix turns the selected splats' SH frames.
+pub func transformed_store(store: const AttributeStore*, count: usize, matrix: Matrix4, marked: Bits) -> AttributeStore!:
+    var result = try store.shared()
+    errdefer result.close()
+    let part = LinearPart.of(matrix)
+    if part.is_identity(): return result
+    let splats = is_splat_store(store)
+    for index in 0..<result.count():
+        let entry = result.entry(index)
+        if entry.domain != Domain.point or entry.storage != Storage.array or (entry.kind != DataType.float32 and entry.kind != DataType.float64): continue
+        if splats and (entry.name() == orient_name or entry.name() == scale_name or entry.name() == restorient_name): continue
+        let role = entry.role
+        let turns = entry.width == 4 and role == Role.rotation
+        let moves = entry.width == 3 and (role == Role.vector or role == Role.normal)
+        if not turns and not moves: continue
+        var values = try writable_floats(&result, index, count)
+        for element in 0..<count:
+            if not marked.get(element): continue
+            if turns:
+                let q = part.rotation.multiply(Quat(values.at(element, 0), values.at(element, 1), values.at(element, 2), values.at(element, 3)))
+                let turned: f64[4] = [q.x, q.y, q.z, q.w]
+                for component in 0..<(usize)4: values.set(element, component, turned[component])
+                continue
+            let v = Vector3(values.at(element, 0), values.at(element, 1), values.at(element, 2))
+            var moved = matrix.transform_direction(v)
+            if role == Role.normal:
+                if v.length() <= 0.000000001: continue
+                moved = try matrix.transform_normal(v)
+            values.set(element, 0, moved.x)
+            values.set(element, 1, moved.y)
+            values.set(element, 2, moved.z)
+    if splats: try place_selected(&result, count, &part, marked)
+    return result
+
+## The selected splats' orient, scale and restorient placed by `part`, and
+## their SH odd bands negated when it reflects.
+func place_selected(store: AttributeStore*, count: usize, part: const LinearPart*, marked: Bits) -> !:
+    var orient = try writable_floats(store, (usize)float_attribute(store, orient_name, 4), count)
+    var scale = try writable_floats(store, (usize)float_attribute(store, scale_name, 3), count)
+    var rest_index = float_attribute(store, restorient_name, 4)
+    if rest_index < 0 and (part.uniform == 0.0 or math.abs(part.rotation.w) < 1.0):
+        # The SH frames turn, and so far they are the identity: restorient starts as orient.
+        let made = try float32_points(restorient_name, 4, count)
+        let values = float32_values(&made)
+        for at in 0..<count * 4: values[at] = (f32)orient.at(at // 4, at % 4)
+        try store.put(made)
+        rest_index = float_attribute(store, restorient_name, 4)
+        # The put may have moved the columns: take them again.
+        orient = try writable_floats(store, (usize)float_attribute(store, orient_name, 4), count)
+        scale = try writable_floats(store, (usize)float_attribute(store, scale_name, 3), count)
+    var restorient = Writable(no_narrow(), no_wide(), 4)
+    if rest_index >= 0: restorient = try writable_floats(store, (usize)rest_index, count)
+    let has_rest = rest_index >= 0
+    for at in 0..<count:
+        if not marked.get(at): continue
+        let o = Quat(orient.at(at, 0), orient.at(at, 1), orient.at(at, 2), orient.at(at, 3))
+        let r = Quat(restorient.at(at, 0), restorient.at(at, 1), restorient.at(at, 2), restorient.at(at, 3)) if has_rest else o
+        let placed = place_splat(o, Vector3(scale.at(at, 0), scale.at(at, 1), scale.at(at, 2)), r, part, false)
+        let q: f64[4] = [placed.orient.x, placed.orient.y, placed.orient.z, placed.orient.w]
+        for component in 0..<(usize)4: orient.set(at, component, q[component])
+        if has_rest:
+            let p: f64[4] = [placed.restorient.x, placed.restorient.y, placed.restorient.z, placed.restorient.w]
+            for component in 0..<(usize)4: restorient.set(at, component, p[component])
+        scale.set(at, 0, placed.scale.x)
+        scale.set(at, 1, placed.scale.y)
+        scale.set(at, 2, placed.scale.z)
+    if not part.reflects: return
+    let sh_index = sh_attribute(store)
+    if sh_index < 0: return
+    let values = try writable_sh(store, (usize)sh_index)
+    let entry = store.entry((usize)sh_index)
+    for element in 0..<count:
+        if not marked.get(element): continue
+        let first = entry.first_item(element)
+        let have = entry.item_count(element)
+        invert_sh(values[first * 3..<(first + have) * 3], have)
+
+func no_narrow() -> f32[]:
+    var nothing: f32[]
+    return nothing
+
+func no_wide() -> f64[]:
+    var nothing: f64[]
+    return nothing
+
+# mark: Color and opacity
+
+## `store` with its selected points' Cd mixed toward `color` (linear) by
+## `amount` (0..1), creating Cd (white) when missing, and their SH bands
+## scaled by 1 - amount.
+pub func recolored_store(store: const AttributeStore*, count: usize, color: Vector3, amount: f64, marked: Bits) -> AttributeStore!:
+    var result = try store.shared()
+    errdefer result.close()
+    let mix = math.clamp(amount, 0.0, 1.0)
+    var index = float_attribute(&result, color_name, 3)
+    if index < 0:
+        let made = try float32_points(color_name, 3, count)
+        let values = float32_values(&made)
+        for at in 0..<count * 3: values[at] = 1.0
+        try result.put(made)
+        index = float_attribute(&result, color_name, 3)
+    var values = try writable_floats(&result, (usize)index, count)
+    let wanted: f64[3] = [color.x, color.y, color.z]
+    for at in 0..<count:
+        if not marked.get(at): continue
+        for channel in 0..<(usize)3: values.set(at, channel, values.at(at, channel) * (1.0 - mix) + wanted[channel] * mix)
+    let sh_index = sh_attribute(&result)
+    if sh_index < 0 or mix == 0.0: return result
+    let bands = try writable_sh(&result, (usize)sh_index)
+    let entry = result.entry((usize)sh_index)
+    let keep = (f32)(1.0 - mix)
+    for element in 0..<count:
+        if not marked.get(element): continue
+        let first = entry.first_item(element)
+        for at in first * 3..<(first + entry.item_count(element)) * 3: bands[at] = bands[at] * keep
+    return result
+
+## `store` with its selected points' opacity multiplied by `value` (mode 0)
+## or set to it (mode 1), kept in 0..1.
+pub func opacity_store(store: const AttributeStore*, count: usize, mode: i64, value: f64, marked: Bits) -> AttributeStore!:
+    var result = try store.shared()
+    errdefer result.close()
+    let index = float_attribute(&result, opacity_name, 1)
+    if index < 0: error(errors.invalid, "the points have no opacity")
+    var values = try writable_floats(&result, (usize)index, count)
+    for at in 0..<count:
+        if not marked.get(at): continue
+        let next = value if mode == 1 else values.at(at, 0) * value
+        values.set(at, 0, math.clamp(next, 0.0, 1.0))
+    return result

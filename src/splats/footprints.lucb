@@ -1,0 +1,209 @@
+## Selecting splats by their footprint on screen (Edit GSplats' box, lasso
+## and brush): a splat is selected when the ellipse it covers on screen
+## meets the region, not only when its center falls inside, so a large splat
+## reached at its edge is picked as the viewport shows it.
+##
+## The ellipse is the splat's EWA projection, as the viewport draws it: its
+## 2D covariance J W Σ Wᵀ Jᵀ plus a 0.3 low-pass, out to k standard
+## deviations, where its Gaussian falls to the footprint alpha `cut`:
+## k = √(2 ln(opacity / cut)), at most 3. A splat fainter than `cut` is
+## selected by its center alone. Plain points (no orient, scale and opacity)
+## are their centers.
+##
+## Tests, in the ellipse's own frame, where it is the unit disc:
+## - a polygon (a box, a lasso) meets the disc when the disc's center is
+##   inside it (even-odd) or one of its edges comes within 1 of the center;
+## - a brush stroke (circles of one radius r) meets the ellipse when a
+##   circle's center lies inside the ellipse grown by r along both axes.
+## Each splat's screen box is checked against the region's first. Work runs
+## on the pool, a byte per splat, then becomes bits.
+
+## The view the footprints are taken in: the camera and the screen, in the
+## units of the region's coordinates (x right, y down from the top left).
+pub struct ScreenView:
+    pub let eye: Vector3
+    pub let right: Vector3
+    pub let up: Vector3
+    ## The view direction (into the screen).
+    pub let forward: Vector3
+    ## Focal lengths in screen units: x = width/2 + fx·(right·d)/(forward·d).
+    pub let fx: f64
+    pub let fy: f64
+    pub let width: f64
+    pub let height: f64
+    pub let near: f64
+
+## What a region is.
+pub enum RegionShape as u8:
+    ## A closed polygon (a box's four corners, a lasso's path): x, y pairs.
+    polygon = 0
+    ## Circles of one radius along a stroke: x, y pairs, the radius apart.
+    brush = 1
+
+## A region on screen.
+pub struct ScreenRegion:
+    pub let shape: RegionShape
+    ## x, y pairs.
+    pub let points: const f64[]
+    ## A brush's radius.
+    pub let radius: f64
+
+## The splats a footprint selection reads.
+pub struct FootprintCloud:
+    ## Positions relative to `origin`.
+    pub let points: const Float3[]
+    pub let origin: Vector3
+    pub let orient: Floats
+    pub let scale: Floats
+    pub let opacity: Floats
+
+## Into `marked` (a byte per point, 1 selected), the points whose footprint
+## meets `region` in `view`; `cut` is the footprint alpha.
+pub func select_footprints(cloud: const FootprintCloud*, view: const ScreenView*, region: const ScreenRegion*, cut: f64, marked: u8[]) -> !:
+    let count = cloud.points.length
+    if count == 0: return
+    if region.points.length < 2 or region.points.length % 2 != 0: error(errors.invalid, "a screen region needs x, y pairs")
+    if region.shape == RegionShape.polygon and region.points.length < 6: error(errors.invalid, "a screen polygon needs three corners")
+    if not (cut > 0.0 and cut < 1.0): error(errors.invalid, "the footprint alpha is between 0 and 1")
+    # The region's box (a brush's grown by its radius).
+    var low_x = 1.0e300
+    var low_y = 1.0e300
+    var high_x = -1.0e300
+    var high_y = -1.0e300
+    var at: usize = 0
+    while at < region.points.length:
+        low_x = math.min(low_x, region.points[at])
+        high_x = math.max(high_x, region.points[at])
+        low_y = math.min(low_y, region.points[at + 1])
+        high_y = math.max(high_y, region.points[at + 1])
+        at += 2
+    let grow = region.radius if region.shape == RegionShape.brush else 0.0
+    var work = FootprintWork(cloud = cloud, view = view, region = region, cut = cut, selected = marked,
+                             splats = cloud.orient.present() and cloud.scale.present() and cloud.opacity.present(),
+                             low_x = low_x - grow, low_y = low_y - grow, high_x = high_x + grow, high_y = high_y + grow)
+    ranges.each_range(count, 4096, (void*)&work, footprint_range)
+
+struct FootprintWork:
+    let cloud: const FootprintCloud*
+    let view: const ScreenView*
+    let region: const ScreenRegion*
+    let cut: f64
+    var selected: u8[]
+    let splats: bool
+    let low_x: f64
+    let low_y: f64
+    let high_x: f64
+    let high_y: f64
+
+## A footprint on screen: its center, and the ellipse's half axes (axis 1
+## along (cos, sin), axis 2 across it); zero axes for a center alone.
+struct Footprint:
+    var x: f64
+    var y: f64
+    var cos: f64
+    var sin: f64
+    var a: f64
+    var b: f64
+
+func footprint_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (FootprintWork*)context
+    for index in first..<end:
+        work.selected[index] = 0
+        let found = footprint_of(work, index) else continue
+        let reach = math.max(found.a, found.b)
+        if found.x + reach < work.low_x or found.x - reach > work.high_x or found.y + reach < work.low_y or found.y - reach > work.high_y: continue
+        let meets = meets_brush(&found, work.region) if work.region.shape == RegionShape.brush else meets_polygon(&found, work.region.points)
+        if meets: work.selected[index] = 1
+
+## Point `index`'s footprint, or none behind the near plane.
+func footprint_of(work: const FootprintWork*, index: usize) -> Footprint?:
+    let view = work.view
+    let cloud = work.cloud
+    let d = cloud.points[index].vector().add(cloud.origin).subtract(view.eye)
+    let tz = d.dot(view.forward)
+    if not (tz > view.near): return none
+    let tx = d.dot(view.right)
+    let ty = d.dot(view.up)
+    var result = Footprint(x = view.width * 0.5 + view.fx * tx / tz, y = view.height * 0.5 - view.fy * ty / tz, cos = 1.0, sin = 0.0, a = 0.0, b = 0.0)
+    if not work.splats: return result
+    let opacity = cloud.opacity.at(index, 0)
+    if not (opacity > work.cut): return result
+    let k = math.min(math.sqrt(2.0 * math.log(opacity / work.cut)), 3.0)
+    let q = Quat(cloud.orient.at(index, 0), cloud.orient.at(index, 1), cloud.orient.at(index, 2), cloud.orient.at(index, 3))
+    if q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w < 1.0e-30: return result
+    let sigma = compose_covariance(q.normalized(), Vector3(math.abs(cloud.scale.at(index, 0)), math.abs(cloud.scale.at(index, 1)), math.abs(cloud.scale.at(index, 2))))
+    # T = J W: rows in world terms, as splat_project.comp builds them; y
+    # grows down the screen, which flips the second row (it changes no size).
+    let t0 = view.right.multiply_scalar(view.fx / tz).subtract(view.forward.multiply_scalar(view.fx * tx / (tz * tz)))
+    let t1 = view.up.multiply_scalar(-view.fy / tz).add(view.forward.multiply_scalar(view.fy * ty / (tz * tz)))
+    let s0 = sigma.transform(t0)
+    let s1 = sigma.transform(t1)
+    let a = t0.dot(s0) + 0.3
+    let b = t0.dot(s1)
+    let c = t1.dot(s1) + 0.3
+    let mid = 0.5 * (a + c)
+    let radius = math.sqrt(math.max(0.25 * (a - c) * (a - c) + b * b, 0.0))
+    let l1 = mid + radius
+    let l2 = math.max(mid - radius, 0.0)
+    var angle = 0.0 if a >= c else math.pi * 0.5
+    if math.abs(b) > 1.0e-12 * math.max(a, c): angle = math.atan2(l1 - a, b)
+    result.cos = math.cos(angle)
+    result.sin = math.sin(angle)
+    result.a = k * math.sqrt(l1)
+    result.b = k * math.sqrt(l2)
+    return result
+
+## Screen point (x, y) in the footprint's frame scaled to its half axes
+## grown by `grow` (the unit disc is the ellipse): [u, v].
+func local(found: const Footprint*, x: f64, y: f64, grow: f64) -> f64[2]:
+    let dx = x - found.x
+    let dy = y - found.y
+    let along = dx * found.cos + dy * found.sin
+    let across = -dx * found.sin + dy * found.cos
+    let a = found.a + grow
+    let b = found.b + grow
+    return [along / a if a > 0.0 else (0.0 if along == 0.0 else 1.0e300), across / b if b > 0.0 else (0.0 if across == 0.0 else 1.0e300)]
+
+## Whether any brush circle's center is inside the footprint grown by the radius.
+func meets_brush(found: const Footprint*, region: const ScreenRegion*) -> bool:
+    var at: usize = 0
+    while at < region.points.length:
+        let p = local(found, region.points[at], region.points[at + 1], region.radius)
+        if p[0] * p[0] + p[1] * p[1] <= 1.0: return true
+        at += 2
+    return false
+
+## Whether the polygon `points` meets the footprint: its center inside the
+## polygon, or an edge within the ellipse (in the ellipse's unit frame).
+func meets_polygon(found: const Footprint*, points: const f64[]) -> bool:
+    let corners = points.length // 2
+    var inside = false
+    var j = corners - 1
+    for i in 0..<corners:
+        let xi = points[i * 2]
+        let yi = points[i * 2 + 1]
+        let xj = points[j * 2]
+        let yj = points[j * 2 + 1]
+        if (yi > found.y) != (yj > found.y) and found.x < (xj - xi) * (found.y - yi) / (yj - yi) + xi: inside = not inside
+        j = i
+    if inside: return true
+    if not (found.a > 0.0 and found.b > 0.0): return false
+    j = corners - 1
+    for i in 0..<corners:
+        let p = local(found, points[i * 2], points[i * 2 + 1], 0.0)
+        let q = local(found, points[j * 2], points[j * 2 + 1], 0.0)
+        if segment_near_origin(p, q): return true
+        j = i
+    return false
+
+## Whether segment p-q comes within 1 of the origin.
+func segment_near_origin(p: f64[2], q: f64[2]) -> bool:
+    let dx = q[0] - p[0]
+    let dy = q[1] - p[1]
+    let length = dx * dx + dy * dy
+    var t = 0.0
+    if length > 0.0: t = math.clamp(-(p[0] * dx + p[1] * dy) / length, 0.0, 1.0)
+    let x = p[0] + t * dx
+    let y = p[1] + t * dy
+    return x * x + y * y <= 1.0

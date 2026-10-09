@@ -1,0 +1,136 @@
+## Luce's Edit GSplats operations: a set's splat cloud (or plain point cloud)
+## edited by selection. Steps name splats by a group on the pick mesh (the
+## cloud's points as a mesh without faces, `pick_mesh`), the same points in
+## the same order, so a group read on either names the same splats; every
+## other component of the set passes through. Kernels: splats/footprints.lucb
+## (screen selection) and splats/edits.lucb.
+
+pub struct SplatEdits:
+    let reserved: u8 = 0
+
+    ## How many points the set's cloud has (0 without one).
+    pub static func count(geometry: interop.Reference[GeometrySet]) -> i64!:
+        let cloud = set_cloud(try geometry.get()) else return 0
+        return (i64)cloud.count()
+
+    ## The set's cloud's points as a mesh without faces, sharing its
+    ## positions and point attributes (empty without a cloud): what Edit
+    ## GSplats picks on.
+    pub static func pick_mesh(geometry: interop.Reference[GeometrySet]) -> interop.Reference[Mesh]!:
+        let cloud = set_cloud(try geometry.get()) else return try Mesh.empty()
+        return try mesh_adopt(try cloud_mesh(cloud))
+
+    ## `current` (a point selection of `pick`) changed by the points whose
+    ## footprints meet a screen region: replaced (operation 0), added to (1)
+    ## or taken from (2). `view`: eye, right, up and view direction (x, y, z
+    ## each), the focal lengths x and y, the screen's width and height and
+    ## the near distance (17 numbers), in the region's units, y down. `shape`
+    ## 0 is a polygon (a box's corners, a lasso), 1 a brush stroke of circles
+    ## of `radius`; `points` are x, y pairs. `cut` is the footprint alpha.
+    pub static func select(pick: interop.Reference[Mesh], current: interop.Reference[Selection], view: const f64[], shape: i64, points: const f64[],
+                           radius: f64, cut: f64, operation: i64) -> interop.Reference[Selection]!:
+        let mesh = try pick.get()
+        let chosen = try current.get()
+        if view.length != 17: error(errors.invalid, "a screen view is 17 numbers")
+        if shape < 0 or shape > 1 or operation < 0 or operation > 2: error(errors.invalid, "a footprint selection needs a shape 0..1 and an operation 0..2")
+        let count = (usize)mesh.point_count()
+        if chosen.domain() != 0 or (usize)chosen.size() != count: error(errors.invalid, "a footprint selection changes a point selection of the pick mesh")
+        let screen = ScreenView(eye = Vector3(view[0], view[1], view[2]), right = Vector3(view[3], view[4], view[5]), up = Vector3(view[6], view[7], view[8]),
+                                forward = Vector3(view[9], view[10], view[11]), fx = view[12], fy = view[13], width = view[14], height = view[15], near = view[16])
+        let region = ScreenRegion(shape = RegionShape((u8)shape), points = points, radius = radius)
+        let cloud = FootprintCloud(points = mesh.point_span(), origin = mesh.position_origin(), orient = try mesh_floats(mesh, orient_name, 4),
+                                   scale = try mesh_floats(mesh, scale_name, 3), opacity = try mesh_floats(mesh, opacity_name, 1))
+        let hits = try new u8[count + 1] --- in memory.heap
+        defer free(hits) in memory.heap
+        try select_footprints(&cloud, &screen, &region, cut, hits[..<count])
+        var bits = (try BitsBuilder.copy_of(selection_bits(chosen))) if operation != 0 else (try BitsBuilder.zeros(count))
+        for at in 0..<count:
+            if hits[at] == 0: continue
+            if operation == 2: bits.clear(at)
+            else: bits.set(at)
+        return try adopt_selection(bits.finish(), count, Domain.point, (u64)mesh.topology_hash(), GroupReport())
+
+    ## The set with the splats `group` names (on the pick mesh) moved by
+    ## Transform Components' numbers (translate, rotate in degrees, scale,
+    ## pivot mode and custom pivot; the centroid pivot is the group's):
+    ## positions, and orient, scale and SH frames exactly.
+    pub static func transformed(geometry: interop.Reference[GeometrySet], group: str, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
+        let source = try geometry.get()
+        let cloud = try edited_cloud(source)
+        var report = GroupReport()
+        var bits = try cloud_group_bits(cloud, group, &report)
+        defer bits.close()
+        let selected = bits.view()
+        let count = cloud.count()
+        # The pivot's middle: the selected points' centroid.
+        var middle = Vector3()
+        var chosen: usize = 0
+        for at in 0..<count:
+            if not selected.get(at): continue
+            middle = middle.add(cloud.point(at))
+            chosen += 1
+        if chosen > 0: middle = middle.multiply_scalar(1.0 / (f64)chosen)
+        let move = try ComponentTransform.of(numbers, middle)
+        let matrix = move.matrix(move.translation)
+        var positions = try Column[Float3].copy_of(cloud_positions(cloud))
+        defer positions.release()
+        let origin = cloud_origin(cloud)
+        let out = positions.span()
+        for at in 0..<count:
+            if selected.get(at): out[at] = Float3.of(matrix.transform_point(cloud.point(at)).subtract(origin))
+        let store = try transformed_store(cloud_store(cloud), count, matrix, selected)
+        return try with_cloud(source, try cloud_assembled(positions.take(), origin, store))
+
+    ## The set with the splats `group` names recolored: Cd mixed toward
+    ## `color` (linear) by `amount`, their SH bands faded by as much.
+    pub static func recolored(geometry: interop.Reference[GeometrySet], group: str, color: Vector3, amount: f64) -> interop.Reference[GeometrySet]!:
+        let source = try geometry.get()
+        let cloud = try edited_cloud(source)
+        var report = GroupReport()
+        var bits = try cloud_group_bits(cloud, group, &report)
+        defer bits.close()
+        return try with_cloud(source, try cloud_with_store(cloud, try recolored_store(cloud_store(cloud), cloud.count(), color, amount, bits.view())))
+
+    ## The set with the splats `group` names made more or less opaque: their
+    ## opacity multiplied by `value` (mode 0) or set to it (mode 1).
+    pub static func with_opacity(geometry: interop.Reference[GeometrySet], group: str, mode: i64, value: f64) -> interop.Reference[GeometrySet]!:
+        let source = try geometry.get()
+        let cloud = try edited_cloud(source)
+        if not is_splat_store(cloud_store(cloud)): error(errors.invalid, "the points are not splats: they have no opacity")
+        var report = GroupReport()
+        var bits = try cloud_group_bits(cloud, group, &report)
+        defer bits.close()
+        return try with_cloud(source, try cloud_with_store(cloud, try opacity_store(cloud_store(cloud), cloud.count(), mode, value, bits.view())))
+
+    ## The set without the splats `group` names.
+    pub static func without(geometry: interop.Reference[GeometrySet], group: str) -> interop.Reference[GeometrySet]!:
+        let source = try geometry.get()
+        let cloud = try edited_cloud(source)
+        var report = GroupReport()
+        var bits = try cloud_group_bits(cloud, group, &report)
+        defer bits.close()
+        bits.invert()
+        return try with_cloud(source, try cloud_subset(cloud, bits.view()))
+
+## The set's point cloud, which an edit needs.
+func edited_cloud(set: const GeometrySet*) -> const PointCloud*!:
+    return set_cloud(set) else error(errors.invalid, "Edit GSplats has no splats to edit: connect a splat cloud")
+
+## A copy of `set` holding `cloud` (taken) as its point cloud.
+func with_cloud(set: const GeometrySet*, cloud: PointCloud*) -> interop.Reference[GeometrySet]!:
+    let storage = set.storage() catch failure:
+        close_cloud_storage(cloud)
+        error(failure.code, failure.message)
+    storage.put(&points_component, (void*)cloud) catch failure:
+        close_cloud_storage(cloud)
+        dispose_set(storage)
+        error(failure.code, failure.message)
+    return try adopt_set(storage)
+
+## The Floats of a mesh's point attribute `name` of `width`, or none.
+func mesh_floats(mesh: const Mesh*, name: str, width: usize) -> Floats!:
+    let index = mesh.attribute_on(name, Domain.point)
+    if index < 0: return Floats.empty()
+    let found = try mesh.attribute_entry(index)
+    if found.width != width or found.is_ragged() or found.kind == DataType.text: return Floats.empty()
+    return Floats.of(found)

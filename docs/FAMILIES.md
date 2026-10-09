@@ -307,12 +307,16 @@ them, and the design is luced-3d's `docs/research/GAUSSIAN-SPLATS.md`.
   primitive). **GSplats to Volume** (`fields/splat_density.lucb`) sums each
   splat's Gaussian, widened by half a voxel and cut off at 3σ, into a fog
   grid, each splat normalized so the grid integrates to its mass, opacity ·
-  (2π)^{3/2} σ₁σ₂σ₃; Convert to Mesh after it is splats to mesh. **Normals
+  (2π)^{3/2} σ₁σ₂σ₃; Convert to Mesh after it is splats to mesh. A Voxel
+  Size of 0 sizes the voxels to the capture (`splats/sizing.lucb`): about
+  256³ across its extent between the 1st and 99th percentile of each axis,
+  never finer than the median splat. **Normals
   from GSplats** (`splats/normals.lucb`, Houdini's Labs node by its fast
   method) takes each splat's shortest axis, votes its side by its 16 nearest
   neighbors' centroid, makes the sides consistent along a minimum spanning
-  tree of the k-NN graph (`splats/orientation.lucb`; each connected part
-  faces the way its votes sum, so concave regions face out too), and
+  tree of the k-NN graph (`splats/orientation.lucb`: Borůvka's, its rounds on
+  the pool; each connected part faces the way its votes sum, so concave
+  regions face out too), and
   optionally refines with a bilateral k-NN filter.
 - **Point nodes on clouds.** `SetAttributes` deletes cloud points by a group
   expression (Blast, Delete), groups them (Selection Group) and promotes point
@@ -322,6 +326,18 @@ them, and the design is luced-3d's `docs/research/GAUSSIAN-SPLATS.md`.
   every point it kept or added stays a point of the cloud, splats stay splats,
   and polygons a snippet adds become a mesh beside the cloud, over copies of
   the points they use. `p.orient` reads the identity on points without one.
+- **Edit GSplats** (`SplatEdits`, `set_verbs/splat_edits.lucb`): luced-3d's
+  Edit node on splats picks on `pick_mesh`, the cloud's points as a faceless
+  mesh, and steps name splats by groups on it. `select` changes a point
+  selection by a screen region (a box's or a lasso's polygon, or a brush
+  stroke of circles) meeting each splat's footprint, its EWA ellipse out to
+  where its Gaussian falls to the footprint alpha, not only its center
+  (`splats/footprints.lucb`). `transformed` moves the selected splats by
+  Transform Components' numbers, orient, scale and SH frames exactly as a
+  placement takes them; `recolored` mixes their Cd toward a color and fades
+  their SH bands by as much; `with_opacity` multiplies or sets their opacity;
+  `without` deletes them (`splats/edits.lucb`). Unselected splats keep their
+  values bit for bit.
 - **Export.** `unbaked_set` (`GeometrySet.unbaked_splats` in Luce) gives the raw
   names back, turned back down for a `y_down` cloud, `restorient` baked into
   `f_rest`. Bake keeps `scale`, `opacity`
