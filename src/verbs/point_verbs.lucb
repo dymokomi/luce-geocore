@@ -26,7 +26,7 @@ pub struct ComponentTransform:
 
     pub static func of(numbers: const f64[], middle: Vector3) -> ComponentTransform!:
         if numbers.length < 13: error(errors.invalid, "a transform needs its thirteen numbers")
-        let degrees = 0.017453292519943295
+        let degrees = math.pi / 180.0
         let linear = Matrix4.compose(Vector3(), Vector3(numbers[3] * degrees, numbers[4] * degrees, numbers[5] * degrees), Vector3(numbers[6], numbers[7], numbers[8]))
         var pivot = Vector3(numbers[10], numbers[11], numbers[12])
         if numbers[9] == 1.0: pivot = Vector3()
@@ -97,46 +97,40 @@ func centroid(points: const Float3[], moved: const u32[]) -> Vector3:
     for point in moved: sum = sum.add(points[(usize)point].vector())
     return sum.multiply_scalar(1.0 / (f64)(moved.length if moved.length > 0 else 1))
 
-## Apply `matrix` about `pivot` to the listed points, each by its weight
-## (all of it without weights), in parallel.
+## Apply `matrix` to the listed points, each by its weight (all of it
+## without weights), in parallel.
 struct PlaceWork:
     let positions: Float3[]
     let moved: const u32[]
     let weights: const f32[]
     let matrix: Matrix4
-    let pivot: Vector3
 
 func place_points(context: void*?, first: usize, end: usize):
     let work = (PlaceWork*)(context else return)
     for at in first..<end:
         let point = (usize)work.moved[at]
         let original = work.positions[point].vector()
-        let target = work.matrix.transform_point(original.subtract(work.pivot)).add(work.pivot)
+        let target = work.matrix.transform_point(original)
         let weight = (f64)work.weights[point] if work.weights.length > 0 else 1.0
         work.positions[point] = Float3.of(original.add(target.subtract(original).multiply_scalar(weight)))
 
 func cook_transform(input: const VerbInput*, output: VerbOutput*) -> !:
     let group = try begin_points(input, output)
     let p = input.parms
-    let degrees = 0.017453292519943295
-    let translation = Vector3(p.at(0), p.at(1), p.at(2))
-    let rotation = Vector3(p.at(3) * degrees, p.at(4) * degrees, p.at(5) * degrees)
-    let scale = Vector3(p.at(6), p.at(7), p.at(8))
+    for at in 0..<(usize)14:
+        if not math.is_finite(p.at(at)): error(errors.invalid, "transform values must be finite")
     let radius = p.at(13)
-    if not translation.is_finite() or not rotation.is_finite() or not scale.is_finite() or not math.is_finite(radius):
-        error(errors.invalid, "transform values must be finite")
     let positions = output.positions.span()
     let origin = input.mesh.position_origin()
     let axis = input.symmetry
     let tolerance = mirror_tolerance(input.mesh) if axis > 0 else 0.0
-    # The pivot: the group's centroid (its positive half under symmetry, so
-    # the mirrored half follows by reflection), the origin, or a point.
-    let mode = (i64)p.at(9)
-    var pivot = Vector3(p.at(10), p.at(11), p.at(12)).subtract(origin)
-    if mode == 1: pivot = origin.multiply_scalar(-1.0)
-    elif mode == 0: pivot = centroid_of(positions, group, origin, axis, tolerance)
-    let linear = Matrix4.compose(Vector3(), rotation, scale)
-    let matrix = Matrix4(linear.x, linear.y, linear.z, translation)
+    # The centroid pivot is of the group's positive half under symmetry, so
+    # the mirrored half follows by reflection.
+    let middle = centroid_of(positions, group, origin, axis, tolerance) if p.at(9) == 0.0 else Vector3()
+    let transform = try ComponentTransform.of(p.numbers, middle.add(origin))
+    # Positions are relative to the origin: so is the matrix.
+    let whole = transform.matrix(transform.translation)
+    let matrix = Matrix4(whole.x, whole.y, whole.z, whole.transform_point(origin).subtract(origin))
     # Soft selection: every point within the radius moves by its weight.
     var affected = Growing[u32]()
     defer affected.close()
@@ -149,7 +143,7 @@ func cook_transform(input: const VerbInput*, output: VerbOutput*) -> !:
             if weights.items[point] > 0.0: try affected.push((u32)point)
     else:
         try affected.assign(group)
-    var work = PlaceWork(positions, affected.view(), weights.view(), matrix, pivot)
+    var work = PlaceWork(positions, affected.view(), weights.view(), matrix)
     parallel.parallel_for(affected.count, 16384, place_points, (void*)&work)
     if axis > 0: try mirror_points(input.mesh, positions, affected.view(), origin, axis, tolerance)
     output.moved.clear()
@@ -162,14 +156,10 @@ func centroid_of(positions: const Float3[], group: const u32[], origin: Vector3,
     var count = 0.0
     for point in group:
         let p = positions[(usize)point].vector()
-        if axis > 0 and axis_coordinate(p.add(origin), axis) < -tolerance: continue
+        if axis > 0 and p.add(origin).coordinate((usize)(axis - 1)) < -tolerance: continue
         sum = sum.add(p)
         count += 1.0
     return sum.multiply_scalar(1.0 / math.max(1.0, count))
-
-## A point's coordinate along the symmetry axis.
-func axis_coordinate(point: Vector3, axis: i64) -> f64:
-    return point.x if axis == 1 else (point.y if axis == 2 else point.z)
 
 ## Symmetry: points on the negative side take the reflection of their
 ## mirror's new position; points on the plane stay on it.
@@ -180,22 +170,16 @@ func mirror_points(mesh: const Mesh*, positions: Float3[], affected: const u32[]
     let before = mesh.point_span()
     for point in affected:
         let original = before[(usize)point].vector().add(origin)
-        let coordinate = axis_coordinate(original, axis)
+        let coordinate = original.coordinate((usize)(axis - 1))
         if math.abs(coordinate) <= tolerance:
             let moved = positions[(usize)point].vector().add(origin)
-            positions[(usize)point] = Float3.of(reflect_onto(moved, axis).subtract(origin))
+            positions[(usize)point] = Float3.of(moved.with_coordinate((usize)(axis - 1), 0.0).subtract(origin))
             continue
         if coordinate > 0.0: continue
         let mirror = mirrors.items[(usize)point]
         if mirror < 0: continue
         let partner = positions[(usize)mirror].vector().add(origin)
-        positions[(usize)point] = Float3.of(reflect(partner, axis).subtract(origin))
-
-## `point` with its coordinate along `axis` set to zero.
-func reflect_onto(point: Vector3, axis: i64) -> Vector3:
-    if axis == 1: return Vector3(0.0, point.y, point.z)
-    if axis == 2: return Vector3(point.x, 0.0, point.z)
-    return Vector3(point.x, point.y, 0.0)
+        positions[(usize)point] = Float3.of(partner.reflected((usize)(axis - 1)).subtract(origin))
 
 ## Neighbour averages over the edges, `iterations` rounds.
 func cook_smooth(input: const VerbInput*, output: VerbOutput*) -> !:

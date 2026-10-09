@@ -9,6 +9,7 @@ from luce_std import math
 import errors
 from math.vector import Vector3
 from core.polygon_topology import PolygonTopology
+from core.growing import grown
 from geometries.polygon import Mesh
 from geometries.builder import MeshBuilder
 from geometries.polygon_triangulation import area_normal
@@ -239,10 +240,10 @@ pub struct DissolveWorkspace: PolygonTopology:
     ## Room for `corners` more corners and `indices` more display indices.
     ## A failure leaves every stored value as it was.
     func reserve(corners: usize, indices: usize) -> !:
-        try grow(&self.corners, self.nc, self.nc + corners)
-        try grow(&self.parents, self.nc, self.nc + corners)
-        try grow(&self.edges, self.nc, self.nc + corners)
-        try grow(&self.triangles, self.nt, self.nt + indices)
+        self.corners = try grown[i64](self.corners, self.nc, self.nc + corners)
+        self.parents = try grown[i64](self.parents, self.nc, self.nc + corners)
+        self.edges = try grown[i64](self.edges, self.nc, self.nc + corners)
+        self.triangles = try grown[i64](self.triangles, self.nt, self.nt + indices)
 
     pub func close():
         free(self.points) in memory.heap
@@ -253,16 +254,6 @@ pub struct DissolveWorkspace: PolygonTopology:
         free(self.triangles) in memory.heap
         free(self.first) in memory.heap
         free(self.second) in memory.heap
-
-## `values` holding at least `needed`, its first `used` kept (doubling).
-func grow(values: i64[]*, used: usize, needed: usize) -> !:
-    if needed <= values.length: return
-    var capacity: usize = values.length * 2 if values.length > 0 else 16
-    while capacity < needed: capacity *= 2
-    let grown = try new i64[capacity] --- in memory.heap
-    memory.copy(grown, *values, used)
-    free(*values) in memory.heap
-    *values = grown
 
 ## The places of a large joined face's points, hashed (open addressing):
 ## rejects a point twice (the union pinches) and finds a point's corner.

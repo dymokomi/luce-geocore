@@ -7,6 +7,7 @@
 from luce_std import math
 import memory
 import core.parallel
+from core.parallel import FirstError
 from core.float3 import Float3
 from core.growing import Growing
 from math.vector import Vector3
@@ -194,9 +195,9 @@ struct Builder:
         if count == 0: return empty
         let task_size = count // 64 + leaf_size
         _ = try self.split_top(0, count, 0, task_size)
-        var work = TaskWork(self.lo, self.hi, self.order, self.tasks.items[..<self.tasks.count], 0)
+        var work = TaskWork(self.lo, self.hi, self.order, self.tasks.items[..<self.tasks.count], FirstError())
         parallel.parallel_for(self.tasks.count, 1, build_tasks, (void*)&work)
-        if work.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory building a triangle index")
+        try work.errors.check()
         var total: usize = 0
         for at in 0..<self.top.count:
             total += self.tasks.items[(usize)self.top.items[at].first].nodes.count if self.placeholders.items[at] else 1
@@ -251,15 +252,14 @@ struct TaskWork:
     let hi: const Float3[]
     let order: u32[]
     let tasks: Task[]
-    var failed: @u32
+    var errors: FirstError
 
 func build_tasks(context: void*?, first: usize, end: usize):
     let work = (TaskWork*)(context else return)
     for index in first..<end:
         let task = &work.tasks[index]
         _ = build_subtree(work.lo, work.hi, work.order, task.first, task.end, 0, &task.nodes) catch failure:
-            _ = failure
-            _ = work.failed.add(1, .relaxed)
+            work.errors.record(failure.code, failure.message)
             recover 0
 
 ## Preorder subtree over order[first..<end] appended to `nodes`; returns its index.
@@ -355,17 +355,14 @@ func high(a: Float3, b: Float3) -> Float3:
 func component(v: Float3, axis: usize) -> f32:
     return v.x if axis == 0 else (v.y if axis == 1 else v.z)
 
-func axis_of(v: Vector3, axis: usize) -> f64:
-    return v.x if axis == 0 else (v.y if axis == 1 else v.z)
-
 func hits_bounds(origin: Vector3, direction: Vector3, minimum: Vector3, maximum: Vector3, nearest: f64) -> bool:
     var near = 0.0
     var far = nearest
     for axis in 0..<(usize)3:
-        let o = axis_of(origin, axis)
-        let d = axis_of(direction, axis)
-        let lo = axis_of(minimum, axis) - 0.000001
-        let hi = axis_of(maximum, axis) + 0.000001
+        let o = origin.coordinate(axis)
+        let d = direction.coordinate(axis)
+        let lo = minimum.coordinate(axis) - 0.000001
+        let hi = maximum.coordinate(axis) + 0.000001
         if math.abs(d) < 1.0e-15:
             if o < lo or o > hi:
                 return false

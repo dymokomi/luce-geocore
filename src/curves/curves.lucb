@@ -28,6 +28,7 @@ import memory
 import sync
 import errors
 import core.parallel
+from core.parallel import FirstError
 import core.attribute_ops
 from core.growing import Growing
 from core.shared import Column
@@ -41,7 +42,7 @@ from core.geometry import Bounds
 from math.vector import Vector3
 from math.matrix import Matrix4
 from geometries.polygon import Mesh, positions_bounds, assembled, put_attribute, mesh_dispose
-from groups import GroupProgram, Term, AtomKind, Compare, Function, Combine, GroupReport, group_bits
+from groups import GroupProgram, Term, AtomKind, Compare, Function, Combine, GroupReport, group_bits, is_blank
 from geometries.builder import MeshBuilder
 from verbs import ComponentTransform
 from geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, empty_storage, dispose_set, adopt_set, set_detail
@@ -140,7 +141,7 @@ pub struct Curves:
 
     ## The attribute `name` on `domain`, if present.
     pub func find(name: str, domain: Domain) -> const Attribute*?:
-        let index = self.attributes.find(name, (i64)(u8)domain)
+        let index = self.attributes.find(name, domain)
         if index < 0: return none
         return self.attributes.entry((usize)index)
 
@@ -181,7 +182,7 @@ func read_settings(store: const AttributeStore*, curve: usize, points: usize) ->
     return CurveSettings(chosen, cyclic, (usize)resolution, (usize)(order if order > 0 else 1), knots)
 
 func integer_of(store: const AttributeStore*, name: str, curve: usize, fallback: i64) -> i64:
-    let index = store.find(name, (i64)(u8)curve_domain)
+    let index = store.find(name, curve_domain)
     if index < 0: return fallback
     let value = store.entry((usize)index).number(curve, 0)
     return (i64)value if math.is_finite(value) else fallback

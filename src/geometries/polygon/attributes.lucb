@@ -6,7 +6,13 @@ extend Mesh:
     pub func attribute_count() -> i64:
         return (i64)self.attributes.count()
 
+    ## The index of attribute `name` on domain `domain` (0..4), or -1.
     pub func find_attribute(name: str, domain: i64) -> i64:
+        if domain < 0 or domain > 4: return -1
+        return self.attributes.find(name, Domain((u8)domain))
+
+    ## `find_attribute` for Base callers.
+    pub func attribute_on(name: str, domain: Domain) -> i64:
         return self.attributes.find(name, domain)
 
     pub func attribute_name(index: i64) -> str!:
@@ -75,25 +81,25 @@ extend Mesh:
 
     pub func without_attribute(name: str, domain: i64) -> interop.Reference[Mesh]!:
         let result = try self.snapshot()
-        let found = result.value().attributes.find(name, domain)
+        let found = result.value().find_attribute(name, domain)
         if found >= 0: result.value().attributes.remove((usize)found)
         return result
 
     pub func renamed_attribute(name: str, replacement: str, domain: i64) -> interop.Reference[Mesh]!:
-        let index = self.attributes.find(name, domain)
+        let index = self.find_attribute(name, domain)
         if index < 0:
             error(errors.invalid, "attribute to rename does not exist")
         let renamed = try self.attributes.entry((usize)index).renamed(replacement)
         let result = try self.with_attribute_entry(renamed)
         if replacement != name:
-            let old = result.value().attributes.find(name, domain)
+            let old = result.value().find_attribute(name, domain)
             result.value().attributes.remove((usize)old)
         return result
 
     ## Numeric domain conversion: continuous values average incident source
     ## elements, integers keep the first contributor. Isolated targets get zero.
     pub func promoted_attribute(name: str, domain: i64, target: i64) -> interop.Reference[Mesh]!:
-        let index = self.attributes.find(name, domain)
+        let index = self.find_attribute(name, domain)
         if index < 0:
             error(errors.invalid, "attribute to promote does not exist")
         if domain == 4 or target == 4:

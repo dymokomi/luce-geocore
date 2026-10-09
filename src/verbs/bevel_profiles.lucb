@@ -18,7 +18,7 @@ struct ProfilePass:
     let work: Bevel*
     let filling: bool
     let corner_points: usize
-    var failed: @u32
+    var errors: FirstError
 
 func place_profiles(work: Bevel*) -> !:
     let slots = work.vertex_points.count
@@ -30,9 +30,9 @@ func place_profiles(work: Bevel*) -> !:
         work.slot_points.items[slot] = 0
         work.slot_entries.items[slot] = 0
     let corner_points = work.created.count
-    var counting = ProfilePass(work, false, corner_points, 0)
+    var counting = ProfilePass(work, false, corner_points, FirstError())
     parallel.parallel_for(slots, 256, plan_profiles, (void*)&counting)
-    if counting.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory planning bevel profiles")
+    try counting.errors.check()
     var points: u32 = 0
     var entries: u32 = 0
     for slot in 0..<slots + 1:
@@ -45,9 +45,9 @@ func place_profiles(work: Bevel*) -> !:
     try work.created.extend(corner_points + (usize)points, NewPoint(Vector3(), -1, -1, 0.0, -1))
     try work.point_source.extend(corner_points + (usize)points, -1)
     try work.profile_points.fill((usize)entries, -1)
-    var filling = ProfilePass(work, true, corner_points, 0)
+    var filling = ProfilePass(work, true, corner_points, FirstError())
     parallel.parallel_for(slots, 256, plan_profiles, (void*)&filling)
-    if filling.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory placing bevel profiles")
+    try filling.errors.check()
 
 func plan_profiles(context: void*?, first: usize, end: usize):
     let pass = (ProfilePass*)(context else return)
@@ -55,8 +55,7 @@ func plan_profiles(context: void*?, first: usize, end: usize):
     defer known.close()
     for slot in first..<end:
         vertex_profiles(pass, &known, slot) catch failure:
-            _ = failure
-            pass.failed.store(1, .relaxed)
+            pass.errors.record(failure.code, failure.message)
             return
 
 ## The profiles at one vertex: one per distinct pair of end points among

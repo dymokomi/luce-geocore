@@ -16,8 +16,8 @@ from math.vector import Vector3
 from math.matrix import Matrix4
 from geometries.polygon import Mesh, MeshPart, concatenated, mesh_share, mesh_dispose
 from geometry_set import GeometrySet, ComponentType, PointCloud, points_component, cloud_origin, cloud_positions, cloud_store, cloud_with_store, set_mesh, empty_storage, dispose_set, adopt_set, geometry_set_type, mesh_component
-from groups import GroupReport, group_bits, guess_domain
-from verbs import ParmSpec, ParmKind, Parms, filled_parms, Verbs, group_domain, verb_at, verb_count
+from groups import GroupReport, GroupType, group_bits, guess_domain
+from verbs import ParmSpec, ParmKind, Parms, filled_parms, Verbs, verb_at, verb_count
 import curves
 from curves import Curves, curves_with_store, curve_domain, set_curves, with_curves, curves_dispose, curves_type, curve_group_bits, guess_curve_domain, convert_curve_bits
 from fields import Sdf, SdfOp, SparseGrid, primitive_sdf, combined_sdf, modified_sdf, release_sdf, sdf_type, set_sdf, release_grid, new_volume, add_grid, release_volume, volume_type, set_volume, sampled_sdf, mesh_level_set, points_level_set, surface_mesh, slice_mesh, push_mesh
@@ -90,12 +90,12 @@ pub func only_curves(made: Curves*, output: SetVerbOutput*) -> !:
 ## read on its Group Type's domain (guessed from the names it uses) and
 ## converted to curves (a curve when all its points are members).
 pub func selected_curves(input: const SetVerbInput*, source: const Curves*, output: SetVerbOutput*) -> BitsBuilder!:
-    var domain = curve_domain
-    match input.group_type:
-        0: domain = guess_curve_domain(source, input.group, curve_domain)
-        1, 4: domain = Domain.point
-        3: domain = curve_domain
-        _: error(errors.invalid, "curves have point and primitive groups, not edge groups")
+    let named = try GroupType.of(input.group_type)
+    if named == GroupType.edges: error(errors.invalid, "curves have point and primitive groups, not edge groups")
+    var domain = named.domain(curve_domain)
+    if named == GroupType.guess: domain = try guess_curve_domain(source, input.group, curve_domain)
+    # A curve's points are its vertices too.
+    if domain == Domain.corner: domain = Domain.point
     var report = GroupReport()
     var bits = try curve_group_bits(source, input.group, domain, &report)
     output.misses += report.misses

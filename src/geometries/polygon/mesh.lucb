@@ -18,6 +18,7 @@ from luce_std import math
 import memory
 import errors
 import core.parallel
+from core.parallel import FirstError
 from core.geometry import Vertex, Bounds
 from core.polygon_topology import PolygonTopology
 from core.shared import Column
@@ -44,6 +45,7 @@ import geometries.display_triangulation as display_triangles
 import geometries.position_edit
 import geometries.face_scratch
 from core.limits import max_corners, check_mesh_size
+from core.hash import mix
 
 ## Coordinates beyond this, or beyond `origin_ratio` times the model's
 ## size, keep an origin at the bounds center, so f32 positions stay precise

@@ -77,7 +77,7 @@ func principal(shape: const CurvatureShape*, point: usize) -> Vector3:
             laplacian = laplacian.add(pq.multiply_scalar(-cot_r)).add(pr.multiply_scalar(-cot_q))
             let angle = math.atan2(twice, pq.dot(pr))
             defect += angle
-            let half_pi = 1.5707963267948966
+            let half_pi = math.pi / 2.0
             if angle > half_pi:
                 area += twice * 0.25
             elif cot_q < 0.0 or cot_r < 0.0:
@@ -88,7 +88,7 @@ func principal(shape: const CurvatureShape*, point: usize) -> Vector3:
     # Mean curvature normal K_H = laplacian / (2 area); H = |K_H| / 2.
     var mean = laplacian.length() / (4.0 * area)
     if laplacian.dot(normal) < 0.0: mean = -mean
-    let gaussian = (6.283185307179586 - defect) / area
+    let gaussian = (2.0 * math.pi - defect) / area
     let spread = math.sqrt(math.max(0.0, mean * mean - gaussian))
     return Vector3(mean + spread, mean - spread, 0.0)
 

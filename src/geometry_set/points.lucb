@@ -119,9 +119,9 @@ func join_clouds(first: const void*, second: const void*) -> void*!:
         let store = &a.attributes if side == 0 else &b.attributes
         for index in 0..<store.count():
             let entry = store.entry(index)
-            if side == 1 and a.attributes.find(entry.name(), (i64)(u8)entry.domain) >= 0: continue
-            let left = a.attributes.find(entry.name(), (i64)(u8)entry.domain)
-            let right = b.attributes.find(entry.name(), (i64)(u8)entry.domain)
+            if side == 1 and a.attributes.find(entry.name(), entry.domain) >= 0: continue
+            let left = a.attributes.find(entry.name(), entry.domain)
+            let right = b.attributes.find(entry.name(), entry.domain)
             let pieces: attribute_ops.Piece[2] = [attribute_ops.Piece(a.attributes.entry((usize)left) if left >= 0 else none, a.count()),
                                                   attribute_ops.Piece(b.attributes.entry((usize)right) if right >= 0 else none, b.count())]
             try attributes.put(try attribute_ops.concatenated(pieces))

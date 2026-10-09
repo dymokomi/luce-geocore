@@ -58,6 +58,13 @@ pub enum AtomKind as u8:
     face_edge = 6
     call = 7
 
+## Whether `text` is only spaces, tabs and newlines: a group that names
+## everything.
+pub func is_blank(text: str) -> bool:
+    for byte in text.bytes:
+        if byte != 32 and byte != 9 and byte != 10: return false
+    return true
+
 pub enum Compare as u8:
     exists = 0
     equal = 1
@@ -67,6 +74,22 @@ pub enum Compare as u8:
     less_equal = 5
     greater_equal = 6
     bits = 7
+
+    ## Whether `value` passes this test: `values` are ranges as pairs for
+    ## equal and not_equal, else one bound (or the mask for bits).
+    pub func passes(values: const f64[], value: f64) -> bool:
+        match self:
+            .exists: return value != 0.0
+            .equal, .not_equal:
+                var hit = false
+                for at in 0..<values.length // 2:
+                    hit = hit or (value >= values[at * 2] and value <= values[at * 2 + 1])
+                return hit if self == Compare.equal else not hit
+            .less: return value < values[0]
+            .greater: return value > values[0]
+            .less_equal: return value <= values[0]
+            .greater_equal: return value >= values[0]
+            _: return ((i64)value & (i64)values[0]) != 0
 
 pub enum Function as u8:
     grow = 0

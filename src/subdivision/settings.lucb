@@ -31,6 +31,7 @@ from groups import Topology
 from verbs import TopologyBuilder
 import geometries.face_scratch
 from core.limits import max_points, max_faces
+import core.hash
 
 pub enum Scheme as u8:
     off = 0
@@ -49,7 +50,7 @@ pub struct Settings:
 
 ## A detail number of `mesh`, or `fallback` without the attribute.
 func detail(mesh: const Mesh*, name: str, fallback: f64) -> f64:
-    let index = mesh.find_attribute(name, (i64)(u8)Domain.detail)
+    let index = mesh.attribute_on(name, Domain.detail)
     if index < 0: return fallback
     return mesh.attribute_value(index, 0) catch failure: recover fallback
 

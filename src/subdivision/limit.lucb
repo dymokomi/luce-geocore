@@ -84,7 +84,7 @@ func limit_points(context: void*?, first: usize, end: usize):
             work.out_normals[out] = direction_of(face_average(work, point))
             continue
         let count = (f64)n
-        let turn = 6.283185307179586 / count
+        let turn = 2.0 * math.pi / count
         # cos and sin of turn * i by rotation (two trig calls a point).
         let step_cos = math.cos(turn)
         let step_sin = math.sin(turn)

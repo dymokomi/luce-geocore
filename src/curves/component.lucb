@@ -152,10 +152,10 @@ func join_curves(first: const void*, second: const void*) -> void*!:
         let store = &x.attributes if side == 0 else &y.attributes
         for index in 0..<store.count():
             let entry = store.entry(index)
-            if side == 1 and x.attributes.find(entry.name(), (i64)(u8)entry.domain) >= 0: continue
+            if side == 1 and x.attributes.find(entry.name(), entry.domain) >= 0: continue
             if entry.domain != Domain.point and entry.domain != curve_domain and entry.domain != Domain.detail: continue
-            let lower = x.attributes.find(entry.name(), (i64)(u8)entry.domain)
-            let higher = y.attributes.find(entry.name(), (i64)(u8)entry.domain)
+            let lower = x.attributes.find(entry.name(), entry.domain)
+            let higher = y.attributes.find(entry.name(), entry.domain)
             let lower_count = x.point_count() if entry.domain == Domain.point else x.curve_count()
             let higher_count = y.point_count() if entry.domain == Domain.point else y.curve_count()
             let pieces: attribute_ops.Piece[2] = [attribute_ops.Piece(x.attributes.entry((usize)lower) if lower >= 0 else none, lower_count),

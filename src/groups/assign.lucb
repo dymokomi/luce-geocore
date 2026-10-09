@@ -14,7 +14,7 @@ pub struct MaterialAssignment:
         var result = try group_bits(geometry, expression if expression.length > 0 else "*", Domain.face)
         defer result.bits.release()
         let chosen = Bits(result.bits.view(), count)
-        let existing = geometry.find_attribute(name, (i64)(u8)Domain.face)
+        let existing = geometry.attribute_on(name, Domain.face)
         var table = TableBuilder()
         defer table.close()
         _ = try table.intern("")

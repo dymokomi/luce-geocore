@@ -1,0 +1,9 @@
+## Hash mixing for keys built from several 64-bit values (change ids,
+## counts, settings): each value is scrambled into the running state.
+## Equal keys are likely, not certain, to mean equal inputs; a cache that
+## must be right compares the inputs too.
+
+## `state` with `value` mixed in.
+pub func mix(state: u64, value: u64) -> u64:
+    let scrambled = state ^ (value *% 0x9E3779B97F4A7C15)
+    return ((scrambled << 27) | (scrambled >> 37)) *% 5 +% 0x52DCE729

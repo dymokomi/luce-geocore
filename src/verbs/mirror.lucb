@@ -44,11 +44,11 @@ func cook_mirror(input: const VerbInput*, output: VerbOutput*) -> !:
             let point = (usize)topology.corners[corner]
             if reflected.items[point] >= 0: continue
             let position = builder.position((i32)point)
-            let distance = axis_value(position, axis) - level
+            let distance = position.coordinate(axis) - level
             if weld and math.abs(distance) <= tolerance:
                 reflected.items[point] = (i32)point
                 continue
-            reflected.items[point] = try builder.point(reflected_across(position, axis, level), (i32)point)
+            reflected.items[point] = try builder.point(position.reflected(axis, level), (i32)point)
     if faces == 0:
         output.warning = "The group has no faces to mirror; the input passes through"
         try builder.copy_faces(mesh, 0, topology.faces())
@@ -74,9 +74,3 @@ func cook_mirror(input: const VerbInput*, output: VerbOutput*) -> !:
     output.selection = try BitsBuilder.zeros(builder.face_count())
     output.selection.set_range(first, builder.face_count())
     output.selection_domain = Domain.face
-
-## `position` reflected across the plane where `axis` is `level`.
-func reflected_across(position: Vector3, axis: usize, level: f64) -> Vector3:
-    if axis == 0: return Vector3(2.0 * level - position.x, position.y, position.z)
-    if axis == 1: return Vector3(position.x, 2.0 * level - position.y, position.z)
-    return Vector3(position.x, position.y, 2.0 * level - position.z)

@@ -80,7 +80,7 @@ func mix(a: Vector3, b: Vector3, t: f64) -> Vector3:
 
 ## Loop's vertex weight for n neighbours.
 pub func loop_beta(n: f64) -> f64:
-    let c = 0.375 + 0.25 * math.cos(6.283185307179586 / n)
+    let c = 0.375 + 0.25 * math.cos(2.0 * math.pi / n)
     return (0.625 - c * c) / n
 
 func vertex_points(context: void*?, first: usize, end: usize):

@@ -30,7 +30,7 @@ struct Loops:
 struct PatchPass:
     let work: Bevel*
     let filling: bool
-    var failed: @u32
+    var errors: FirstError
 
 func patches(work: Bevel*, builder: TopologyBuilder*) -> !:
     let slots = work.vertex_points.count
@@ -38,9 +38,9 @@ func patches(work: Bevel*, builder: TopologyBuilder*) -> !:
         work.slot_points.items[slot] = 0
         work.slot_entries.items[slot] = 0
     try work.patch_skipped.fill(slots, 0)
-    var counting = PatchPass(work, false, 0)
+    var counting = PatchPass(work, false, FirstError())
     parallel.parallel_for(slots, 256, plan_patches, (void*)&counting)
-    if counting.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory finding bevel patches")
+    try counting.errors.check()
     var loops: u32 = 0
     var points: u32 = 0
     for slot in 0..<slots + 1:
@@ -52,9 +52,9 @@ func patches(work: Bevel*, builder: TopologyBuilder*) -> !:
         points += point_count
     try work.patch_sizes.fill((usize)loops, 0)
     try work.patch_points.fill((usize)points, -1)
-    var filling = PatchPass(work, true, 0)
+    var filling = PatchPass(work, true, FirstError())
     parallel.parallel_for(slots, 256, plan_patches, (void*)&filling)
-    if filling.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory finding bevel patches")
+    try filling.errors.check()
     for slot in 0..<slots: work.skipped += (usize)work.patch_skipped.items[slot]
     # Emit in vertex order; corners take the values a face gave each point.
     let mask: i64 = 0xFFFFFFFF
@@ -87,8 +87,7 @@ func plan_patches(context: void*?, first: usize, end: usize):
     defer scratch.close()
     for slot in first..<end:
         vertex_patches(pass, &scratch, slot) catch failure:
-            _ = failure
-            pass.failed.store(1, .relaxed)
+            pass.errors.record(failure.code, failure.message)
             return
 
 ## The directed edges among one vertex's points: along each face's run of

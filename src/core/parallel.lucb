@@ -18,6 +18,7 @@ import os
 import sync
 import thread
 import ownership
+import strings
 
 extern func getenv(name: c.str) -> c.str?
 
@@ -321,6 +322,26 @@ pub func parallel_for(count: usize, grain: usize, body: func(void*?, usize, usiz
     var chunks = Chunks(body = body, context = context, count = count, grain = size)
     run((count + size - 1) // size, run_chunk, (void*)&chunks)
 
+## The first error the items of a batch raise. Items catch their errors and
+## `record` them (later ones are dropped); the caller calls `check` once the
+## batch is done, which raises the recorded one.
+pub struct FirstError:
+    var failed: @bool
+    var code: ErrorCode?
+    ## The message, copied: the handler that caught it gives it back.
+    var room: u8[256]
+    var message: str
+
+    pub func record(code: ErrorCode, message: str):
+        if self.failed.swap(true, .acq_rel): return
+        self.code = code
+        self.message = strings.copy_into(self.room, message)
+
+    pub func check() -> !:
+        if not self.failed.load(.acquire): return
+        let code = self.code else return
+        error(code, self.message)
+
 struct Sum:
     var total: @usize
 
@@ -335,3 +356,22 @@ test "parallel_for covers the range once in chunks":
     parallel_for(100001, 1000, add_range, (void*)&sum)
     assert(sum.total.load(.acquire) == 100001 * 100000 // 2)
     parallel_for(0, 10, add_range, (void*)&sum)
+
+let odd_item: ErrorCode = ErrorCode.package(77)
+
+struct Failing:
+    var errors: FirstError
+
+func fail_odd(context: void*?, first: usize, end: usize):
+    let failing = (Failing*)(context else return)
+    for index in first..<end:
+        if index % 2 == 1: failing.errors.record(odd_item, "odd")
+
+test "FirstError raises one recorded error after the batch":
+    var failing = Failing(FirstError())
+    failing.errors.check() catch failure: assert(false)
+    parallel_for(1000, 10, fail_odd, (void*)&failing)
+    failing.errors.check() catch failure:
+        assert(failure.code == odd_item and failure.message == "odd")
+        return
+    assert(false)

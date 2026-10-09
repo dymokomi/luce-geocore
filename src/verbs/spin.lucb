@@ -88,12 +88,9 @@ func quad(builder: TopologyBuilder*, ids: i32[4], parent: i32) -> !:
 
 ## The part of `offset` across `axis` (its distance from the axis).
 func radial(offset: Vector3, axis: usize) -> Vector3:
-    if axis == 0: return Vector3(0.0, offset.y, offset.z)
-    if axis == 1: return Vector3(offset.x, 0.0, offset.z)
-    return Vector3(offset.x, offset.y, 0.0)
+    return offset.with_coordinate(axis, 0.0)
 
 ## `position` turned by `degrees` about `axis` through `center`.
 func turn(position: Vector3, center: Vector3, axis: usize, degrees: f64) -> Vector3:
-    let r = degrees * 0.017453292519943295
-    let rotation = Vector3(r if axis == 0 else 0.0, r if axis == 1 else 0.0, r if axis == 2 else 0.0)
+    let rotation = Vector3.along(axis, degrees * math.pi / 180.0)
     return Matrix4.compose(Vector3(), rotation, Vector3(1.0, 1.0, 1.0)).transform_point(position.subtract(center)).add(center)

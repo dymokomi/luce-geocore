@@ -30,16 +30,16 @@ extend GeometrySet:
         return (i64)(key >> 1)
 
     pub func has_detail(name: str) -> bool:
-        return self.detail.find(name, (i64)(u8)Domain.detail) >= 0
+        return self.detail.find(name, Domain.detail) >= 0
 
     ## A detail attribute's width (0 when it is missing).
     pub func detail_width(name: str) -> i64:
-        let index = self.detail.find(name, (i64)(u8)Domain.detail)
+        let index = self.detail.find(name, Domain.detail)
         if index < 0: return 0
         return (i64)self.detail.entry((usize)index).width
 
     pub func detail_value(name: str, component: i64 = 0) -> f64!:
-        let index = self.detail.find(name, (i64)(u8)Domain.detail)
+        let index = self.detail.find(name, Domain.detail)
         if index < 0: error(errors.invalid, "no such detail attribute")
         let entry = self.detail.entry((usize)index)
         if component < 0 or (usize)component >= entry.width: error(errors.invalid, "detail attribute component out of range")
@@ -63,7 +63,7 @@ extend GeometrySet:
     ## This set without detail attribute `name`.
     pub func without_detail(name: str) -> interop.Reference[GeometrySet]!:
         let storage = try self.storage()
-        let index = storage.detail.find(name, (i64)(u8)Domain.detail)
+        let index = storage.detail.find(name, Domain.detail)
         if index >= 0: storage.detail.remove((usize)index)
         return try adopt_set(storage)
 

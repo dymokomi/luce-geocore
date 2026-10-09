@@ -249,10 +249,11 @@ pub struct AttributeStore:
     pub func entry(index: usize) -> const Attribute*:
         return &self.entries.items[index]
 
-    pub func find(name: str, domain: i64) -> i64:
+    ## The index of attribute `name` on `domain`, or -1.
+    pub func find(name: str, domain: Domain) -> i64:
         for index in 0..<self.entries.count:
             let entry = &self.entries.items[index]
-            if (i64)(u8)entry.domain == domain and entry.name() == name:
+            if entry.domain == domain and entry.name() == name:
                 return (i64)index
         return -1
 
@@ -260,7 +261,7 @@ pub struct AttributeStore:
     ## domain. On failure the store is unchanged and the share released.
     pub func put(attribute: Attribute) -> !:
         var owned = attribute
-        let found = self.find(owned.name(), (i64)(u8)owned.domain)
+        let found = self.find(owned.name(), owned.domain)
         if found >= 0:
             self.entries.items[(usize)found].release()
             self.entries.items[(usize)found] = owned

@@ -35,9 +35,9 @@ pub struct MeshPrimitives:
         defer out.close()
         _ = try out.point(Vector3(0.0, radius * 2.0, 0.0))
         for row in 1..<rows:
-            let theta = (f64)row * 3.141592653589793 / (f64)rows
+            let theta = (f64)row * math.pi / (f64)rows
             for segment in 0..<segments:
-                let phi = (f64)segment * 6.283185307179586 / (f64)segments
+                let phi = (f64)segment * (2.0 * math.pi) / (f64)segments
                 _ = try out.point(Vector3(math.sin(theta) * math.cos(phi) * radius, (math.cos(theta) + 1.0) * radius, math.sin(theta) * math.sin(phi) * radius))
         let bottom = try out.point(Vector3())
         for segment in 0..<segments:
@@ -67,7 +67,7 @@ pub struct MeshPrimitives:
         defer out.close()
         for row in 0..<(i64)(1 if cone else 2):
             for segment in 0..<segments:
-                let angle = (f64)segment * 6.283185307179586 / (f64)segments
+                let angle = (f64)segment * (2.0 * math.pi) / (f64)segments
                 _ = try out.point(Vector3(math.cos(angle) * radius, (f64)row * height, math.sin(angle) * radius))
         if cone:
             _ = try out.point(Vector3(0.0, height, 0.0))
@@ -96,9 +96,9 @@ pub struct MeshPrimitives:
         var out = try MeshBuilder()
         defer out.close()
         for i in 0..<segments:
-            let phi = (f64)i * 6.283185307179586 / (f64)segments
+            let phi = (f64)i * (2.0 * math.pi) / (f64)segments
             for j in 0..<rows:
-                let theta = (f64)j * 6.283185307179586 / (f64)rows
+                let theta = (f64)j * (2.0 * math.pi) / (f64)rows
                 let r = radius + math.cos(theta) * tube
                 _ = try out.point(Vector3(r * math.cos(phi), math.sin(theta) * tube + tube, r * math.sin(phi)))
         for i in 0..<segments:

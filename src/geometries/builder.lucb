@@ -8,7 +8,11 @@ from geometries.polygon import Mesh, mesh_type
 from geometries.polygon_triangulation import triangulate, unit_or_zero
 import geometries.face_scratch
 from core.limits import max_points, max_faces, max_corners, check_mesh_size
+from core.growing import grown
 
+## A mesh built point by point and face by face, each element recording
+## its parent. Its arrays grow by doubling up to core.limits, so callers must
+## not keep spans across appends.
 pub struct MeshBuilder:
     pub var points: Vector3[]
     pub var sizes: i64[]
@@ -53,10 +57,9 @@ pub struct MeshBuilder:
         self.precise = precise
 
     pub func point(position: Vector3, parent: i64 = -1) -> i64!:
-        if self.np == self.points.length:
-            try grow[Vector3](&self.points, max_points)
-        if self.np == self.point_parents.length:
-            try grow[i64](&self.point_parents, max_points)
+        if self.np == max_points: try check_mesh_size(self.np + 1, 0, 0)
+        self.points = try grown[Vector3](self.points, self.np, self.np + 1)
+        self.point_parents = try grown[i64](self.point_parents, self.np, self.np + 1)
         let id = self.np
         self.points[id] = position
         self.point_parents[id] = parent
@@ -73,19 +76,17 @@ pub struct MeshBuilder:
             let end = start + ((usize)count - 2) * 3
             try self.reserve_display(end)
             for at in start..<end: self.display[at] = -1
-        if self.nf == self.sizes.length:
-            try grow[i64](&self.sizes, max_faces)
-        if self.nf == self.face_parents.length:
-            try grow[i64](&self.face_parents, max_faces)
+        if self.nf == max_faces: try check_mesh_size(0, self.nf + 1, 0)
+        self.sizes = try grown[i64](self.sizes, self.nf, self.nf + 1)
+        self.face_parents = try grown[i64](self.face_parents, self.nf, self.nf + 1)
         self.sizes[self.nf] = count
         self.face_parents[self.nf] = parent
         self.nf += 1
 
     pub func corner(point: i64, parent: i64 = -1) -> !:
-        if self.nc == self.corners.length:
-            try grow[i64](&self.corners, max_corners)
-        if self.nc == self.corner_parents.length:
-            try grow[i64](&self.corner_parents, max_corners)
+        if self.nc == max_corners: try check_mesh_size(0, 0, self.nc + 1)
+        self.corners = try grown[i64](self.corners, self.nc, self.nc + 1)
+        self.corner_parents = try grown[i64](self.corner_parents, self.nc, self.nc + 1)
         self.corners[self.nc] = point
         self.corner_parents[self.nc] = parent
         self.nc += 1
@@ -194,14 +195,3 @@ pub struct MeshBuilder:
         free(self.face_parents) in memory.heap
         free(self.corner_parents) in memory.heap
         if self.display.length > 0: free(self.display) in memory.heap
-
-## Geometric growth keeps small operations small; the hard budget bounds runaway
-## subdivision. Callers must not retain spans across point/face/corner appends.
-func grow[T](values: T[]*, limit: usize) -> !:
-    if values.length >= limit:
-        error(errors.limit, "mesh exceeds the 8M point/face or 32M corner safety budget")
-    let replacement = try new T[values.length * 2] --- in memory.heap
-    for index in 0..<values.length:
-        replacement[index] = (*values)[index]
-    free(*values) in memory.heap
-    *values = replacement

@@ -41,6 +41,30 @@ pub struct Vector3:
     pub func is_finite() -> bool:
         return math.is_finite(self.x) and math.is_finite(self.y) and math.is_finite(self.z)
 
+    ## `length` along axis `index` (0 X, 1 Y, 2 Z).
+    pub static func along(index: usize, length: f64 = 1.0) -> Vector3:
+        return Vector3(length if index == 0 else 0.0, length if index == 1 else 0.0, length if index == 2 else 0.0)
+
+    ## The coordinate along axis `index` (0 X, 1 Y, 2 Z).
+    pub func coordinate(index: usize) -> f64:
+        return self.x if index == 0 else (self.y if index == 1 else self.z)
+
+    ## This vector with its coordinate along axis `index` set to `value`.
+    pub func with_coordinate(index: usize, value: f64) -> Vector3:
+        return Vector3(value if index == 0 else self.x, value if index == 1 else self.y, value if index == 2 else self.z)
+
+    ## Reflected across the plane where axis `index`'s coordinate is `level`.
+    pub func reflected(index: usize, level: f64 = 0.0) -> Vector3:
+        return self.with_coordinate(index, 2.0 * level - self.coordinate(index))
+
+    ## Turned by `angle` radians about `axis`, right-handed (Rodrigues);
+    ## unchanged when `axis` has no direction.
+    pub func rotated_about(axis: Vector3, angle: f64) -> Vector3:
+        let pivot = axis.normalized() catch failure: return self
+        let c = math.cos(angle)
+        let s = math.sin(angle)
+        return self.multiply_scalar(c).add(pivot.cross(self).multiply_scalar(s)).add(pivot.multiply_scalar(pivot.dot(self) * (1.0 - c)))
+
     ## XYZ intrinsic Euler rotation; column vectors encounter Z, then Y, then X.
     pub func rotated(angles: Vector3) -> Vector3:
         let sx = math.sin(angles.x)

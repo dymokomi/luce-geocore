@@ -145,7 +145,7 @@ func concatenate_attributes(meshes: const (const Mesh*)[], matrices: const Matri
     for at in 0..<meshes.length:
         for index in 0..<meshes[at].attributes.count():
             let entry = meshes[at].attributes.entry(index)
-            let domain = (i64)(u8)entry.domain
+            let domain = entry.domain
             # Each (name, domain) once: from the first part that has it.
             var seen = false
             for earlier in 0..<at:

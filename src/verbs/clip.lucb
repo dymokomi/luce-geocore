@@ -39,7 +39,7 @@ func cook_clip(input: const VerbInput*, output: VerbOutput*) -> !:
     let mesh = input.mesh
     let topology = try Topology.of(mesh)
     # The plane: a unit normal and its distance from the origin.
-    var normal = Vector3(1.0 if axis == 0 else 0.0, 1.0 if axis == 1 else 0.0, 1.0 if axis == 2 else 0.0)
+    var normal = Vector3.along(axis)
     var level = offset
     if axis == 3:
         let point = Vector3(input.parms.at(4), input.parms.at(5), input.parms.at(6))
@@ -104,13 +104,9 @@ func cook_clip(input: const VerbInput*, output: VerbOutput*) -> !:
     if crossed == 0 and keep == 2:
         output.warning = "The plane crosses none of the group's faces; the input passes through"
 
-func axis_value(value: Vector3, axis: usize) -> f64:
-    return value.x if axis == 0 else (value.y if axis == 1 else value.z)
-
 ## The mean of the group's faces' points along `axis`.
 func centroid_axis(mesh: const Mesh*, topology: const Topology*, group: Bits, axis: usize) -> f64!:
-    let direction = Vector3(1.0 if axis == 0 else 0.0, 1.0 if axis == 1 else 0.0, 1.0 if axis == 2 else 0.0)
-    return try centroid_along(mesh, topology, group, direction)
+    return try centroid_along(mesh, topology, group, Vector3.along(axis))
 
 ## The mean of the group's faces' points along `direction`.
 func centroid_along(mesh: const Mesh*, topology: const Topology*, group: Bits, direction: Vector3) -> f64!:

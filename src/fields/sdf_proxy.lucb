@@ -55,7 +55,7 @@ func sphere_profile(radius: f64, stretch: f64) -> Profile:
     let rows: i64 = 8
     result.add(0.0, radius + stretch)
     for row in 1..<rows:
-        let theta = (f64)row * 3.141592653589793 / (f64)rows
+        let theta = (f64)row * math.pi / (f64)rows
         let r = math.sin(theta) * radius
         let y = math.cos(theta) * radius
         if row * 2 == rows and stretch > 0.0:
@@ -79,7 +79,7 @@ func torus_profile(major: f64, minor: f64) -> Profile:
     var result = Profile.empty()
     let rows: i64 = 8
     for row in 0..<rows:
-        let theta = (f64)row * 2.0 * 3.141592653589793 / (f64)rows
+        let theta = (f64)row * 2.0 * math.pi / (f64)rows
         result.add(major + math.cos(theta) * minor, math.sin(theta) * minor)
     return result
 
@@ -99,7 +99,7 @@ func lathe(out: MeshBuilder*, world: Matrix4, profile: Profile, closed: bool) ->
             next += 1
             continue
         for segment in 0..<proxy_segments:
-            let phi = (f64)segment * 2.0 * 3.141592653589793 / (f64)proxy_segments
+            let phi = (f64)segment * 2.0 * math.pi / (f64)proxy_segments
             _ = try out.point(world.transform_point(Vector3(math.cos(phi) * profile.radii[row], profile.heights[row], math.sin(phi) * profile.radii[row])))
         next += proxy_segments
     let bands = profile.count if closed else profile.count - 1

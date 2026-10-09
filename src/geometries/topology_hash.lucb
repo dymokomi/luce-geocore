@@ -5,13 +5,10 @@
 ## order, so the value depends on neither the thread count nor how the arrays
 ## are stored.
 import core.parallel
+from core.hash import mix
 
-## Mesh limits (8M faces, 32M corners) keep the chunks under 1024.
+## core.limits (8M faces, 32M corners) keep the chunks under 1024.
 let chunk: usize = 65536
-
-func mix(state: u64, value: u64) -> u64:
-    let scrambled = state ^ (value *% 0x9E3779B97F4A7C15)
-    return ((scrambled << 27) | (scrambled >> 37)) *% 5 +% 0x52DCE729
 
 ## Never zero: callers use zero for "no guard recorded". `offsets` has one
 ## entry per face and a final one; face f's size is offsets[f + 1] - offsets[f].

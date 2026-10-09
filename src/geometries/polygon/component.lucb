@@ -20,7 +20,7 @@ pub func mesh_unique_bytes(mesh: const Mesh*, ids: IdSet*) -> usize!:
 
 ## The face paths in use, interned into `out`.
 pub func mesh_paths(mesh: const Mesh*, out: TableBuilder*) -> !:
-    let index = mesh.attributes.find("path", (i64)(u8)Domain.face)
+    let index = mesh.attributes.find("path", Domain.face)
     if index < 0: return
     let entry = mesh.attributes.entry((usize)index)
     if entry.kind != DataType.text: return
@@ -46,7 +46,7 @@ pub func mesh_filtered(mesh: const Mesh*, filter: const PathFilter*, keep: bool)
     if filter.is_empty():
         selected.set_range(0, faces)
     else:
-        let index = mesh.attributes.find("path", (i64)(u8)Domain.face)
+        let index = mesh.attributes.find("path", Domain.face)
         if index >= 0 and mesh.attributes.entry((usize)index).kind == DataType.text:
             let entry = mesh.attributes.entry((usize)index)
             let table = entry.table.view()

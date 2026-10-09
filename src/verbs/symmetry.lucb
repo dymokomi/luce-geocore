@@ -5,12 +5,6 @@
 ## mirrors of its members. Soft weights fall off with the distance to the
 ## nearest group point, found through a PointHash of cells one radius wide.
 
-## Reflection across the plane normal to `axis` (1 X, 2 Y, 3 Z).
-pub func reflect(point: Vector3, axis: i64) -> Vector3:
-    if axis == 1: return Vector3(-point.x, point.y, point.z)
-    if axis == 2: return Vector3(point.x, -point.y, point.z)
-    return Vector3(point.x, point.y, -point.z)
-
 ## The tolerance mirrors are matched within: a ten-thousandth of the
 ## model's size.
 pub func mirror_tolerance(mesh: const Mesh*) -> f64:
@@ -64,7 +58,7 @@ pub func mirror_map(mesh: const Mesh*, domain: Domain, axis: i64, out: Growing[i
     defer grid.close()
     try out.fill(positions.count, -1)
     for at in 0..<positions.count:
-        out.items[at] = grid.nearest(positions.view(), reflect(positions.items[at], axis), tolerance)
+        out.items[at] = grid.nearest(positions.view(), positions.items[at].reflected((usize)(axis - 1)), tolerance)
 
 ## `bits` with the mirror of every member added.
 pub func symmetric(mesh: const Mesh*, bits: Bits, domain: Domain, axis: i64) -> BitsBuilder!:

@@ -130,14 +130,9 @@ func next_normal(normal: Vector3, last: Vector3, current: Vector3) -> Vector3:
     if axis.length() < 0.000000001: return normal
     return rotated(normal, axis, angle)
 
-## `value` turned by `angle` about the unit `axis` (Rodrigues).
-func rotated(value: Vector3, axis: Vector3, angle: f64) -> Vector3:
-    if axis.length() < 0.000000001: return value
-    let pivot = axis.normalized() catch failure: recover axis
-    let c = math.cos(angle)
-    let s = math.sin(angle)
-    let result = value.multiply_scalar(c).add(pivot.cross(value).multiply_scalar(s)).add(pivot.multiply_scalar(pivot.dot(value) * (1.0 - c)))
-    return result.normalized() catch failure: recover value
+## The unit `normal` turned by `angle` about `axis`, kept unit.
+func rotated(normal: Vector3, axis: Vector3, angle: f64) -> Vector3:
+    return normal.rotated_about(axis, angle).normalized() catch failure: recover normal
 
 ## The angle from `a` to `b` about `axis`, in 0..2π.
 func signed_angle(a: Vector3, b: Vector3, axis: Vector3) -> f64:

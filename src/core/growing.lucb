@@ -1,5 +1,19 @@
-## Heap arrays that keep their capacity across rebuilds of retained overlays.
+## Heap arrays that grow by doubling: `Growing`, which keeps its capacity
+## across rebuilds of retained overlays, and `grown` for parallel arrays that
+## share one count (builders).
 import memory
+
+## `values` (heap) with room for `needed`, its first `used` kept: itself
+## when it is large enough, else a doubled copy (at least `least`) that
+## replaces it, the old array freed.
+pub func grown[T](values: T[], used: usize, needed: usize, least: usize = 16) -> T[]!:
+    if needed <= values.length: return values
+    var capacity: usize = least if values.length < least else values.length
+    while capacity < needed: capacity *= 2
+    let replacement = try new T[capacity] --- in memory.heap
+    if used > 0: memory.copy(replacement, values, used)
+    if values.length > 0: free(values) in memory.heap
+    return replacement
 
 ## A heap array that grows by doubling and keeps its capacity across rebuilds.
 pub struct Growing[T]:
@@ -13,13 +27,7 @@ pub struct Growing[T]:
         self.count = 0
 
     pub func reserve(capacity: usize) -> !:
-        if capacity <= self.items.length: return
-        var size: usize = 64 if self.items.length == 0 else self.items.length
-        while size < capacity: size *= 2
-        let grown = try new T[size] --- in memory.heap
-        if self.count > 0: memory.copy(grown, self.items, self.count)
-        if self.items.length > 0: free(self.items) in memory.heap
-        self.items = grown
+        self.items = try grown[T](self.items, self.count, capacity, 64)
 
     pub func push(value: T) -> !:
         try self.reserve(self.count + 1)

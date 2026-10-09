@@ -41,7 +41,7 @@ pub func sketch_plane_of(set: const GeometrySet*) -> SketchPlane!:
 
 ## Detail attribute `name` as a vector, or `fallback`.
 func detail_vector(store: const AttributeStore*, name: str, fallback: Vector3) -> Vector3:
-    let index = store.find(name, (i64)(u8)Domain.detail)
+    let index = store.find(name, Domain.detail)
     if index < 0: return fallback
     let entry = store.entry((usize)index)
     if entry.width != 3: return fallback
@@ -143,8 +143,8 @@ pub struct SketchChoice:
             try bases.push(total)
             total += segment_count(curves, curve)
         try result.segments.fill(total, false)
-        let curve_tag = pick.find_attribute("curve", 0)
-        let segment_tag = pick.find_attribute("segment", 0)
+        let curve_tag = pick.attribute_on("curve", Domain.point)
+        let segment_tag = pick.attribute_on("segment", Domain.point)
         if curve_tag < 0 or (group_type != 1 and segment_tag < 0): error(errors.invalid, "the pick cloud does not match the sketch: undo the upstream change or clear this node's edits")
         if group_type == 1 and (usize)pick.point_count() != curves.point_count(): error(errors.invalid, "the pick cloud does not match the sketch's points")
         var found = try group_bits(pick, group, Domain.point)

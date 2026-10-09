@@ -253,6 +253,20 @@ pub enum GroupType as u8:
     faces = 3
     corners = 4
 
+    ## A Group Type menu's value (0..4).
+    pub static func of(value: i64) -> GroupType!:
+        if value < 0 or value > 4: error(errors.invalid, "a group type is 0 (guess), 1 (points), 2 (edges), 3 (faces) or 4 (corners)")
+        return GroupType((u8)value)
+
+    ## The mesh domain this names; `fallback` when it is a guess.
+    pub func domain(fallback: Domain) -> Domain:
+        match self:
+            .guess: return fallback
+            .points: return Domain.point
+            .edges: return Domain.edge
+            .faces: return Domain.face
+            _: return Domain.corner
+
 pub func domain_of(value: i64) -> Domain!:
     if value < 0 or value > 4 or value == 3: error(errors.invalid, "a selection is of points (0), corners (1), faces (2) or edges (4)")
     return Domain((u8)value)

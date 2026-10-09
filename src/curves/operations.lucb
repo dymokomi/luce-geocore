@@ -227,14 +227,7 @@ func fillet_corner(builder: CurvesBuilder*, before: Vector3, here: Vector3, afte
     let axis = from_center.cross(to_end)
     for step in 0..=(usize)segments:
         let t = (f64)step / (f64)segments
-        try builder.point(center.add(turned(from_center, axis, turn * t)), parent)
-
-## `value` turned by `angle` about `axis` (Rodrigues).
-func turned(value: Vector3, axis: Vector3, angle: f64) -> Vector3:
-    let pivot = axis.normalized() catch failure: return value
-    let c = math.cos(angle)
-    let s = math.sin(angle)
-    return value.multiply_scalar(c).add(pivot.cross(value).multiply_scalar(s)).add(pivot.multiply_scalar(pivot.dot(value) * (1.0 - c)))
+        try builder.point(center.add(from_center.rotated_about(axis, turn * t)), parent)
 
 ## Selected curves reversed: their points, handles and knots run backwards.
 pub func reversed(curves: const Curves*, selected: Bits) -> Curves*!:
@@ -255,14 +248,14 @@ pub func with_type(curves: const Curves*, selected: Bits, kind: i64) -> Curves*!
     if kind < 0 or kind > 3: error(errors.invalid, "curve type is 0 poly, 1 Bezier, 2 NURBS or 3 Catmull-Rom")
     var attributes = try curves.attributes.shared()
     errdefer attributes.close()
-    let found = attributes.find("curve_type", (i64)(u8)curve_domain)
+    let found = attributes.find("curve_type", curve_domain)
     if found < 0 or attributes.entry((usize)found).kind != DataType.int8 or attributes.entry((usize)found).storage != Storage.array:
         var types = try Attribute.create("curve_type", curve_domain, DataType.int8, 1, curves.curve_count())
         types.role = Role.index
         let values = attribute_ops.typed_mut[i8](types.data.span())
         for curve in 0..<values.length: values[curve] = (i8)(u8)curves.settings(curve).kind
         try attributes.put(types)
-    let index = (usize)attributes.find("curve_type", (i64)(u8)curve_domain)
+    let index = (usize)attributes.find("curve_type", curve_domain)
     let values = attribute_ops.typed_mut[i8](try attributes.writable(index))
     for curve in 0..<values.length:
         if selected.get(curve): values[curve] = (i8)kind

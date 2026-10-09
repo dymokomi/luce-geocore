@@ -43,14 +43,13 @@ func dispose_cache(context: void*):
 ## attributes excepted: a Move refreshes normals, the display makes its own,
 ## and hidden ones such as a verb's `.selection` are not carried).
 func plan_key(mesh: const Mesh*, settings: Settings) -> u64:
-    var key = (u64)mesh.topology_hash() *% 0x9E3779B97F4A7C15
-    key = (key ^ (u64)(u8)settings.scheme) *% 0x100000001B3
-    key = (key ^ (u64)settings.level) *% 0x100000001B3
-    key = (key ^ (1 if settings.corners else 0)) *% 0x100000001B3
+    var key = hash.mix((u64)mesh.topology_hash(), (u64)(u8)settings.scheme)
+    key = hash.mix(key, (u64)settings.level)
+    key = hash.mix(key, 1 if settings.corners else 0)
     for index in 0..<mesh.attribute_count():
         let entry = mesh.attribute_entry(index) catch failure: continue
         if entry.role == Role.normal or entry.name().bytes[0] == 46: continue
-        key = (key ^ entry.data.id()) *% 0x100000001B3
+        key = hash.mix(key, entry.data.id())
     return key
 
 ## The display mesh of `mesh` (another owner's share), or none when it is
@@ -175,7 +174,7 @@ func placed_display(base: const Mesh*, limit: const Vector3[], normals: const Ve
     var attribute = try Attribute.create("N", Domain.point, DataType.float32, 3, count)
     let values = typed_mut[f32](attribute.data.span())
     if let old = previous:
-        let index = old.find_attribute("N", (i64)(u8)Domain.point)
+        let index = old.attribute_on("N", Domain.point)
         if index >= 0:
             let entry = old.attribute_entry(index) catch failure:
                 attribute.release()
@@ -208,6 +207,6 @@ pub struct Subdivision:
 
     ## The cage face a display face came from (-1 when it has no cage).
     pub static func cage_face(display: interop.Reference[Mesh], face: i64) -> i64!:
-        let index = (try display.get()).find_attribute(".cage_face", (i64)(u8)Domain.face)
+        let index = (try display.get()).attribute_on(".cage_face", Domain.face)
         if index < 0: return -1
         return (i64)(try (try display.get()).attribute_value(index, face))

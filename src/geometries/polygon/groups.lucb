@@ -74,7 +74,7 @@ extend Mesh:
 
     ## Members of group `name` on `domain`, or -1 when there is no such group.
     pub func group_size(name: str, domain: i64) -> i64:
-        let index = self.attributes.find(name, domain)
+        let index = self.find_attribute(name, domain)
         if index < 0 or not self.attributes.entry((usize)index).is_group(): return -1
         let entry = self.attributes.entry((usize)index)
         return (i64)Bits.of_bytes(entry.data.view(), entry.elements).population()

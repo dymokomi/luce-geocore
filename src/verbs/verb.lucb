@@ -10,6 +10,7 @@ from luce_std import math
 import memory
 import errors
 import core.parallel
+from core.parallel import FirstError
 import core.attribute_ops
 from core.growing import Growing
 from core.shared import Column
@@ -23,19 +24,8 @@ from geometries.polygon import with_group_bits, Mesh, mesh_share, mesh_dispose, 
 from geometries.polygon_triangulation import area_normal
 import geometries.face_scratch
 from geometries.point_hash import PointHash
-from groups import guess_domain, GroupResult, GroupReport, group_bits, converted, Topology, Selection, adopt_selection, strict_conversion, selection_bits
+from groups import GroupType, is_blank, guess_domain, GroupResult, GroupReport, group_bits, converted, Topology, Selection, adopt_selection, strict_conversion, selection_bits
 from core.limits import max_points, check_mesh_size
-
-## What a Group Type menu names: 0 guess (from the expression, else the
-## verb's own domain), then points, edges, faces, corners.
-pub func group_domain(group_type: i64, fallback: Domain) -> Domain!:
-    match group_type:
-        0: return fallback
-        1: return Domain.point
-        2: return Domain.edge
-        3: return Domain.face
-        4: return Domain.corner
-        _: error(errors.invalid, "unknown group type")
 
 pub enum ParmKind as u8:
     number = 0
@@ -199,15 +189,16 @@ pub struct VerbRun:
 ## selection is the group carried through the verb (a new element is
 ## selected when all its parents were) instead of what the verb made.
 pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false) -> VerbRun!:
-    let expression = group if not blank(group) else "*"
-    var domain = try group_domain(group_type, verb.domain)
-    if group_type == 0: domain = try guess_domain(mesh, expression, verb.domain)
+    let expression = group if not is_blank(group) else "*"
+    let named = try GroupType.of(group_type)
+    var domain = named.domain(verb.domain)
+    if named == GroupType.guess: domain = try guess_domain(mesh, expression, verb.domain)
     let target = domain if domain == verb.also and verb.also != Domain.detail else verb.domain
     if not verb.converts and domain != target: error(errors.invalid, "this operation works on another component type")
     if symmetry < 0 or symmetry > 3: error(errors.invalid, "symmetry is 0 (none), 1 (X), 2 (Y) or 3 (Z)")
     var result = try group_bits(mesh, expression, domain)
     defer result.bits.release()
-    var chosen = try BitsBuilder.copy_of(Bits(result.bits.view(), (usize)(try mesh.domain_count((i64)(u8)domain))))
+    var chosen = try BitsBuilder.copy_of(Bits(result.bits.view(), try mesh.domain_size(domain)))
     defer chosen.close()
     if symmetry > 0:
         var mirrored = try symmetric(mesh, chosen.view(), domain, symmetry)
@@ -245,7 +236,7 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
     var selection = output.selection.finish()
     var selection_domain = output.selection_domain
     if keep:
-        let carried_index = product.find_attribute(".carried", (i64)(u8)domain)
+        let carried_index = product.attribute_on(".carried", domain)
         if carried_index >= 0:
             let entry = product.attribute_entry(carried_index) catch failure:
                 mesh_dispose(product)
@@ -263,10 +254,10 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
         mesh_dispose(product)
         selection.release()
         error(failure.code, failure.message)
-    let count = (usize)(product.domain_count((i64)(u8)selection_domain) catch failure:
+    let count = product.domain_size(selection_domain) catch failure:
         mesh_dispose(product)
         selection.release()
-        error(failure.code, failure.message))
+        error(failure.code, failure.message)
     return VerbRun(product, selection, count, selection_domain, output.warning, result.report.misses)
 
 ## The kernel's output as a mesh: moved positions share everything else, a
@@ -318,18 +309,13 @@ func select_edges(product: const Mesh*, output: VerbOutput*) -> !:
 func mark_selection(mesh: Mesh*, bits: Column[u64]*, domain: Domain) -> !:
     let domains: Domain[4] = [Domain.point, Domain.corner, Domain.face, Domain.edge]
     for other in domains: remove_attribute(mesh, ".selection", other)
-    let count = (usize)(try mesh.domain_count((i64)(u8)domain))
+    let count = try mesh.domain_size(domain)
     if bits.count() == 0:
         var empty = try BitsBuilder.zeros(count)
         bits.release()
         *bits = empty.finish()
     if bits.count() != (count + 63) // 64: trap("a verb's selection does not cover its domain")
     try put_attribute(mesh, try Attribute.group_of(".selection", domain, count, bits.view()))
-
-func blank(text: str) -> bool:
-    for byte in text.bytes:
-        if byte != 32 and byte != 9 and byte != 10: return false
-    return true
 
 ## How many faces have no area (a zero normal).
 func degenerate_faces(mesh: const Mesh*) -> usize:

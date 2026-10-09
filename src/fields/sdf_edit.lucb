@@ -131,7 +131,7 @@ struct ChosenPrimitives:
         var result = ChosenPrimitives(Growing[bool](), Vector3())
         errdefer result.close()
         try result.marks.fill(count, false)
-        let tag = pick.find_attribute("sdf_prim", 2)
+        let tag = pick.attribute_on("sdf_prim", Domain.face)
         if tag < 0: error(errors.invalid, "the pick mesh has no SDF primitive tags")
         var found = try group_bits(pick, group, Domain.face)
         defer found.bits.release()

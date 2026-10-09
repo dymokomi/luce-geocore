@@ -69,13 +69,13 @@ func cage_sharpness(mesh: const Mesh*, pinned: bool, plan: Plan*) -> !:
     let topology = try Topology.of(mesh)
     var edges = try Column[f32].filled(topology.edges(), 0.0)
     errdefer edges.release()
-    let crease = mesh.find_attribute("crease", (i64)(u8)Domain.edge)
+    let crease = mesh.attribute_on("crease", Domain.edge)
     if crease >= 0:
         let values = edges.span()
         for edge in 0..<values.length: values[edge] = (f32)math.max(0.0, try mesh.attribute_value(crease, (i64)edge))
     var points = try Column[f32].filled(topology.points, 0.0)
     errdefer points.release()
-    let corner = mesh.find_attribute("corner_sharpness", (i64)(u8)Domain.point)
+    let corner = mesh.attribute_on("corner_sharpness", Domain.point)
     let values = points.span()
     if corner >= 0:
         for point in 0..<values.length: values[point] = (f32)math.max(0.0, try mesh.attribute_value(corner, (i64)point))

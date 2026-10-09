@@ -66,7 +66,7 @@ pub struct Instances:
 
     ## Row `index`'s text attribute `name` ("" without one).
     pub func row_text(name: str, index: usize) -> str:
-        let found = self.attributes.find(name, (i64)(u8)Domain.point)
+        let found = self.attributes.find(name, Domain.point)
         if found < 0 or index >= self.size: return ""
         return self.attributes.entry((usize)found).text_at(index)
 
@@ -154,7 +154,7 @@ pub func new_instances() -> Instances*!:
 func joined_store(first: const AttributeStore*, first_rows: usize, second: const AttributeStore*?, second_rows: usize) -> AttributeStore!:
     var result = AttributeStore()
     errdefer result.close()
-    let point = (i64)(u8)Domain.point
+    let point = Domain.point
     for pass in 0..<(usize)2:
         var from_store: const AttributeStore*? = none
         if pass == 0: from_store = first

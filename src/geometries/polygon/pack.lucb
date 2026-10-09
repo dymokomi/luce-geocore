@@ -121,10 +121,10 @@ extend Mesh:
         return 1 if (u8)entry.storage == 1 else entry.elements
 
     pub func curvature_source() -> CurvatureSource!:
-        let k1 = self.find_attribute("curvature.k1", 1)
-        let k2 = self.find_attribute("curvature.k2", 1)
+        let k1 = self.attribute_on("curvature.k1", Domain.corner)
+        let k2 = self.attribute_on("curvature.k2", Domain.corner)
         if k1 >= 0 and k2 >= 0:
-            let key = (try self.attribute_id(k1)) *% 0x9E3779B97F4A7C15 ^ (try self.attribute_id(k2))
+            let key = mix(try self.attribute_id(k1), try self.attribute_id(k2))
             return CurvatureSource(1, key, k1, k2)
         return CurvatureSource(0, try self.curvature_id(), -1, -1)
 

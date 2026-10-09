@@ -23,9 +23,7 @@ pub func line_verb() -> SetVerb:
 func cook_line(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     let p = input.parms
     let origin = Vector3(p.at(0), p.at(1), p.at(2))
-    let axis = (i64)p.at(3)
-    let length = p.at(4)
-    let end = origin.add(Vector3(length if axis == 0 else 0.0, length if axis == 1 else 0.0, length if axis == 2 else 0.0))
+    let end = origin.add(Vector3.along((usize)p.at(3), p.at(4)))
     try only_curves(try curves.line_curves(origin, end, (i64)p.at(5), (i64)p.at(6), 12), output)
 
 let circle_parms: ParmSpec[5] = [

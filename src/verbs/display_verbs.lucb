@@ -38,7 +38,7 @@ func cook_crease(input: const VerbInput*, output: VerbOutput*) -> !:
     let edges = (usize)(try mesh.edge_count())
     var attribute = try Attribute.create("crease", Domain.edge, DataType.float32, 1, edges)
     let values = attribute_ops.typed_mut[f32](attribute.data.span())
-    let existing = mesh.find_attribute("crease", (i64)(u8)Domain.edge)
+    let existing = mesh.attribute_on("crease", Domain.edge)
     for edge in 0..<edges:
         values[edge] = value if input.group.get(edge) else (f32)(0.0 if existing < 0 else (mesh.attribute_value(existing, (i64)edge) catch failure: recover 0.0))
     let made = mesh_share(mesh) catch failure:

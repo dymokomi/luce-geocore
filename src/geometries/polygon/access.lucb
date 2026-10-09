@@ -1,6 +1,10 @@
 ## Element access, per-corner vertices, lazy topology caches and
 ## spatial queries.
 
+## Domains in the order a corner's color, uv and N are looked up, later
+## ones winning: detail, face, point, corner (Houdini's precedence).
+let lookup_order: usize[4] = [3, 2, 0, 1]
+
 extend Mesh:
     pub static func cube(size: f64 = 2.0) -> interop.Reference[Mesh]!:
         if not (size > 0.0 and size <= 100000.0):
@@ -46,7 +50,8 @@ extend Mesh:
             error(errors.invalid, "unknown attribute domain")
         return (i64)(try self.domain_size(Domain((u8)domain)))
 
-    func domain_size(domain: Domain) -> usize!:
+    ## `domain_count` for Base callers.
+    pub func domain_size(domain: Domain) -> usize!:
         match domain:
             .point: return self.positions.count()
             .corner: return self.corners.count()
@@ -148,10 +153,8 @@ extend Mesh:
             return errors.failure[Vertex](failure.code, failure.message)
         var u = 1.0 if at == 1 or at == 2 else 0.0
         var v = 1.0 if at >= 2 else 0.0
-        # Houdini-style corner > point > primitive > detail lookup precedence.
-        let domains: usize[4] = [3, 2, 0, 1]
-        for domain in domains:
-            let element = 0 if domain == 3 else (face if domain == 2 else (point if domain == 0 else (usize)index))
+        for domain in lookup_order:
+            let element = self.element_of(domain, (usize)index, face)
             let cd = self.attributes.colors[domain]
             if cd >= 0 and self.attributes.entry((usize)cd).width >= 3:
                 let entry = self.attributes.entry((usize)cd)
@@ -176,17 +179,24 @@ extend Mesh:
         if not self.has_normals():
             let smooth = try self.smooth_normals()
             return smooth[corner if self.shading.corner_domain() else (usize)self.corners.view()[corner]].vector()
-        let domains: usize[4] = [3, 2, 0, 1]
-        for domain in domains:
+        for domain in lookup_order:
             let ni = self.attributes.normals[domain]
             if ni < 0 or self.attributes.entry((usize)ni).width != 3:
                 continue
-            let element = 0 if domain == 3 else (face if domain == 2 else ((usize)self.corners.view()[corner] if domain == 0 else corner))
+            let element = self.element_of(domain, corner, face)
             let entry = self.attributes.entry((usize)ni)
             let provided = Vector3(entry.number(element, 0), entry.number(element, 1), entry.number(element, 2))
             if provided.length() > 0.000000001:
                 normal = provided.multiply_scalar(1.0 / provided.length())
         return normal if normal.length() > 0.0 else self.normals.view()[face].vector()
+
+    ## The element of `domain` that corner `corner` of `face` reads: the
+    ## detail's one, the face, the corner's point or the corner itself.
+    func element_of(domain: usize, corner: usize, face: usize) -> usize:
+        if domain == 3: return 0
+        if domain == 2: return face
+        if domain == 0: return (usize)self.corners.view()[corner]
+        return corner
 
     ## Whether an authored N (three components) exists on any domain.
     func has_normals() -> bool:

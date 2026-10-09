@@ -10,19 +10,19 @@
 ## empty text selects everything.
 pub func curve_group_bits(curves: const Curves*, text: str, target: Domain, report: GroupReport*) -> BitsBuilder!:
     if target != Domain.point and target != curve_domain: error(errors.invalid, "curve groups are point or primitive groups")
-    var blank = true
-    for byte in text.bytes: blank = blank and (byte == 32 or byte == 9 or byte == 10)
     let size = curves.point_count() if target == Domain.point else curves.curve_count()
-    if blank: return try BitsBuilder.ones(size)
+    if is_blank(text): return try BitsBuilder.ones(size)
     var program = try GroupProgram.parse(text)
     defer program.close()
     var run = CurveEvaluation(&program, curves, report)
     return try run.terms(program.top_first, program.top_count, target)
 
 ## The domain an expression's first name or attribute lives on, else
-## `fallback` (Houdini's "guess from group").
-pub func guess_curve_domain(curves: const Curves*, text: str, fallback: Domain) -> Domain:
-    var program = GroupProgram.parse(text) catch failure: return fallback
+## `fallback` (Houdini's "guess from group"). Blank text guesses nothing;
+## text that does not parse is an error, as on meshes.
+pub func guess_curve_domain(curves: const Curves*, text: str, fallback: Domain) -> Domain!:
+    if is_blank(text): return fallback
+    var program = try GroupProgram.parse(text)
     defer program.close()
     for index in program.top_first..<program.top_first + program.top_count:
         let term = &program.terms.items[(usize)index]
@@ -171,7 +171,7 @@ struct CurveEvaluation:
             elif kind == 3:
                 let attribute = entry else trap("attribute")
                 value = attribute.number(0 if attribute.storage == Storage.single or attribute.domain == Domain.detail else element, component)
-            if compared(term.compare, values, value): bits.set(element)
+            if term.compare.passes(values, value): bits.set(element)
         return bits
 
     func call(term: const Term*, target: Domain) -> BitsBuilder!:
@@ -199,21 +199,6 @@ struct CurveEvaluation:
                         walked = try convert_curve_bits(self.curves, whole.view(), curve_domain, Domain.point)
                 if target == Domain.point: return try BitsBuilder.copy_of(walked.view())
                 return try convert_curve_bits(self.curves, walked.view(), Domain.point, target)
-
-func compared(compare: Compare, values: const f64[], value: f64) -> bool:
-    let pairs = values.length // 2
-    match compare:
-        .exists: return value != 0.0
-        .equal, .not_equal:
-            var hit = false
-            for at in 0..<pairs:
-                hit = hit or (value >= values[at * 2] and value <= values[at * 2 + 1])
-            return hit if compare == Compare.equal else not hit
-        .less: return value < values[0]
-        .greater: return value > values[0]
-        .less_equal: return value <= values[0]
-        .greater_equal: return value >= values[0]
-        _: return ((i64)value & (i64)values[0]) != 0
 
 ## Point bits as curve bits (a curve when all its points are members, or any
 ## when not `all`), or curve bits as the bits of their points.

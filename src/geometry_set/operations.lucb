@@ -56,7 +56,7 @@ pub func set_joined(first: const GeometrySet*, second: const GeometrySet*) -> Ge
     errdefer dispose_set(result)
     for index in 0..<second.detail.count():
         let entry = second.detail.entry(index)
-        if result.detail.find(entry.name(), (i64)(u8)Domain.detail) < 0: try result.detail.put(entry.share())
+        if result.detail.find(entry.name(), Domain.detail) < 0: try result.detail.put(entry.share())
     for entry in second.entries.view():
         if let mine = first.find(entry.kind):
             let joined = entry.kind.joined
