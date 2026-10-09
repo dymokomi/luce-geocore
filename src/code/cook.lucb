@@ -52,6 +52,7 @@ pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over
     try state.edits.prepare(lanes, old_points, old_prims)
     prepare_sources(&state, &compiled.program)
     state.ramps = try gather_ramps(compiled, names, values, header, body)
+    try prepare_named(&state, compiled, header, body)
     try cook.bind_inputs(&layout)
     try cook.bind_outputs(&layout)
     try cook.bind_uniforms(&settings)

@@ -387,6 +387,131 @@ pub struct Geometry:
     ## The box around the points.
     pub func bounds() -> Bounds:
         return Bounds(min = [0.0, 0.0, 0.0, 0.0], max = [0.0, 0.0, 0.0, 0.0], center = [0.0, 0.0, 0.0, 0.0], size = [0.0, 0.0, 0.0, 0.0])
+    ## The primitive of vertex `vertex` (VEX `vertexprim`); vertices are face corners,
+    ## numbered linearly (VEX's linear vertex numbers).
+    pub func vertex_prim(vertex: i32) -> i32:
+        return vertex
+    ## The point of vertex `vertex` (VEX `vertexpoint`).
+    pub func vertex_point(vertex: i32) -> i32:
+        return vertex
+    ## The next and previous vertex using the same point, -1 past the ends (VEX
+    ## `vertexnext`, `vertexprev`).
+    pub func vertex_next(vertex: i32) -> i32:
+        return vertex
+    pub func vertex_prev(vertex: i32) -> i32:
+        return vertex
+    ## How many vertices primitive `prim` has, and its `at`-th (VEX `primvertexcount`,
+    ## `primvertex`).
+    pub func prim_vertex_count(prim: i32) -> i32:
+        return prim
+    pub func prim_vertex(prim: i32, at: i32) -> i32:
+        return prim + at
+    ## The vertices using point `point`, ascending: how many, and the `at`-th (VEX
+    ## `pointvertices`).
+    pub func point_vertex_count(point: i32) -> i32:
+        return point
+    pub func point_vertex(point: i32, at: i32) -> i32:
+        return point + at
+    ## Half-edges are named by the vertex they leave and run to the next vertex of their
+    ## primitive. The next and previous half-edge around the primitive (VEX `hedge_next`,
+    ## `hedge_prev`).
+    pub func hedge_next(hedge: i32) -> i32:
+        return hedge
+    pub func hedge_prev(hedge: i32) -> i32:
+        return hedge
+    ## A half-edge's source and destination points (VEX `hedge_srcpoint`, `hedge_dstpoint`).
+    pub func hedge_src_point(hedge: i32) -> i32:
+        return hedge
+    pub func hedge_dst_point(hedge: i32) -> i32:
+        return hedge
+    ## A half-edge's primitive (VEX `hedge_prim`).
+    pub func hedge_prim(hedge: i32) -> i32:
+        return hedge
+    ## How many half-edges lie on the same edge, this one included, either direction (VEX
+    ## `hedge_equivcount`): 1 on a boundary, 2 inside a manifold.
+    pub func hedge_equiv_count(hedge: i32) -> i32:
+        return hedge
+    ## A half-edge from point `src` to point `dst`, or -1 (VEX `pointhedge`).
+    pub func point_hedge(src: i32, dst: i32) -> i32:
+        return src + dst
+    ## Primitive `prim`'s first half-edge (VEX `primhedge`).
+    pub func prim_hedge(prim: i32) -> i32:
+        return prim
+    ## The primitives sharing an edge with `prim`, ascending: how many, and the `at`-th
+    ## (VEX `polyneighbours`).
+    pub func poly_neighbor_count(prim: i32) -> i32:
+        return prim
+    pub func poly_neighbor(prim: i32, at: i32) -> i32:
+        return prim + at
+    ## How many points group pattern `group` holds (VEX `npointsgroup`; any group
+    ## expression), and the same for primitives (VEX `nprimsgroup`). The pattern is a
+    ## literal, expanded once per cook.
+    pub func npointsgroup(group: str) -> i32:
+        _ = group
+        return 0
+    pub func nprimsgroup(group: str) -> i32:
+        _ = group
+        return 0
+    ## Pattern `pattern`'s points, ascending: how many, and the `at`-th (VEX
+    ## `expandpointgroup` as a count and an index); the primitive forms likewise.
+    pub func expandpointgroup_count(pattern: str) -> i32:
+        _ = pattern
+        return 0
+    pub func expandpointgroup(pattern: str, at: i32) -> i32:
+        _ = pattern
+        return at
+    pub func expandprimgroup_count(pattern: str) -> i32:
+        _ = pattern
+        return 0
+    pub func expandprimgroup(pattern: str, at: i32) -> i32:
+        _ = pattern
+        return at
+    ## The box's lowest corner, highest corner, center and size (VEX `getbbox_min` ...).
+    pub func getbbox_min() -> f32[4]:
+        return [0.0, 0.0, 0.0, 0.0]
+    pub func getbbox_max() -> f32[4]:
+        return [0.0, 0.0, 0.0, 0.0]
+    pub func getbbox_center() -> f32[4]:
+        return [0.0, 0.0, 0.0, 0.0]
+    pub func getbbox_size() -> f32[4]:
+        return [0.0, 0.0, 0.0, 0.0]
+    ## `position` as a fraction of the box along each axis, 0 at its lowest corner and 1 at
+    ## its highest; 0.5 along an axis without extent (VEX `relbbox`, `relpointbbox`: the
+    ## same box for polygons).
+    pub func relbbox(position: f32[4]) -> f32[4]:
+        return position
+    pub func relpointbbox(position: f32[4]) -> f32[4]:
+        return position
+    ## The closest surface position to `position` (VEX `minpos`).
+    pub func minpos(position: f32[4]) -> f32[4]:
+        return position
+    ## Point `point`'s normal: its primitives' area vectors summed, unit length (VEX
+    ## `computenormal` for a point); zero when they have no area.
+    pub func computenormal(point: i32) -> f32[4]:
+        _ = point
+        return [0.0, 0.0, 0.0, 0.0]
+    ## The length along primitive `prim` between parametric `u1` and `u2` in 0..1 (VEX
+    ## `primarclen`): a polygon's u runs once around it, each edge an equal share.
+    pub func primarclen(prim: i32, u1: f32, u2: f32) -> f32:
+        _ = prim
+        return u2 - u1
+    ## The length of primitive `prim` as an open curve through its vertices (VEX
+    ## `curvearclen`).
+    pub func curvearclen(prim: i32) -> f32:
+        _ = prim
+        return 0.0
+    ## Point `point`'s distance along the surface's edges from the nearest point of group
+    ## pattern `group`, -1 where none reaches (VEX `surfacedist`). Each pattern's field is
+    ## computed once per cook (Dijkstra over the edges).
+    pub func surfacedist(group: str, point: i32) -> f32:
+        _ = group
+        return (f32)point
+    ## The generalized winding number at `position`: 1 inside a closed outward-facing
+    ## mesh, 0 outside, between at holes (VEX `windingnumber`; fast winding numbers,
+    ## within about 0.2% of the exact value).
+    pub func windingnumber(position: f32[4]) -> f32:
+        _ = position
+        return 0.0
 
 ## The node: the timeline, its spare parameters, the detail attributes, the inputs, and
 ## edits queued for after the run (new points and primitives, attribute sets, removals:

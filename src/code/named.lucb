@@ -1,0 +1,220 @@
+# What a snippet names by a literal group pattern, built once per cook before the run:
+# group expansions (`npointsgroup`, `expandpointgroup` and the primitive forms) and
+# surface-distance fields (`surfacedist`). A pattern that does not parse fails the cook at
+# the line naming it.
+
+## The members of group pattern `pattern` on `domain`, ascending.
+struct GroupSet:
+    let pattern: str
+    let domain: Domain
+    var members: i32[]
+
+    func close():
+        if self.members.length > 0: free(self.members) in memory.heap
+
+## Every point's distance along the surface's edges from the nearest member of point
+## group `pattern` (-1 where none reaches).
+struct SurfaceField:
+    let pattern: str
+    var distances: f32[]
+
+    func close():
+        if self.distances.length > 0: free(self.distances) in memory.heap
+
+let group_names: str[6] = ["npointsgroup", "expandpointgroup_count", "expandpointgroup", "nprimsgroup", "expandprimgroup_count", "expandprimgroup"]
+## The group reads' domains (0 points, 1 primitives) and whether they take a position.
+let group_domains: i32[6] = [0, 0, 0, 1, 1, 1]
+let group_positions: bool[6] = [false, false, true, false, false, true]
+
+## Register the group and surface-distance reads.
+func bind_named(host: Host*) -> !:
+    for (at, name) in group_names.indexed():
+        if group_positions[at]:
+            try host.builtin("Geometry", name, engine.Builtin.of(name, [Kind.i64, Kind.i32], [Kind.i32], group_lanes, (void*)&group_codes[at]))
+        else:
+            try host.builtin("Geometry", name, engine.Builtin.of(name, [Kind.i64], [Kind.i32], group_lanes, (void*)&group_codes[at]))
+    try host.builtin("Geometry", "surfacedist", engine.Builtin.of("surfacedist", [Kind.i64, Kind.i32], [Kind.f32], surfacedist_lanes))
+
+let group_codes: i32[6] = [0, 1, 2, 3, 4, 5]
+
+## Build, on the cook's thread, the winding tree and every group expansion and distance
+## field `compiled` names, for each input its calls may read.
+func prepare_named(state: CookState*, compiled: const Compiled*, header: str, body: str) -> !:
+    let program = &compiled.program
+    for handle: i64 in 0..<2:
+        let source = &state.first if handle == 0 else &state.second
+        if let mesh = source.mesh:
+            if program.may_pass("windingnumber", 0, handle) and not source.winding.built:
+                try source.winding.build(mesh)
+    for site in 0..<program.call_count():
+        let name = program.call_name(site)
+        var group_at: usize? = none
+        for (at, known) in group_names.indexed():
+            if known == name: group_at = at
+        let field = name == "surfacedist"
+        if group_at == none and not field: continue
+        let pattern = program.call_text(site, 0)
+        for handle: i64 in 0..<2:
+            let source = &state.first if handle == 0 else &state.second
+            let mesh = source.mesh else continue
+            if not program.may_pass(name, 0, handle): continue
+            if let at = group_at:
+                let domain = Domain.point if group_domains[at] == 0 else Domain.face
+                if find_group(source, pattern, domain) != none: continue
+                let members = group_members(mesh, pattern, domain) catch failure:
+                    try fail_at(compiled, site, failure.message, header, body)
+                    recover no_members()
+                try source.group_sets.append(GroupSet(pattern = pattern, domain = domain, members = members))
+            else:
+                if find_field(source, pattern) != none: continue
+                let members = group_members(mesh, pattern, Domain.point) catch failure:
+                    try fail_at(compiled, site, failure.message, header, body)
+                    recover no_members()
+                defer:
+                    if members.length > 0: free(members) in memory.heap
+                if not source.with_topology():
+                    error(errors.invalid, "the surface's edges could not be found")
+                let topology = source.topology else continue
+                try source.fields.append(SurfaceField(pattern = pattern, distances = try geodesic(mesh, &topology, members)))
+
+func no_members() -> i32[]:
+    var none_given: i32[]
+    return none_given
+
+## The members of `pattern` on `domain`, ascending, on the heap.
+func group_members(mesh: const Mesh*, pattern: str, domain: Domain) -> i32[]!:
+    var result = try groups.group_bits(mesh, pattern, domain)
+    defer result.bits.release()
+    let chosen = Bits(result.bits.view(), try mesh.domain_size(domain))
+    let count = chosen.population()
+    let indices = try new i64[count] --- in memory.heap
+    defer free(indices) in memory.heap
+    chosen.indices(indices)
+    let members = try new i32[count] --- in memory.heap
+    for (at, index) in indices.indexed(): members[at] = (i32)index
+    return members
+
+func find_group(source: const Source*, pattern: str, domain: Domain) -> const GroupSet*?:
+    let sets = source.group_sets.view()
+    for at in 0..<sets.length:
+        if sets[at].domain == domain and sets[at].pattern == pattern: return &sets[at]
+    return none
+
+func find_field(source: const Source*, pattern: str) -> const SurfaceField*?:
+    let fields = source.fields.view()
+    for at in 0..<fields.length:
+        if fields[at].pattern == pattern: return &fields[at]
+    return none
+
+func group_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let code = (usize)*(const i32*)context
+    let domain = Domain.point if group_domains[code] == 0 else Domain.face
+    let pattern = call.text(0)
+    let out = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        out[lane] = 0
+        let source = source_or_fail(state, call, lane) else continue
+        if source.mesh == none: continue
+        let found = find_group(source, pattern, domain)
+        if found == none:
+            call.fail(lane)
+            continue
+        let set = found else continue
+        if not group_positions[code]:
+            out[lane] = (i32)set.members.length
+            continue
+        let at = element_or_fail(call, lane, call.i32_argument(1)[lane], set.members.length) else continue
+        out[lane] = set.members[at]
+
+func surfacedist_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let pattern = call.text(0)
+    let points = call.i32_argument(1)
+    let out = call.f32_result(0)
+    for lane in 0..<call.lanes:
+        out[lane] = -1.0
+        let source = source_or_fail(state, call, lane) else continue
+        let point = element_or_fail(call, lane, points[lane], source.points()) else continue
+        let found = find_field(source, pattern)
+        if found == none:
+            call.fail(lane)
+            continue
+        let field = found else continue
+        out[lane] = field.distances[point]
+
+## Dijkstra over the edges from every member at once: each point's distance along the
+## edges to the nearest member (-1 where no member reaches). O(E log V).
+func geodesic(mesh: const Mesh*, topology: const Topology*, members: const i32[]) -> f32[]!:
+    let points = (usize)mesh.point_count()
+    let distances = try new f32[points] --- in memory.heap
+    errdefer free(distances) in memory.heap
+    let best = try new f64[points] --- in memory.heap
+    defer free(best) in memory.heap
+    for at in 0..<points: best[at] = -1.0
+    var heap = Heap()
+    defer heap.close()
+    for member in members:
+        best[(usize)member] = 0.0
+        try heap.push(0.0, (u32)member)
+    let positions = mesh.point_span()
+    while let entry = heap.pop():
+        let p = (usize)entry.point
+        if entry.distance > best[p]: continue
+        let from_point = positions[p].vector()
+        for at in (usize)topology.point_edge_offsets[p]..<(usize)topology.point_edge_offsets[p + 1]:
+            let edge = (usize)topology.point_edges[at]
+            let a = (usize)topology.edge_points[edge * 2]
+            let other = (usize)topology.edge_points[edge * 2 + 1] if a == p else a
+            let d = entry.distance + positions[other].vector().subtract(from_point).length()
+            if best[other] < 0.0 or d < best[other]:
+                best[other] = d
+                try heap.push(d, (u32)other)
+    for at in 0..<points: distances[at] = (f32)best[at]
+    return distances
+
+## A point waiting in Dijkstra's queue.
+struct Waiting:
+    var distance: f64
+    var point: u32
+
+## A binary min-heap of waiting points.
+struct Heap:
+    var items: collections.List[Waiting]
+
+    func close():
+        self.items.destroy()
+
+    func push(distance: f64, point: u32) -> !:
+        try self.items.append(Waiting(distance = distance, point = point))
+        let all = self.items.items()
+        var at = all.length - 1
+        while at > 0:
+            let parent = (at - 1) // 2
+            if all[parent].distance <= all[at].distance: break
+            let held = all[parent]
+            all[parent] = all[at]
+            all[at] = held
+            at = parent
+
+    func pop() -> Waiting?:
+        let count = self.items.length()
+        if count == 0: return none
+        let all = self.items.items()
+        let top = all[0]
+        all[0] = all[count - 1]
+        self.items.truncate(count - 1)
+        let size = count - 1
+        var at: usize = 0
+        while true:
+            let left = at * 2 + 1
+            if left >= size: break
+            var smaller = left
+            if left + 1 < size and all[left + 1].distance < all[left].distance: smaller = left + 1
+            if all[at].distance <= all[smaller].distance: break
+            let held = all[at]
+            all[at] = all[smaller]
+            all[smaller] = held
+            at = smaller
+        return top

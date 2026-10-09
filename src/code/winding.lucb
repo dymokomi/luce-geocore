@@ -1,0 +1,209 @@
+# Generalized winding numbers (VEX `windingnumber`): 1 inside a closed, outward-facing
+# mesh, 0 outside, fractional near holes. Exact solid angles near the point and, for
+# clusters far from it, the second-order expansion of Barill et al. ("Fast Winding
+# Numbers", 2018), over a binary tree of the triangles built once per cook. Values are
+# within about 0.2% of the exact sum near the surface, closer farther away.
+
+## Triangles per leaf.
+let winding_leaf: usize = 8
+## A cluster this many radii away is far enough for its dipole.
+let winding_beta: f64 = 2.0
+
+## A cluster: its triangles (a leaf) or children, the area-weighted center, the radius
+## around it holding every corner, the summed area vector, and the moments of the
+## surface about the center: `moment[3i + j]` sums the integral of y_i times area_j,
+## `third[9i + 3j + k]` the integral of y_i y_j times area_k (y the offset from the center).
+struct WindingNode:
+    var center: Vector3
+    var radius: f64
+    var area: Vector3
+    var moment: f64[9]
+    var third: f64[27]
+    var first: u32
+    var count: u32
+    var left: u32
+    var right: u32
+
+## The tree over one input's display triangles (positions relative to its origin).
+struct WindingTree:
+    var built: bool
+    var nodes: collections.List[WindingNode]
+    var order: u32[]
+    var corners: Vector3[]
+
+    func close():
+        if not self.built: return
+        self.nodes.destroy()
+        free(self.order) in memory.heap
+        free(self.corners) in memory.heap
+        self.built = false
+
+    ## Build the tree over `mesh`'s triangles.
+    func build(mesh: const Mesh*) -> !:
+        let triangles = mesh.triangle_span()
+        let corners = mesh.corner_span()
+        let positions = mesh.point_span()
+        let count = triangles.length // 3
+        self.corners = try new Vector3[count * 3] --- in memory.heap
+        self.order = try new u32[count] --- in memory.heap
+        for t in 0..<count:
+            for k: usize in 0..<3: self.corners[t * 3 + k] = positions[(usize)corners[(usize)triangles[t * 3 + k]]].vector()
+            self.order[t] = (u32)t
+        self.nodes = collections.List[WindingNode]()
+        self.built = true
+        if count > 0: _ = try self.split(0, count)
+
+    ## The node over `order[first..<end]`, its children built first.
+    func split(first: usize, end: usize) -> u32!:
+        var center = Vector3()
+        var area = Vector3()
+        var weight: f64 = 0.0
+        var low = Vector3(1.0e300, 1.0e300, 1.0e300)
+        var high = Vector3(-1.0e300, -1.0e300, -1.0e300)
+        for at in first..<end:
+            let t = (usize)self.order[at]
+            let a = self.corners[t * 3]
+            let b = self.corners[t * 3 + 1]
+            let c = self.corners[t * 3 + 2]
+            let n = b.subtract(a).cross(c.subtract(a)).multiply_scalar(0.5)
+            let size = n.length()
+            let middle = a.add(b).add(c).multiply_scalar(1.0 / 3.0)
+            center = center.add(middle.multiply_scalar(size))
+            weight += size
+            area = area.add(n)
+            low = Vector3(math.min(low.x, middle.x), math.min(low.y, middle.y), math.min(low.z, middle.z))
+            high = Vector3(math.max(high.x, middle.x), math.max(high.y, middle.y), math.max(high.z, middle.z))
+        center = center.multiply_scalar(1.0 / weight) if weight > 0.0 else low.add(high).multiply_scalar(0.5)
+        var radius: f64 = 0.0
+        var moment: f64[9]
+        var third: f64[27]
+        for at in first..<end:
+            let t = (usize)self.order[at]
+            for k: usize in 0..<3: radius = math.max(radius, self.corners[t * 3 + k].subtract(center).length())
+            let a = self.corners[t * 3]
+            let b = self.corners[t * 3 + 1]
+            let c = self.corners[t * 3 + 2]
+            let n = b.subtract(a).cross(c.subtract(a)).multiply_scalar(0.5)
+            let y = a.add(b).add(c).multiply_scalar(1.0 / 3.0).subtract(center)
+            let ys: f64[3] = [y.x, y.y, y.z]
+            let ns: f64[3] = [n.x, n.y, n.z]
+            # A triangle's mean of y y^T: (sum of v v^T + s s^T) / 12, v its corners and s
+            # their sum, all from the center.
+            let va = a.subtract(center)
+            let vb = b.subtract(center)
+            let vc = c.subtract(center)
+            let v: f64[9] = [va.x, va.y, va.z, vb.x, vb.y, vb.z, vc.x, vc.y, vc.z]
+            let sum: f64[3] = [va.x + vb.x + vc.x, va.y + vb.y + vc.y, va.z + vb.z + vc.z]
+            for i: usize in 0..<3:
+                for j: usize in 0..<3:
+                    moment[i * 3 + j] += ys[i] * ns[j]
+                    let mean = (v[i] * v[j] + v[3 + i] * v[3 + j] + v[6 + i] * v[6 + j] + sum[i] * sum[j]) * (1.0 / 12.0)
+                    for k: usize in 0..<3: third[(i * 3 + j) * 3 + k] += mean * ns[k]
+        let id = (u32)self.nodes.length()
+        try self.nodes.append(WindingNode(center = center, radius = radius, area = area, moment = moment, third = third, first = (u32)first, count = (u32)(end - first), left = 0, right = 0))
+        if end - first <= winding_leaf:
+            return id
+        # Split at the middle of the widest axis of the triangles' centers.
+        let size = high.subtract(low)
+        let axis = 0 if size.x >= size.y and size.x >= size.z else (1 if size.y >= size.z else 2)
+        let cut = axis_value(low.add(high).multiply_scalar(0.5), axis)
+        var lo = first
+        var hi = end
+        while lo < hi:
+            let t = (usize)self.order[lo]
+            let middle = self.corners[t * 3].add(self.corners[t * 3 + 1]).add(self.corners[t * 3 + 2]).multiply_scalar(1.0 / 3.0)
+            if axis_value(middle, axis) < cut:
+                lo += 1
+            else:
+                hi -= 1
+                let held = self.order[lo]
+                self.order[lo] = self.order[hi]
+                self.order[hi] = held
+        if lo == first or lo == end: lo = (first + end) // 2
+        let left = try self.split(first, lo)
+        let right = try self.split(lo, end)
+        let node = &self.nodes.items()[(usize)id]
+        node.left = left
+        node.right = right
+        node.count = 0
+        return id
+
+    ## The winding number at `p` (relative to the mesh's origin).
+    func winding(p: Vector3) -> f64:
+        if not self.built or self.nodes.length() == 0: return 0.0
+        var total: f64 = 0.0
+        var stack: u32[64]
+        var depth: usize = 1
+        stack[0] = 0
+        let nodes = self.nodes.view()
+        while depth > 0:
+            depth -= 1
+            let node = nodes[(usize)stack[depth]]
+            let to = node.center.subtract(p)
+            let distance = to.length()
+            if distance > winding_beta * node.radius and distance > 0.0:
+                total += far_field(node, to, distance)
+                continue
+            if node.count > 0:
+                for at in (usize)node.first..<(usize)(node.first + node.count):
+                    let t = (usize)self.order[at]
+                    total += solid_angle(self.corners[t * 3].subtract(p), self.corners[t * 3 + 1].subtract(p), self.corners[t * 3 + 2].subtract(p))
+                continue
+            stack[depth] = node.left
+            stack[depth + 1] = node.right
+            depth += 2
+        return total / (4.0 * math.pi)
+
+## A far cluster's solid angle from `p`, `to` its center less `p`: the Taylor expansion of
+## F(x) = (x - p) / |x - p|^3 to second order integrated against the area, F(center) .
+## area, then its Jacobian with the first moment, then half its Hessian with the second.
+func far_field(node: WindingNode, to: Vector3, distance: f64) -> f64:
+    let d2 = distance * distance
+    let d3 = d2 * distance
+    let d5 = d3 * d2
+    let d7 = d5 * d2
+    let r: f64[3] = [to.x, to.y, to.z]
+    let m = node.moment
+    let t = node.third
+    var rmr: f64 = 0.0
+    var linear: f64 = 0.0
+    var cubic: f64 = 0.0
+    for i: usize in 0..<3:
+        for j: usize in 0..<3:
+            rmr += r[i] * m[i * 3 + j] * r[j]
+            # The Hessian's delta terms: T_iji r_j + T_ijj r_i + T_iij r_j.
+            linear += t[(i * 3 + j) * 3 + i] * r[j] + t[(i * 3 + j) * 3 + j] * r[i] + t[(i * 3 + i) * 3 + j] * r[j]
+            for k: usize in 0..<3: cubic += t[(i * 3 + j) * 3 + k] * r[i] * r[j] * r[k]
+    let first = to.dot(node.area) / d3
+    let second = (m[0] + m[4] + m[8]) / d3 - 3.0 * rmr / d5
+    let third_order = 0.5 * (-3.0 * linear / d5 + 15.0 * cubic / d7)
+    return first + second + third_order
+
+func axis_value(v: Vector3, axis: i64) -> f64:
+    return v.x if axis == 0 else (v.y if axis == 1 else v.z)
+
+## The signed solid angle of triangle (a, b, c) seen from the origin (Van Oosterom and
+## Strackee): positive when the triangle faces away from the origin.
+func solid_angle(a: Vector3, b: Vector3, c: Vector3) -> f64:
+    let la = a.length()
+    let lb = b.length()
+    let lc = c.length()
+    let det = a.dot(b.cross(c))
+    let below = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb
+    return 2.0 * math.atan2(det, below)
+
+## Register `windingnumber`.
+func bind_winding(host: Host*) -> !:
+    try host.builtin("Geometry", "windingnumber", engine.Builtin.of("windingnumber", [Kind.i64, Kind.f32, Kind.f32, Kind.f32, Kind.f32], [Kind.f32], winding_lanes))
+
+func winding_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let out = call.f32_result(0)
+    for lane in 0..<call.lanes:
+        out[lane] = 0.0
+        let source = source_or_fail(state, call, lane) else continue
+        let mesh = source.mesh else continue
+        if not source.winding.built:
+            call.fail(lane)
+            continue
+        out[lane] = (f32)source.winding.winding(position_argument(call, 1, lane).subtract(mesh.position_origin()))

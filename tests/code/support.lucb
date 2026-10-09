@@ -1,6 +1,7 @@
 ## Helpers for the Code checks: grids as sets, running a snippet, reading results.
 import interop
 import memory
+from luce_std import math
 from luce_geocore import geocore, kernel as geocore_kernel
 from luce_geocore.geocore import Mesh, MeshPrimitives, GeometrySet, Vector3
 
@@ -37,6 +38,62 @@ pub func big_grid_set(side: usize) -> interop.Reference[GeometrySet]!:
             corners[face * 4 + 3] = first + 1
     let storage = try new Mesh[1] --- in memory.heap
     storage[0] = Mesh(points, sizes, corners) catch failure:
+        free(storage) in memory.heap
+        error(failure.code, failure.message)
+    return try GeometrySet.of_mesh(try geocore_kernel.mesh_adopt(storage.data))
+
+## A closed unit sphere around the origin, faces outward: `segments` around and `rows`
+## from pole to pole (triangles at the poles, quads between), any size.
+pub func closed_sphere(segments: usize, rows: usize) -> interop.Reference[GeometrySet]!:
+    let count = 2 + (rows - 1) * segments
+    let points = try new Vector3[count] --- in memory.heap
+    defer free(points) in memory.heap
+    let faces = segments * rows
+    let sizes = try new i64[faces] in memory.heap
+    defer free(sizes) in memory.heap
+    let corners = try new i64[faces * 4] in memory.heap
+    defer free(corners) in memory.heap
+    let bottom = (i64)(count - 1)
+    points[0] = Vector3(0.0, 1.0, 0.0)
+    points[count - 1] = Vector3(0.0, -1.0, 0.0)
+    for ring in 1..<rows:
+        let theta = (f64)ring * math.pi / (f64)rows
+        for s in 0..<segments:
+            let phi = (f64)s * 2.0 * math.pi / (f64)segments
+            points[1 + (ring - 1) * segments + s] = Vector3(math.sin(theta) * math.cos(phi), math.cos(theta), math.sin(theta) * math.sin(phi))
+    var face: usize = 0
+    var at: usize = 0
+    for s in 0..<segments:
+        let next = (s + 1) % segments
+        sizes[face] = 3
+        corners[at] = 0
+        corners[at + 1] = (i64)(1 + next)
+        corners[at + 2] = (i64)(1 + s)
+        face += 1
+        at += 3
+    for ring in 1..<rows - 1:
+        for s in 0..<segments:
+            let next = (s + 1) % segments
+            let upper = 1 + (ring - 1) * segments
+            let lower = upper + segments
+            sizes[face] = 4
+            corners[at] = (i64)(upper + s)
+            corners[at + 1] = (i64)(upper + next)
+            corners[at + 2] = (i64)(lower + next)
+            corners[at + 3] = (i64)(lower + s)
+            face += 1
+            at += 4
+    let last = 1 + (rows - 2) * segments
+    for s in 0..<segments:
+        let next = (s + 1) % segments
+        sizes[face] = 3
+        corners[at] = (i64)(last + s)
+        corners[at + 1] = (i64)(last + next)
+        corners[at + 2] = bottom
+        face += 1
+        at += 3
+    let storage = try new Mesh[1] --- in memory.heap
+    storage[0] = Mesh(points, sizes[..<face], corners[..<at]) catch failure:
         free(storage) in memory.heap
         error(failure.code, failure.message)
     return try GeometrySet.of_mesh(try geocore_kernel.mesh_adopt(storage.data))

@@ -1,0 +1,160 @@
+# Measuring an input: VEX's getbbox_* forwards, relbbox and relpointbbox, minpos,
+# computenormal, primarclen and curvearclen.
+
+let box_names: str[4] = ["getbbox_min", "getbbox_max", "getbbox_center", "getbbox_size"]
+let box_codes: i32[4] = [0, 1, 2, 3]
+let relative_names: str[2] = ["relbbox", "relpointbbox"]
+
+## Register the measuring reads.
+func bind_measure(host: Host*) -> !:
+    let one = [Kind.i64]
+    let point4 = [Kind.i64, Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+    let four = [Kind.f32, Kind.f32, Kind.f32, Kind.f32]
+    for (at, name) in box_names.indexed():
+        try host.builtin("Geometry", name, engine.Builtin.of(name, one, four, box_lanes, (void*)&box_codes[at]))
+    for name in relative_names:
+        try host.builtin("Geometry", name, engine.Builtin.of(name, point4, four, relative_lanes))
+    try host.builtin("Geometry", "minpos", engine.Builtin.of("minpos", point4, four, minpos_lanes))
+    try host.builtin("Geometry", "computenormal", engine.Builtin.of("computenormal", [Kind.i64, Kind.i32], four, normal_lanes))
+    try host.builtin("Geometry", "primarclen", engine.Builtin.of("primarclen", [Kind.i64, Kind.i32, Kind.f32, Kind.f32], [Kind.f32], arclen_lanes))
+    try host.builtin("Geometry", "curvearclen", engine.Builtin.of("curvearclen", [Kind.i64, Kind.i32], [Kind.f32], curve_lanes))
+
+## The input's box: its lowest and highest corner (zero for no points).
+func box_of(source: const Source*) -> (Vector3, Vector3):
+    let mesh = source.mesh else return (Vector3(), Vector3())
+    if mesh.point_count() == 0: return (Vector3(), Vector3())
+    let box = mesh.bounds()
+    return (box.minimum, box.maximum)
+
+func box_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let code = *(const i32*)context
+    for lane in 0..<call.lanes:
+        var low = Vector3()
+        var high = Vector3()
+        if let source = source_or_fail(state, call, lane):
+            let box = box_of(source)
+            low = box.0
+            high = box.1
+        let value = low if code == 0 else (high if code == 1 else (low.add(high).multiply_scalar(0.5) if code == 2 else high.subtract(low)))
+        write_vector(call, 0, lane, value)
+
+## `P` as a fraction of the box along each axis (0 at the lowest corner, 1 at the
+## highest; 0.5 along an axis the box has no extent on).
+func relative_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let (low, high) = box_of(source)
+        let p = position_argument(call, 1, lane)
+        write_vector(call, 0, lane, Vector3(fraction(p.x, low.x, high.x), fraction(p.y, low.y, high.y), fraction(p.z, low.z, high.z)))
+
+func fraction(x: f64, low: f64, high: f64) -> f64:
+    if high <= low: return 0.5
+    return (x - low) / (high - low)
+
+## The closest surface position to `P` (VEX `minpos`); `P` itself with no surface.
+func minpos_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    for lane in 0..<call.lanes:
+        let source = source_or_fail(state, call, lane) else continue
+        let p = position_argument(call, 1, lane)
+        var found = p
+        if let mesh = source.mesh:
+            let (face, _) = nearest_face(source, p, -1, -1.0) catch failure:
+                _ = failure
+                call.fail(lane)
+                continue
+            if face >= 0:
+                let (point, _, _) = closest_on_face(mesh, (usize)face, p)
+                found = point
+        write_vector(call, 0, lane, found)
+
+## Point `point`'s normal: its primitives' area vectors summed and made unit (VEX
+## `computenormal` for one point); zero when they have no area.
+func normal_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let points = call.i32_argument(1)
+    for lane in 0..<call.lanes:
+        write_vector(call, 0, lane, Vector3())
+        let source = source_or_fail(state, call, lane) else continue
+        let mesh = mesh_or_fail(source, call, lane) else continue
+        let point = element_or_fail(call, lane, points[lane], source.points()) else continue
+        if not source.with_vertices():
+            call.fail(lane)
+            continue
+        var sum = Vector3()
+        for at in (usize)source.point_corner_offsets[point]..<(usize)source.point_corner_offsets[point + 1]:
+            sum = sum.add(face_area(mesh, (usize)source.corner_faces[(usize)source.point_corners[at]]))
+        let size = sum.length()
+        write_vector(call, 0, lane, sum.multiply_scalar(1.0 / size) if size > 0.0 else Vector3())
+
+## The area vector of face `f` (Newell's sum, half the cross products).
+func face_area(mesh: const Mesh*, f: usize) -> Vector3:
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
+    let positions = mesh.point_span()
+    let start = (usize)offsets[f]
+    let size = (usize)offsets[f + 1] - start
+    let origin = positions[(usize)corners[start]].vector()
+    var area = Vector3()
+    for k in 1..<size - 1:
+        let a = positions[(usize)corners[start + k]].vector().subtract(origin)
+        let b = positions[(usize)corners[start + k + 1]].vector().subtract(origin)
+        area = area.add(a.cross(b))
+    return area.multiply_scalar(0.5)
+
+## The arc length of primitive `prim` between parametric positions `u1` and `u2` (VEX
+## `primarclen`): a polygon's `u` runs 0 to 1 around its edges, the closing one
+## included, each edge an equal share; `u1` above `u2` measures backward.
+func arclen_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let prims = call.i32_argument(1)
+    let from_u = call.f32_argument(2)
+    let to_u = call.f32_argument(3)
+    let out = call.f32_result(0)
+    for lane in 0..<call.lanes:
+        out[lane] = 0.0
+        let source = source_or_fail(state, call, lane) else continue
+        let mesh = mesh_or_fail(source, call, lane) else continue
+        let prim = element_or_fail(call, lane, prims[lane], source.prims()) else continue
+        let low = math.clamp(math.min((f64)from_u[lane], (f64)to_u[lane]), 0.0, 1.0)
+        let high = math.clamp(math.max((f64)from_u[lane], (f64)to_u[lane]), 0.0, 1.0)
+        out[lane] = (f32)(perimeter_to(mesh, prim, high, true) - perimeter_to(mesh, prim, low, true))
+
+## The length of primitive `prim` as an open curve through its vertices in order, no
+## closing edge (VEX `curvearclen` over a whole curve).
+func curve_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let prims = call.i32_argument(1)
+    let out = call.f32_result(0)
+    for lane in 0..<call.lanes:
+        out[lane] = 0.0
+        let source = source_or_fail(state, call, lane) else continue
+        let mesh = mesh_or_fail(source, call, lane) else continue
+        let prim = element_or_fail(call, lane, prims[lane], source.prims()) else continue
+        out[lane] = (f32)perimeter_to(mesh, prim, 1.0, false)
+
+## The length along primitive `prim` from its first vertex to parametric `u` (0..1), the
+## closing edge counted when `closed`.
+func perimeter_to(mesh: const Mesh*, prim: usize, u: f64, closed: bool) -> f64:
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
+    let positions = mesh.point_span()
+    let start = (usize)offsets[prim]
+    let size = (usize)offsets[prim + 1] - start
+    let edges = size if closed else size - 1
+    if edges == 0: return 0.0
+    let along = u * (f64)edges
+    var total: f64 = 0.0
+    for k in 0..<edges:
+        let a = positions[(usize)corners[start + k]].vector()
+        let b = positions[(usize)corners[start + (k + 1) % size]].vector()
+        let length = b.subtract(a).length()
+        if (f64)(k + 1) <= along:
+            total += length
+        else:
+            total += length * math.max(along - (f64)k, 0.0)
+            break
+    return total

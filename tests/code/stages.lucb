@@ -278,3 +278,44 @@ pub func ramps() -> !:
         if c.parameter_ramp(at) == 3 and c.parameter_name(at) == "tint": color_ramps += 1
     expect(float_ramps == 2 and color_ramps == 1, "Code.check reports the ramps")
     print("ok    ramps: float and color against luce-std's lookup, defaults, refused data, Code.check")
+
+## Vertices, half-edges, neighbors, groups and measures (CODE-NODE items 4 and 5): half-edge
+## walks close around faces, vertex chains visit every vertex of a point, the winding
+## number is 1 inside a closed cube and 0 outside, surface distances follow the edges.
+pub func topology_and_measure() -> !:
+    let cube = try GeometrySet.of_mesh(try Mesh.cube(2.0))
+    let walks = try support.mesh_of(try support.run(cube, support.primitives_mode, "let g = k.input(0)\nlet first = g.prim_hedge(f.primnum)\nvar h = first\nvar fine: f32 = 1.0\nfor i in 0..<g.prim_vertex_count(f.primnum):\n    if g.hedge_dst_point(h) != g.hedge_src_point(g.hedge_next(h)): fine = 0.0\n    if g.point_hedge(g.hedge_src_point(h), g.hedge_dst_point(h)) != h: fine = 0.0\n    if g.hedge_prev(g.hedge_next(h)) != h or g.hedge_prim(h) != f.primnum: fine = 0.0\n    if g.hedge_equiv_count(h) != 2 or g.vertex_prim(g.prim_vertex(f.primnum, i)) != f.primnum: fine = 0.0\n    h = g.hedge_next(h)\nif h != first: fine = 0.0\nf.set_f32(\"walk\", fine)\nf.set_f32(\"neighbors\", (f32)g.poly_neighbor_count(f.primnum) * 10.0 + (f32)(g.poly_neighbor(f.primnum, 1) - g.poly_neighbor(f.primnum, 0)))\n"))
+    for face: i64 in 0..<6:
+        expect(try support.value(walks, "walk", 2, face) == 1.0, "half-edge walks close around faces")
+        let neighbors = try support.value(walks, "neighbors", 2, face)
+        expect(neighbors > 40.0 and neighbors < 50.0, "a cube face has four neighbors, ascending")
+    let points = try support.mesh_of(try support.run(cube, support.points_mode, "let g = k.input(0)\nvar count: i32 = 0\nvar v = g.point_vertex(p.ptnum, 0)\nwhile v >= 0:\n    if g.vertex_point(v) != p.ptnum: count = -100\n    count += 1\n    v = g.vertex_next(v)\np.set_f32(\"chain\", (f32)(count - g.point_vertex_count(p.ptnum)))\nlet center = g.getbbox_center()\np.set_f32(\"inside\", g.windingnumber(center))\np.set_f32(\"near\", g.windingnumber(p.P * 0.9 + center * 0.1))\np.set_f32(\"outside\", g.windingnumber(center + [5.0, 0.3, 0.0, 0.0]))\np.Cd = g.computenormal(p.ptnum)\np.set_f32(\"rel\", g.relbbox(p.P)[1] + g.relpointbbox(center)[0] * 10.0)\n"))
+    for point: i64 in 0..<8:
+        expect(try support.value(points, "chain", 0, point) == 0.0, "vertex_next visits every vertex of a point")
+        expect(near(try support.value(points, "inside", 0, point), 1.0, 0.001) and near(try support.value(points, "near", 0, point), 1.0, 0.001), "the winding number is 1 inside")
+        expect(near(try support.value(points, "outside", 0, point), 0.0, 0.001), "the winding number is 0 outside")
+        let corner = try (try points.get()).point(point)
+        for c: i64 in 0..<3:
+            let want = (corner.x if c == 0 else (corner.y - 1.0 if c == 1 else corner.z)) / math.sqrt(3.0)
+            expect(near(try support.value(points, "Cd", 0, point, c), want, 0.0001), "a corner's normal")
+        let relative = try support.value(points, "rel", 0, point)
+        expect(relative == 5.0 + (0.0 if corner.y == 0.0 else 1.0), "relbbox")
+    let grid = try support.grid_set(4)
+    let measured = try support.mesh_of(try support.run(grid, support.points_mode, "let g = k.input(0)\np.set_f32(\"geo\", g.surfacedist(\"0\", p.ptnum))\np.set_f32(\"groups\", (f32)g.npointsgroup(\"0-4\") + 10.0 * (f32)g.expandpointgroup(\"0-4\", 2) + 100.0 * (f32)g.expandprimgroup_count(\"1 3\"))\np.set_f32(\"arc\", g.primarclen(0, 0.0, 0.5) + 10.0 * g.curvearclen(0))\np.Cd = g.minpos(p.P + [0.1, 1.0, 0.0, 0.0])\n"))
+    let m = try measured.get()
+    let origin = try m.point(0)
+    for point: i64 in 0..<m.point_count():
+        let q = try m.point(point)
+        expect(near(try support.value(measured, "geo", 0, point), math.abs(q.x - origin.x) + math.abs(q.z - origin.z), 0.0001), "surface distance along the grid's edges")
+        expect(try support.value(measured, "groups", 0, point) == 225.0, "group counts and expansion")
+        expect(near(try support.value(measured, "arc", 0, point), 16.0, 0.0001), "primarclen and curvearclen")
+        expect(near(try support.value(measured, "Cd", 0, point, 0), math.min(q.x + 0.1, 1.0), 0.0001) and near(try support.value(measured, "Cd", 0, point, 1), 0.0, 0.0001), "minpos")
+    # A closed sphere of quads and pole triangles: inside 1, outside 0, through the far
+    # field's expansion (within about 0.2% here).
+    let ball = try support.closed_sphere(48, 24)
+    let wound = try support.mesh_of(try support.run_inputs(grid, ball, support.points_mode, "p.set_f32(\"w\", k.input(1).windingnumber(p.P * 0.6) + 10.0 * k.input(1).windingnumber(p.P + [0.0, 3.0, 0.0, 0.0]))\n"))
+    for point: i64 in 0..<m.point_count():
+        expect(near(try support.value(wound, "w", 0, point), 1.0, 0.005), "the winding number of a closed sphere, within the expansion's 0.5%")
+    let faulted = failure(grid, support.points_mode, "p.set_f32(\"x\", (f32)k.input(0).vertex_prim(p.ptnum + 1000))\n")
+    expect(strings.ends_with(faulted, "index out of bounds (point 0)"), "a vertex out of range faults")
+    print("ok    topology and measure: half-edge walks, vertex chains, neighbors, winding numbers, normals, relbbox, surfacedist, groups, arc lengths, minpos")

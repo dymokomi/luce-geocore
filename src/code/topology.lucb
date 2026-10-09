@@ -1,0 +1,160 @@
+# Vertex and half-edge reads (VEX's vertex*, hedge_* and polyneighbours), one dispatcher
+# per argument shape. A vertex is a face corner, numbered linearly; a half-edge is named
+# by the vertex it leaves, as in Houdini, and runs to the next vertex of its primitive.
+# Numbers out of range fault the element.
+
+## The reads, by the builtin's context.
+let read_vertex_prim: i32 = 0
+let read_vertex_point: i32 = 1
+let read_vertex_next: i32 = 2
+let read_vertex_prev: i32 = 3
+let read_prim_vertex_count: i32 = 4
+let read_point_vertex_count: i32 = 5
+let read_hedge_next: i32 = 6
+let read_hedge_prev: i32 = 7
+let read_hedge_src: i32 = 8
+let read_hedge_dst: i32 = 9
+let read_hedge_prim: i32 = 10
+let read_hedge_equiv: i32 = 11
+let read_prim_hedge: i32 = 12
+let read_poly_neighbor_count: i32 = 13
+let read_prim_vertex: i32 = 14
+let read_point_vertex: i32 = 15
+let read_point_hedge: i32 = 16
+let read_poly_neighbor: i32 = 17
+
+let unary_names: str[14] = ["vertex_prim", "vertex_point", "vertex_next", "vertex_prev", "prim_vertex_count", "point_vertex_count", "hedge_next", "hedge_prev", "hedge_src_point", "hedge_dst_point", "hedge_prim", "hedge_equiv_count", "prim_hedge", "poly_neighbor_count"]
+let unary_codes: i32[14] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
+let binary_names: str[4] = ["prim_vertex", "point_vertex", "point_hedge", "poly_neighbor"]
+let binary_codes: i32[4] = [14, 15, 16, 17]
+
+## Register the vertex and half-edge reads.
+func bind_topology(host: Host*) -> !:
+    for (at, name) in unary_names.indexed():
+        try host.builtin("Geometry", name, engine.Builtin.of(name, [Kind.i64, Kind.i32], [Kind.i32], unary_topology, (void*)&unary_codes[at]))
+    for (at, name) in binary_names.indexed():
+        try host.builtin("Geometry", name, engine.Builtin.of(name, [Kind.i64, Kind.i32, Kind.i32], [Kind.i32], binary_topology, (void*)&binary_codes[at]))
+
+func unary_topology(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let code = *(const i32*)context
+    let first = call.i32_argument(1)
+    let out = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        out[lane] = -1
+        let source = source_or_fail(state, call, lane) else continue
+        if not source.with_vertices():
+            call.fail(lane)
+            continue
+        if let found = topology_read(source, code, first[lane], 0):
+            out[lane] = found
+        else:
+            call.fail_as(lane, .bounds)
+
+func binary_topology(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let code = *(const i32*)context
+    let first = call.i32_argument(1)
+    let second = call.i32_argument(2)
+    let out = call.i32_result(0)
+    for lane in 0..<call.lanes:
+        out[lane] = -1
+        let source = source_or_fail(state, call, lane) else continue
+        if not source.with_vertices():
+            call.fail(lane)
+            continue
+        if let found = topology_read(source, code, first[lane], second[lane]):
+            out[lane] = found
+        else:
+            call.fail_as(lane, .bounds)
+
+## Read `code` of element `a` (and `b`), or none when a number is out of range.
+func topology_read(source: const Source*, code: i32, a: i32, b: i32) -> i32?:
+    let mesh = source.mesh else return none
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
+    let vertices = corners.length
+    let points = (usize)mesh.point_count()
+    let prims = offsets.length - 1
+    if code <= read_vertex_prev or (code >= read_hedge_next and code <= read_hedge_equiv):
+        if a < 0 or (usize)a >= vertices: return none
+        let v = (usize)a
+        if code == read_vertex_prim or code == read_hedge_prim: return source.corner_faces[v]
+        if code == read_vertex_point or code == read_hedge_src: return corners[v]
+        if code == read_vertex_next or code == read_vertex_prev:
+            let p = (usize)corners[v]
+            let low = (usize)source.point_corner_offsets[p]
+            let high = (usize)source.point_corner_offsets[p + 1]
+            for at in low..<high:
+                if (usize)source.point_corners[at] != v: continue
+                if code == read_vertex_next: return source.point_corners[at + 1] if at + 1 < high else -1
+                return source.point_corners[at - 1] if at > low else -1
+            return -1
+        if code == read_hedge_equiv:
+            let e = (usize)source.corner_edges[v]
+            return source.edge_corner_offsets[e + 1] - source.edge_corner_offsets[e]
+        let next = turn(offsets, source.corner_faces, v, 1)
+        if code == read_hedge_next: return (i32)next
+        if code == read_hedge_prev: return (i32)turn(offsets, source.corner_faces, v, -1)
+        return corners[next]
+    if code == read_prim_vertex_count or code == read_prim_hedge or code == read_prim_vertex or code == read_poly_neighbor_count or code == read_poly_neighbor:
+        if a < 0 or (usize)a >= prims: return none
+        let f = (usize)a
+        let start = offsets[f]
+        let size = offsets[f + 1] - start
+        if code == read_prim_vertex_count: return size
+        if code == read_prim_hedge: return start
+        if code == read_prim_vertex:
+            if b < 0 or b >= size: return none
+            return start + b
+        var found: i32[256] = ---
+        let count = poly_neighbors(source, mesh, f, found)
+        if code == read_poly_neighbor_count: return (i32)count
+        if b < 0 or (usize)b >= count: return none
+        return found[(usize)b]
+    if a < 0 or (usize)a >= points: return none
+    let p = (usize)a
+    let low = source.point_corner_offsets[p]
+    let high = source.point_corner_offsets[p + 1]
+    if code == read_point_vertex_count: return high - low
+    if code == read_point_vertex:
+        if b < 0 or b >= high - low: return none
+        return source.point_corners[(usize)(low + b)]
+    # point_hedge: a half-edge leaving `a` toward point `b`, or -1.
+    if b < 0 or (usize)b >= points: return none
+    for at in (usize)low..<(usize)high:
+        let v = (usize)source.point_corners[at]
+        if corners[turn(offsets, source.corner_faces, v, 1)] == b: return (i32)v
+    return -1
+
+## The vertex `step` (1 or -1) from vertex `v` around its primitive.
+func turn(offsets: const i32[], corner_faces: const i32[], v: usize, step: i64) -> usize:
+    let f = (usize)corner_faces[v]
+    let start = (i64)offsets[f]
+    let size = (i64)offsets[f + 1] - start
+    return (usize)(start + (((i64)v - start + step) % size + size) % size)
+
+## The primitives sharing an edge with primitive `f`, ascending, into `found` (at most
+## its length): how many.
+func poly_neighbors(source: const Source*, mesh: const Mesh*, f: usize, found: i32[]) -> usize:
+    let offsets = mesh.offset_span()
+    var count: usize = 0
+    for v in (usize)offsets[f]..<(usize)offsets[f + 1]:
+        let e = (usize)source.corner_edges[v]
+        for at in (usize)source.edge_corner_offsets[e]..<(usize)source.edge_corner_offsets[e + 1]:
+            let other = source.corner_faces[(usize)source.edge_corners[at]]
+            if (usize)other == f: continue
+            # Insert in order, once.
+            var slot = count
+            while slot > 0 and found[slot - 1] > other: slot -= 1
+            if slot > 0 and found[slot - 1] == other: continue
+            if count == found.length: continue
+            var move = count
+            while move > slot:
+                found[move] = found[move - 1]
+                move -= 1
+            found[slot] = other
+            count += 1
+    return count

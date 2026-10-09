@@ -1,6 +1,8 @@
 # The geometries a snippet reads (`k.input(0)`, `k.input(1)`) for one cook, and what each
-# builds on first use: its topology, its point-to-primitive incidence, its spatial index
-# and a point grid. Builtins reach them through the run's context.
+# builds on first use: its topology, its point-to-primitive incidence, its vertex tables,
+# its spatial index and a point grid; and, before the run, the group expansions, surface
+# distance fields and winding-number tree the snippet's calls name. Builtins reach them
+# through the run's context.
 
 ## One input: its mesh (none when the input is empty) and what was built for it.
 struct Source:
@@ -16,9 +18,28 @@ struct Source:
     var index: const TriangleIndex*?
     var grid_ready: @bool
     var grid: PointGrid
+    ## Vertices (corners) by point, ascending, and the mesh's corner and edge tables.
+    var vertices_ready: @bool
+    var point_corner_offsets: i32[]
+    var point_corners: i32[]
+    var corner_faces: const i32[]
+    var corner_edges: const i32[]
+    var edge_corner_offsets: const i32[]
+    var edge_corners: const i32[]
+    ## Built before the run (`prepare_named`): groups, distance fields, the winding tree.
+    var group_sets: collections.List[GroupSet]
+    var fields: collections.List[SurfaceField]
+    var winding: WindingTree
 
     func close():
         self.grid.close()
+        if self.point_corner_offsets.length > 0: free(self.point_corner_offsets) in memory.heap
+        if self.point_corners.length > 0: free(self.point_corners) in memory.heap
+        for set in self.group_sets.items(): set.close()
+        self.group_sets.destroy()
+        for field in self.fields.items(): field.close()
+        self.fields.destroy()
+        self.winding.close()
 
     func points() -> usize:
         let mesh = self.mesh else return 0
@@ -80,6 +101,40 @@ struct Source:
             self.queries_ready.store(true, .release)
         return not self.failed.load(.acquire)
 
+    ## The vertex tables, built on first use: each point's corners in ascending order,
+    ## and the mesh's corner-to-face, corner-to-edge and edge-to-corner tables.
+    func with_vertices() -> bool:
+        if self.vertices_ready.load(.acquire):
+            return not self.failed.load(.acquire)
+        self.lock.lock()
+        defer self.lock.unlock()
+        if not self.vertices_ready.load(.acquire):
+            if let mesh = self.mesh:
+                self.build_vertices(mesh) catch failure:
+                    _ = failure
+                    self.failed.store(true, .release)
+            self.vertices_ready.store(true, .release)
+        return not self.failed.load(.acquire)
+
+    func build_vertices(mesh: const Mesh*) -> !:
+        self.corner_faces = try mesh.corner_face_span()
+        self.corner_edges = try mesh.corner_edge_span()
+        let (offsets, corners) = try mesh.edge_corner_span()
+        self.edge_corner_offsets = offsets
+        self.edge_corners = corners
+        let points = (usize)mesh.point_count()
+        let corner_points = mesh.corner_span()
+        self.point_corner_offsets = try new i32[points + 1] in memory.heap
+        self.point_corners = try new i32[corner_points.length] --- in memory.heap
+        for point in corner_points: self.point_corner_offsets[(usize)point + 1] += 1
+        for at in 0..<points: self.point_corner_offsets[at + 1] += self.point_corner_offsets[at]
+        var filled = try new i32[points] in memory.heap
+        defer free(filled) in memory.heap
+        for (corner, point) in corner_points.indexed():
+            let p = (usize)point
+            self.point_corners[(usize)self.point_corner_offsets[p] + (usize)filled[p]] = (i32)corner
+            filled[p] += 1
+
     ## The point grid, built on first use.
     func with_grid() -> bool:
         if self.grid_ready.load(.acquire):
@@ -116,6 +171,7 @@ let grid_users: str[2] = ["nearpoint", "nearpoints"]
 let index_users: str[4] = ["xyzdist", "closest_prim", "closest_uv", "intersect"]
 let topology_users: str[2] = ["neighbor_count", "neighbor"]
 let incidence_users: str[2] = ["point_prim_count", "point_prim"]
+let vertex_users: str[21] = ["vertex_prim", "vertex_point", "vertex_next", "vertex_prev", "prim_vertex", "prim_vertex_count", "point_vertex_count", "point_vertex", "hedge_next", "hedge_prev", "hedge_src_point", "hedge_dst_point", "hedge_prim", "hedge_equiv_count", "point_hedge", "prim_hedge", "poly_neighbor_count", "poly_neighbor", "computenormal", "primarclen", "curvearclen"]
 
 ## Build, on the cook's thread before the run, what `program`'s calls may need of each
 ## input: built inside the run, one worker builds while the others wait on the lock.
@@ -128,6 +184,8 @@ func prepare_sources(state: CookState*, program: const Program*):
         if calls_any(program, index_users, handle): _ = source.with_queries()
         if calls_any(program, topology_users, handle): _ = source.with_topology()
         if calls_any(program, incidence_users, handle): _ = source.with_incidence()
+        if calls_any(program, vertex_users, handle): _ = source.with_vertices()
+        if calls_any(program, ["minpos"], handle): _ = source.with_queries()
 
 func calls_any(program: const Program*, names: const str[], handle: i64) -> bool:
     for name in names:
