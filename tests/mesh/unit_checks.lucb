@@ -1,0 +1,166 @@
+## Checks of the small pieces other checks only reach indirectly: Vector3's
+## axis helpers, ComponentTransform's pivots, bit sets, path filters, id
+## sets, text attributes, the subdivided display, the Curve Spiral verb, and
+## Keep with symmetry on Spin and PolyMirror.
+import interop
+import memory
+from luce_std import math
+from luce_geocore import geocore
+from luce_geocore.geocore import Mesh, MeshPrimitives, GeometrySet, Verbs, Vector3, Matrix4
+from luce_geocore.kernel import BitsBuilder, PathFilter, IdSet, TableBuilder, Domain, ComponentTransform, text_attribute, subdivided_display, mesh_dispose, find_set_verb, run_set_verb, set_curves, adopt_set, empty_set, clear_group_cache
+from verb_run import verb_mesh
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    vectors()
+    try transforms()
+    try bit_sets()
+    try path_filters()
+    try id_sets()
+    try text_values()
+    try subdivided()
+    try spiral()
+    try keep_with_symmetry()
+
+pub func run() -> !:
+    try exercise()
+    print("PASS units: vector axes, component transforms, bit sets, path filters, id sets, text attributes, the subdivided display, Curve Spiral, Keep with symmetry")
+
+func near(a: f64, b: f64):
+    assert(math.abs(a - b) < 0.000001)
+
+func same(a: Vector3, b: Vector3):
+    near(a.x, b.x)
+    near(a.y, b.y)
+    near(a.z, b.z)
+
+func vectors():
+    let p = Vector3(1.0, 2.0, 3.0)
+    same(Vector3.along(1, 2.0), Vector3(0.0, 2.0, 0.0))
+    near(p.coordinate(0), 1.0)
+    near(p.coordinate(2), 3.0)
+    same(p.with_coordinate(1, 0.0), Vector3(1.0, 0.0, 3.0))
+    same(p.reflected(0), Vector3(-1.0, 2.0, 3.0))
+    same(p.reflected(2, 1.0), Vector3(1.0, 2.0, -1.0))
+    # A quarter turn about +Y takes +X to -Z (right-handed).
+    same(Vector3(1.0, 0.0, 0.0).rotated_about(Vector3(0.0, 2.0, 0.0), math.pi / 2.0), Vector3(0.0, 0.0, -1.0))
+    same(p.rotated_about(Vector3(), 1.0), p)
+
+## The three pivots: the given middle, the origin and the custom point.
+func transforms() -> !:
+    let middle = Vector3(1.0, 0.0, 0.0)
+    let doubled: f64[13] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 0.0, 0.0, 0.0, 0.0]
+    let around_middle = try ComponentTransform.of(doubled, middle)
+    same(around_middle.matrix(around_middle.translation).transform_point(Vector3(2.0, 0.0, 0.0)), Vector3(3.0, 0.0, 0.0))
+    var numbers: f64[13] = doubled
+    numbers[9] = 1.0
+    let around_origin = try ComponentTransform.of(numbers, middle)
+    same(around_origin.matrix(around_origin.translation).transform_point(Vector3(2.0, 0.0, 0.0)), Vector3(4.0, 0.0, 0.0))
+    numbers[9] = 2.0
+    numbers[10] = 2.0
+    numbers[0] = 0.5
+    let around_point = try ComponentTransform.of(numbers, middle)
+    same(around_point.matrix(around_point.translation).transform_point(Vector3(3.0, 0.0, 0.0)), Vector3(4.5, 0.0, 0.0))
+    let short: f64[12] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]
+    _ = ComponentTransform.of(short, middle) catch failure:
+        assert(failure.code == geocore.invalid)
+        return
+    trap("a transform took twelve numbers")
+
+func bit_sets() -> !:
+    var bits = try BitsBuilder.zeros(200)
+    defer bits.close()
+    bits.set_range(60, 70)
+    bits.set(199)
+    assert(bits.view().population() == 11 and bits.view().get(64) and not bits.view().get(70))
+    bits.clear(199)
+    var strided = try BitsBuilder.zeros(200)
+    defer strided.close()
+    strided.set_stride(0, 20, 1, 4)
+    assert(strided.view().population() == 5 and strided.view().get(16) and not strided.view().get(17))
+    bits.unite(strided.view())
+    assert(bits.view().population() == 15)
+    bits.subtract(strided.view())
+    assert(bits.view().population() == 10)
+    bits.intersect(strided.view())
+    assert(not bits.view().any())
+    bits.invert()
+    assert(bits.view().population() == 200)
+    var indices: i64[5] = ---
+    strided.view().indices(indices)
+    assert(indices[0] == 0 and indices[4] == 16)
+
+func path_filters() -> !:
+    var some = try PathFilter.parse("Camera \"*/solid 3\", ^Camera/Lens")
+    defer some.close()
+    assert(some.matches("Camera/Body") and not some.matches("Camera/Lens") and some.matches("part/solid 3") and not some.matches("part/solid_3"))
+    var every = try PathFilter.parse("  ")
+    defer every.close()
+    assert(every.is_empty() and every.matches("anything"))
+
+func id_sets() -> !:
+    var ids = IdSet()
+    defer ids.close()
+    for id in 1..<(u64)200: assert(try ids.insert(id))
+    assert(not (try ids.insert(7)) and not (try ids.insert(0)))
+    assert((try ids.charge(7, 64)) == 0 and (try ids.charge(500, 64)) == 64)
+
+func text_values() -> !:
+    var table = TableBuilder()
+    defer table.close()
+    let a = try table.intern("left")
+    let b = try table.intern("right")
+    assert(try table.intern("left") == a)
+    let values: i32[4] = [a, b, -1, a]
+    var attribute = try text_attribute("side", Domain.face, 4, &table, values)
+    defer attribute.release()
+    assert(attribute.text_at(0) == "left" and attribute.text_at(1) == "right" and attribute.text_at(2) == "" and attribute.text_at(3) == "left")
+
+## A cube marked for two levels of Catmull-Clark shows 96 faces; an unmarked
+## one has no display mesh.
+func subdivided() -> !:
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    assert(try subdivided_display(cube.value()) == none)
+    let marked = try verb_mesh("Subdivision", cube, "", 0, [1.0, 2.0, 3.0, 1.0])
+    defer marked.release()
+    let display = (try subdivided_display(marked.value())) else trap("no display mesh")
+    defer mesh_dispose(display)
+    assert(display.face_count() == 96)
+
+## Two turns of 8 points (one more to close the end) rising 2.
+func spiral() -> !:
+    let empty = try adopt_set(try empty_set())
+    defer empty.release()
+    let verb = find_set_verb("Curve Spiral") else trap("no Curve Spiral")
+    var output = try run_set_verb(&verb, empty.value(), none, "", 0, [2.0, 8.0, 1.0, 2.0, 2.0])
+    defer output.close()
+    let made = output.set else trap("no set")
+    let curves = set_curves(made) else trap("no curves")
+    assert(curves.curve_count() == 1 and curves.point_count() == 17)
+    near(curves.point(0).y, 0.0)
+    near(curves.point(16).y, 2.0)
+    near(curves.point(16).length(), math.sqrt(8.0))
+
+## Keep selects the group carried through the verb, made symmetric first.
+func keep_with_symmetry() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let turn: f64[6] = [1.0, 0.0, 0.0, 0.0, 90.0, 3.0]
+    let spun = try Verbs.run("Spin", grid, "p0-1", 2, turn, 1, true)
+    defer spun.release()
+    let edges = try spun.value().selection()
+    defer edges.release()
+    # p0-1 and its mirror p3-4: each copied along the turn.
+    assert(edges.value().domain() == 4 and edges.value().count() >= 2)
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    let mirror: f64[5] = [0.0, 1.5, 0.0, 1.0, 0.0]
+    let mirrored = try Verbs.run("PolyMirror", cube, "0", 3, mirror, 1, true)
+    defer mirrored.release()
+    let faces = try mirrored.value().selection()
+    defer faces.release()
+    # Face 0 and its mirror across X, and both their reflections.
+    let made = try mirrored.value().mesh()
+    defer made.release()
+    assert(faces.value().domain() == 2 and faces.value().count() >= 2 and faces.value().count() < made.value().face_count())
