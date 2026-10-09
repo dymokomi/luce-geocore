@@ -24,6 +24,7 @@ pub func run_all() -> !:
     try measure("noise displacement", "let amount = k.f32(\"amount\", 0.2)\nlet scale = k.f32(\"scale\", 3.0)\nlet n = snoise(p.P * scale + [0.0, 0.0, (f32)k.time, 0.0])\np.P = p.P + p.N * (n * amount)\n", 25.0)
     try measure("rand3", "p.Cd = rand3(p.ptnum)\n", 8.0)
     try measure("empty", "", 3.0)
+    try measure("twist (a Mat3 per point)", "let m = Mat3.rotation(p.P[1] * 2.0, [0.0, 1.0, 0.0, 0.0])\np.P = m.transform(p.P)\n", 0.0)
     _ = geocore_kernel.code_compiles()
     try grid_build()
     try families()

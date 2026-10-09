@@ -3,9 +3,9 @@
 import interop
 import memory
 import strings
-from luce_std import math, math32
+from luce_std import math, math32, ramp
 from luce_geocore import kernel as geocore_kernel
-from luce_geocore.geocore import Mesh, GeometrySet, MeshPrimitives, Vector3, Matrix4, mesh_overlay_points
+from luce_geocore.geocore import Code, Mesh, GeometrySet, MeshPrimitives, Vector3, Matrix4, mesh_overlay_points
 import support
 
 func expect(condition: bool, what: str):
@@ -232,3 +232,49 @@ pub func varying_gathers() -> !:
         for i in 0..<at % 5: total += ((i + at) % 16) * 10 + at
         expect(try support.value(mesh, "Cd", 0, at) == (f64)total, "a varying index in a varying loop")
     print("ok    gathers with element-dependent indices and bounds")
+
+## Ramp parameters: a float falloff and a color by height through Code.run's names and
+## values ("<name>#ramp", the length, then the data), against luce-std's lookup at the
+## same t; defaults for ramps not sent; refused data fails at its line; Code.check
+## reports both kinds.
+pub func ramps() -> !:
+    let set = try support.grid_set(8)
+    let falloff: f64[12] = [1.0, 1.0, 3.0, 0.0, 0.0, 2.0, 0.4, 1.0, 1.0, 1.0, 0.2, 1.0]
+    let tint: f64[18] = [1.0, 3.0, 3.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.5, 0.0, 1.0, 0.0, 3.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+    var names: str[32]
+    var values: f64[32]
+    names[0] = "falloff#ramp"
+    values[0] = 12.0
+    for at in 0..<12: values[1 + at] = falloff[at]
+    names[13] = "tint#ramp"
+    values[13] = 18.0
+    for at in 0..<18: values[14 + at] = tint[at]
+    let body = "let d = p.P[0] * 0.5 + 0.5\np.Cd = k.ramp_color(\"tint\", p.P[2] * 0.5 + 0.5)\np.set_f32(\"w\", k.ramp(\"falloff\", d))\np.set_f32(\"plain\", k.ramp(\"missing\", d))\n"
+    let made = try support.mesh_of(try Code.run(set, support.points_mode, "", body, "", 0, names[..<32], values[..<32], 1.0, 0.0, 24.0, 0))
+    let mesh = try made.get()
+    var channels: f64[4]
+    for at in 0..<mesh.point_count():
+        let q = try mesh.point(at)
+        let d = (f32)q.x * 0.5 + 0.5
+        expect(try support.value(made, "w", 0, at) == (f64)(f32)ramp.lookup(falloff[..<12], (f64)d), "a float ramp reads as luce-std's lookup")
+        expect(try support.value(made, "plain", 0, at) == (f64)d, "a ramp not sent is the default line")
+        channels = [0.0, 0.0, 0.0, 0.0]
+        _ = ramp.lookup_into(tint[..<18], (f64)((f32)q.z * 0.5 + 0.5), channels)
+        for c: i64 in 0..<3:
+            expect(try support.value(made, "Cd", 0, at, c) == (f64)(f32)channels[(usize)c], "a color ramp reads as luce-std's lookup")
+    # Refused data: version 2.
+    values[1] = 2.0
+    let refused = Code.run(set, support.points_mode, "", "let x: f32 = 1.0\np.set_f32(\"w\", k.ramp(\"falloff\", x))\n", "", 0, names[..<32], values[..<32], 1.0, 0.0, 24.0, 0) catch refusal:
+        expect(strings.starts_with(refusal.message, "line 2, column ") and strings.contains(refusal.message, "version"), "a refused ramp fails at the line naming it")
+        print(f"      {refusal.message}")
+        recover set
+    _ = refused
+    let check = try Code.check(1, "", body)
+    let c = try check.get()
+    var float_ramps = 0
+    var color_ramps = 0
+    for at: i64 in 0..<c.parameter_count():
+        if c.parameter_ramp(at) == 1 and c.parameter_components(at) == 0: float_ramps += 1
+        if c.parameter_ramp(at) == 3 and c.parameter_name(at) == "tint": color_ramps += 1
+    expect(float_ramps == 2 and color_ramps == 1, "Code.check reports the ramps")
+    print("ok    ramps: float and color against luce-std's lookup, defaults, refused data, Code.check")

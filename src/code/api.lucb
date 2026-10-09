@@ -16,6 +16,8 @@ struct CheckParameter:
     var components: i64
     let integer: bool
     var defaults: f64[4]
+    ## 1 a float ramp, 3 a color ramp, 0 a number or vector.
+    var ramp: i64 = 0
 
 ## What checking a snippet found: its diagnostics (positions in characters, 1-based),
 ## its spare parameters in order of first use, and whether it reads the timeline.
@@ -54,8 +56,8 @@ pub struct CodeCheck:
     pub func diagnostic_message(index: i64) -> str:
         return self.line_at(index).message
 
-    ## How many spare parameters there are, and each one's name, components (1 to 4),
-    ## whether it is an integer, and the default of a component.
+    ## How many spare parameters there are, and each one's name, components (1 to 4; 0
+    ## for a ramp), whether it is an integer, and the default of a component.
     pub func parameter_count() -> i64:
         return (i64)self.parameters.length()
 
@@ -74,6 +76,12 @@ pub struct CodeCheck:
     pub func parameter_default(index: i64, component: i64) -> f64:
         if index < 0 or (usize)index >= self.parameters.length() or component < 0 or component > 3: return 0.0
         return self.parameters.at((usize)index).defaults[(usize)component]
+
+    ## Whether parameter `index` is a ramp: 1 a float ramp (`k.ramp`), 3 a color ramp
+    ## (`k.ramp_color`), 0 a number or vector. A ramp has 0 components and no default.
+    pub func parameter_ramp(index: i64) -> i64:
+        if index < 0 or (usize)index >= self.parameters.length(): return 0
+        return self.parameters.at((usize)index).ramp
 
     ## Whether the snippet reads `k.frame`, `k.time` or `k.fps`.
     pub func reads_time() -> bool:
@@ -115,10 +123,12 @@ pub struct Code:
     ## `group` (a group expression read on `group_type`'s domain, 0 guessing; empty: all).
     ## `k.input(0)` reads `set` as it was, `k.input(1)` reads `input1` (none: an empty
     ## geometry, as when the second input is not connected); edits the snippet queues
-    ## apply after the run. Spare parameters take
-    ## `values[i]` by `names[i]` (a vector's components are named `name[0]`, `name[1]`,
-    ## ...; a parameter not named keeps its default). `count` is the lane count of Run
-    ## Over Numbers. A fault or a snippet that does not check fails with
+    ## apply after the run. Spare parameters take `values[i]` by `names[i]` (a vector's
+    ## components are named `name[0]`, `name[1]`, ...; a parameter not named keeps its
+    ## default). A ramp's flat data (luce-std `ramp`) is the name `"<name>#ramp"` with the
+    ## data's length L, then L entries named "" holding it; a ramp not sent reads its
+    ## kind's default, and data `ramp.check` refuses fails at the line naming the ramp.
+    ## `count` is the lane count of Run Over Numbers. A fault or a snippet that does not check fails with
     ## "line L, column C: message (point N)" (`header line ...` in the header).
     pub static func run(set: interop.Reference[GeometrySet], run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, input1: interop.Reference[GeometrySet]? = none) -> interop.Reference[GeometrySet]!:
         var second: const GeometrySet*? = none
@@ -164,6 +174,17 @@ func fill_check(check: CodeCheck*, compiled: const Compiled*, header: str, body:
             let kept = try check.texts.keep_text(base.bytes)
             let integer = slot.kind == .i32 or slot.kind == .i64
             try check.parameters.append(CheckParameter(name = kept, components = (i64)component + 1, integer = integer, defaults = defaults))
+    # Ramps, by the calls that read them.
+    let program = &compiled.program
+    for site in 0..<program.call_count():
+        let kind = ramp_kind(program.call_name(site))
+        if kind == 0: continue
+        let name = program.call_text(site, 0)
+        var known = false
+        for parameter in check.parameters.view(): known = known or parameter.name == name
+        if known: continue
+        let kept = try check.texts.keep_text(name.bytes)
+        try check.parameters.append(CheckParameter(name = kept, components = 0, integer = false, defaults = [0.0, 0.0, 0.0, 0.0], ramp = kind))
 
 ## A uniform's default bits as a number.
 func default_number(kind: Kind, raw: u64) -> f64:

@@ -402,6 +402,16 @@ pub struct Kernel:
     pub func input(index: i32) -> const Geometry*:
         _ = index
         return (const Geometry*)(void*)4096
+    ## Ramp parameter `name` (a float ramp row on the node, made on first use) at `t`,
+    ## clamped to `0..1` (Houdini's `chramp`); without data, a line from 0 to 1.
+    pub func ramp(name: str, t: f32) -> f32:
+        _ = name
+        return t
+    ## Color ramp parameter `name` at `t`: red, green and blue in lanes 0 to 2, lane 3
+    ## zero; without data, black to white.
+    pub func ramp_color(name: str, t: f32) -> f32[4]:
+        _ = name
+        return [t, t, t, 0.0]
     ## Queue a new point at world position `position`; its number, for add_prim and the
     ## set_point_ accessors (an element adds at most 1024 points and 1024 primitives).
     pub func add_point(position: f32[4]) -> i32:

@@ -103,11 +103,13 @@ struct CookState:
     var first: Source
     var second: Source
     var edits: Edits
+    var ramps: Ramps
 
     func close():
         self.first.close()
         self.second.close()
         self.edits.close()
+        self.ramps.close()
 
 ## The builtins that need each structure, by what they need.
 let grid_users: str[2] = ["nearpoint", "nearpoints"]

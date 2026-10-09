@@ -1,0 +1,107 @@
+# Ramp parameters, Houdini's ramp: `k.ramp("falloff", t)` reads a float ramp and
+# `k.ramp_color("tint", t)` an RGB one, through luce-std's `ramp` lookup. The node sends
+# each ramp's flat data inside Code.run's names and values: the name `"<name>#ramp"` with
+# the data's length L, then L entries named "" holding the data in order. A ramp the
+# node does not send is its kind's default; data `ramp.check` refuses fails the cook at
+# the snippet line that names it.
+
+## The default float ramp: 0 at 0 rising linearly to 1 at 1.
+let default_float: f64[9] = [1.0, 1.0, 2.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]
+## The default color ramp: black at 0 to white at 1, linearly.
+let default_color: f64[13] = [1.0, 3.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+## The suffix naming a ramp's length entry in Code.run's names.
+let ramp_suffix: str = "#ramp"
+
+## The ramp kind of builtin `name`: 1 a float ramp, 3 a color ramp, 0 none.
+func ramp_kind(name: str) -> i64:
+    if name == "ramp": return 1
+    if name == "ramp_color": return 3
+    return 0
+
+## One ramp a cook reads: its name and data (Code.run's values or a default).
+struct RampEntry:
+    let name: str
+    let data: const f64[]
+
+## The ramps of one cook.
+struct Ramps:
+    var entries: collections.List[RampEntry]
+
+    func close():
+        self.entries.destroy()
+
+    ## The data of ramp `name` (empty when the cook gathered none of that name).
+    func find(name: str) -> const f64[]:
+        for entry in self.entries.view():
+            if entry.name == name: return entry.data
+        var none_given: const f64[]
+        return none_given
+
+## The data Code.run's `names` and `values` hold for ramp `name`, or none when they hold
+## none; a length that does not fit is an error.
+func given_ramp(names: const str[], values: const f64[], name: str) -> const f64[]?!:
+    for (at, given) in names.indexed():
+        if given.length != name.length + ramp_suffix.length or not strings.starts_with(given, name) or not strings.ends_with(given, ramp_suffix):
+            continue
+        let length = values[at]
+        if not (length >= 0.0) or length != math.floor(length) or (f64)(values.length - at - 1) < length:
+            error(errors.invalid, "a ramp's length does not match the numbers after it")
+        return values[at + 1..<at + 1 + (usize)length]
+    return none
+
+## The ramps `compiled` reads, each checked; a refused one fails at its call's line.
+func gather_ramps(compiled: const Compiled*, names: const str[], values: const f64[], header: str, body: str) -> Ramps!:
+    var ramps = Ramps()
+    errdefer ramps.close()
+    let program = &compiled.program
+    for site in 0..<program.call_count():
+        let kind = ramp_kind(program.call_name(site))
+        if kind == 0: continue
+        let name = program.call_text(site, 0)
+        if ramps.find(name).length > 0: continue
+        var data: const f64[] = default_float[..<9]
+        if kind == 3: data = default_color[..<13]
+        let given = given_ramp(names, values, name) catch failure:
+            try fail_at(compiled, site, failure.message, header, body)
+            recover none
+        if let found = given: data = found
+        ramp.check(data) catch failure:
+            try fail_at(compiled, site, failure.message, header, body)
+        try ramps.entries.append(RampEntry(name = name, data = data))
+    return ramps
+
+## Fail with `message` at call site `site`'s place in the snippet.
+func fail_at(compiled: const Compiled*, site: usize, message: str, header: str, body: str) -> !:
+    var room: u8[64]
+    var at = ""
+    if let source = compiled.program.call_source(site):
+        let (part, line, column) = compiled.locate(source.line, source.column)
+        at = position_text(room, part, line, column, header, body)
+    var buffer: u8[512]
+    let text = strings.format(buffer, f"{at}{message}") else message
+    error(errors.invalid, text)
+
+## Register the Kernel's ramp lookups.
+func bind_ramps(host: Host*) -> !:
+    try host.builtin("Kernel", "ramp", engine.Builtin.of("ramp", [Kind.f32], [Kind.f32], ramp_lanes))
+    try host.builtin("Kernel", "ramp_color", engine.Builtin.of("ramp_color", [Kind.f32], [Kind.f32, Kind.f32, Kind.f32, Kind.f32], ramp_color_lanes))
+
+func ramp_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let data = state.ramps.find(call.text(0))
+    let t = call.f32_argument(0)
+    let values = call.f32_result(0)
+    for lane in 0..<call.lanes:
+        values[lane] = (f32)ramp.lookup(data, (f64)t[lane])
+
+func ramp_color_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let data = state.ramps.find(call.text(0))
+    let t = call.f32_argument(0)
+    var channels: f64[4]
+    for lane in 0..<call.lanes:
+        channels = [0.0, 0.0, 0.0, 0.0]
+        _ = ramp.lookup_into(data, (f64)t[lane], channels)
+        for k: usize in 0..<3: call.f32_result(k)[lane] = (f32)channels[k]
+        call.f32_result(3)[lane] = 0.0
