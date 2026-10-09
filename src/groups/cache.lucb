@@ -10,7 +10,7 @@ let cache_size: usize = 16
 struct CachedGroup:
     var key: u64 = 0
     ## Everything the group read (`signature`), compared in full on lookup.
-    var signature: Growing[u8]
+    var signature: FullKey
     var bits: Column[u64]
     var report: GroupReport
     var used: u64 = 0
@@ -27,7 +27,7 @@ var cache_clock: u64 = 0
 func entries() -> CachedGroup[]!:
     if let known = cached: return CachedGroup[](known, cache_size)
     let made = try new CachedGroup[cache_size] --- in memory.heap
-    for at in 0..<cache_size: made[at] = CachedGroup(0, Growing[u8](), Column[u64](), GroupReport(), 0)
+    for at in 0..<cache_size: made[at] = CachedGroup(0, FullKey(), Column[u64](), GroupReport(), 0)
     cached = made.data
     return made
 
@@ -39,16 +39,16 @@ pub struct GroupResult:
 
 ## The bits of `text` on `target`, evaluated or cached.
 pub func group_bits(mesh: const Mesh*, text: str, target: Domain) -> GroupResult!:
-    var wanted = Growing[u8]()
+    var wanted = FullKey()
     defer wanted.close()
     try signature(mesh, text, target, &wanted)
-    let key = signature_hash(wanted.view())
+    let key = wanted.hash()
     cache_lock.lock()
     let slots = entries() catch failure:
         cache_lock.unlock()
         error(failure.code, failure.message)
     for at in 0..<cache_size:
-        if slots[at].key == key and (str)slots[at].signature.view() == (str)wanted.view():
+        if slots[at].key == key and slots[at].signature.equals(&wanted):
             cache_clock += 1
             slots[at].used = cache_clock
             let found = GroupResult(slots[at].bits.share(), slots[at].report)
@@ -70,7 +70,7 @@ pub func group_bits(mesh: const Mesh*, text: str, target: Domain) -> GroupResult
     table[slot].close()
     cache_clock += 1
     table[slot] = CachedGroup(key, wanted, column.share(), report, cache_clock)
-    wanted = Growing[u8]()
+    wanted = FullKey()
     return GroupResult(column, report)
 
 ## Drop every cached group (tests with allocation trackers).
@@ -83,35 +83,19 @@ pub func clear_group_cache():
     free(slots) in memory.heap
     cached = none
 
-## What evaluating `text` on `target` reads, as bytes: the text, the target,
-## the ids of the topology, positions and normals, and each attribute's name,
-## domain and column ids (a renamed attribute keeps its column).
-func signature(mesh: const Mesh*, text: str, target: Domain, into: Growing[u8]*) -> !:
-    try put_text(into, text)
-    try put_word(into, (u64)(u8)target)
-    try put_word(into, mesh.corners_id())
-    try put_word(into, mesh.offsets_id())
-    try put_word(into, mesh.points_id())
-    try put_word(into, mesh.normals_id())
+## What evaluating `text` on `target` reads: the text, the target, the ids
+## of the topology, positions and normals, and each attribute's name, domain
+## and column ids (a renamed attribute keeps its column).
+func signature(mesh: const Mesh*, text: str, target: Domain, into: FullKey*) -> !:
+    try into.text(text)
+    try into.word((u64)(u8)target)
+    try into.word(mesh.corners_id())
+    try into.word(mesh.offsets_id())
+    try into.word(mesh.points_id())
+    try into.word(mesh.normals_id())
     for index in 0..<(usize)mesh.attribute_count():
         let entry = try mesh.attribute_entry((i64)index)
-        try put_text(into, entry.name())
-        try put_word(into, (u64)(u8)entry.domain)
-        try put_word(into, entry.data.id())
-        try put_word(into, entry.table.id())
-
-func put_word(into: Growing[u8]*, value: u64) -> !:
-    try into.reserve(into.count + 8)
-    memory.write[u64]((void*)&into.items[into.count], value)
-    into.count += 8
-
-## `text` after its length, so consecutive texts cannot run together.
-func put_text(into: Growing[u8]*, text: str) -> !:
-    try put_word(into, (u64)text.length)
-    try into.reserve(into.count + text.length)
-    if text.length > 0: memory.copy(into.items[into.count..<into.count + text.length], text.bytes, text.length)
-    into.count += text.length
-
-func signature_hash(bytes: const u8[]) -> u64:
-    let key = ((str)bytes).hash()
-    return key if key != 0 else 1
+        try into.text(entry.name())
+        try into.word((u64)(u8)entry.domain)
+        try into.word(entry.data.id())
+        try into.word(entry.table.id())

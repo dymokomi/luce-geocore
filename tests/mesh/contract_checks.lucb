@@ -1,6 +1,7 @@
 ## Contracts of the verb framework and mesh assembly: parameters left out
 ## take their initial values and extra ones are refused, every registered
-## verb runs on its defaults, the group cache tells meshes apart, assembly
+## verb runs on its defaults, the group and subdivision caches tell meshes
+## apart, assembly
 ## refuses meshes past the limits, Fuse merges a large grid of loose quads, and
 ## distances to faces without area stay finite.
 import interop
@@ -8,7 +9,7 @@ import memory
 from luce_std import math
 from luce_geocore import geocore
 from luce_geocore.geocore import Mesh, MeshPrimitives, GeometrySet, Verbs, VerbCatalog, Vector3
-from luce_geocore.kernel import Domain, Float3, group_bits_of, assembled, max_faces, mesh_level_set, release_grid, clear_group_cache, run_set_verb, find_set_verb
+from luce_geocore.kernel import subdivided_display, mesh_dispose, Domain, Float3, group_bits_of, assembled, max_faces, mesh_level_set, release_grid, clear_group_cache, run_set_verb, find_set_verb
 from luce_geocore.core.shared import Column
 from luce_geocore.core.growing import Growing
 from verb_run import verb_mesh, no_numbers
@@ -19,12 +20,13 @@ pub func exercise() -> !:
     try registry_sweep()
     try group_cache_keys()
     try flat_triangle_distance()
+    try subdivision_plan_keys()
 
 pub func run() -> !:
     try exercise()
     try assembly_limits()
     try fuse_loose_grid(400)
-    print("PASS contracts: parameter defaults, the verb registry, group cache keys, assembly limits, Fuse at scale, distances to flat faces")
+    print("PASS contracts: parameter defaults, the verb registry, group cache keys, subdivision plan keys, assembly limits, Fuse at scale, distances to flat faces")
 
 ## Transform Components with only its translation equals the run with all
 ## fifteen numbers; a sixteenth is refused.
@@ -134,3 +136,23 @@ func fuse_loose_grid(cells: usize) -> !:
     let fused = try verb_mesh("Fuse", loose, "", 0, [0.001])
     defer fused.release()
     assert(fused.value().point_count() == (i64)((cells + 1) * (cells + 1)) and fused.value().face_count() == (i64)(cells * cells))
+
+## A creased cage and the same cage with its `crease` renamed share their
+## topology and columns: only the full plan key (which holds attribute
+## names) tells them apart, so the renamed cage subdivides smooth.
+func subdivision_plan_keys() -> !:
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    # Crease last, so the renamed attribute keeps its place in the order.
+    let subdivided = try verb_mesh("Subdivision", cube, "", 0, [1.0, 2.0, 2.0, 1.0])
+    defer subdivided.release()
+    let marked = try verb_mesh("Crease", subdivided, "", 0, [10.0, 0.0])
+    defer marked.release()
+    let renamed = try marked.value().renamed_attribute("crease", "kept", 4)
+    defer renamed.release()
+    let sharp = (try subdivided_display(marked.value())) else trap("no display")
+    defer mesh_dispose(sharp)
+    let smooth = (try subdivided_display(renamed.value())) else trap("no display")
+    defer mesh_dispose(smooth)
+    assert(math.abs(sharp.bounds().maximum.x - 1.0) < 0.000001)
+    assert(smooth.bounds().maximum.x < 0.99)

@@ -9,7 +9,10 @@
 ## The final level's faces carry `.cage_face`, the cage face they came from.
 
 pub struct Plan:
+    ## The plan's id in its cache (display meshes and level state name it).
     pub var key: u64
+    ## Everything the plan was built from (see display.lucb's plan_key).
+    pub var source: FullKey
     pub var scheme: Scheme
     pub var level: usize
     pub var corners: bool
@@ -24,6 +27,7 @@ pub struct Plan:
         return self.meshes.items[self.meshes.count - 1]
 
     pub func close():
+        self.source.close()
         for mesh in self.meshes.view(): mesh_dispose(mesh)
         self.meshes.close()
         for column in self.edge_sharpness.view():
@@ -37,7 +41,7 @@ pub struct Plan:
 
 ## The plan for `mesh` under `settings` (level at least 1).
 pub func build_plan(mesh: const Mesh*, settings: Settings, key: u64) -> Plan*!:
-    let plan = try new Plan(key, settings.scheme, settings.level, settings.corners, Growing[Mesh*](), Growing[Column[f32]](), Growing[Column[f32]]()) in memory.heap
+    let plan = try new Plan(key, FullKey(), settings.scheme, settings.level, settings.corners, Growing[Mesh*](), Growing[Column[f32]](), Growing[Column[f32]]()) in memory.heap
     errdefer:
         plan.close()
         free(plan) in memory.heap

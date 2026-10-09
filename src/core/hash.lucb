@@ -1,9 +1,45 @@
-## Hash mixing for keys built from several 64-bit values (change ids,
-## counts, settings): each value is scrambled into the running state.
-## Equal keys are likely, not certain, to mean equal inputs; a cache that
-## must be right compares the inputs too.
+## Keys for caches. `mix` folds 64-bit values (change ids, counts, settings)
+## into a hash; equal hashes are likely, not certain, to mean equal inputs.
+## A cache that must be right keeps a `FullKey`, the bytes of everything its
+## result read, and compares it on lookup, the hash only skipping unequal
+## entries quickly.
+import memory
+from core.growing import Growing
 
 ## `state` with `value` mixed in.
 pub func mix(state: u64, value: u64) -> u64:
     let scrambled = state ^ (value *% 0x9E3779B97F4A7C15)
     return ((scrambled << 27) | (scrambled >> 37)) *% 5 +% 0x52DCE729
+
+## Everything a cached result read, as bytes.
+pub struct FullKey:
+    var bytes: Growing[u8]
+
+    pub func init():
+        self.bytes = Growing[u8]()
+
+    ## Append a 64-bit value.
+    pub func word(value: u64) -> !:
+        try self.bytes.reserve(self.bytes.count + 8)
+        memory.write[u64]((void*)&self.bytes.items[self.bytes.count], value)
+        self.bytes.count += 8
+
+    ## Append `text` after its length, so consecutive texts cannot run
+    ## together.
+    pub func text(value: str) -> !:
+        try self.word((u64)value.length)
+        try self.bytes.reserve(self.bytes.count + value.length)
+        if value.length > 0: memory.copy(self.bytes.items[self.bytes.count..<self.bytes.count + value.length], value.bytes, value.length)
+        self.bytes.count += value.length
+
+    ## A hash of the bytes; never zero, so zero can mean "no key".
+    pub func hash() -> u64:
+        let key = ((str)self.bytes.view()).hash()
+        return key if key != 0 else 1
+
+    ## Whether `other` holds the same bytes.
+    pub func equals(other: const FullKey*) -> bool:
+        return (str)self.bytes.view() == (str)other.bytes.view()
+
+    pub func close():
+        self.bytes.close()

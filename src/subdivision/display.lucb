@@ -1,7 +1,7 @@
 ## The display mesh of a subdivided cage, cached in the cage's topology
-## cache (so every mesh with its connectivity shares it): plans by their key
-## (connectivity, settings, sharpness and the carried attributes' columns),
-## display meshes by plan and positions. An unchanged mesh costs a lookup.
+## cache (so every mesh with its connectivity shares it): plans by their full
+## key (settings and the carried attributes' names and columns, compared in
+## full), display meshes by plan and positions. An unchanged mesh costs a lookup.
 ## The newest display keeps every level's positions, so a Move re-evaluates
 ## only what the moved points reach: at each level the faces around them,
 ## the edges and points those touch, and at the limit the final points
@@ -25,6 +25,9 @@ struct DisplayCache:
     var plans: Growing[Plan*]
     var shown: Growing[Shown]
     var state: LevelState
+    ## The id the next plan gets (ids are never reused, so a display of an
+    ## evicted plan matches no new one).
+    var next_plan: u64 = 1
 
 func dispose_cache(context: void*):
     let cache = (DisplayCache*)context
@@ -38,37 +41,43 @@ func dispose_cache(context: void*):
     cache.state.starts.close()
     free(cache) in memory.heap
 
-## The key of the plan `mesh` needs: connectivity, settings, and the columns
-## of every attribute the levels carry or read (normals and hidden
-## attributes excepted: a Move refreshes normals, the display makes its own,
-## and hidden ones such as a verb's `.selection` are not carried).
-func plan_key(mesh: const Mesh*, settings: Settings) -> u64:
-    var key = hash.mix((u64)mesh.topology_hash(), (u64)(u8)settings.scheme)
-    key = hash.mix(key, (u64)settings.level)
-    key = hash.mix(key, 1 if settings.corners else 0)
+## The full key of the plan `mesh` needs: its settings, and the name,
+## domain and columns of every attribute the levels carry or read (normals
+## and hidden attributes excepted: a Move refreshes normals, the display
+## makes its own, and hidden ones such as a verb's `.selection` are not
+## carried). Connectivity is not in it: the cache belongs to one topology.
+func plan_key(mesh: const Mesh*, settings: Settings, into: FullKey*) -> !:
+    try into.word((u64)(u8)settings.scheme)
+    try into.word((u64)settings.level)
+    try into.word(1 if settings.corners else 0)
     for index in 0..<mesh.attribute_count():
-        let entry = mesh.attribute_entry(index) catch failure: continue
+        let entry = try mesh.attribute_entry(index)
         if entry.role == Role.normal or entry.name().bytes[0] == 46: continue
-        key = hash.mix(key, entry.data.id())
-    return key
+        try into.text(entry.name())
+        try into.word((u64)(u8)entry.domain)
+        try into.word(entry.data.id())
+        try into.word(entry.table.id())
 
 ## The display mesh of `mesh` (another owner's share), or none when it is
 ## not subdivided.
 pub func subdivided_display(mesh: const Mesh*) -> Mesh*?!:
     let settings = settings_of(mesh)
     if settings.scheme == Scheme.off or settings.level == 0: return none
-    let key = plan_key(mesh, settings)
+    var wanted = FullKey()
+    defer wanted.close()
+    try plan_key(mesh, settings, &wanted)
     let positions = mesh.points_id()
     let context = try mesh.topology_extension(dispose_cache, make_cache)
     let cache = (DisplayCache*)context
     cache.lock.lock()
     defer cache.lock.unlock()
-    for entry in cache.shown.view():
-        if entry.plan == key and entry.positions == positions: return try mesh_share(entry.mesh)
     var plan: Plan*? = none
     for known in cache.plans.view():
-        if known.key == key: plan = known
-    let chosen = plan else try keep_plan(cache, try build_plan(mesh, settings, key))
+        if known.source.equals(&wanted): plan = known
+    let chosen = plan else try keep_plan(cache, try build_plan(mesh, settings, cache.next_plan), &wanted)
+    let key = chosen.key
+    for entry in cache.shown.view():
+        if entry.plan == key and entry.positions == positions: return try mesh_share(entry.mesh)
     # The newest display of this plan updates where the cage moved;
     # otherwise every level is evaluated.
     var made: Mesh*? = none
@@ -90,10 +99,14 @@ pub func subdivided_display(mesh: const Mesh*) -> Mesh*?!:
     return result
 
 func make_cache() -> void*!:
-    return (void*)(try new DisplayCache(sync.Mutex(), Growing[Plan*](), Growing[Shown](), LevelState(0, Growing[Vector3](), Growing[usize]())) in memory.heap)
+    return (void*)(try new DisplayCache(sync.Mutex(), Growing[Plan*](), Growing[Shown](), LevelState(0, Growing[Vector3](), Growing[usize]()), 1) in memory.heap)
 
-## Keep `plan` (the last two plans are kept).
-func keep_plan(cache: DisplayCache*, plan: Plan*) -> Plan*!:
+## Keep `plan`, built from `source` (taken), under the next id; the last
+## two plans are kept.
+func keep_plan(cache: DisplayCache*, plan: Plan*, source: FullKey*) -> Plan*!:
+    plan.source = *source
+    *source = FullKey()
+    cache.next_plan += 1
     if cache.plans.count == 2:
         cache.plans.items[0].close()
         free(cache.plans.items[0]) in memory.heap
