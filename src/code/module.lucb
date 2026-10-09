@@ -41,10 +41,10 @@ from core.strings import TableBuilder
 from core.growing import Growing
 from core.float3 import Float3
 from core.shared import Column as SharedColumn
-from core.bits import Bits, BitsBuilder
+from core.bits import Bits, BitsBuilder, trailing_zeros
 from geometries.topology.connectivity import Topology
 from geometries.polygon import Mesh, mesh_share, mesh_dispose, moved_storage, put_attribute, assembled, transfer_attributes
 from geometry_set import GeometrySet, set_mesh, adopt_set, dispose_set, mesh_component, set_detail, set_put_detail
 from math.vector import Vector3
 from geometries.triangle_index import TriangleIndex
-from fields import Volume, Sdf, SparseGrid, GridSampler, set_volume, set_sdf
+from fields import Volume, Sdf, SparseGrid, GridSampler, GridClass, set_volume, set_sdf, new_volume, add_grid, release_volume, volume_type, share_grid, release_grid, densified, grid_with_values, same_voxels, same_matrix, key_leaf, leaf_key, leaf_of, local_index, leaf_voxels, mask_words

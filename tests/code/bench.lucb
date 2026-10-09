@@ -5,6 +5,7 @@ from luce_geocore.geocore import GeometrySet
 from luce_geocore import kernel as geocore_kernel
 from luce_geocore.geocore import MeshPrimitives
 import support
+import voxels
 
 func measure(name: str, body: str, target: f64) -> !:
     # A grid of 1M points with point normals (up), as an imported mesh has.
@@ -59,6 +60,7 @@ func families() -> !:
     let arrays = try support.run(grid, support.points_mode, "p.set_f32_array(\"w\", k.floats().append(1.0).append(2.0).append(3.0).append((f32)p.ptnum))\n")
     try time_cook("set_f32_array, 4 items x 1M", grid, none, support.points_mode, "p.set_f32_array(\"w\", k.floats().append(1.0).append(2.0).append(3.0).append((f32)p.ptnum))\n", 0, 0.0)
     try time_cook("f32_array, 4 items x 1M (summed)", arrays, none, support.points_mode, "let a = p.f32_array(\"w\")\nvar sum: f32 = 0.0\nfor i in 0..<a.len():\n    sum += a.at(i)\np.P[1] = sum * 0.001\n", 0, 0.0)
+    try voxel_bench()
     try time_cook("add_point x 1M (Numbers)", try support.empty_set(), none, support.numbers_mode, "_ = k.add_point([(f32)n * 0.001, 0.0, 0.0, 0.0])\n", 1000000, 60.0)
 
 ## MeshPrimitives.grid at its largest: 2048 divisions, 4.2M points.
@@ -71,3 +73,16 @@ pub func grid_build() -> !:
         if (try grid.get()).point_count() != 2049 * 2049: trap("grid size")
         if spent < best: best = spent
     print(f"grid 2048\t{(f64)best / 1000000.0}\t0")
+
+## 128^3 dense voxels (16^3 leaves) given a noise density by Run Over Voxels.
+func voxel_bench() -> !:
+    let box = try voxels.volume(try support.empty_set(), "density", 0.0, 6.35, 12.7, 0.1, true)
+    let body = "x.value = max(noise(x.P * 0.7) - 0.4, 0.0)\n"
+    _ = try voxels.voxel_run(box, "density", body)
+    var best: u64 = 0xFFFFFFFFFFFFFFFF
+    for _ in 0..<5:
+        let started = time.now()
+        _ = try voxels.voxel_run(box, "density", body)
+        let spent = time.since(started)
+        if spent < best: best = spent
+    print(f"voxels 128^3 dense, noise density\t{(f64)best / 1000000.0}\t0")

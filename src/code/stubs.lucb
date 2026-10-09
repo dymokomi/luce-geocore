@@ -1,7 +1,9 @@
 # The API a snippet is checked against: `luce_geocore/code.lucb` in the snippet root. The
 # bodies never run; what each member does is in `bindings.lucb`.
 
-let stub_text: str = """## The geometry a Code node's snippet runs against (luce-geocore). Positions, normals
+let stub_text: str = """from luce_kernel.lib import Mat4
+
+## The geometry a Code node's snippet runs against (luce-geocore). Positions, normals
 ## and colors are f32[4] with lane 3 zero; uv is f32[2]. Accessors take the attribute's
 ## name as a literal and read or write it in its stored type; reading an attribute the
 ## geometry lacks gives 0, and writing one creates it.
@@ -951,6 +953,74 @@ pub struct Geometry:
     pub func volume_voxel_size(name: str) -> f32:
         _ = name
         return 0.0
+    ## The tricubic (Catmull-Rom) value at `position`: smooth across voxels and through
+    ## each voxel's value (VEX `volumesmoothsample`).
+    pub func volume_smooth_sample(name: str, position: f32[4]) -> f32:
+        _ = name
+        _ = position
+        return 0.0
+    ## The trilinear value at index-space `index` (voxel (i, j, k) at (i, j, k); VEX
+    ## `volumesample` of a position from `volume_index_to_pos`).
+    pub func volume_sample_index(name: str, index: f32[4]) -> f32:
+        _ = name
+        _ = index
+        return 0.0
+    ## 1 when voxel (i, j, k) is active, else 0 (VEX `volumeindexactive`).
+    pub func volume_index_active(name: str, i: i32, j: i32, k: i32) -> i32:
+        _ = name
+        return i + j + k
+    ## 0 for a fog grid, 1 a level set, 2 the input's SDF, -1 when there is none.
+    pub func volume_type(name: str) -> i32:
+        _ = name
+        return 0
+    ## The grid's value outside its voxels (0 without a grid).
+    pub func volume_background(name: str) -> f32:
+        _ = name
+        return 0.0
+    ## The grid's index-to-world transform: rows the images of the index axes, then
+    ## the translation (VEX `primintrinsic` "transform"); identity without a grid.
+    pub func volume_transform(name: str) -> Mat4:
+        _ = name
+        return Mat4.identity()
+
+## The voxel a snippet runs for (Run Over Voxels, Houdini's Volume Wrangle): one run per
+## active voxel of the target grid. Reads see the input; writes become grids on the
+## target's voxels when the run ends.
+pub struct Voxel:
+    ## The voxel's center, in world space (read only).
+    pub var P: f32[4]
+    ## The target grid's value here; writing sets it.
+    pub var value: f32
+    ## The voxel's index along x, y and z (read only).
+    pub var ix: i32
+    pub var iy: i32
+    pub var iz: i32
+    ## This voxel's number among the target's leaf voxels (512 a leaf).
+    pub let voxnum: i32
+    ## How many voxels the target's active ones span along x, y and z (VEX `volumeres`).
+    pub let res: f32[4]
+    var written: bool
+
+    ## Grid `name` of the volume at this voxel (0 without one): by index when it shares
+    ## the target's transform, trilinear at the center when not.
+    pub func f32(name: str) -> f32:
+        _ = name
+        return 0.0
+    ## Grid `name` set at this voxel; a grid the volume lacks is made on the target's
+    ## voxels and transform (a fog grid, background 0).
+    pub func set_f32(name: str, value: f32):
+        _ = name
+        _ = value
+        self.written = true
+    ## The vector grids `name.x`, `name.y`, `name.z` at this voxel.
+    pub func vec3(name: str) -> f32[4]:
+        _ = name
+        return [0.0, 0.0, 0.0, 0.0]
+    ## The vector grids `name.x`, `name.y`, `name.z` set at this voxel.
+    pub func set_vec3(name: str, value: f32[4]):
+        _ = name
+        _ = value
+        self.written = true
 
 ## The node: the timeline, its spare parameters, the detail attributes, the inputs, and
 ## edits queued for after the run (new points and primitives, attribute sets, removals:

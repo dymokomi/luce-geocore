@@ -1,0 +1,157 @@
+## Grids made from other grids and from scratch: a grid made dense over its leaves' box
+## (Houdini's dense volume against a sparse VDB), one sharing another's leaves with new
+## values (what a voxel run writes), a box of voxels (the Volume node), and the smooth,
+## index-space and activity reads of VEX's volume functions.
+
+## `grid` with every leaf of its leaves' box present and every voxel active: stored
+## values kept, the rest the background.
+pub func densified(grid: const SparseGrid*) -> SparseGrid*!:
+    let keys = grid.keys.view()
+    if keys.length == 0:
+        return try new_grid(grid.name(), grid.class, grid.background, grid.transform, try Column[u64].allocate(0), try Column[f32].allocate(0), try Column[u64].allocate(0))
+    let (x0, y0, z0) = key_leaf(keys[0])
+    var low: i64[3] = [x0, y0, z0]
+    var high: i64[3] = [x0, y0, z0]
+    for key in keys:
+        let (x, y, z) = key_leaf(key)
+        let at: i64[3] = [x, y, z]
+        for k in 0..<3:
+            if at[k] < low[k]: low[k] = at[k]
+            if at[k] > high[k]: high[k] = at[k]
+    let nx = high[0] - low[0] + 1
+    let ny = high[1] - low[1] + 1
+    let nz = high[2] - low[2] + 1
+    if (f64)nx * (f64)ny * (f64)nz > 4.0e6: error(errors.limit, "the grid is too large to make dense")
+    var box_keys = Growing[u64]()
+    defer box_keys.close()
+    for z in 0..<nz:
+        for y in 0..<ny:
+            for x in 0..<nx:
+                try box_keys.push(leaf_key(low[0] + x, low[1] + y, low[2] + z))
+    var fill = DenseFill(source = grid)
+    return try grid_of_leaves(grid.name(), grid.class, grid.background, grid.transform, box_keys.view(), fill_dense_leaf, (void*)&fill)
+
+struct DenseFill:
+    let source: const SparseGrid*
+
+func fill_dense_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[]):
+    _ = leaf
+    let fill = (DenseFill*)(context else return)
+    let found = fill.source.find(key)
+    if found >= 0:
+        memory.copy(values, fill.source.values.view()[(usize)found * leaf_voxels..<((usize)found + 1) * leaf_voxels], leaf_voxels)
+    else:
+        for at in 0..<leaf_voxels: values[at] = fill.source.background
+    for at in 0..<mask_words: mask[at] = 0xFFFFFFFFFFFFFFFF
+
+## A grid named `name` on `like`'s leaves, active voxels and transform, holding `values`
+## (taken: one per voxel of `like`'s leaves, in its order).
+pub func grid_with_values(like: const SparseGrid*, name: str, class: GridClass, background: f32, values: Column[f32]) -> SparseGrid*!:
+    var owned = values
+    errdefer owned.release()
+    if owned.count() != like.leaf_count() * leaf_voxels: error(errors.invalid, "a grid's values must fill its leaves")
+    return try new_grid(name, class, background, like.transform, like.keys.share(), owned.take(), like.masks.share())
+
+## Whether two grids have the same voxels: one transform, one list of leaves.
+pub func same_voxels(a: const SparseGrid*, b: const SparseGrid*) -> bool:
+    if a.keys.count() != b.keys.count(): return false
+    if not same_matrix(a.transform, b.transform): return false
+    let left = a.keys.view()
+    let right = b.keys.view()
+    for at in 0..<left.length:
+        if left[at] != right[at]: return false
+    return true
+
+## Whether two transforms are the same, exactly.
+pub func same_matrix(a: Matrix4, b: Matrix4) -> bool:
+    return same_vector(a.x, b.x) and same_vector(a.y, b.y) and same_vector(a.z, b.z) and same_vector(a.translation, b.translation)
+
+func same_vector(a: Vector3, b: Vector3) -> bool:
+    return a.x == b.x and a.y == b.y and a.z == b.z
+
+## A grid named `name` of voxels `voxel` apart over the world box `low`..`high`: when
+## `dense`, every voxel whose center is in the box active with `initial` (the rest of
+## their leaves inactive, at the background); else no voxels at all.
+pub func box_grid(name: str, class: GridClass, low: Vector3, high: Vector3, voxel: f64, background: f32, initial: f32, dense: bool) -> SparseGrid*!:
+    if not (voxel > 0.0 and voxel < 1.0e6): error(errors.invalid, "a volume needs a positive voxel size")
+    let transform = voxel_transform(voxel)
+    var keys = Growing[u64]()
+    defer keys.close()
+    let span = BoxSpan(lo = [(i64)math.ceil(low.x / voxel), (i64)math.ceil(low.y / voxel), (i64)math.ceil(low.z / voxel)],
+                       hi = [(i64)math.floor(high.x / voxel), (i64)math.floor(high.y / voxel), (i64)math.floor(high.z / voxel)], initial = initial, background = background)
+    if dense and span.hi[0] >= span.lo[0] and span.hi[1] >= span.lo[1] and span.hi[2] >= span.lo[2]:
+        let lx = leaf_of(span.lo[0])
+        let ly = leaf_of(span.lo[1])
+        let lz = leaf_of(span.lo[2])
+        let hx = leaf_of(span.hi[0])
+        let hy = leaf_of(span.hi[1])
+        let hz = leaf_of(span.hi[2])
+        if (f64)(hx - lx + 1) * (f64)(hy - ly + 1) * (f64)(hz - lz + 1) > 4.0e6: error(errors.limit, "the voxels are too small for this box")
+        for z in lz..<hz + 1:
+            for y in ly..<hy + 1:
+                for x in lx..<hx + 1:
+                    try keys.push(leaf_key(x, y, z))
+    return try grid_of_leaves(name, class, background, transform, keys.view(), fill_box_leaf, (void*)&span)
+
+## The voxel index box a box grid fills, and its values.
+struct BoxSpan:
+    let lo: i64[3]
+    let hi: i64[3]
+    let initial: f32
+    let background: f32
+
+func fill_box_leaf(context: void*?, leaf: usize, key: u64, values: f32[], mask: u64[]):
+    _ = leaf
+    let span = (BoxSpan*)(context else return)
+    let (x, y, z) = key_leaf(key)
+    for at in 0..<mask_words: mask[at] = 0
+    for k in 0..<8:
+        for j in 0..<8:
+            for i in 0..<8:
+                let at = (usize)(i + j * 8 + k * 64)
+                let gi = x * 8 + (i64)i
+                let gj = y * 8 + (i64)j
+                let gk = z * 8 + (i64)k
+                let inside = gi >= span.lo[0] and gi <= span.hi[0] and gj >= span.lo[1] and gj <= span.hi[1] and gk >= span.lo[2] and gk <= span.hi[2]
+                values[at] = span.initial if inside else span.background
+                if inside: mask[at >> 6] |= (u64)1 << (u64)(at & 63)
+
+extend SparseGrid:
+    ## Whether voxel (i, j, k) is active (VEX `volumeindexactive`).
+    pub func is_active(i: i64, j: i64, k: i64) -> bool:
+        let leaf = self.find(leaf_key(leaf_of(i), leaf_of(j), leaf_of(k)))
+        if leaf < 0: return false
+        let at = local_index(i, j, k)
+        return (self.masks.view()[(usize)leaf * mask_words + (at >> 6)] >> (u64)(at & 63)) & 1 != 0
+
+extend GridSampler:
+    ## The trilinear value at index-space point `p` (voxel (i, j, k) at (i, j, k)).
+    pub func sample_index(p: Vector3) -> f64:
+        return self.sample(self.grid.transform.transform_point(p))
+
+    ## The tricubic (Catmull-Rom) value at world point `point`: smooth across voxels,
+    ## through every voxel's value (VEX `volumesmoothsample`).
+    pub func smooth_sample(point: Vector3) -> f64:
+        let p = self.grid.inverse.transform_point(point)
+        let fx = math.floor(p.x)
+        let fy = math.floor(p.y)
+        let fz = math.floor(p.z)
+        let wx = catmull_weights(p.x - fx)
+        let wy = catmull_weights(p.y - fy)
+        let wz = catmull_weights(p.z - fz)
+        var total: f64 = 0.0
+        for c in 0..<4:
+            var plane: f64 = 0.0
+            for b in 0..<4:
+                var row: f64 = 0.0
+                for a in 0..<4:
+                    row += wx[a] * (f64)self.voxel((i64)fx + (i64)a - 1, (i64)fy + (i64)b - 1, (i64)fz + (i64)c - 1)
+                plane += wy[b] * row
+            total += wz[c] * plane
+        return total
+
+## Catmull-Rom weights of the four voxels around fraction `t`.
+func catmull_weights(t: f64) -> f64[4]:
+    let t2 = t * t
+    let t3 = t2 * t
+    return [-0.5 * t3 + t2 - 0.5 * t, 1.5 * t3 - 2.5 * t2 + 1.0, -1.5 * t3 + 2.0 * t2 + 0.5 * t, 0.5 * t3 - 0.5 * t2]

@@ -13,22 +13,25 @@ pub enum RunOver as u8:
     primitives = 3
     ## `count` times, numbered.
     numbers = 4
+    ## Once per active voxel of a volume grid (Houdini's Volume Wrangle).
+    voxels = 5
 
 extend RunOver:
     ## The mode a menu value names.
     static func of(value: i64) -> RunOver!:
-        if value < 0 or value > 4:
-            error(errors.invalid, "Run Over is 0 (detail), 1 (points), 2 (vertices), 3 (primitives) or 4 (numbers)")
+        if value < 0 or value > 5:
+            error(errors.invalid, "Run Over is 0 (detail), 1 (points), 2 (vertices), 3 (primitives), 4 (numbers) or 5 (voxels)")
         return (RunOver)(u8)value
 
     ## The entry function the snippet's body goes into.
     func wrapper() -> lower.RunOver:
-        let imports = "from luce_geocore.code import Point, Prim, Vertex, Kernel"
+        let imports = "from luce_geocore.code import Point, Prim, Vertex, Voxel, Kernel"
         return match self:
             .detail => lower.RunOver(entry = "detail", parameters = "k: Kernel*", imports = imports)
             .points => lower.RunOver(entry = "point", parameters = "p: Point*, k: const Kernel*", imports = imports)
             .vertices => lower.RunOver(entry = "vertex", parameters = "v: Vertex*, k: const Kernel*", imports = imports)
             .primitives => lower.RunOver(entry = "prim", parameters = "f: Prim*, k: const Kernel*", imports = imports)
+            .voxels => lower.RunOver(entry = "voxel", parameters = "x: Voxel*, k: const Kernel*", imports = imports)
             _ => lower.RunOver(entry = "number", parameters = "n: i64, k: Kernel*", imports = imports)
 
     ## The mesh domain its lanes are elements of (detail for Detail and Numbers).
@@ -46,6 +49,7 @@ extend RunOver:
             .vertices => "vertex"
             .primitives => "prim"
             .numbers => "number"
+            .voxels => "voxel"
             _ => "detail"
 
     ## The stub type a mode's element is.
@@ -54,4 +58,5 @@ extend RunOver:
             .points => "Point"
             .vertices => "Vertex"
             .primitives => "Prim"
+            .voxels => "Voxel"
             _ => "Kernel"

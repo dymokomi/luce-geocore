@@ -1,0 +1,111 @@
+## Run Over Voxels (Houdini's Volume Wrangle) on grids from the Volume node: a density
+## shaped by noise inside a sphere, an SDF union by min across grids, the gradient of a
+## written field, the same voxels on any number of workers, dense against active-only,
+## and VEX's volume reads.
+import interop
+import strings
+from luce_std import math
+from luce_geocore import kernel as geocore_kernel
+from luce_geocore.geocore import GeometrySet, GeometryVerbs, VerbCatalog
+import support
+
+let voxels_mode: i64 = 5
+
+func expect(condition: bool, what: str):
+    if not condition:
+        print(f"FAIL  {what}")
+        trap("voxel checks")
+
+pub func run_all() -> !:
+    let node = VerbCatalog.index_of("Volume")
+    expect(VerbCatalog.text_row(node) == "Name" and VerbCatalog.text_row(0) == "" and not VerbCatalog.grouped(node), "the Volume node's Name row")
+    try noise_density()
+    try sdf_union()
+    try gradient()
+    try dense_and_active()
+    try volume_reads()
+    print("ok    voxels: noise density in a sphere, SDF union, gradients, 1 and 16 workers, dense and active, volume reads")
+
+## Grid `name` from the Volume node added to `set`: class (0 fog, 1 level set), centered
+## box of `size`, voxels `voxel` apart, dense or empty.
+pub func volume(set: interop.Reference[GeometrySet], name: str, class: f64, center: f64, size: f64, voxel: f64, dense: bool) -> interop.Reference[GeometrySet]!:
+    let numbers: f64[11] = [class, center, center, center, size, size, size, voxel, 0.0, 0.0, 1.0 if dense else 0.0]
+    let made = try GeometryVerbs.run("Volume", set, none, name, 0, numbers[..<11])
+    return try (try made.get()).geometry()
+
+## Run `body` over the voxels of grid `name` of `set`.
+pub func voxel_run(set: interop.Reference[GeometrySet], name: str, body: str, threads: usize = 0, dense: bool = false) -> interop.Reference[GeometrySet]!:
+    let made = try geocore_kernel.run_code(try set.get(), none, voxels_mode, "", body, "", 0, support.no_names(), support.no_values(), 1.0, 0.0, 24.0, 0, threads, none, name, dense)
+    return try geocore_kernel.adopt_set(made)
+
+## A 21 by 21 slice of voxel indices (-10..10, k = `k`) read from `volumes` by `body`
+## (which sets point attributes), as a mesh of 441 points.
+func slice(volumes: interop.Reference[GeometrySet], k: i64, body: str) -> interop.Reference[GeometrySet]!:
+    var room: u8[2048]
+    let full = try strings.format(room, f"let g = k.input(1)\nlet i = p.ptnum % 21 - 10\nlet j = p.ptnum // 21 - 10\nlet kk: i32 = {k}\n{body}")
+    return try support.run_inputs(try support.grid_set(20), volumes, support.points_mode, full)
+
+## noise(P * 3) inside a sphere of 0.8, 0 outside, on a 2-unit fog box of 0.1 voxels;
+## every voxel equals what the snippet computes from its center, at 1 and 16 workers.
+func noise_density() -> !:
+    let box = try volume(try support.empty_set(), "density", 0.0, 0.0, 2.0, 0.1, true)
+    let body = "if length(x.P) < 0.8:\n    x.value = noise(x.P * 3.0)\nelse:\n    x.value = 0.0\n"
+    let one = try voxel_run(box, "density", body, 1)
+    let many = try voxel_run(box, "density", body, 16)
+    let check = "let c = g.volume_index_to_pos(\"density\", i, j, kk)\nvar want: f32 = 0.0\nif length(c) < 0.8:\n    want = noise(c * 3.0)\np.set_f32(\"got\", g.volume_index(\"density\", i, j, kk))\np.set_f32(\"want\", want)\n"
+    for k in [-6, 0, 5]:
+        let a = try support.mesh_of(try slice(one, k, check))
+        let b = try support.mesh_of(try slice(many, k, check))
+        var inside = 0
+        for at: i64 in 0..<441:
+            let got = try support.value(a, "got", 0, at)
+            expect(got == try support.value(a, "want", 0, at), "the density is noise inside the sphere")
+            expect(got == try support.value(b, "got", 0, at), "1 and 16 workers write the same voxels")
+            if got != 0.0: inside += 1
+        expect(inside > 50, "the sphere has density")
+
+## Two level sets written by voxel runs, then their union by min() into a new grid.
+func sdf_union() -> !:
+    var set = try volume(try support.empty_set(), "a", 1.0, 0.0, 2.0, 0.1, true)
+    set = try volume(set, "b", 1.0, 0.0, 2.0, 0.1, true)
+    set = try voxel_run(set, "a", "x.value = length(x.P - [0.3, 0.0, 0.0, 0.0]) - 0.4\n")
+    set = try voxel_run(set, "b", "x.value = length(x.P + [0.3, 0.0, 0.0, 0.0]) - 0.4\n")
+    let joined = try voxel_run(set, "a", "x.set_f32(\"union\", min(x.value, x.f32(\"b\")))\n")
+    let check = "let c = g.volume_index_to_pos(\"union\", i, j, kk)\np.set_f32(\"got\", g.volume_index(\"union\", i, j, kk))\np.set_f32(\"want\", min(length(c - [0.3, 0.0, 0.0, 0.0]) - 0.4, length(c + [0.3, 0.0, 0.0, 0.0]) - 0.4))\np.set_i32(\"type\", g.volume_type(\"union\"))\n"
+    let m = try support.mesh_of(try slice(joined, 0, check))
+    for at: i64 in 0..<441:
+        expect(math.abs(try support.value(m, "got", 0, at) - try support.value(m, "want", 0, at)) < 1.0e-6, "the union is the min of the two")
+    expect(try support.value(m, "type", 0, 0) == 0.0, "a new grid is fog")
+
+## f = 2x + y written, then its gradient read back inside the box.
+func gradient() -> !:
+    let set = try voxel_run(try volume(try support.empty_set(), "f", 0.0, 0.0, 2.0, 0.1, true), "f", "x.value = 2.0 * x.P[0] + x.P[1]\n")
+    let check = "let c = g.volume_index_to_pos(\"f\", i // 2, j // 2, kk)\np.set_vec3(\"grad\", g.volume_gradient(\"f\", c))\n"
+    let m = try support.mesh_of(try slice(set, 2, check))
+    for at: i64 in 0..<441:
+        expect(math.abs(try support.value(m, "grad", 0, at, 0) - 2.0) < 1.0e-4 and math.abs(try support.value(m, "grad", 0, at, 1) - 1.0) < 1.0e-4, "the gradient of 2x + y")
+
+## A 1-unit box of 0.1 voxels: 11 voxels a side active in leaves of 16. Active-only
+## leaves the rest of the leaves at the background; dense fills and activates them.
+func dense_and_active() -> !:
+    let box = try volume(try support.empty_set(), "d", 0.0, 0.0, 1.0, 0.1, true)
+    let active = try voxel_run(box, "d", "x.value = 1.0 + x.res[0] * 0.0 + (f32)x.ix * 0.0\nx.set_f32(\"span\", x.res[0])\n")
+    let dense = try voxel_run(box, "d", "x.value = 1.0\nx.set_f32(\"span\", x.res[0])\n", 0, true)
+    let check = "p.set_f32(\"inside\", g.volume_index(\"d\", 0, 0, 0))\np.set_f32(\"outside\", g.volume_index(\"d\", 7, 0, 0))\np.set_i32(\"on\", g.volume_index_active(\"d\", 7, 0, 0))\np.set_f32(\"span\", g.volume_index(\"span\", 0, 0, 0))\n"
+    let a = try support.mesh_of(try slice(active, 0, check))
+    let d = try support.mesh_of(try slice(dense, 0, check))
+    expect(try support.value(a, "inside", 0, 0) == 1.0 and try support.value(a, "outside", 0, 0) == 0.0 and try support.value(a, "on", 0, 0) == 0.0, "active-only runs the box's voxels")
+    expect(try support.value(d, "inside", 0, 0) == 1.0 and try support.value(d, "outside", 0, 0) == 1.0 and try support.value(d, "on", 0, 0) == 1.0, "dense runs every voxel of the leaves")
+    expect(try support.value(a, "span", 0, 0) == 11.0 and try support.value(d, "span", 0, 0) == 16.0, "x.res spans the active voxels")
+    let empty = try volume(try support.empty_set(), "e", 0.0, 0.0, 1.0, 0.1, false)
+    _ = try voxel_run(empty, "e", "x.value = 1.0\n")
+
+## The smooth, index-space, type, background and transform reads.
+func volume_reads() -> !:
+    let set = try voxel_run(try volume(try support.empty_set(), "f", 0.0, 0.0, 2.0, 0.1, true), "f", "x.value = 2.0 * x.P[0] + x.P[1]\n")
+    let check = "let c: f32[4] = [0.13, -0.27, 0.05, 0.0]\np.set_f32(\"smooth\", g.volume_smooth_sample(\"f\", c))\np.set_f32(\"index\", g.volume_sample_index(\"f\", [1.3, -2.7, 0.5, 0.0]))\np.set_f32(\"background\", g.volume_background(\"f\"))\np.set_i32(\"type\", g.volume_type(\"f\"))\nlet m = g.volume_transform(\"f\")\np.set_f32(\"scale\", m.x[0])\n"
+    let m = try support.mesh_of(try slice(set, 0, check))
+    expect(math.abs(try support.value(m, "smooth", 0, 0) - (2.0 * 0.13 - 0.27)) < 1.0e-4, "a smooth sample of a linear field is exact")
+    expect(math.abs(try support.value(m, "index", 0, 0) - (2.0 * 0.13 - 0.27)) < 1.0e-4, "an index-space sample")
+    expect(try support.value(m, "background", 0, 0) == 0.0 and try support.value(m, "type", 0, 0) == 0.0, "background and type")
+    expect(math.abs(try support.value(m, "scale", 0, 0) - 0.1) < 1.0e-7, "the transform's scale is the voxel size")

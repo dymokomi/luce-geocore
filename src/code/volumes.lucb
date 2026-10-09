@@ -26,6 +26,14 @@ func bind_volumes(host: Host*) -> !:
     try host.builtin("Geometry", "volume_index_to_pos", engine.Builtin.of("volume_index_to_pos", index3, four, volume_index_to_pos_lanes))
     try host.builtin("Geometry", "volume_res", engine.Builtin.of("volume_res", [Kind.i64], four, volume_res_lanes))
     try host.builtin("Geometry", "volume_voxel_size", engine.Builtin.of("volume_voxel_size", [Kind.i64], [Kind.f32], volume_voxel_lanes))
+    try host.builtin("Geometry", "volume_smooth_sample", engine.Builtin.of("volume_smooth_sample", point4, [Kind.f32], volume_smooth_lanes))
+    try host.builtin("Geometry", "volume_sample_index", engine.Builtin.of("volume_sample_index", point4, [Kind.f32], volume_sample_index_lanes))
+    try host.builtin("Geometry", "volume_index_active", engine.Builtin.of("volume_index_active", index3, [Kind.i32], volume_active_lanes))
+    try host.builtin("Geometry", "volume_type", engine.Builtin.of("volume_type", [Kind.i64], [Kind.i32], volume_type_lanes))
+    try host.builtin("Geometry", "volume_background", engine.Builtin.of("volume_background", [Kind.i64], [Kind.f32], volume_background_lanes))
+    var matrix: Kind[16]
+    for at in 0..<16: matrix[at] = Kind.f32
+    try host.builtin("Geometry", "volume_transform", engine.Builtin.of("volume_transform", [Kind.i64], matrix[..<16], volume_transform_lanes))
 
 ## What a name reaches on an input: a grid, the SDF, or nothing.
 struct Field:
@@ -156,3 +164,79 @@ func volume_voxel_lanes(call: engine.Call*):
         let source = source_or_fail(state, call, lane) else continue
         if let grid = field_named(source, name).grid:
             call.f32_result(0)[lane] = (f32)voxel_size(grid)
+
+## `volume_smooth_sample(name, p)`: the tricubic (Catmull-Rom) value at `p` (VEX
+## `volumesmoothsample`); an SDF samples exactly.
+func volume_smooth_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let name = call.text(0)
+    for lane in 0..<call.lanes:
+        call.f32_result(0)[lane] = 0.0
+        let source = source_or_fail(state, call, lane) else continue
+        let field = field_named(source, name)
+        let p = position_argument(call, 1, lane)
+        if let grid = field.grid:
+            var sampler = GridSampler.of(grid)
+            call.f32_result(0)[lane] = (f32)sampler.smooth_sample(p)
+        elif let sdf = field.sdf:
+            call.f32_result(0)[lane] = (f32)sdf.distance(p)
+
+## `volume_sample_index(name, p)`: the trilinear value at index-space `p` (voxel (i, j, k)
+## at (i, j, k)).
+func volume_sample_index_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let name = call.text(0)
+    for lane in 0..<call.lanes:
+        call.f32_result(0)[lane] = 0.0
+        let source = source_or_fail(state, call, lane) else continue
+        let grid = field_named(source, name).grid else continue
+        var sampler = GridSampler.of(grid)
+        call.f32_result(0)[lane] = (f32)sampler.sample_index(position_argument(call, 1, lane))
+
+## `volume_index_active(name, i, j, k)`: 1 when voxel (i, j, k) is active, else 0 (VEX
+## `volumeindexactive`).
+func volume_active_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let name = call.text(0)
+    let xs = call.i32_argument(1)
+    let ys = call.i32_argument(2)
+    let zs = call.i32_argument(3)
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = 0
+        let source = source_or_fail(state, call, lane) else continue
+        let grid = field_named(source, name).grid else continue
+        call.i32_result(0)[lane] = 1 if grid.is_active((i64)xs[lane], (i64)ys[lane], (i64)zs[lane]) else 0
+
+## `volume_type(name)`: 0 a fog grid, 1 a level set, 2 the input's SDF, -1 nothing.
+func volume_type_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let name = call.text(0)
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = -1
+        let source = source_or_fail(state, call, lane) else continue
+        let field = field_named(source, name)
+        if let grid = field.grid: call.i32_result(0)[lane] = (i32)(u8)grid.class
+        elif field.sdf != none: call.i32_result(0)[lane] = 2
+
+## `volume_background(name)`: the grid's value outside its voxels (0 without a grid).
+func volume_background_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let name = call.text(0)
+    for lane in 0..<call.lanes:
+        call.f32_result(0)[lane] = 0.0
+        let source = source_or_fail(state, call, lane) else continue
+        let grid = field_named(source, name).grid else continue
+        call.f32_result(0)[lane] = grid.background
+
+## `volume_transform(name)`: the grid's index-to-world transform as a Mat4 (rows the
+## images of the index axes, then the translation; identity without a grid).
+func volume_transform_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let name = call.text(0)
+    for lane in 0..<call.lanes:
+        var rows: f64[16] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        if let source = source_or_fail(state, call, lane):
+            if let grid = field_named(source, name).grid:
+                let m = grid.transform
+                rows = [m.x.x, m.x.y, m.x.z, 0.0, m.y.x, m.y.y, m.y.z, 0.0, m.z.x, m.z.y, m.z.z, 0.0, m.translation.x, m.translation.y, m.translation.z, 1.0]
+        for at: usize in 0..<16: call.f32_result(at)[lane] = (f32)rows[at]

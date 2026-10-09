@@ -20,6 +20,7 @@ pub func run_all() -> !:
         if points.label(at) == "numpt": expect(points.doc(at) == "This point's number and how many points there are.", "a doc shared down a group")
     try expect_labels(try Code.complete(1, "", "p.P[1] = k.", 0, 1, 12), ["f32", "ramp", "input", "printf", "time"], "k. completes the kernel's members")
     try expect_labels(try Code.complete(3, "", "f.", 0, 1, 3), ["primnum", "f32_array"], "f. completes the primitive's members")
+    try expect_labels(try Code.complete(5, "", "x.", 0, 1, 3), ["value", "P", "res", "set_f32", "vec3"], "x. completes the voxel's members")
     try expect_labels(try Code.complete(1, "", "let g = k.input(0)\nlet near = g.nearpoints(p.P, 0.1, 8)\nnear.", 0, 3, 6), ["count", "points"], "a struct value's fields")
     let named = try Code.complete(1, "", "p.P[1] = sno", 0, 1, 13)
     try expect_labels(named, ["snoise"], "sno completes snoise")

@@ -292,6 +292,10 @@ The volume verbs:
 - **Convert to Mesh**: surface nets of the SDF and every grid, SDF surfaces
   made exact.
 - **Volume Slice**: a colored plane, beside the field or alone.
+- **Volume**: a fog or level-set grid over a box, named by the node's Name row
+  (`VerbCatalog.text_row`, sent as the run's group text), with a voxel size,
+  background and initial value, dense or empty. It joins the input's volume,
+  replacing a grid of its name: the start for a Code node running over voxels.
 
 ## Geometry files (.prism)
 

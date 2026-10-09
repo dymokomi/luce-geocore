@@ -137,7 +137,7 @@ pub struct Code:
     let reserved: u8 = 0
 
     ## Check and lower `body` (and `header`) for Run Over `run_over` (0 detail, 1 points,
-    ## 2 vertices, 3 primitives, 4 numbers) with no geometry: attribute reads take the
+    ## 2 vertices, 3 primitives, 4 numbers, 5 voxels) with no geometry: attribute reads take the
     ## type their accessor names.
     pub static func check(run_over: i64, header: str, body: str) -> interop.Reference[CodeCheck]!:
         let mode = try RunOver.of(run_over)
@@ -176,12 +176,15 @@ pub struct Code:
     ## `count` is the lane count of Run Over Numbers. A fault, `k.error("text")` or a
     ## snippet that does not check fails with "line L, column C: message (point N)"
     ## (`header line ...` in the header). The result: the geometry, the snippet's
-    ## `k.printf` output and its `k.warning`s (see CodeRun).
-    pub static func cook(set: interop.Reference[GeometrySet], run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, input1: interop.Reference[GeometrySet]? = none) -> interop.Reference[CodeRun]!:
+    ## `k.printf` output and its `k.warning`s (see CodeRun). Run Over Voxels (5) runs
+    ## over the active voxels of grid `volume` ("" the first grid, "#2" the third),
+    ## after making every voxel of its leaves' box active when `dense`; without that
+    ## grid the set passes through.
+    pub static func cook(set: interop.Reference[GeometrySet], run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, input1: interop.Reference[GeometrySet]? = none, volume: str = "", dense: bool = false) -> interop.Reference[CodeRun]!:
         var second: const GeometrySet*? = none
         if let given = input1: second = try given.get()
         var report = CookReport()
-        let made = run_code(try set.get(), second, run_over, header, body, group, group_type, names, values, frame, time, fps, count, 0, &report) catch failure:
+        let made = run_code(try set.get(), second, run_over, header, body, group, group_type, names, values, frame, time, fps, count, 0, &report, volume, dense) catch failure:
             report.close()
             error(failure.code, failure.message)
         let geometry = adopt_set(made) catch failure:
@@ -195,10 +198,10 @@ pub struct Code:
         return try interop.Reference[CodeRun].adopt(storage.data, code_run_type, memory.heap)
 
     ## `cook`'s geometry alone (the printf output and warnings are dropped).
-    pub static func run(set: interop.Reference[GeometrySet], run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, input1: interop.Reference[GeometrySet]? = none) -> interop.Reference[GeometrySet]!:
+    pub static func run(set: interop.Reference[GeometrySet], run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, input1: interop.Reference[GeometrySet]? = none, volume: str = "", dense: bool = false) -> interop.Reference[GeometrySet]!:
         var second: const GeometrySet*? = none
         if let given = input1: second = try given.get()
-        let made = try run_code(try set.get(), second, run_over, header, body, group, group_type, names, values, frame, time, fps, count, 0)
+        let made = try run_code(try set.get(), second, run_over, header, body, group, group_type, names, values, frame, time, fps, count, 0, none, volume, dense)
         return try adopt_set(made)
 
 ## Copy a compiled snippet's diagnostics and parameters into `check`.

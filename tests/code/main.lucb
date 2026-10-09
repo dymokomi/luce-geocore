@@ -5,6 +5,7 @@ import bench
 import checks
 import help
 import stages
+import voxels
 
 pub func main(arguments: str[]) -> i32!:
     if arguments.length > 1 and arguments[1] == "--bench":
@@ -38,4 +39,5 @@ pub func main(arguments: str[]) -> i32!:
     try stages.text_groups()
     try array_attributes.run_all()
     try help.run_all()
+    try voxels.run_all()
     return 0

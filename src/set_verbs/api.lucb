@@ -6,7 +6,7 @@
 
 ## Every set verb's constructor, in menu order: the array's length is the
 ## registry's size, so a set verb added here is counted.
-let set_makers: (func() -> SetVerb)[23] = [
+let set_makers: (func() -> SetVerb)[24] = [
     line_verb,
     circle_verb,
     arc_verb,
@@ -29,7 +29,8 @@ let set_makers: (func() -> SetVerb)[23] = [
     mesh_to_sdf_verb,
     volume_from_points_verb,
     convert_to_mesh_verb,
-    volume_slice_verb]
+    volume_slice_verb,
+    volume_verb]
 
 ## SetVerb `index` in menu order.
 pub func set_verb_at(index: usize) -> SetVerb:
@@ -141,6 +142,11 @@ pub struct VerbCatalog:
     pub static func grouped(index: i64) -> bool:
         return entry(checked(index)).grouped
 
+    ## The label of the text row its node shows in place of Group ("" for none; the
+    ## Volume node's "Name"): the row's text goes to the run as its `group`.
+    pub static func text_row(index: i64) -> str:
+        return entry(checked(index)).text_row
+
     ## How many parameters verb `index` has.
     pub static func parm_count(index: i64) -> i64:
         return (i64)entry(checked(index)).parms.length
@@ -202,13 +208,14 @@ struct Entry:
     let grouped: bool
     let parms: const ParmSpec[]
     let trailing: bool
+    let text_row: str
 
 func entry(index: usize) -> Entry:
     if index < verb_count():
         let verb = verb_at(index)
-        return Entry(verb.name, verb.category, verb.description, 1, false, true, verb.parms, verb.trailing)
+        return Entry(verb.name, verb.category, verb.description, 1, false, true, verb.parms, verb.trailing, "")
     let verb = set_verb_at(index - verb_count())
-    return Entry(verb.name, verb.category, verb.description, verb.inputs, verb.second_required, verb.grouped, verb.parms, false)
+    return Entry(verb.name, verb.category, verb.description, verb.inputs, verb.second_required, verb.grouped, verb.parms, false, verb.text_row)
 
 func checked(index: i64) -> usize:
     if index < 0 or index >= VerbCatalog.count(): trap("verb index out of range")

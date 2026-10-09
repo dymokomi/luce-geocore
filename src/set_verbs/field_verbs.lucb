@@ -275,3 +275,58 @@ func cook_slice(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
 
 func mesh_type_component() -> const ComponentType*:
     return &mesh_component
+
+# mark: Volumes from scratch
+
+let volume_parms: ParmSpec[7] = [
+    ParmSpec("Class", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Fog|Level set", "Fog holds densities; a level set signed distances, negative inside."),
+    ParmSpec("Center", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "The box's center."),
+    ParmSpec("Size", ParmKind.vector, 2.0, 0.000001, 100000.0, 3, "", "The box's width, height and depth."),
+    ParmSpec("Voxel size", ParmKind.number, 0.05, 0.000001, 100000.0, 1, "", voxel_doc, 1.0),
+    ParmSpec("Background", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "The value everywhere outside the voxels.", 1.0),
+    ParmSpec("Initial value", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "The value every voxel starts with.", 1.0),
+    ParmSpec("Dense", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Every voxel of the box active; off, the grid starts with none.")]
+
+func volume_verb() -> SetVerb:
+    return SetVerb("Volume", "Volumes", "A grid of voxels over a box, by name, to fill with a Voxels Code node", 1, false, false, volume_parms, cook_volume, "Name")
+
+## The grid joins the input's volume, replacing a grid of its name; the Name row is
+## the run's group text ("density" for fog, "surface" for a level set when empty).
+func cook_volume(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let p = input.parms
+    let level_set = p.at(0) != 0.0
+    var name = strings.trim(input.group)
+    if name.length == 0: name = "surface" if level_set else "density"
+    let center = Vector3(p.at(1), p.at(2), p.at(3))
+    let half = Vector3(p.at(4) * 0.5, p.at(5) * 0.5, p.at(6) * 0.5)
+    let grid = try box_grid(name, GridClass.level_set if level_set else GridClass.fog, center.subtract(half), center.add(half), p.at(7), (f32)p.at(8), (f32)p.at(9), p.at(10) != 0.0)
+    try with_added_grid(input, grid, output)
+
+## The input set with `grid` (taken) added to its volume, in place of a grid of its name.
+func with_added_grid(input: const SetVerbInput*, grid: SparseGrid*, output: SetVerbOutput*) -> !:
+    let volume = new_volume() catch failure:
+        release_grid(grid)
+        error(failure.code, failure.message)
+    var others: usize = 0
+    if let existing = set_volume(input.set): others = existing.grid_count()
+    var placed = false
+    for at in 0..<others:
+        let existing = set_volume(input.set) else break
+        let other = existing.grid(at)
+        let taken = grid if other.name() == grid.name() else share_grid((SparseGrid*)other)
+        if taken == grid: placed = true
+        add_grid(volume, taken) catch failure:
+            if not placed: release_grid(grid)
+            release_volume(volume)
+            error(failure.code, failure.message)
+    if not placed:
+        add_grid(volume, grid) catch failure:
+            release_volume(volume)
+            error(failure.code, failure.message)
+    let storage = input.set.storage() catch failure:
+        release_volume(volume)
+        error(failure.code, failure.message)
+    storage.put(volume_type(), (void*)volume) catch failure:
+        dispose_set(storage)
+        error(failure.code, failure.message)
+    output.set = storage

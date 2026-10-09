@@ -1,7 +1,8 @@
 # What the API's members mean, per Run Over mode, as a luce-kernel `Host`. Column names
 # a program uses: an attribute's own name on the mode's domain, `P` for positions,
 # `group:<name>` for a group, `detail:<name>` for a detail attribute, and `@area`,
-# `@center`, `@normal`, `@point` for values geocore computes or keeps outside attributes.
+# `@center`, `@normal`, `@point` for values geocore computes or keeps outside attributes;
+# for voxels `value`, `grid:<name>`, `@ix`, `@iy`, `@iz` (voxels.lucb).
 
 ## The accessor kinds: method suffix and lanes.
 let accessor_names: str[7] = ["f32", "f64", "i32", "i64", "vec2", "vec3", "vec4"]
@@ -34,6 +35,18 @@ func make_host(mode: RunOver, layout: const Layout*?) -> Host!:
             try host.element("Vertex", "vtxnum")
             try host.uniform("Vertex", "numvtx", "numvtx")
             try host.field("Vertex", "ptnum", "@point", 1)
+        .voxels:
+            try host.field("Voxel", "P", "P", 3)
+            try host.field("Voxel", "value", "value", 1)
+            try host.field("Voxel", "ix", "@ix", 1)
+            try host.field("Voxel", "iy", "@iy", 1)
+            try host.field("Voxel", "iz", "@iz", 1)
+            try host.element("Voxel", "voxnum")
+            try host.uniform("Voxel", "res", "res")
+            for (name, lanes) in [("f32", (usize)1), ("vec3", (usize)3)]:
+                var room: u8[32]
+                try host.getter("Voxel", name, "grid:", lanes)
+                try host.setter("Voxel", try strings.format(room, f"set_{name}"), "grid:", lanes)
         _:
             _ = 0
     if mode == .points or mode == .primitives or mode == .vertices:

@@ -10,8 +10,9 @@ struct Settings:
     let fps: f64
 
 ## Run the snippet over `set` on `threads` workers (0: every core): the new set, or an
-## error naming the line, column and element (see `fault_message`).
-pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, threads: usize, report: CookReport*? = none) -> GeometrySet*!:
+## error naming the line, column and element (see `fault_message`). Run Over Voxels runs
+## over grid `volume` ("" the first), made dense over its leaves' box first when `dense`.
+pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over: i64, header: str, body: str, group: str, group_type: i64, names: const str[], values: const f64[], frame: f64, time: f64, fps: f64, count: i64, threads: usize, report: CookReport*? = none, volume: str = "", dense: bool = false) -> GeometrySet*!:
     let mode = try RunOver.of(run_over)
     _ = try groups.GroupType.of(group_type)
     if names.length != values.length:
@@ -20,12 +21,20 @@ pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over
         error(errors.invalid, "Numbers runs a count of zero or more")
     let mesh = set_mesh(set)
     var lanes: usize = 1
+    var run_room: VoxelRun[1] = ---
+    var run_pointer: VoxelRun*? = none
+    defer release_run(run_pointer)
     if mode == .numbers:
         lanes = (usize)count
+    elif mode == .voxels:
+        let made = try voxel_run(set, volume, dense) else return try set.storage()
+        run_room[0] = made
+        run_pointer = &run_room[0]
+        lanes = made.target.leaf_count() * leaf_voxels
     elif mode != .detail:
         let source = mesh else return try set.storage()
         lanes = try source.domain_size(mode.domain())
-    var layout = try build_layout(mode, mesh, set)
+    var layout = try build_layout(mode, mesh, set, run_pointer)
     defer layout.close()
     let entry = try acquire(mode, header, body, &layout)
     defer release(entry)
@@ -36,7 +45,7 @@ pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over
     if lanes == 0:
         return try set.storage()
     let settings = Settings(names = names, values = values, frame = frame, time = time, fps = fps)
-    var cook = Cook(mode = mode, mesh = mesh, set = set, lanes = lanes, program = &compiled.program)
+    var cook = Cook(mode = mode, mesh = mesh, set = set, lanes = lanes, program = &compiled.program, voxels = run_pointer, dense = dense)
     defer cook.close()
     # What the snippet's k.input() reads and the edits it queues.
     var state: CookState
@@ -58,7 +67,9 @@ pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over
     try cook.bind_inputs(&layout)
     try cook.bind_outputs(&layout)
     try cook.bind_uniforms(&settings)
-    if not groups.is_blank(group) and mode != .detail and mode != .numbers:
+    if let run = run_pointer:
+        cook.active = try voxel_active(run, &cook.scratch)
+    elif not groups.is_blank(group) and mode != .detail and mode != .numbers:
         try cook.restrict(group, group_type)
     let request = Request(count = lanes, inputs = cook.inputs.view(), outputs = cook.engine_outputs.view(), uniforms = cook.uniforms.view(), threads = threads, active = cook.active, context = (void*)&state)
     let workers = engine.workers_of(&request)
@@ -107,6 +118,9 @@ struct Cook:
     let set: const GeometrySet*
     let lanes: usize
     let program: const Program*
+    ## Run Over Voxels' target, and whether it was made dense.
+    let voxels: const VoxelRun*?
+    let dense: bool
     var scratch: Scratch
     var inputs: collections.List[Column]
     var engine_outputs: collections.List[Column]
@@ -133,7 +147,10 @@ struct Cook:
             if self.has_input(binding.name):
                 continue
             let column = layout.find(binding.name) else error(errors.invalid, "the program reads a column the input lacks")
-            try self.inputs.append(try input_of(column, self.mesh, self.set, &self.scratch))
+            if let run = self.voxels:
+                try self.inputs.append(try voxel_input(column, run, &self.scratch))
+            else:
+                try self.inputs.append(try input_of(column, self.mesh, self.set, &self.scratch))
 
     func has_input(name: str) -> bool:
         for column in self.inputs.view():
@@ -160,6 +177,14 @@ struct Cook:
     func add_output(name: str, kind: Kind, width: usize, existing: LayoutColumn?) -> !:
         var none_yet: u8[]
         var output = Output(name = name, kind = kind, width = width, bytes = none_yet, attribute = Attribute(), has_attribute = false)
+        if let run = self.voxels:
+            # Voxel outputs: the target's values and grids, and what is not kept (`P`).
+            if not strings.starts_with(name, "detail:"):
+                output.bytes = try self.scratch.bytes(self.lanes * width * kind.size())
+                if kind == .f32: try prefill_voxels(run, &output, existing)
+                try self.outputs.append(output)
+                try self.engine_outputs.append(output_column(name, kind, output.bytes, width))
+                return
         if name == "P":
             let source = self.mesh else error(errors.invalid, "positions without a mesh")
             self.positions = try SharedColumn[Float3].copy_of(source.point_span())
@@ -216,6 +241,10 @@ struct Cook:
         if name == "time": return settings.time
         if name == "fps": return settings.fps
         if name == "numpt" or name == "numprim" or name == "numvtx": return (f64)self.lanes
+        if strings.starts_with(name, "res["):
+            let run = self.voxels else return 0.0
+            let (_, component) = split_component(name)
+            return run.res[component] if component < 3 else 0.0
         if strings.starts_with(name, "detail:"):
             let (base, component) = split_component((str)name.bytes[7..])
             let store = set_detail(self.set)
@@ -252,6 +281,13 @@ struct Cook:
 
     ## The output set: the mesh with new positions and attributes, new detail values.
     func output() -> GeometrySet*!:
+        if let run = self.voxels:
+            let storage = try voxel_output(run, self.set, self.outputs.view(), self.dense)
+            errdefer dispose_set(storage)
+            for output in self.outputs.view():
+                if strings.starts_with(output.name, "detail:"):
+                    try set_put_detail(storage, try self.detail_attribute(output))
+            return storage
         let storage = try self.set.storage()
         errdefer dispose_set(storage)
         var mesh_changed = self.has_positions

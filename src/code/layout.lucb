@@ -20,6 +20,14 @@ enum Origin:
     corner_points
     ## Detail attribute `index` of the set, as the one element of Run Over Detail.
     detail
+    ## Run Over Voxels (voxels.lucb): the voxel's center, its index along axis `index`,
+    ## the target's value, grid `index` of the volume, and the vector whose `.x` grid is
+    ## `index`.
+    voxel_centers
+    voxel_index
+    voxel_value
+    voxel_grid
+    voxel_vector
 
 ## One column the input has.
 struct LayoutColumn:
@@ -64,10 +72,14 @@ func kind_of_data(kind: DataType) -> Kind?:
         .int64 => Kind.i64
         _ => none
 
-## The layout of `mesh` (when there is one) and `set` for `mode`.
-func build_layout(mode: RunOver, mesh: const Mesh*?, set: const GeometrySet*) -> Layout!:
+## The layout of `mesh` (when there is one) and `set` for `mode` (and a voxel run's
+## target).
+func build_layout(mode: RunOver, mesh: const Mesh*?, set: const GeometrySet*, voxels: const VoxelRun*?) -> Layout!:
     var layout = Layout()
     errdefer layout.close()
+    if let run = voxels:
+        try voxel_layout(run, &layout)
+        return layout
     if mode == .detail:
         let store = set_detail(set)
         for at in 0..<store.count():

@@ -1,0 +1,262 @@
+# Run Over Voxels (Houdini's Volume Wrangle): one lane per voxel of the target grid's
+# leaves, in leaf order (512 a leaf, x fastest), run on its active voxels only. Columns:
+# `P` the voxel's center in world space, `@ix`, `@iy`, `@iz` its index, `value` the
+# target's value, `grid:<name>` another grid of the volume at the same voxel (`grid:<v>`
+# with three components for the grids `v.x`, `v.y`, `v.z`). Reads see the input; what
+# the run writes becomes grids on the target's leaves, active voxels and transform: the
+# target's new values, and each written grid (made when the volume lacks it).
+
+## The target of a voxel run: its grid (made dense when asked; shared or owned), the
+## volume it is in, and the span of its active voxels along each axis.
+struct VoxelRun:
+    var target: SparseGrid*
+    let volume: const Volume*
+    let target_index: usize
+    var res: f64[3]
+
+    func close():
+        release_grid(self.target)
+
+    ## Lane `lane`'s voxel index.
+    func index_of(lane: usize) -> (i64, i64, i64):
+        let (x, y, z) = key_leaf(self.target.keys.view()[lane // leaf_voxels])
+        let local = (i64)(lane % leaf_voxels)
+        return (x * 8 + (local & 7), y * 8 + ((local >> 3) & 7), z * 8 + (local >> 6))
+
+## Give back a voxel run's target, if there is a run.
+func release_run(run: VoxelRun*?):
+    if let given = run: given.close()
+
+## The voxel run of `set` over grid `name` ("" the first grid, "#2" the third), made dense
+## over its leaves' box when `dense`; none when the set has no such grid.
+func voxel_run(set: const GeometrySet*, name: str, dense: bool) -> VoxelRun?!:
+    let volume = set_volume(set) else return none
+    var found: usize? = none
+    for at in 0..<volume.grid_count():
+        if volume.grid(at).name() == name or (name.length == 0 and found == none): found = at
+    if name.length > 1 and name.bytes[0] == '#':
+        if let at = strings.parse_i64((str)name.bytes[1..]):
+            if at >= 0 and (usize)at < volume.grid_count(): found = (usize)at
+    let index = found else return none
+    let grid = volume.grid(index)
+    let target = try densified(grid) if dense else share_grid((SparseGrid*)grid)
+    var run = VoxelRun(target = target, volume = volume, target_index = index, res = [0.0, 0.0, 0.0])
+    run.res = active_span(target)
+    return run
+
+## The voxels the active ones span along each axis (VEX `volumeres`).
+func active_span(grid: const SparseGrid*) -> f64[3]:
+    var low: i64[3] = [0x7FFFFFFFFFFF, 0x7FFFFFFFFFFF, 0x7FFFFFFFFFFF]
+    var high: i64[3] = [-0x7FFFFFFFFFFF, -0x7FFFFFFFFFFF, -0x7FFFFFFFFFFF]
+    let masks = grid.masks.view()
+    for (leaf, key) in grid.keys.view().indexed():
+        let (x, y, z) = key_leaf(key)
+        for word in 0..<mask_words:
+            var word_bits = masks[leaf * mask_words + word]
+            while word_bits != 0:
+                let bit = (usize)trailing_zeros(word_bits)
+                word_bits = word_bits & (word_bits - 1)
+                let local = (i64)(word * 64 + bit)
+                let at: i64[3] = [x * 8 + (local & 7), y * 8 + ((local >> 3) & 7), z * 8 + (local >> 6)]
+                for k in 0..<3:
+                    if at[k] < low[k]: low[k] = at[k]
+                    if at[k] > high[k]: high[k] = at[k]
+    if high[0] < low[0]: return [0.0, 0.0, 0.0]
+    return [(f64)(high[0] - low[0] + 1), (f64)(high[1] - low[1] + 1), (f64)(high[2] - low[2] + 1)]
+
+## The run's columns in `layout`: the voxel's place, the target's value and every grid.
+func voxel_layout(run: const VoxelRun*, layout: Layout*) -> !:
+    try layout.add("P", .f32, 3, .voxel_centers, 0)
+    try layout.add("@ix", .i32, 1, .voxel_index, 0)
+    try layout.add("@iy", .i32, 1, .voxel_index, 1)
+    try layout.add("@iz", .i32, 1, .voxel_index, 2)
+    try layout.add("value", .f32, 1, .voxel_value, 0)
+    for at in 0..<run.volume.grid_count():
+        let name = run.volume.grid(at).name()
+        var room: u8[96]
+        try layout.add(try strings.format(room, f"grid:{name}"), .f32, 1, .voxel_grid, at)
+        if strings.ends_with(name, ".x") and name.length > 2:
+            let base = (str)name.bytes[..<name.length - 2]
+            if vector_grids(run.volume, base) != none:
+                var vector_room: u8[96]
+                try layout.add(try strings.format(vector_room, f"grid:{base}"), .f32, 3, .voxel_vector, at)
+
+## The grids `base.x`, `base.y` and `base.z`, by index, when the volume has all three.
+func vector_grids(volume: const Volume*, base: str) -> (usize, usize, usize)?:
+    var found: usize[3] = [0, 0, 0]
+    var seen = 0
+    for (k, suffix) in [".x", ".y", ".z"].indexed():
+        for at in 0..<volume.grid_count():
+            let name = volume.grid(at).name()
+            if name.length == base.length + 2 and strings.starts_with(name, base) and strings.ends_with(name, suffix):
+                found[k] = at
+                seen += 1
+                break
+    if seen < 3: return none
+    return (found[0], found[1], found[2])
+
+## The engine column for a voxel layout column.
+func voxel_input(column: LayoutColumn, run: const VoxelRun*, scratch: Scratch*) -> Column!:
+    let lanes = run.target.leaf_count() * leaf_voxels
+    match column.origin:
+        .voxel_value:
+            return Column.input_f32(column.name, run.target.values.view(), 1)
+        .voxel_grid:
+            let grid = run.volume.grid(column.index)
+            if same_voxels(grid, run.target): return Column.input_f32(column.name, grid.values.view(), 1)
+            let values = f32_view(try scratch.bytes(lanes * 4))
+            try fill_grid_values(run, grid, values, 1, 0)
+            return Column.input_f32(column.name, values, 1)
+        .voxel_vector:
+            let values = f32_view(try scratch.bytes(lanes * 12))
+            let base = column.name.bytes[5..]
+            let (a, b, c) = vector_grids(run.volume, (str)base) else return Column.input_f32(column.name, values, 3)
+            for (k, at) in [a, b, c].indexed(): try fill_grid_values(run, run.volume.grid(at), values, 3, k)
+            return Column.input_f32(column.name, values, 3)
+        .voxel_centers:
+            let values = f32_view(try scratch.bytes(lanes * 12))
+            var work = VoxelFill(run = run, grid = run.target, values = values, stride = 3, offset = 0, what = 1)
+            try parallel.for_each_range(run.target.leaf_count(), 16, (void*)&work, fill_voxel_leaves)
+            return Column.input_f32(column.name, values, 3)
+        _:
+            let values = i32_view(try scratch.bytes(lanes * 4))
+            for lane in 0..<lanes:
+                let (i, j, k) = run.index_of(lane)
+                values[lane] = (i32)(i if column.index == 0 else (j if column.index == 1 else k))
+            return Column.input_i32(column.name, values, 1)
+
+## `grid` read at every lane's voxel into component `offset` of `stride`-wide `values`:
+## by index when it shares the target's transform, trilinear at the center when not.
+func fill_grid_values(run: const VoxelRun*, grid: const SparseGrid*, values: f32[], stride: usize, offset: usize) -> !:
+    var work = VoxelFill(run = run, grid = grid, values = values, stride = stride, offset = offset, what = 0)
+    try parallel.for_each_range(run.target.leaf_count(), 16, (void*)&work, fill_voxel_leaves)
+
+## A fill of per-voxel values over leaves: a grid's values (`what` 0) or the centers (1).
+struct VoxelFill:
+    let run: const VoxelRun*
+    let grid: const SparseGrid*
+    let values: f32[]
+    let stride: usize
+    let offset: usize
+    let what: i32
+
+func fill_voxel_leaves(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (VoxelFill*)context
+    let target = work.run.target
+    let by_index = same_matrix(work.grid.transform, target.transform)
+    var sampler = GridSampler.of(work.grid)
+    for leaf in first..<end:
+        for local in 0..<leaf_voxels:
+            let lane = leaf * leaf_voxels + local
+            let (i, j, k) = work.run.index_of(lane)
+            let at = lane * work.stride + work.offset
+            if work.what == 1:
+                let p = target.transform.transform_point(Vector3((f64)i, (f64)j, (f64)k))
+                work.values[at] = (f32)p.x
+                work.values[at + 1] = (f32)p.y
+                work.values[at + 2] = (f32)p.z
+            elif by_index:
+                work.values[at] = sampler.voxel(i, j, k)
+            else:
+                work.values[at] = (f32)sampler.sample(target.transform.transform_point(Vector3((f64)i, (f64)j, (f64)k)))
+
+## One byte a lane: 1 for the target's active voxels.
+func voxel_active(run: const VoxelRun*, scratch: Scratch*) -> u8[]!:
+    let lanes = run.target.leaf_count() * leaf_voxels
+    let mask = try scratch.bytes(lanes)
+    let words = run.target.masks.view()
+    for lane in 0..<lanes:
+        mask[lane] = (u8)((words[lane >> 6] >> (u64)(lane & 63)) & 1)
+    return mask
+
+## A voxel output's starting values: what the input column holds, or 0 for a new grid.
+func prefill_voxels(run: const VoxelRun*, output: Output*, column: LayoutColumn?) -> !:
+    let existing = column else return
+    let values = f32_view(output.bytes)
+    match existing.origin:
+        .voxel_value:
+            let stored = run.target.values.view()
+            memory.copy(values[..<stored.length], stored, stored.length)
+        .voxel_grid:
+            try fill_grid_values(run, run.volume.grid(existing.index), values, 1, 0)
+        .voxel_vector:
+            let (a, b, c) = vector_grids(run.volume, (str)existing.name.bytes[5..]) else return
+            for (k, at) in [a, b, c].indexed(): try fill_grid_values(run, run.volume.grid(at), values, 3, k)
+        _: return
+
+## The output set of a voxel run: the volume with the target's written values and every
+## written grid on the target's voxels, in place of the grids they replace.
+func voxel_output(run: const VoxelRun*, set: const GeometrySet*, outputs: const Output[], dense: bool) -> GeometrySet*!:
+    let storage = try set.storage()
+    errdefer dispose_set(storage)
+    var grids = GridList()
+    defer grids.close()
+    let made = &grids.list
+    # The input's grids, the target as the run left it.
+    for at in 0..<run.volume.grid_count():
+        let grid = run.target if at == run.target_index and dense else (SparseGrid*)run.volume.grid(at)
+        try made.append(share_grid(grid))
+    var any = dense
+    for output in outputs:
+        if output.name == "value":
+            let target = run.volume.grid(run.target_index)
+            try replace_grid(made, try grid_with_values(run.target, target.name(), target.class, target.background, try column_of(output.bytes, 1, 0)))
+            any = true
+        elif strings.starts_with(output.name, "grid:"):
+            let name = (str)output.name.bytes[5..]
+            for k in 0..<output.width:
+                var room: u8[96]
+                let grid_name = name if output.width == 1 else try component_name_of(room, name, k)
+                var class = GridClass.fog
+                var background: f32 = 0.0
+                for grid in made.view():
+                    if grid.name() == grid_name:
+                        class = grid.class
+                        background = grid.background
+                try replace_grid(made, try grid_with_values(run.target, grid_name, class, background, try column_of(output.bytes, output.width, k)))
+            any = true
+    if not any: return storage
+    let volume = try new_volume()
+    for grid in made.view():
+        add_grid(volume, share_grid(grid)) catch failure:
+            release_volume(volume)
+            error(failure.code, failure.message)
+    try storage.put(volume_type(), (void*)volume)
+    return storage
+
+## Grids held while an output volume is put together.
+struct GridList:
+    var list: collections.List[SparseGrid*]
+
+    func close():
+        for grid in self.list.view(): release_grid(grid)
+        self.list.destroy()
+
+## `grid` (taken) in place of the grid of its name in `grids`, or after them.
+func replace_grid(grids: collections.List[SparseGrid*]*, grid: SparseGrid*) -> !:
+    for at in 0..<grids.length():
+        let old = grids.at(at)
+        if old.name() == grid.name():
+            grids.set(at, grid)
+            release_grid(old)
+            return
+    grids.append(grid) catch failure:
+        release_grid(grid)
+        error(failure.code, failure.message)
+
+## Component `k` of `width`-wide f32 `bytes` as a column.
+func column_of(bytes: const u8[], width: usize, k: usize) -> SharedColumn[f32]!:
+    let values = f32_view(bytes)
+    let count = values.length // width
+    var column = try SharedColumn[f32].allocate(count)
+    let out = column.span()
+    if width == 1: memory.copy(out, values[..<count], count)
+    else:
+        for at in 0..<count: out[at] = values[at * width + k]
+    return column
+
+## `name.x`, `name.y` or `name.z`.
+func component_name_of(room: u8[], name: str, k: usize) -> str!:
+    let suffix = ".x" if k == 0 else (".y" if k == 1 else ".z")
+    return try strings.format(room, f"{name}{suffix}")
