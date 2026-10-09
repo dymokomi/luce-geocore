@@ -17,8 +17,8 @@ import interop
 from luce_std import math
 import memory
 import errors
-import core.parallel
-from core.parallel import FirstError
+from luce_std import parallel
+import core.ranges
 from core.geometry import Vertex, Bounds
 from core.polygon_topology import PolygonTopology
 from core.shared import Column
@@ -118,11 +118,11 @@ pub struct Mesh: PolygonTopology:
         errdefer exact.release()
         var copy = CopyWork(points, origin, position_column.span(), corners, corner_column.span())
         copy.invalid.store(0, .relaxed)
-        parallel.parallel_for(points.length if points.length > corners.length else corners.length, 65536, copy_input, (void*)&copy)
+        try parallel.for_each_range(points.length if points.length > corners.length else corners.length, 65536, (void*)&copy, copy_input)
         if copy.invalid.load(.acquire) != 0:
             error(errors.invalid, "polygon references a missing point")
         var work = BuildWork(position_column.view(), exact.view(), corners, offsets, supplied, display != none, normal_column.span(), triangle_column.span())
-        parallel.parallel_for(sizes.length, 1024, build_faces, (void*)&work)
+        try parallel.for_each_range(sizes.length, 1024, (void*)&work, build_faces)
         if work.failed.load(.acquire) != 0:
             # A serial pass reports the first failing face's own error.
             for face in 0..<sizes.length: try build_face(&work, face)
@@ -258,8 +258,8 @@ struct CopyWork:
     let output: i32[]
     var invalid: @u32
 
-func copy_input(context: void*?, first: usize, end: usize):
-    let work = (CopyWork*)(context else return)
+func copy_input(context: void*, first: usize, end: usize, worker: usize):
+    let work = (CopyWork*)context
     for at in first..<end:
         if at < work.points.length:
             work.positions[at] = Float3.of(work.points[at].subtract(work.origin))
@@ -283,8 +283,8 @@ struct BuildWork:
     ## Whether any face failed.
     var failed: @u32
 
-func build_faces(context: void*?, first: usize, end: usize):
-    let work = (BuildWork*)(context else return)
+func build_faces(context: void*, first: usize, end: usize, worker: usize):
+    let work = (BuildWork*)context
     for face in first..<end:
         build_face(work, face) catch failure:
             _ = failure

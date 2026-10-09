@@ -18,7 +18,6 @@ struct ProfilePass:
     let work: Bevel*
     let filling: bool
     let corner_points: usize
-    var errors: FirstError
 
 func place_profiles(work: Bevel*) -> !:
     let slots = work.vertex_points.count
@@ -30,9 +29,8 @@ func place_profiles(work: Bevel*) -> !:
         work.slot_points.items[slot] = 0
         work.slot_entries.items[slot] = 0
     let corner_points = work.created.count
-    var counting = ProfilePass(work, false, corner_points, FirstError())
-    parallel.parallel_for(slots, 256, plan_profiles, (void*)&counting)
-    try counting.errors.check()
+    var counting = ProfilePass(work, false, corner_points)
+    try parallel.for_each_range(slots, 256, (void*)&counting, plan_profiles)
     var points: u32 = 0
     var entries: u32 = 0
     for slot in 0..<slots + 1:
@@ -45,18 +43,15 @@ func place_profiles(work: Bevel*) -> !:
     try work.created.extend(corner_points + (usize)points, NewPoint(Vector3(), -1, -1, 0.0, -1))
     try work.point_source.extend(corner_points + (usize)points, -1)
     try work.profile_points.fill((usize)entries, -1)
-    var filling = ProfilePass(work, true, corner_points, FirstError())
-    parallel.parallel_for(slots, 256, plan_profiles, (void*)&filling)
-    try filling.errors.check()
+    var filling = ProfilePass(work, true, corner_points)
+    try parallel.for_each_range(slots, 256, (void*)&filling, plan_profiles)
 
-func plan_profiles(context: void*?, first: usize, end: usize):
-    let pass = (ProfilePass*)(context else return)
+func plan_profiles(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let pass = (ProfilePass*)context
     var known = Growing[Known]()
     defer known.close()
     for slot in first..<end:
-        vertex_profiles(pass, &known, slot) catch failure:
-            pass.errors.record(failure.code, failure.message)
-            return
+        try vertex_profiles(pass, &known, slot)
 
 ## The profiles at one vertex: one per distinct pair of end points among
 ## its beveled edges' ends there.

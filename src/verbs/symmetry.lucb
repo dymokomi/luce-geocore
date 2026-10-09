@@ -94,7 +94,7 @@ pub func soft_weights(mesh: const Mesh*, group: Bits, radius: f64, falloff: i64,
     var grid = try PointHash.build(members.view(), radius)
     defer grid.close()
     var work = SoftWork(points, group, members.view(), &grid, radius, falloff, weights)
-    parallel.parallel_for(points.length, 4096, soft_points, (void*)&work)
+    try parallel.for_each_range(points.length, 4096, (void*)&work, soft_points)
 
 ## Soft weights of every point for a selection's components, as Transform
 ## Components weighs them: the selection's points (with their mirrors across
@@ -123,8 +123,8 @@ struct SoftWork:
     let falloff: i64
     let weights: f32[]
 
-func soft_points(context: void*?, first: usize, end: usize):
-    let work = (SoftWork*)(context else return)
+func soft_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (SoftWork*)context
     for point in first..<end:
         if work.group.get(point):
             work.weights[point] = 1.0

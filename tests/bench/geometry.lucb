@@ -13,7 +13,7 @@ from luce_geocore.kernel import Curves, CurvesBuilder, CurveType, evaluated_posi
 from luce_geocore.core.growing import Growing
 from luce_geocore.kernel import SdfOp, primitive_sdf, combined_sdf, release_sdf, sampled_sdf, surface_mesh, release_grid, mesh_level_set, points_level_set, mesh_dispose
 from io import path
-from luce_geocore.core import parallel as geocore_parallel
+from luce_std import parallel as std_parallel
 
 func row(name: str, started: u64, count: usize):
     print(f"{name}\t{(f64)time.since(started) / 1000000.0}\t{count}\t")
@@ -65,7 +65,7 @@ func quad_grid(n: usize) -> interop.Reference[Mesh]!:
     return try interop.Reference[Mesh].adopt(try new Mesh(points, sizes, corners) in memory.heap, geocore.mesh_type, memory.heap)
 
 pub func main(arguments: str[]) -> i32!:
-    geocore_parallel.warm()
+    std_parallel.warm()
     var started = time.now()
     let bezier = try wavy(10000, 32, CurveType.bezier)
     row("Curves: build 10k Bezier curves of 32 points", started, bezier.point_count())

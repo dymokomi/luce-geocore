@@ -93,7 +93,7 @@ func concatenated_storage(parts: const MeshPart[]) -> Mesh*!:
         sums[2] += meshes[at].corners.count()
         sums[3] += meshes[at].triangles.count()
     var work = ConcatWork(meshes[..<parts.length], matrices[..<parts.length], bases, origin, positions.span(), exact.span(), offsets.span(), corner_points.span(), display.span())
-    parallel.run(parts.length, concat_part, (void*)&work)
+    try parallel.for_each(parts.length, (void*)&work, concat_part)
     offsets.span()[faces] = (i32)corners
     let storage = try assembled(positions.take(), origin, offsets.take(), corner_points.take(), display.take(), Column[Float3](), exact.take())
     errdefer dispose_detached(storage)
@@ -114,8 +114,8 @@ struct ConcatWork:
 
 ## Copy part `index` into its place: points placed, and faces, corners and
 ## triangles offset by the parts before it.
-func concat_part(context: void*?, index: usize):
-    let work = (ConcatWork*)(context else return)
+func concat_part(context: void*, index: usize, worker: usize):
+    let work = (ConcatWork*)context
     let point_base = work.bases[index * 4]
     let face_base = work.bases[index * 4 + 1]
     let corner_base = work.bases[index * 4 + 2]

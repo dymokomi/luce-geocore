@@ -75,7 +75,7 @@ func resampled_all(curves: const Curves*, mode: i64, count: i64, length: f64) ->
     let mix = try new f32[total] --- in memory.heap
     defer free(mix) in memory.heap
     var work = ResampleWork(curves, try evaluated_offsets(curves), try evaluated_positions(curves), frames, out_offsets.view(), positions.span(), parents, others, mix)
-    parallel.parallel_for(curve_total, 64, resample_curves, (void*)&work)
+    try parallel.for_each_range(curve_total, 64, (void*)&work, resample_curves)
     var store = AttributeStore()
     errdefer store.close()
     var types = try Attribute.create("curve_type", curve_domain, DataType.int8, 1, curve_total, Storage.single)
@@ -109,8 +109,8 @@ struct ResampleWork:
     let others: i32[]
     let mix: f32[]
 
-func resample_curves(context: void*?, first: usize, end: usize):
-    let work = (ResampleWork*)(context else return)
+func resample_curves(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ResampleWork*)context
     for curve in first..<end:
         let low = (usize)work.offsets[curve]
         let high = (usize)work.offsets[curve + 1]

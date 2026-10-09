@@ -13,7 +13,7 @@ func build_frames(curves: const Curves*, cache: CurveCache*) -> !:
     var totals = try Column[f32].allocate(curves.curve_count())
     errdefer totals.release()
     var work = FrameWork(curves, cache.eval_offsets.view(), cache.evaluated.view(), tangents.span(), normals.span(), lengths.span(), totals.span())
-    parallel.parallel_for(curves.curve_count(), 64, frame_curves, (void*)&work)
+    try parallel.for_each_range(curves.curve_count(), 64, (void*)&work, frame_curves)
     cache.tangents.release()
     cache.normals.release()
     cache.lengths.release()
@@ -32,8 +32,8 @@ struct FrameWork:
     let lengths: f32[]
     let totals: f32[]
 
-func frame_curves(context: void*?, first: usize, end: usize):
-    let work = (FrameWork*)(context else return)
+func frame_curves(context: void*, first: usize, end: usize, worker: usize):
+    let work = (FrameWork*)context
     for curve in first..<end:
         let low = (usize)work.offsets[curve]
         let high = (usize)work.offsets[curve + 1]

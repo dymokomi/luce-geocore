@@ -1,3 +1,4 @@
+import core.ranges
 ## One level of positions, in parallel: face points, then edge points, then
 ## vertex points, by the scheme's rules with USD sharpness. An edge on a
 ## boundary or on more than two faces is infinitely sharp. A point with a
@@ -21,16 +22,16 @@ struct Level:
 ## (with lists) only the listed ones, the rest of `out` left as it is.
 pub func refine_positions(scheme: Scheme, topology: const Topology*, positions: const Vector3[], edge_sharpness: const f32[], point_sharpness: const f32[], out: Vector3[], faces: const u32[], edges: const u32[], points: const u32[]):
     var level = Level(scheme, topology, positions, edge_sharpness, point_sharpness, out, faces, edges, points)
-    if scheme != Scheme.loop: parallel.parallel_for(faces.length if faces.length > 0 else topology.faces(), 4096, face_points, (void*)&level)
-    parallel.parallel_for(edges.length if edges.length > 0 else topology.edges(), 4096, edge_points, (void*)&level)
-    parallel.parallel_for(points.length if points.length > 0 else topology.points, 4096, vertex_points, (void*)&level)
+    if scheme != Scheme.loop: ranges.each_range(faces.length if faces.length > 0 else topology.faces(), 4096, (void*)&level, face_points)
+    ranges.each_range(edges.length if edges.length > 0 else topology.edges(), 4096, (void*)&level, edge_points)
+    ranges.each_range(points.length if points.length > 0 else topology.points, 4096, (void*)&level, vertex_points)
 
 ## Element `at` of a pass: from the list, or itself.
 func element(list: const u32[], at: usize) -> usize:
     return (usize)list[at] if list.length > 0 else at
 
-func face_points(context: void*?, first: usize, end: usize):
-    let level = (Level*)(context else return)
+func face_points(context: void*, first: usize, end: usize, worker: usize):
+    let level = (Level*)context
     let topology = level.topology
     let base = topology.points + topology.edges()
     for index in first..<end:
@@ -47,8 +48,8 @@ func sharpness_of(level: const Level*, edge: usize) -> f32:
     if topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge] != 2: return infinite
     return level.edge_sharpness[edge]
 
-func edge_points(context: void*?, first: usize, end: usize):
-    let level = (Level*)(context else return)
+func edge_points(context: void*, first: usize, end: usize, worker: usize):
+    let level = (Level*)context
     let topology = level.topology
     let face_base = topology.points + topology.edges()
     for index in first..<end:
@@ -83,8 +84,8 @@ pub func loop_beta(n: f64) -> f64:
     let c = 0.375 + 0.25 * math.cos(2.0 * math.pi / n)
     return (0.625 - c * c) / n
 
-func vertex_points(context: void*?, first: usize, end: usize):
-    let level = (Level*)(context else return)
+func vertex_points(context: void*, first: usize, end: usize, worker: usize):
+    let level = (Level*)context
     let topology = level.topology
     let face_base = topology.points + topology.edges()
     for index in first..<end:

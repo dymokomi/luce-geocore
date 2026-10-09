@@ -9,7 +9,7 @@ import interop
 import memory
 from luce_geocore import geocore
 from luce_geocore.geocore import Mesh, Vector3, Verbs, Subdivision
-from luce_geocore.core import parallel as geocore_parallel
+from luce_std import parallel as std_parallel
 
 ## One case: what it runs, on which mesh (0 grid, 1 tube cut in two, 2 grid
 ## with a ten-face hole), and its numbers.
@@ -58,7 +58,7 @@ func case_at(index: usize) -> Case:
         _: return Case("Clean, everything", "Clean", "*", 0, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
 pub func main(arguments: str[]) -> i32!:
-    geocore_parallel.warm()
+    std_parallel.warm()
     let grid = try quad_grid(837)
     defer grid.release()
     # The tube with its middle row of faces gone: two loops facing.

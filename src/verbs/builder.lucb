@@ -217,7 +217,7 @@ pub struct TopologyBuilder:
         var triangles = try Column[i32].allocate((corner_total - faces * 2) * 3)
         defer triangles.release()
         var work = TriangleWork(source.offset_span(), source.triangle_span(), self.offsets.view(), self.face_parents.view(), self.copied.view(), triangles.span(), self.fans)
-        parallel.parallel_for(faces, 4096, copy_triangles, (void*)&work)
+        try parallel.for_each_range(faces, 4096, (void*)&work, copy_triangles)
         var normals: Column[Float3]
         defer normals.release()
         if self.fans: normals = try Column[Float3].filled(faces, Float3.of(Vector3()))
@@ -260,8 +260,8 @@ struct TriangleWork:
 
 ## Copied faces take their parent's triangles, shifted to their corners;
 ## the rest are marked for ear clipping.
-func copy_triangles(context: void*?, first: usize, end: usize):
-    let work = (TriangleWork*)(context else return)
+func copy_triangles(context: void*, first: usize, end: usize, worker: usize):
+    let work = (TriangleWork*)context
     for face in first..<end:
         let start = (usize)work.offsets[face]
         let size = (usize)work.offsets[face + 1] - start

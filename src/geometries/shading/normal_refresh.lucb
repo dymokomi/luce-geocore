@@ -6,7 +6,7 @@
 ## written copy-on-write, so snapshots sharing them keep theirs, and the new
 ## column names the old one as its parent (GPU copies update in place).
 import memory
-import core.parallel
+from luce_std import parallel
 from core.attributes import AttributeStore, DataType, Domain
 from core.attribute_ops import typed_mut
 from math.vector import Vector3
@@ -33,7 +33,7 @@ pub func refresh_normals(attributes: AttributeStore*, shape: const Surface*, mov
             continue
         # Each affected point writes only its own point or corners.
         var work = Work(shape, affected, bytes, wide, domain == Domain.corner)
-        parallel.parallel_for(affected.length, 64, refresh_range, (void*)&work)
+        try parallel.for_each_range(affected.length, 64, (void*)&work, refresh_range)
         let range = written_range(shape, affected, domain == Domain.corner)
         attributes.set_changed(index, range.0, range.1)
 
@@ -44,8 +44,8 @@ struct Work:
     let wide: bool
     let corners: bool
 
-func refresh_range(context: void*?, first: usize, end: usize):
-    let work = (Work*)(context else return)
+func refresh_range(context: void*, first: usize, end: usize, worker: usize):
+    let work = (Work*)context
     let shape = work.shape
     for index in first..<end:
         let point = work.points[index]

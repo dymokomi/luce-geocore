@@ -92,7 +92,7 @@ pub func swept(curves: const Curves*, selected: Bits, profile: const Profile*, c
     defer free(point_mix) in memory.heap
     var work = SweepWork(curves, selected, profile, caps, offsets, path, frames, starts, positions.span(), face_offsets.span(), corner_points.span(),
                          triangle_corners.span(), attribute_ops.typed_mut[f32](uv.data.span()), face_parents, point_parents, point_others, point_mix)
-    parallel.parallel_for(count, 16, sweep_curves, (void*)&work)
+    try parallel.for_each_range(count, 16, (void*)&work, sweep_curves)
     face_offsets.span()[faces] = (i32)corners
     var empty_normals: Column[Float3]
     var empty_precise: Column[Vector3]
@@ -136,8 +136,8 @@ struct SweepWork:
     let point_others: i32[]
     let point_mix: f32[]
 
-func sweep_curves(context: void*?, first: usize, end: usize):
-    let work = (SweepWork*)(context else return)
+func sweep_curves(context: void*, first: usize, end: usize, worker: usize):
+    let work = (SweepWork*)context
     for curve in first..<end:
         if work.starts[curve + 1].point > work.starts[curve].point: sweep_curve(work, curve)
 

@@ -57,6 +57,11 @@ pub func run_with(set: interop.Reference[GeometrySet], mode: i64, header: str, b
     let made = try geocore_kernel.run_code(try set.get(), mode, header, body, group, 0, names, values, 1.0, 0.0, 24.0, count, threads)
     return try geocore_kernel.adopt_set(made)
 
+## Run `body` restricted to `group` read on `group_type`'s domain.
+pub func run_with_type(set: interop.Reference[GeometrySet], mode: i64, body: str, group: str, group_type: i64) -> interop.Reference[GeometrySet]!:
+    let made = try geocore_kernel.run_code(try set.get(), mode, "", body, group, group_type, no_names(), no_values(), 1.0, 0.0, 24.0, 0, 0)
+    return try geocore_kernel.adopt_set(made)
+
 ## The mesh of a set (trap without one).
 pub func mesh_of(set: interop.Reference[GeometrySet]) -> interop.Reference[Mesh]!:
     let found = try (try set.get()).mesh()

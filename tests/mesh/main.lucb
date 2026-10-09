@@ -7,7 +7,7 @@ import os
 import ownership
 import sync
 from luce_std import process
-from luce_geocore.core import parallel as geocore_parallel
+from luce_std import parallel as std_parallel
 from luce_geocore.kernel import clear_group_cache
 import polygon_checks
 import scale_checks
@@ -105,19 +105,14 @@ func small_faces_argument(arguments: const str[]) -> usize?:
         return value
     return none
 
-## Every check once and, unless this is already a variant, again in fresh processes: with
-## nearly every face on the large-face (heap) path, and with pools of one and two workers.
+## Every check once and, unless this is already a variant, again in a fresh process with
+## nearly every face on the large-face (heap) path.
 pub func main(arguments: str[]) -> i32!:
     let status = try checks(arguments)
-    if status != 0 or arguments.length > 1 or os.env("LUCE_POOL_WORKERS") != none: return status
+    if status != 0 or arguments.length > 1: return status
     let program = try os.executable()
     var small: c.str[2] = ["--small-faces", "4"]
-    var none_given: c.str[1] = ["unused"]
     try again(program, small[..<2], none)
-    var one: c.str[1] = ["LUCE_POOL_WORKERS=1"]
-    try again(program, none_given[..<0], one[..<1])
-    var two: c.str[1] = ["LUCE_POOL_WORKERS=2"]
-    try again(program, none_given[..<0], two[..<1])
     return 0
 
 ## Run this program again with `words` and `environment`, showing what it printed; fail
@@ -137,7 +132,7 @@ func checks(arguments: str[]) -> i32!:
         set_small_faces(limit)
         print(f"small faces: at most {limit} corners")
     # Start the pool first: its starting threads free blocks in the current heap.
-    geocore_parallel.warm()
+    std_parallel.warm()
     try query_checks.exercise()
     let previous = memory.heap
     var tracker = Tracker(previous, 0, none, sync.Mutex())

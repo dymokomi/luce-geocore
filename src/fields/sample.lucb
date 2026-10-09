@@ -47,7 +47,7 @@ pub func sampled_sdf(sdf: const Sdf*, voxel: f64, band: f64, name: str) -> Spars
     var marks = try Column[u64].filled(blocks * mask_words, 0)
     defer marks.release()
     var find = FindWork(sdf, voxel, band, lx, ly, lz, nx, ny, nz, bx, by, marks.span())
-    parallel.parallel_for(blocks, 1, find_leaves, (void*)&find)
+    try parallel.for_each_range(blocks, 1, (void*)&find, find_leaves)
     var keys = Growing[u64]()
     defer keys.close()
     try gather_marks(marks.view(), lx, ly, lz, bx, by, &keys)
@@ -68,8 +68,8 @@ struct FindWork:
     let by: i64
     let marks: u64[]
 
-func find_leaves(context: void*?, first: usize, end: usize):
-    let work = (FindWork*)(context else return)
+func find_leaves(context: void*, first: usize, end: usize, worker: usize):
+    let work = (FindWork*)context
     let leaf_world = work.voxel * 8.0
     let reach = work.band * work.voxel
     for block in first..<end:

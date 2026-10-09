@@ -2,7 +2,7 @@
 ## parent maps and joining two meshes' attributes. Each writes one new column
 ## per attribute with typed loops, never per-element f64 conversions.
 import memory
-import core.parallel
+from luce_std import parallel
 import errors
 from core.attributes import Attribute, DataType, Domain, Storage, is_integer, scalar_bytes
 from core.strings import TableBuilder, table_count, table_text
@@ -28,7 +28,7 @@ pub func remapped(source: const Attribute*, parents: const i32[], elements: usiz
     let output = result.data.span()
     if source.kind == DataType.boolean:
         var bits = BitWork(input, output, parents)
-        parallel.parallel_for((elements + 63) // 64, 4096, gather_bits, (void*)&bits)
+        try parallel.for_each_range((elements + 63) // 64, 4096, (void*)&bits, gather_bits)
     elif source.kind == DataType.int8:
         let values = typed_mut[i8](output)
         let old = typed[i8](input)
@@ -39,7 +39,7 @@ pub func remapped(source: const Attribute*, parents: const i32[], elements: usiz
     else:
         let words = source.tuple_bytes() // 4
         var work = GatherWork(typed[u32](input), typed_mut[u32](output), words, parents, 0xFFFFFFFF if source.kind == DataType.text else 0)
-        parallel.parallel_for(elements, 65536, gather_words, (void*)&work)
+        try parallel.for_each_range(elements, 65536, (void*)&work, gather_words)
     return result
 
 struct GatherWork:
@@ -51,8 +51,8 @@ struct GatherWork:
     ## The value of each word of an element without a parent.
     let fill: u32
 
-func gather_words(context: void*?, first: usize, end: usize):
-    let work = (GatherWork*)(context else return)
+func gather_words(context: void*, first: usize, end: usize, worker: usize):
+    let work = (GatherWork*)context
     let words = work.words
     for at in first..<end:
         let parent = work.parents[at]
@@ -69,8 +69,8 @@ struct BitWork:
     let parents: const i32[]
 
 ## Output words first..<end: each takes the bits of its elements' parents.
-func gather_bits(context: void*?, first: usize, end: usize):
-    let work = (BitWork*)(context else return)
+func gather_bits(context: void*, first: usize, end: usize, worker: usize):
+    let work = (BitWork*)context
     let output = typed_mut[u64](work.output)
     let input = typed[u64](work.input)
     for word in first..<end:

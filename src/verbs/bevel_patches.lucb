@@ -30,7 +30,6 @@ struct Loops:
 struct PatchPass:
     let work: Bevel*
     let filling: bool
-    var errors: FirstError
 
 func patches(work: Bevel*, builder: TopologyBuilder*) -> !:
     let slots = work.vertex_points.count
@@ -38,9 +37,8 @@ func patches(work: Bevel*, builder: TopologyBuilder*) -> !:
         work.slot_points.items[slot] = 0
         work.slot_entries.items[slot] = 0
     try work.patch_skipped.fill(slots, 0)
-    var counting = PatchPass(work, false, FirstError())
-    parallel.parallel_for(slots, 256, plan_patches, (void*)&counting)
-    try counting.errors.check()
+    var counting = PatchPass(work, false)
+    try parallel.for_each_range(slots, 256, (void*)&counting, plan_patches)
     var loops: u32 = 0
     var points: u32 = 0
     for slot in 0..<slots + 1:
@@ -52,9 +50,8 @@ func patches(work: Bevel*, builder: TopologyBuilder*) -> !:
         points += point_count
     try work.patch_sizes.fill((usize)loops, 0)
     try work.patch_points.fill((usize)points, -1)
-    var filling = PatchPass(work, true, FirstError())
-    parallel.parallel_for(slots, 256, plan_patches, (void*)&filling)
-    try filling.errors.check()
+    var filling = PatchPass(work, true)
+    try parallel.for_each_range(slots, 256, (void*)&filling, plan_patches)
     for slot in 0..<slots: work.skipped += (usize)work.patch_skipped.items[slot]
     # Emit in vertex order; corners take the values a face gave each point.
     let mask: i64 = 0xFFFFFFFF
@@ -81,14 +78,12 @@ func patches(work: Bevel*, builder: TopologyBuilder*) -> !:
             try builder.end_face()
             at += size
 
-func plan_patches(context: void*?, first: usize, end: usize):
-    let pass = (PatchPass*)(context else return)
+func plan_patches(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let pass = (PatchPass*)context
     var scratch = Loops()
     defer scratch.close()
     for slot in first..<end:
-        vertex_patches(pass, &scratch, slot) catch failure:
-            pass.errors.record(failure.code, failure.message)
-            return
+        try vertex_patches(pass, &scratch, slot)
 
 ## The directed edges among one vertex's points: along each face's run of
 ## new corners there, and along each strip's profile side there.

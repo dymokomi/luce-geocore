@@ -26,7 +26,7 @@ func find_fans(work: Bevel*, mesh: const Mesh*, beveled: BitsBuilder*) -> !:
     try work.fans.fill((usize)work.fan_starts.items[slots], -1)
     try work.cyclic.fill(slots, 0)
     try work.fan_valid.fill(slots, 0)
-    parallel.parallel_for(slots, 512, walk_fans, (void*)work)
+    try parallel.for_each_range(slots, 512, (void*)work, walk_fans)
     # Edges at a point without one fan stay as they are.
     for edge in 0..<topology.edges():
         if not beveled.view().get(edge): continue
@@ -38,8 +38,8 @@ func find_fans(work: Bevel*, mesh: const Mesh*, beveled: BitsBuilder*) -> !:
     for slot in 0..<slots:
         if work.fan_valid.items[slot] == 0: work.slot_of.items[(usize)work.vertex_points.items[slot]] = -1
 
-func walk_fans(context: void*?, first: usize, end: usize):
-    let work = (Bevel*)(context else return)
+func walk_fans(context: void*, first: usize, end: usize, worker: usize):
+    let work = (Bevel*)context
     for slot in first..<end:
         let start = (usize)work.fan_starts.items[slot]
         let room = (usize)work.fan_starts.items[slot + 1] - start
@@ -110,7 +110,6 @@ struct Scratch:
 struct CornerPass:
     let work: Bevel*
     let filling: bool
-    var errors: FirstError
 
 ## The new corners of every face around every bevel vertex (see the file
 ## notes and bevel.lucb).
@@ -122,9 +121,8 @@ func place_corners(work: Bevel*) -> !:
     try work.retained.fill(slots, 1)
     try work.slot_points.fill(slots + 1, 0)
     try work.slot_entries.fill(slots + 1, 0)
-    var counting = CornerPass(work, false, FirstError())
-    parallel.parallel_for(slots, 256, plan_corners, (void*)&counting)
-    try counting.errors.check()
+    var counting = CornerPass(work, false)
+    try parallel.for_each_range(slots, 256, (void*)&counting, plan_corners)
     # Starts: an exclusive prefix sum (the last entry is the total).
     var points: u32 = 0
     var entries: u32 = 0
@@ -138,18 +136,15 @@ func place_corners(work: Bevel*) -> !:
     try work.created.fill((usize)points, NewPoint(Vector3(), -1, -1, 0.0, -1))
     try work.point_source.fill((usize)points, -1)
     try work.sequence.fill((usize)entries, NewCorner(-1, -1, 0.0))
-    var filling = CornerPass(work, true, FirstError())
-    parallel.parallel_for(slots, 256, plan_corners, (void*)&filling)
-    try filling.errors.check()
+    var filling = CornerPass(work, true)
+    try parallel.for_each_range(slots, 256, (void*)&filling, plan_corners)
 
-func plan_corners(context: void*?, first: usize, end: usize):
-    let pass = (CornerPass*)(context else return)
+func plan_corners(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let pass = (CornerPass*)context
     var scratch = Scratch()
     defer scratch.close()
     for slot in first..<end:
-        plan_vertex(pass.work, &scratch, slot, pass.filling) catch failure:
-            pass.errors.record(failure.code, failure.message)
-            return
+        try plan_vertex(pass.work, &scratch, slot, pass.filling)
 
 ## One vertex: slides on its unbeveled edges beside a beveled one, then each
 ## face's new corners there. Counting records how many points and entries it

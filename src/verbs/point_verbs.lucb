@@ -105,8 +105,8 @@ struct PlaceWork:
     let weights: const f32[]
     let matrix: Matrix4
 
-func place_points(context: void*?, first: usize, end: usize):
-    let work = (PlaceWork*)(context else return)
+func place_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (PlaceWork*)context
     for at in first..<end:
         let point = (usize)work.moved[at]
         let original = work.positions[point].vector()
@@ -144,7 +144,7 @@ func cook_transform(input: const VerbInput*, output: VerbOutput*) -> !:
     else:
         try affected.assign(group)
     var work = PlaceWork(positions, affected.view(), weights.view(), matrix)
-    parallel.parallel_for(affected.count, 16384, place_points, (void*)&work)
+    try parallel.for_each_range(affected.count, 16384, (void*)&work, place_points)
     if axis > 0: try mirror_points(input.mesh, positions, affected.view(), origin, axis, tolerance)
     output.moved.clear()
     try output.moved.assign(affected.view())
@@ -194,7 +194,7 @@ func cook_smooth(input: const VerbInput*, output: VerbOutput*) -> !:
     defer free(next) in memory.heap
     for _ in 0..<rounds:
         var work = SmoothWork(positions, moved, edges, around.0, around.1, next, amount)
-        parallel.parallel_for(moved.length, 4096, smooth_points, (void*)&work)
+        try parallel.for_each_range(moved.length, 4096, (void*)&work, smooth_points)
         for at in 0..<moved.length: positions[(usize)moved[at]] = next[at]
 
 struct SmoothWork:
@@ -206,8 +206,8 @@ struct SmoothWork:
     let next: Float3[]
     let amount: f64
 
-func smooth_points(context: void*?, first: usize, end: usize):
-    let work = (SmoothWork*)(context else return)
+func smooth_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (SmoothWork*)context
     for at in first..<end:
         let point = (usize)work.moved[at]
         let p = work.positions[point].vector()

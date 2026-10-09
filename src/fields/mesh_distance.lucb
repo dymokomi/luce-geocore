@@ -51,7 +51,7 @@ pub func mesh_level_set(mesh: const Mesh*, voxel: f64, band: f64, name: str) -> 
     let counts = try new usize[triangles + 1] --- in memory.heap
     defer free(counts) in memory.heap
     var count_work = BinWork(&shape, voxel, reach, counts, nothing[u64](), nothing[u64](), 0)
-    parallel.parallel_for(triangles, 1024, bin_triangles, (void*)&count_work)
+    try parallel.for_each_range(triangles, 1024, (void*)&count_work, bin_triangles)
     var total: usize = 0
     for triangle in 0..<triangles:
         let count = counts[triangle]
@@ -64,7 +64,7 @@ pub func mesh_level_set(mesh: const Mesh*, voxel: f64, band: f64, name: str) -> 
     let pair_triangles = try new u64[total] --- in memory.heap
     defer free(pair_triangles) in memory.heap
     var list_work = BinWork(&shape, voxel, reach, counts, pair_keys, pair_triangles, 1)
-    parallel.parallel_for(triangles, 1024, bin_triangles, (void*)&list_work)
+    try parallel.for_each_range(triangles, 1024, (void*)&list_work, bin_triangles)
     # Pairs sorted by leaf: each leaf's triangles are one run.
     try sort_pairs(pair_keys, pair_triangles)
     var leaves = Growing[u64]()
@@ -87,7 +87,7 @@ func band_voxels(mesh: const Mesh*, voxel: f64, band: f64) -> f64!:
     var parts: f64[64] = ---
     for at in 0..<(usize)64: parts[at] = 0.0
     var work = AreaWork(mesh.face_normal_span(), mesh.offset_span(), mesh.corner_span(), mesh.point_span(), (faces + 63) // 64, parts)
-    parallel.run(64, sum_areas, (void*)&work)
+    try parallel.for_each(64, (void*)&work, sum_areas)
     var area = 0.0
     for part in work.parts: area += part
     return area / (voxel * voxel) * (2.0 * band + 1.0)
@@ -101,8 +101,8 @@ struct AreaWork:
     var parts: f64[64]
 
 ## Polygon areas (Newell's vector along the face normal), a chunk each.
-func sum_areas(context: void*?, index: usize):
-    let work = (AreaWork*)(context else return)
+func sum_areas(context: void*, index: usize, worker: usize):
+    let work = (AreaWork*)context
     let faces = work.offsets.length - 1
     let first = index * work.chunk
     let end = first + work.chunk if first + work.chunk < faces else faces
@@ -128,7 +128,7 @@ func queried_level_set(mesh: const Mesh*, shape: const MeshShape*, voxel: f64, b
     let counts = try new usize[triangles + 1] --- in memory.heap
     defer free(counts) in memory.heap
     var count_work = BinWork(shape, voxel, reach, counts, nothing[u64](), nothing[u64](), 3)
-    parallel.parallel_for(triangles, 4096, bin_triangles, (void*)&count_work)
+    try parallel.for_each_range(triangles, 4096, (void*)&count_work, bin_triangles)
     var total: usize = 0
     for triangle in 0..<triangles:
         let count = counts[triangle]
@@ -139,7 +139,7 @@ func queried_level_set(mesh: const Mesh*, shape: const MeshShape*, voxel: f64, b
     let listed = try new u64[total] --- in memory.heap
     defer free(listed) in memory.heap
     var list_work = BinWork(shape, voxel, reach, counts, listed, nothing[u64](), 4)
-    parallel.parallel_for(triangles, 4096, bin_triangles, (void*)&list_work)
+    try parallel.for_each_range(triangles, 4096, (void*)&list_work, bin_triangles)
     try sort_keys(listed)
     var keys = Growing[u64]()
     defer keys.close()
@@ -192,11 +192,11 @@ struct MeshShape:
         try edge_sums.fill(edge_offsets.length - 1, Vector3())
         var work = ShapeWork(&shape, positions, mesh.position_origin(), offsets, mesh.corner_span(), mesh.triangle_span(), try mesh.corner_face_span(), try mesh.corner_edge_span(),
                              point_offsets, point_faces, edge_offsets, edge_corners, edge_sums.items[..<edge_sums.count])
-        parallel.parallel_for(positions.length, 65536, shape_points, (void*)&work)
-        parallel.parallel_for(faces, 4096, shape_faces, (void*)&work)
-        parallel.parallel_for(positions.length, 16384, shape_point_normals, (void*)&work)
-        parallel.parallel_for(edge_sums.count, 16384, shape_edge_normals, (void*)&work)
-        parallel.parallel_for(faces, 4096, shape_triangles, (void*)&work)
+        try parallel.for_each_range(positions.length, 65536, (void*)&work, shape_points)
+        try parallel.for_each_range(faces, 4096, (void*)&work, shape_faces)
+        try parallel.for_each_range(positions.length, 16384, (void*)&work, shape_point_normals)
+        try parallel.for_each_range(edge_sums.count, 16384, (void*)&work, shape_edge_normals)
+        try parallel.for_each_range(faces, 4096, (void*)&work, shape_triangles)
         return shape
 
     func close():
@@ -225,13 +225,13 @@ struct ShapeWork:
     let edge_corners: const i32[]
     let edge_sums: Vector3[]
 
-func shape_points(context: void*?, first: usize, end: usize):
-    let work = (ShapeWork*)(context else return)
+func shape_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ShapeWork*)context
     for point in first..<end: work.shape.points.items[point] = work.positions[point].vector().add(work.origin)
 
 ## Face normals from the polygons themselves (Newell), unit length.
-func shape_faces(context: void*?, first: usize, end: usize):
-    let work = (ShapeWork*)(context else return)
+func shape_faces(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ShapeWork*)context
     let points = work.shape.points.items
     for face in first..<end:
         var normal = Vector3()
@@ -242,8 +242,8 @@ func shape_faces(context: void*?, first: usize, end: usize):
         work.shape.face_normals.items[face] = normal.normalized() catch failure: recover Vector3()
 
 ## A point's faces' normals, each weighted by the face's angle there.
-func shape_point_normals(context: void*?, first: usize, end: usize):
-    let work = (ShapeWork*)(context else return)
+func shape_point_normals(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ShapeWork*)context
     let points = work.shape.points.items
     for point in first..<end:
         var sum = Vector3()
@@ -261,8 +261,8 @@ func shape_point_normals(context: void*?, first: usize, end: usize):
         work.shape.point_normals.items[point] = sum
 
 ## An edge's faces' normals, summed.
-func shape_edge_normals(context: void*?, first: usize, end: usize):
-    let work = (ShapeWork*)(context else return)
+func shape_edge_normals(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ShapeWork*)context
     for edge in first..<end:
         var sum = Vector3()
         for at in (usize)work.edge_offsets[edge]..<(usize)work.edge_offsets[edge + 1]:
@@ -271,8 +271,8 @@ func shape_edge_normals(context: void*?, first: usize, end: usize):
 
 ## A face's triangles (after the faces before it), each edge's normal
 ## found by its corners: a polygon edge's, or a diagonal's face normal.
-func shape_triangles(context: void*?, first: usize, end: usize):
-    let work = (ShapeWork*)(context else return)
+func shape_triangles(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ShapeWork*)context
     for face in first..<end:
         let start = (usize)work.offsets[face]
         let size = (usize)work.offsets[face + 1] - start
@@ -322,8 +322,8 @@ func leaf_box(work: const BinWork*, triangle: usize) -> (i64, i64, i64, i64, i64
             (i64)math.floor((high.x + work.reach) / size), (i64)math.floor((high.y + work.reach) / size), (i64)math.floor((high.z + work.reach) / size))
 
 ## One pass of BinWork over triangles first..<end.
-func bin_triangles(context: void*?, first: usize, end: usize):
-    let work = (BinWork*)(context else return)
+func bin_triangles(context: void*, first: usize, end: usize, worker: usize):
+    let work = (BinWork*)context
     for triangle in first..<end:
         let (lx, ly, lz, hx, hy, hz) = leaf_box(work, triangle)
         if work.pass >= 3 and triangle > 0:

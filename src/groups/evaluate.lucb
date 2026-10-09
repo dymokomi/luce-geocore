@@ -185,7 +185,7 @@ struct Evaluation:
             if component >= 3: error(errors.invalid, "group syntax: the attribute has fewer components")
         var work = TestWork(self.program.numbers.view()[(usize)term.first..<(usize)term.first + (usize)term.count * 2], term.compare, source.kind, component,
                             self.mesh.point_span(), self.mesh.position_origin(), self.mesh.face_normal_span(), source.entry, is_detail(source), bits.words(), size)
-        parallel.parallel_for(work.words.length, 256, test_words, (void*)&work)
+        try parallel.for_each_range(work.words.length, 256, (void*)&work, test_words)
         return bits
 
     ## Text attributes: `=` and `==` match any glob, `!=` none; no operator
@@ -310,8 +310,8 @@ struct TestWork:
     let words: u64[]
     let count: usize
 
-func test_words(context: void*?, first: usize, end: usize):
-    let work = (TestWork*)(context else return)
+func test_words(context: void*, first: usize, end: usize, worker: usize):
+    let work = (TestWork*)context
     for word in first..<end:
         var bits: u64 = 0
         let stop = word * 64 + 64 if work.count > word * 64 + 64 else work.count

@@ -6,9 +6,10 @@
 ## points, where neither estimate holds, read zero. Computed in parallel over
 ## points; each triangle is visited by its three points, so nothing is shared.
 from luce_std import math
-import core.parallel
+from luce_std import parallel
 from core.float3 import Float3
 from math.vector import Vector3
+import core.ranges
 
 ## The arrays the estimate reads.
 pub struct CurvatureShape:
@@ -25,14 +26,14 @@ pub struct CurvatureShape:
 ## k1 and k2 of every point into `out` (two per point).
 pub func point_curvatures(shape: const CurvatureShape*, out: f32[]):
     var work = Work(shape, out)
-    parallel.parallel_for(shape.positions.length, 2048, points_range, (void*)&work)
+    ranges.each_range(shape.positions.length, 2048, (void*)&work, points_range)
 
 struct Work:
     let shape: const CurvatureShape*
     let out: f32[]
 
-func points_range(context: void*?, first: usize, end: usize):
-    let work = (Work*)(context else return)
+func points_range(context: void*, first: usize, end: usize, worker: usize):
+    let work = (Work*)context
     for point in first..<end:
         let k = principal(work.shape, point)
         work.out[point * 2] = (f32)k.x

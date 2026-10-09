@@ -41,8 +41,8 @@ pub func run_code(set: const GeometrySet*, run_over: i64, header: str, body: str
     try cook.bind_inputs(&layout)
     try cook.bind_outputs(&layout)
     try cook.bind_uniforms(&settings)
-    if group.length > 0 and mode != .detail and mode != .numbers:
-        try cook.restrict(group)
+    if not groups.is_blank(group) and mode != .detail and mode != .numbers:
+        try cook.restrict(group, group_type)
     let request = Request(count = lanes, inputs = cook.inputs.view(), outputs = cook.engine_outputs.view(), uniforms = cook.uniforms.view(), threads = threads, active = cook.active)
     if let fault = try engine.run(&compiled.program, &request):
         var room: u8[1024]
@@ -176,13 +176,26 @@ struct Cook:
             if given == name: return settings.values[at]
         return none
 
-    ## Run only on the elements of group expression `group`.
-    func restrict(group: str) -> !:
+    ## Run only on the elements of group expression `group`, read on `group_type`'s
+    ## domain (0 guesses it from the expression) and converted to the run's domain as
+    ## verbs convert theirs.
+    func restrict(group: str, group_type: i64) -> !:
         let source = self.mesh else return
-        var result = try groups.group_bits(source, group, self.mode.domain())
+        let target = self.mode.domain()
+        let named = try groups.GroupType.of(group_type)
+        var domain = named.domain(target)
+        if named == .guess: domain = try groups.guess_domain(source, group, target)
+        var result = try groups.group_bits(source, group, domain)
         defer result.bits.release()
+        var chosen = try BitsBuilder.copy_of(Bits(result.bits.view(), try source.domain_size(domain)))
+        defer chosen.close()
+        if domain != target:
+            let topology = try Topology.of(source)
+            var moved = try groups.converted(&topology, chosen.view(), domain, target, groups.strict_conversion(domain, target))
+            chosen.close()
+            chosen = moved
         let mask = try self.scratch.bytes(self.lanes)
-        let members = Bits(words = result.bits.view(), count = self.lanes)
+        let members = chosen.view()
         for at in 0..<self.lanes: mask[at] = (u8)members.get(at)
         self.active = mask
 
@@ -264,23 +277,52 @@ struct Cook:
         let integer = output.kind == .i32 or output.kind == .i64
         return try Attribute.from_numbers((str)output.name.bytes[7..], Domain.detail, output.width, numbers[..<output.width], integer, float32 = output.kind == .f32)
 
-## The points whose positions changed, ascending, in one pass.
+## The points whose positions changed, ascending: blocks of points counted on the pool,
+## then filled in their places.
 func changed(previous: const Float3[], next: const Float3[]) -> u32[]!:
     let count = next.length if next.length < previous.length else previous.length
-    let moved = try new u32[count] --- in memory.heap
-    var used: usize = 0
-    for at in 0..<count:
-        if differs(previous[at], next[at]):
-            moved[used] = (u32)at
+    let blocks = (count + changed_block - 1) // changed_block
+    let starts = try new usize[blocks + 1] in memory.heap
+    defer free(starts) in memory.heap
+    var work = ChangedWork(previous = previous, next = next, count = count, starts = starts, moved = u32[]((u32*)starts.data, 0))
+    try parallel.for_each(blocks, (void*)&work, count_changed)
+    var total: usize = 0
+    for block in 0..<blocks:
+        let here = starts[block]
+        starts[block] = total
+        total += here
+    let moved = try new u32[total] --- in memory.heap
+    work.moved = moved
+    try parallel.for_each(blocks, (void*)&work, fill_changed)
+    return moved
+
+let changed_block: usize = 65536
+
+struct ChangedWork:
+    let previous: const Float3[]
+    let next: const Float3[]
+    let count: usize
+    let starts: usize[]
+    var moved: u32[]
+
+func count_changed(context: void*, block: usize, worker: usize):
+    let work = (ChangedWork*)context
+    let first = block * changed_block
+    let end = first + changed_block if work.count - first > changed_block else work.count
+    var found: usize = 0
+    for at in first..<end:
+        if differs(work.previous[at], work.next[at]): found += 1
+    work.starts[block] = found
+
+func fill_changed(context: void*, block: usize, worker: usize):
+    let work = (ChangedWork*)context
+    let first = block * changed_block
+    let end = first + changed_block if work.count - first > changed_block else work.count
+    var used = work.starts[block]
+    for at in first..<end:
+        if differs(work.previous[at], work.next[at]):
+            work.moved[used] = (u32)at
             used += 1
-    if used == count:
-        return moved
-    let exact = new u32[used] --- in memory.heap catch failure:
-        free(moved) in memory.heap
-        error(failure.code, failure.message)
-    for at in 0..<used: exact[at] = moved[at]
-    free(moved) in memory.heap
-    return exact
 
 func differs(a: Float3, b: Float3) -> bool:
     return a.x.bits() != b.x.bits() or a.y.bits() != b.y.bits() or a.z.bits() != b.z.bits()

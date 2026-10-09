@@ -1,3 +1,8 @@
+## Kept only for the packages that still use it (luce-obj, luce-fbx, luce-usd, luce-3d
+## and luce-cad, whose background tessellation needs `start`/`wait`, which luce-std's
+## pool does not offer); luce-geocore itself runs on luce-std's `parallel`. Remove it
+## once they have moved.
+##
 ## One persistent pool of worker threads for geometry kernels, the pattern of
 ## luce-canvas's engine pool: workers start once, on first use (one fewer than
 ## the processors, at most 63), and stay for the process, so kernels never

@@ -3,28 +3,36 @@ import interop
 from luce_std import math
 import errors
 from math.vector import Vector3
-from geometries.polygon import Mesh
+from geometries.polygon import Mesh, assembled, mesh_adopt
+from core.float3 import Float3
+from core.shared import Column
+import core.ranges
 from geometries.builder import MeshBuilder
 
 pub struct MeshPrimitives:
     let reserved: u8 = 0
 
+    ## A flat square grid in XZ of `divisions` squared quads (1..2048: up to 4.2M
+    ## points, as Houdini's Grid builds wrangle-sized inputs).
     pub static func grid(size: f64 = 2.0, divisions: i64 = 4) -> interop.Reference[Mesh]!:
-        try parameters(size, divisions)
-        var out = try MeshBuilder()
-        defer out.close()
-        for z in 0..<divisions + 1:
-            for x in 0..<divisions + 1:
-                _ = try out.point(Vector3(((f64)x / (f64)divisions - 0.5) * size, 0.0, ((f64)z / (f64)divisions - 0.5) * size))
-        for z in 0..<divisions:
-            for x in 0..<divisions:
-                let a = z * (divisions + 1) + x
-                try out.face(4)
-                try out.corner(a)
-                try out.corner(a + divisions + 1)
-                try out.corner(a + divisions + 2)
-                try out.corner(a + 1)
-        return try out.finish()
+        try parameters(size, divisions, most_grid_divisions)
+        let steps = (usize)divisions
+        let points = (steps + 1) * (steps + 1)
+        let faces = steps * steps
+        var positions = try Column[Float3].allocate(points)
+        errdefer positions.release()
+        var offsets = try Column[i32].allocate(faces + 1)
+        errdefer offsets.release()
+        var corners = try Column[i32].allocate(faces * 4)
+        errdefer corners.release()
+        # A first index of -1 asks assembly to triangulate the face, as a builder's mesh is.
+        var triangles = try Column[i32].filled(faces * 6, -1)
+        errdefer triangles.release()
+        var work = GridWork(size = size, steps = steps, positions = positions.span(), offsets = offsets.span(), corners = corners.span())
+        ranges.each_range(steps + 1, 64, (void*)&work, grid_rows)
+        offsets.span()[faces] = (i32)(faces * 4)
+        let storage = try assembled(positions.take(), Vector3(), offsets.take(), corners.take(), triangles.take(), Column[Float3](), Column[Vector3]())
+        return try mesh_adopt(storage)
 
     pub static func sphere(radius: f64 = 1.0, segments: i64 = 16) -> interop.Reference[Mesh]!:
         try parameters(radius, segments)
@@ -110,6 +118,39 @@ pub struct MeshPrimitives:
                 try out.corner(((i + 1) % segments) * rows + j)
         return try out.finish()
 
-func parameters(size: f64, divisions: i64) -> !:
-    if not (size > 0.0 and size <= 100000.0) or divisions < 1 or divisions > 64:
-        error(errors.invalid, "primitive size must be positive and divisions in 1..64")
+## A grid's columns, filled a band of rows at a time.
+struct GridWork:
+    let size: f64
+    let steps: usize
+    let positions: Float3[]
+    let offsets: i32[]
+    let corners: i32[]
+
+## Row z's points and, below the last row, its faces: the builder's layout (points
+## row by row, each face's corners a, a + side, a + side + 1, a + 1).
+func grid_rows(context: void*, first: usize, end: usize, worker: usize):
+    let work = (GridWork*)context
+    let side = work.steps + 1
+    let scale = (f64)work.steps
+    for z in first..<end:
+        let depth = ((f64)z / scale - 0.5) * work.size
+        for x in 0..<side:
+            work.positions[z * side + x] = Float3.of(Vector3(((f64)x / scale - 0.5) * work.size, 0.0, depth))
+        if z == work.steps:
+            continue
+        for x in 0..<work.steps:
+            let face = z * work.steps + x
+            let a = (i32)(z * side + x)
+            work.offsets[face] = (i32)(face * 4)
+            work.corners[face * 4] = a
+            work.corners[face * 4 + 1] = a + (i32)side
+            work.corners[face * 4 + 2] = a + (i32)side + 1
+            work.corners[face * 4 + 3] = a + 1
+
+## The most divisions a grid takes; the other primitives take 64.
+let most_grid_divisions: i64 = 2048
+
+func parameters(size: f64, divisions: i64, most: i64 = 64) -> !:
+    if not (size > 0.0 and size <= 100000.0) or divisions < 1 or divisions > most:
+        if most == 64: error(errors.invalid, "primitive size must be positive and divisions in 1..64")
+        error(errors.invalid, "grid size must be positive and divisions in 1..2048")

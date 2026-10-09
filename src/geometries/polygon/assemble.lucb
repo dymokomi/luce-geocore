@@ -26,13 +26,11 @@ pub func assembled(positions: Column[Float3], origin: Vector3, offsets: Column[i
     if owned_normals.is_empty() or owned_normals.count() != faces:
         owned_normals.release()
         owned_normals = try Column[Float3].allocate(faces)
-        var work = FinishWork(owned_positions.view(), owned_precise.view(), owned_corners.view(), owned_offsets.view(), owned_triangles.span(), owned_normals.span(), true, FirstError())
-        parallel.parallel_for(faces, 1024, finish_faces, (void*)&work)
-        try work.errors.check()
+        var work = FinishWork(owned_positions.view(), owned_precise.view(), owned_corners.view(), owned_offsets.view(), owned_triangles.span(), owned_normals.span(), true)
+        try work.run(faces)
     else:
-        var work = FinishWork(owned_positions.view(), owned_precise.view(), owned_corners.view(), owned_offsets.view(), owned_triangles.span(), owned_normals.span(), false, FirstError())
-        parallel.parallel_for(faces, 1024, finish_faces, (void*)&work)
-        try work.errors.check()
+        var work = FinishWork(owned_positions.view(), owned_precise.view(), owned_corners.view(), owned_offsets.view(), owned_triangles.span(), owned_normals.span(), false)
+        try work.run(faces)
     let extent = positions_bounds(owned_positions.view(), origin)
     let topology = try new TopologyCache() in memory.heap
     errdefer free(topology) in memory.heap
@@ -64,13 +62,24 @@ struct FinishWork:
     let normals: Float3[]
     ## Compute every face's normal (else only faces being triangulated).
     let all_normals: bool
-    var errors: FirstError
+    ## The lowest face that failed (the face count when none has).
+    var lowest: @usize
 
-func finish_faces(context: void*?, first: usize, end: usize):
-    let work = (FinishWork*)(context else return)
+    ## Finish every face on the pool; a failure is the lowest failing face's own error,
+    ## whatever the thread count.
+    func run(faces: usize) -> !:
+        self.lowest.store(faces, .relaxed)
+        ranges.each_range(faces, 1024, (void*)&self, finish_faces)
+        let failed = self.lowest.load(.acquire)
+        if failed < faces:
+            try finish_face(&self, failed)
+
+func finish_faces(context: void*, first: usize, end: usize, worker: usize):
+    let work = (FinishWork*)context
     for face in first..<end:
         finish_face(work, face) catch failure:
-            work.errors.record(failure.code, failure.message)
+            _ = failure
+            _ = work.lowest.min(face, .acq_rel)
 
 ## The face's normal and, when its first index is -1, its triangles.
 func finish_face(work: FinishWork*, face: usize) -> !:
@@ -119,7 +128,7 @@ pub func positions_bounds(positions: const Float3[], origin: Vector3) -> Bounds:
     work.high = high[..<(chunks if chunks < 64 else 64)]
     let grain = (positions.length + work.low.length - 1) // work.low.length
     work.grain = grain
-    parallel.run(work.low.length, bounds_chunk, (void*)&work)
+    ranges.each(work.low.length, (void*)&work, bounds_chunk)
     var minimum = work.low[0]
     var maximum = work.high[0]
     for at in 1..<work.low.length:
@@ -133,8 +142,8 @@ struct BoundsWork:
     var high: Vector3[]
     var grain: usize = 1
 
-func bounds_chunk(context: void*?, index: usize):
-    let work = (BoundsWork*)(context else return)
+func bounds_chunk(context: void*, index: usize, worker: usize):
+    let work = (BoundsWork*)context
     let first = index * work.grain
     let end = first + work.grain if work.positions.length - first > work.grain else work.positions.length
     var lx = work.positions[first].x

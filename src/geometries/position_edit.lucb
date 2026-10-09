@@ -7,7 +7,7 @@
 from luce_std import math
 import memory
 import errors
-import core.parallel
+from luce_std import parallel
 from core.geometry import Bounds
 from core.float3 import Float3
 from core.shared import Column
@@ -49,7 +49,7 @@ pub func bounds_of(positions: const Float3[], origin: Vector3) -> Bounds!:
     let results = try new Extent[chunks] --- in memory.heap
     defer free(results) in memory.heap
     var work = ExtentWork(positions, results)
-    parallel.parallel_for(chunks, 1, chunk_extent, (void*)&work)
+    try parallel.for_each_range(chunks, 1, (void*)&work, chunk_extent)
     var lo = results[0].lo
     var hi = results[0].hi
     var finite = true
@@ -72,8 +72,8 @@ struct ExtentWork:
     let positions: const Float3[]
     let results: Extent[]
 
-func chunk_extent(context: void*?, first: usize, end: usize):
-    let work = (ExtentWork*)(context else return)
+func chunk_extent(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ExtentWork*)context
     for chunk in first..<end:
         let start = chunk * 65536
         let stop = start + 65536 if work.positions.length - start > 65536 else work.positions.length
@@ -93,33 +93,40 @@ func chunk_extent(context: void*?, first: usize, end: usize):
 pub func reposition(shape: const Shape*, normals: Column[Float3], moved: const u32[], rigid: bool) -> Repositioned!:
     let extent = try bounds_of(shape.positions, shape.origin)
     let faces = shape.offsets.length - 1
-    let list = try touched_faces(shape, moved, faces)
-    defer free(list) in memory.heap
-    var fresh = normals.share()
+    # Every point moved: every face gets a new normal, into a fresh column (nothing of
+    # the old one survives, so nothing is copied) with no face list to build.
+    let every = moved.length == shape.positions.length
+    var list: u32[]
+    if not every:
+        list = try touched_faces(shape, moved, faces)
+    defer:
+        if not every: free(list) in memory.heap
+    var fresh: Column[Float3]
+    if every:
+        fresh = try Column[Float3].allocate(faces)
+    else:
+        fresh = normals.share()
     errdefer fresh.release()
-    let output = try fresh.writable()
-    var work = NormalWork(shape, list, output, rigid)
-    parallel.parallel_for(list.length, 2048, face_normals, (void*)&work)
+    let output = fresh.span() if every else try fresh.writable()
+    var work = NormalWork(shape, list, every, normals.view(), output, rigid)
+    try parallel.for_each_range(faces if every else list.length, 2048, (void*)&work, face_normals)
     if work.failed.load(.acquire) != 0:
-        # A serial pass reports the first failing face's own error.
-        for face in list:
-            if not is_degenerate(output[(usize)face].vector()): _ = try face_normal(shape, (usize)face)
+        # A serial pass reports the lowest failing face's own error.
+        for at in 0..<(faces if every else list.length):
+            let face = at if every else (usize)list[at]
+            if not is_degenerate(output[face].vector()): _ = try face_normal(shape, face)
     var triangles: Column[i32]
     errdefer triangles.release()
     if work.folded.load(.acquire) != 0:
         triangles = try Column[i32].copy_of(shape.triangles)
         let copy = triangles.span()
-        for face in list:
-            try retriangulate(shape, (usize)face, output[(usize)face].vector(), copy)
+        for at in 0..<(faces if every else list.length):
+            let face = at if every else (usize)list[at]
+            try retriangulate(shape, face, output[face].vector(), copy)
     return Repositioned(fresh, triangles, extent)
 
-## The faces around the `moved` points, ascending; every face when every point moved
-## (a deformation of the whole mesh), without walking the incidence.
+## The faces around the `moved` points, ascending.
 func touched_faces(shape: const Shape*, moved: const u32[], faces: usize) -> u32[]!:
-    if moved.length == shape.positions.length:
-        let all = try new u32[faces] --- in memory.heap
-        for face in 0..<faces: all[face] = (u32)face
-        return all
     let touched = try new bool[faces] --- in memory.heap
     defer free(touched) in memory.heap
     memory.set(u8[]((u8*)touched.data, touched.length), 0)
@@ -140,26 +147,71 @@ func touched_faces(shape: const Shape*, moved: const u32[], faces: usize) -> u32
 
 struct NormalWork:
     let shape: const Shape*
+    ## The faces to redo, or every face (`every`).
     let list: const u32[]
+    let every: bool
+    let previous: const Float3[]
     let normals: Float3[]
     let rigid: bool
     ## Whether any face's normal failed, and whether any triangle folded.
     var failed: @u32
     var folded: @u32
 
-func face_normals(context: void*?, first: usize, end: usize):
-    let work = (NormalWork*)(context else return)
+func face_normals(context: void*, first: usize, end: usize, worker: usize):
+    let work = (NormalWork*)context
     for at in first..<end:
-        let face = (usize)work.list[at]
-        let normal = face_normal(work.shape, face) catch failure:
-            _ = failure
-            # A face that had no area keeps its zero normal; one that
-            # collapses now fails the edit.
-            if not is_degenerate(work.normals[face].vector()): work.failed.store(1, .relaxed)
+        let face = at if work.every else (usize)work.list[at]
+        if let normal = quick_normal(work.shape, face):
+            work.normals[face] = normal
+        else:
+            # A face that had no area keeps its zero normal; one that collapses now
+            # fails the edit (the serial pass names it).
+            work.normals[face] = work.previous[face]
+            if not is_degenerate(work.previous[face].vector()): work.failed.store(1, .relaxed)
             continue
-        work.normals[face] = Float3.of(normal)
         if not work.rigid and folded(work.shape, face):
             work.folded.store(1, .relaxed)
+
+## `face_normal`'s value without its error: the same sums in the same order, as
+## plain numbers read from the positions as flat floats, or none for a face without
+## an area.
+func quick_normal(shape: const Shape*, face: usize) -> Float3?:
+    let start = (usize)shape.offsets[face]
+    let count = (usize)shape.offsets[face + 1] - start
+    let corners = shape.corners[start..<start + count]
+    let xyz = flat(shape.positions)
+    let first = (usize)corners[0] * 3
+    let ox = (f64)xyz[first]
+    let oy = (f64)xyz[first + 1]
+    let oz = (f64)xyz[first + 2]
+    var ax: f64 = 0.0
+    var ay: f64 = 0.0
+    var az: f64 = 0.0
+    var extent2: f64 = 0.0
+    var dx: f64 = 0.0
+    var dy: f64 = 0.0
+    var dz: f64 = 0.0
+    for at in 0..<count:
+        let next = (usize)corners[at + 1 if at + 1 < count else 0] * 3
+        let ex = (f64)xyz[next] - ox
+        let ey = (f64)xyz[next + 1] - oy
+        let ez = (f64)xyz[next + 2] - oz
+        extent2 = math.max(extent2, dx * dx + dy * dy + dz * dz)
+        ax = ax + (dy * ez - dz * ey)
+        ay = ay + (dz * ex - dx * ez)
+        az = az + (dx * ey - dy * ex)
+        dx = ex
+        dy = ey
+        dz = ez
+    let length = math.sqrt(ax * ax + ay * ay + az * az)
+    if not math.is_finite(length) or not math.is_finite(extent2) or length <= math.max(1e-30, extent2 * 1e-14):
+        return none
+    let scale = 1.0 / length
+    return Float3((f32)(ax * scale), (f32)(ay * scale), (f32)(az * scale))
+
+## Positions as flat floats, three to a point.
+func flat(positions: const Float3[]) -> const f32[]:
+    return f32[]((f32*)positions.data, positions.length * 3)
 
 ## The unit area normal of `face` from the new positions.
 pub func face_normal(shape: const Shape*, face: usize) -> Vector3!:
@@ -174,22 +226,37 @@ pub func face_normal(shape: const Shape*, face: usize) -> Vector3!:
         area = area.add(delta.cross(shape.positions[(usize)shape.corners[start + (at + 1) % count]].vector().subtract(origin)))
     return try area_normal(area, extent2)
 
-## A kept triangle folds when it degenerates or turns against its old facing.
+## A kept triangle folds when it degenerates or turns against its old facing
+## (lengths compared squared).
 func folded(shape: const Shape*, face: usize) -> bool:
     let start = (usize)shape.offsets[face]
     let count = (usize)shape.offsets[face + 1] - start
     let first = (start - face * 2) * 3
+    let before_xyz = flat(shape.previous)
+    let after_xyz = flat(shape.positions)
+    let triangles = shape.triangles[first..<first + (count - 2) * 3]
     for at in 0..<count - 2:
-        let a = (usize)shape.corners[(usize)shape.triangles[first + at * 3]]
-        let b = (usize)shape.corners[(usize)shape.triangles[first + at * 3 + 1]]
-        let c = (usize)shape.corners[(usize)shape.triangles[first + at * 3 + 2]]
-        let pa = shape.previous[a].vector()
-        let before = shape.previous[b].vector().subtract(pa).cross(shape.previous[c].vector().subtract(pa))
-        let na = shape.positions[a].vector()
-        let ab = shape.positions[b].vector().subtract(na)
-        let ac = shape.positions[c].vector().subtract(na)
-        let after = ab.cross(ac)
-        if after.length() <= math.max(1e-30, math.max(ab.dot(ab), ac.dot(ac)) * 1e-14) or after.dot(before) <= 0.0:
+        let a = (usize)shape.corners[(usize)triangles[at * 3]] * 3
+        let b = (usize)shape.corners[(usize)triangles[at * 3 + 1]] * 3
+        let c = (usize)shape.corners[(usize)triangles[at * 3 + 2]] * 3
+        let bx = (f64)before_xyz[b] - (f64)before_xyz[a]
+        let by = (f64)before_xyz[b + 1] - (f64)before_xyz[a + 1]
+        let bz = (f64)before_xyz[b + 2] - (f64)before_xyz[a + 2]
+        let cx = (f64)before_xyz[c] - (f64)before_xyz[a]
+        let cy = (f64)before_xyz[c + 1] - (f64)before_xyz[a + 1]
+        let cz = (f64)before_xyz[c + 2] - (f64)before_xyz[a + 2]
+        let ux = (f64)after_xyz[b] - (f64)after_xyz[a]
+        let uy = (f64)after_xyz[b + 1] - (f64)after_xyz[a + 1]
+        let uz = (f64)after_xyz[b + 2] - (f64)after_xyz[a + 2]
+        let vx = (f64)after_xyz[c] - (f64)after_xyz[a]
+        let vy = (f64)after_xyz[c + 1] - (f64)after_xyz[a + 1]
+        let vz = (f64)after_xyz[c + 2] - (f64)after_xyz[a + 2]
+        let wx = uy * vz - uz * vy
+        let wy = uz * vx - ux * vz
+        let wz = ux * vy - uy * vx
+        let facing = (by * cz - bz * cy) * wx + (bz * cx - bx * cz) * wy + (bx * cy - by * cx) * wz
+        let limit = math.max(1e-30, math.max(ux * ux + uy * uy + uz * uz, vx * vx + vy * vy + vz * vz) * 1e-14)
+        if wx * wx + wy * wy + wz * wz <= limit * limit or facing <= 0.0:
             return true
     return false
 

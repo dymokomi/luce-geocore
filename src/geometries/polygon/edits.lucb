@@ -205,7 +205,7 @@ extend Mesh:
         for point in moved:
             for at in (usize)incidence.0[(usize)point]..<(usize)incidence.0[(usize)point + 1]: touched.set((usize)incidence.1[at])
         var work = DisplayNormals(owned.view(), self.offsets.view(), self.corners.view(), touched.view(), output)
-        parallel.parallel_for(faces, 4096, display_normals, (void*)&work)
+        try parallel.for_each_range(faces, 4096, (void*)&work, display_normals)
         var attributes = try self.attributes.shared()
         errdefer attributes.close()
         let queries = try QueryCache.after(self.queries)
@@ -372,8 +372,8 @@ struct DisplayNormals:
     let touched: Bits
     let normals: Float3[]
 
-func display_normals(context: void*?, first: usize, end: usize):
-    let work = (DisplayNormals*)(context else return)
+func display_normals(context: void*, first: usize, end: usize, worker: usize):
+    let work = (DisplayNormals*)context
     for face in first..<end:
         if not work.touched.get(face): continue
         let start = (usize)work.offsets[face]

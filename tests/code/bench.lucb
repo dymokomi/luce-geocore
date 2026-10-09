@@ -1,6 +1,7 @@
 ## Whole cooks through the Code node over a 1M-point grid: the Stage 1 targets.
 import time
 from luce_geocore import kernel as geocore_kernel
+from luce_geocore.geocore import MeshPrimitives
 import support
 
 func measure(name: str, body: str, target: f64) -> !:
@@ -22,3 +23,15 @@ pub func run_all() -> !:
     try measure("rand3", "p.Cd = rand3(p.ptnum)\n", 8.0)
     try measure("empty", "", 3.0)
     _ = geocore_kernel.code_compiles()
+    try grid_build()
+
+## MeshPrimitives.grid at its largest: 2048 divisions, 4.2M points.
+pub func grid_build() -> !:
+    var best: u64 = 0xFFFFFFFFFFFFFFFF
+    for _ in 0..<3:
+        let started = time.now()
+        let grid = try MeshPrimitives.grid(2.0, 2048)
+        let spent = time.since(started)
+        if (try grid.get()).point_count() != 2049 * 2049: trap("grid size")
+        if spent < best: best = spent
+    print(f"grid 2048\t{(f64)best / 1000000.0}\t0")

@@ -6,8 +6,7 @@
 ## rebuilding it. The index borrows the mesh arrays it was built over.
 from luce_std import math
 import memory
-import core.parallel
-from core.parallel import FirstError
+from luce_std import parallel
 from core.float3 import Float3
 from core.growing import Growing
 from math.vector import Vector3
@@ -50,7 +49,7 @@ pub struct TriangleIndex:
         let hi = try new Float3[count] --- in memory.heap
         defer free(hi) in memory.heap
         var boxes = BoxWork(positions, corners, triangles, lo, hi, order)
-        parallel.parallel_for(count, 16384, fill_boxes, (void*)&boxes)
+        try parallel.for_each_range(count, 16384, (void*)&boxes, fill_boxes)
         var builder = Builder(lo, hi, order)
         defer builder.close()
         let nodes = try builder.build()
@@ -69,7 +68,7 @@ pub struct TriangleIndex:
         errdefer free(nodes) in memory.heap
         memory.copy(nodes, self.nodes, self.nodes.length)
         var work = RefitWork(positions, self.corners, triangles, order, nodes)
-        parallel.parallel_for(nodes.length, 8192, refit_leaves, (void*)&work)
+        try parallel.for_each_range(nodes.length, 8192, (void*)&work, refit_leaves)
         # Children follow their parent, so a reverse pass sees them first.
         var at = nodes.length
         while at > 0:
@@ -195,9 +194,8 @@ struct Builder:
         if count == 0: return empty
         let task_size = count // 64 + leaf_size
         _ = try self.split_top(0, count, 0, task_size)
-        var work = TaskWork(self.lo, self.hi, self.order, self.tasks.items[..<self.tasks.count], FirstError())
-        parallel.parallel_for(self.tasks.count, 1, build_tasks, (void*)&work)
-        try work.errors.check()
+        var work = TaskWork(self.lo, self.hi, self.order, self.tasks.items[..<self.tasks.count])
+        try parallel.for_each_range(self.tasks.count, 1, (void*)&work, build_tasks)
         var total: usize = 0
         for at in 0..<self.top.count:
             total += self.tasks.items[(usize)self.top.items[at].first].nodes.count if self.placeholders.items[at] else 1
@@ -252,15 +250,12 @@ struct TaskWork:
     let hi: const Float3[]
     let order: u32[]
     let tasks: Task[]
-    var errors: FirstError
 
-func build_tasks(context: void*?, first: usize, end: usize):
-    let work = (TaskWork*)(context else return)
+func build_tasks(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (TaskWork*)context
     for index in first..<end:
         let task = &work.tasks[index]
-        _ = build_subtree(work.lo, work.hi, work.order, task.first, task.end, 0, &task.nodes) catch failure:
-            work.errors.record(failure.code, failure.message)
-            recover 0
+        _ = try build_subtree(work.lo, work.hi, work.order, task.first, task.end, 0, &task.nodes)
 
 ## Preorder subtree over order[first..<end] appended to `nodes`; returns its index.
 func build_subtree(lo: const Float3[], hi: const Float3[], order: u32[], first: usize, end: usize, depth: usize, nodes: Growing[Node]*) -> usize!:
@@ -313,8 +308,8 @@ struct BoxWork:
     let hi: Float3[]
     let order: u32[]
 
-func fill_boxes(context: void*?, first: usize, end: usize):
-    let work = (BoxWork*)(context else return)
+func fill_boxes(context: void*, first: usize, end: usize, worker: usize):
+    let work = (BoxWork*)context
     for triangle in first..<end:
         let a = work.positions[(usize)work.corners[(usize)work.triangles[triangle * 3]]]
         let b = work.positions[(usize)work.corners[(usize)work.triangles[triangle * 3 + 1]]]
@@ -330,8 +325,8 @@ struct RefitWork:
     let order: const u32[]
     let nodes: Node[]
 
-func refit_leaves(context: void*?, first: usize, end: usize):
-    let work = (RefitWork*)(context else return)
+func refit_leaves(context: void*, first: usize, end: usize, worker: usize):
+    let work = (RefitWork*)context
     for id in first..<end:
         let node = &work.nodes[id]
         if node.count == 0: continue

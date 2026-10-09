@@ -32,7 +32,7 @@ Import `geocore` (`from luce_geocore.geocore import Mesh, MeshBuilder,
 Vector3`). Base code in other packages also has `luce_geocore.kernel` (bit
 sets and groups, mesh assembly and its size limits, the geometry set's
 component protocol, the codec registry, curves and fields),
-`luce_geocore.core.parallel` (the shared worker pool),
+`luce_geocore.core.parallel` (the old worker pool, kept for packages not yet on luce-std's `parallel`),
 `luce_geocore.core.shared` (shared columns) and `luce_geocore.core.growing`
 (`Growing`, a heap array that keeps its capacity). A mesh's arrays as spans
 (`point_span()`, `corner_span()`, …) and their packing into GPU layouts

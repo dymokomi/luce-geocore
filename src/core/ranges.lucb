@@ -1,0 +1,17 @@
+## Ranges of work on luce-std's pool for code that cannot fail: what
+## `parallel.for_each_range` is to a fallible caller, `each_range` is to one
+## whose body never returns an error, so the caller need not be fallible.
+from luce_std import parallel
+
+## Call `body(context, first, end, worker)` over `0..<count` in ranges of
+## `grain` elements, on the pool and this thread, and return once all are done.
+## `body` cannot fail, so neither can the call.
+pub func each_range(count: usize, grain: usize, context: void*, body: func(void*, usize, usize, usize) -> unit!):
+    parallel.for_each_range(count, grain, context, body) catch failure:
+        trap(failure.message)
+
+## Call `item(context, index, worker)` for every index below `count`, on the pool
+## and this thread, and return once all are done. `item` cannot fail.
+pub func each(count: usize, context: void*, item: func(void*, usize, usize) -> unit!):
+    parallel.for_each(count, context, item) catch failure:
+        trap(failure.message)

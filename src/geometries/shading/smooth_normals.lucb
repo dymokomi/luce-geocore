@@ -6,9 +6,10 @@
 ## point serves them. All passes run in parallel and share nothing.
 from luce_std import math
 import memory
-import core.parallel
+from luce_std import parallel
 from core.float3 import Float3
 from math.vector import Vector3
+import core.ranges
 
 ## cos(60 degrees): faces meeting at a sharper angle keep separate normals.
 let cusp_cosine: f64 = 0.5
@@ -26,14 +27,14 @@ pub struct Surface:
 ## at a cusp (`split`); true when any point does.
 pub func point_normals(shape: const Surface*, output: Float3[], split: bool[]) -> bool:
     var work = PointWork(shape, output, split)
-    parallel.parallel_for(shape.positions.length, 2048, points_range, (void*)&work)
+    ranges.each_range(shape.positions.length, 2048, (void*)&work, points_range)
     return work.splits.load(.acquire) != 0
 
 ## Every corner's normal: its point's where the point does not split, else
 ## the average over the faces within the cusp of the corner's own face.
 pub func corner_normals(shape: const Surface*, points: const Float3[], split: const bool[], output: Float3[]):
     var work = CornerWork(shape, points, split, output)
-    parallel.parallel_for(shape.offsets.length - 1, 2048, corners_range, (void*)&work)
+    ranges.each_range(shape.offsets.length - 1, 2048, (void*)&work, corners_range)
 
 ## Every point of a face around a moved point; the caller frees the list.
 pub func affected_points(shape: const Surface*, moved: const u32[]) -> u32[]!:
@@ -62,14 +63,14 @@ pub func affected_points(shape: const Surface*, moved: const u32[]) -> u32[]!:
 ## split at a cusp; true when any does (per-point storage no longer holds).
 pub func refresh_points(shape: const Surface*, points: const u32[], output: Float3[], split: bool[]) -> bool:
     var work = RefreshWork(shape, points, output, split)
-    parallel.parallel_for(points.length, 1024, refresh_range, (void*)&work)
+    ranges.each_range(points.length, 1024, (void*)&work, refresh_range)
     return work.splits.load(.acquire) != 0
 
 ## Redo the per-corner normals at `points`.
 pub func refresh_corners(shape: const Surface*, points: const u32[], output: Float3[]):
     var none_split: bool[]
     var work = RefreshWork(shape, points, output, none_split)
-    parallel.parallel_for(points.length, 1024, corners_at_range, (void*)&work)
+    ranges.each_range(points.length, 1024, (void*)&work, corners_at_range)
 
 struct PointWork:
     let shape: const Surface*
@@ -77,8 +78,8 @@ struct PointWork:
     let split: bool[]
     var splits: @u32
 
-func points_range(context: void*?, first: usize, end: usize):
-    let work = (PointWork*)(context else return)
+func points_range(context: void*, first: usize, end: usize, worker: usize):
+    let work = (PointWork*)context
     for point in first..<end:
         let result = point_normal(work.shape, point)
         work.output[point] = Float3.of(result.0)
@@ -91,8 +92,8 @@ struct CornerWork:
     let split: const bool[]
     let output: Float3[]
 
-func corners_range(context: void*?, first: usize, end: usize):
-    let work = (CornerWork*)(context else return)
+func corners_range(context: void*, first: usize, end: usize, worker: usize):
+    let work = (CornerWork*)context
     for face in first..<end:
         for corner in (usize)work.shape.offsets[face]..<(usize)work.shape.offsets[face + 1]:
             let point = (usize)work.shape.corners[corner]
@@ -105,8 +106,8 @@ struct RefreshWork:
     let split: bool[]
     var splits: @u32
 
-func refresh_range(context: void*?, first: usize, end: usize):
-    let work = (RefreshWork*)(context else return)
+func refresh_range(context: void*, first: usize, end: usize, worker: usize):
+    let work = (RefreshWork*)context
     for at in first..<end:
         let point = (usize)work.points[at]
         let result = point_normal(work.shape, point)
@@ -114,8 +115,8 @@ func refresh_range(context: void*?, first: usize, end: usize):
         work.split[point] = result.1
         if result.1: work.splits.store(1, .relaxed)
 
-func corners_at_range(context: void*?, first: usize, end: usize):
-    let work = (RefreshWork*)(context else return)
+func corners_at_range(context: void*, first: usize, end: usize, worker: usize):
+    let work = (RefreshWork*)context
     let shape = work.shape
     for at in first..<end:
         let point = work.points[at]

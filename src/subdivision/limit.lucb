@@ -21,7 +21,7 @@ struct LimitWork:
 
 pub func limit_surface(scheme: Scheme, topology: const Topology*, positions: const Vector3[], edge_sharpness: const f32[], point_sharpness: const f32[], out_positions: Vector3[], out_normals: Vector3[], points: const u32[]):
     var work = LimitWork(scheme, topology, positions, edge_sharpness, point_sharpness, out_positions, out_normals, points)
-    parallel.parallel_for(points.length if points.length > 0 else topology.points, 2048, limit_points, (void*)&work)
+    ranges.each_range(points.length if points.length > 0 else topology.points, 2048, (void*)&work, limit_points)
 
 ## The area-weighted normal of the faces around `point` (each met through
 ## both of its edges there, which doubles every weight alike).
@@ -46,8 +46,8 @@ func direction_of(value: Vector3) -> Vector3:
     let length = value.length()
     return value.multiply_scalar(1.0 / length) if length > 0.0 else Vector3(0.0, 1.0, 0.0)
 
-func limit_points(context: void*?, first: usize, end: usize):
-    let work = (LimitWork*)(context else return)
+func limit_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (LimitWork*)context
     let topology = work.topology
     var ring: i32[128]
     var diagonals: i32[128]

@@ -4,8 +4,9 @@
 ## is read as words without conversion. Bits past `count` are always zero.
 ## Whole-set operations run a word at a time, in parallel for large sets.
 import memory
-import core.parallel
+from luce_std import parallel
 from core.shared import Column
+import core.ranges
 
 ## Words above this count split across the pool.
 let parallel_words: usize = 16384
@@ -147,7 +148,7 @@ pub struct BitsBuilder:
 
     func combine(other: Bits, operation: u8):
         var work = CombineWork(self.column.span(), other.words, operation, self.count)
-        parallel.parallel_for(work.target.length, parallel_words, combine_words, (void*)&work)
+        ranges.each_range(work.target.length, parallel_words, (void*)&work, combine_words)
 
     ## Publish: the column becomes immutable. The builder keeps nothing.
     pub func finish() -> Column[u64]:
@@ -166,8 +167,8 @@ struct CombineWork:
     let operation: u8
     let count: usize
 
-func combine_words(context: void*?, first: usize, end: usize):
-    let work = (CombineWork*)(context else return)
+func combine_words(context: void*, first: usize, end: usize, worker: usize):
+    let work = (CombineWork*)context
     let last = work.target.length - 1
     let tail: u64 = ~(u64)0 if work.count & 63 == 0 else ((u64)1 << (u64)(work.count & 63)) - 1
     for at in first..<end:

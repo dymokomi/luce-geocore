@@ -23,9 +23,9 @@ pub func surface_mesh(grid: const SparseGrid*, iso: f64, exact: const Sdf*?) -> 
     let quad_counts = try new usize[leaves + 1] --- in memory.heap
     defer free(quad_counts) in memory.heap
     var cells = NetsWork(grid, iso, sign, masks.span(), vertex_counts, quad_counts, empty_float3(), empty_i32(), 0)
-    parallel.parallel_for(leaves, 4, count_leaves, (void*)&cells)
+    try parallel.for_each_range(leaves, 4, (void*)&cells, count_leaves)
     var count = NetsWork(grid, iso, sign, masks.span(), vertex_counts, quad_counts, empty_float3(), empty_i32(), 1)
-    parallel.parallel_for(leaves, 4, count_leaves, (void*)&count)
+    try parallel.for_each_range(leaves, 4, (void*)&count, count_leaves)
     # Counts to firsts.
     var vertices: usize = 0
     var quads: usize = 0
@@ -44,10 +44,10 @@ pub func surface_mesh(grid: const SparseGrid*, iso: f64, exact: const Sdf*?) -> 
     var corners = try Column[i32].allocate(quads * 4)
     errdefer corners.release()
     var fill = NetsWork(grid, iso, sign, masks.span(), vertex_counts, quad_counts, positions.span(), corners.span(), 2)
-    parallel.parallel_for(leaves, 4, fill_leaves_mesh, (void*)&fill)
+    try parallel.for_each_range(leaves, 4, (void*)&fill, fill_leaves_mesh)
     if let field = exact:
         var project = ProjectWork(field, positions.span())
-        parallel.parallel_for(vertices, 4096, project_points, (void*)&project)
+        try parallel.for_each_range(vertices, 4096, (void*)&project, project_points)
     return try quads_mesh(positions.take(), corners.take())
 
 struct NetsWork:
@@ -70,12 +70,12 @@ func empty_i32() -> i32[]:
     var empty: i32[]
     return empty
 
-func count_leaves(context: void*?, first: usize, end: usize):
-    let work = (NetsWork*)(context else return)
+func count_leaves(context: void*, first: usize, end: usize, worker: usize):
+    let work = (NetsWork*)context
     for leaf in first..<end: net_leaf(work, leaf)
 
-func fill_leaves_mesh(context: void*?, first: usize, end: usize):
-    let work = (NetsWork*)(context else return)
+func fill_leaves_mesh(context: void*, first: usize, end: usize, worker: usize):
+    let work = (NetsWork*)context
     for leaf in first..<end: net_leaf(work, leaf)
 
 ## A leaf with what its cells read: the 27 leaves around it (their indices,
@@ -235,8 +235,8 @@ struct ProjectWork:
 
 ## Two Newton steps onto the SDF's zero set, by its central-difference
 ## gradient.
-func project_points(context: void*?, first: usize, end: usize):
-    let work = (ProjectWork*)(context else return)
+func project_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ProjectWork*)context
     for at in first..<end:
         var p = work.positions[at].vector()
         for step in 0..<(usize)2:
@@ -265,7 +265,7 @@ pub func quads_mesh(positions: Column[Float3], corners: Column[i32]) -> Mesh*!:
     var normals = try Column[Float3].allocate(quads)
     errdefer normals.release()
     var work = QuadWork(owned_positions.view(), owned_corners.view(), offsets.span(), triangles.span(), normals.span())
-    parallel.parallel_for(quads, 4096, finish_quads, (void*)&work)
+    try parallel.for_each_range(quads, 4096, (void*)&work, finish_quads)
     offsets.span()[quads] = (i32)(quads * 4)
     var empty: Column[Vector3]
     return try assembled(owned_positions.take(), Vector3(), offsets.take(), owned_corners.take(), triangles.take(), normals.take(), empty)
@@ -277,8 +277,8 @@ struct QuadWork:
     let triangles: i32[]
     let normals: Float3[]
 
-func finish_quads(context: void*?, first: usize, end: usize):
-    let work = (QuadWork*)(context else return)
+func finish_quads(context: void*, first: usize, end: usize, worker: usize):
+    let work = (QuadWork*)context
     for quad in first..<end:
         let c = (i32)(quad * 4)
         work.offsets[quad] = c

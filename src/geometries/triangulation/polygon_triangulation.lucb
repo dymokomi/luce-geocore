@@ -19,7 +19,7 @@ pub let ring_corners: usize = 256
 ## Polygon area has squared-distance units. Normalize relative to its own
 ## extent, not Vector3's world-space direction cutoff, exactly as ear tests do.
 pub func area_normal(area: Vector3, extent2: f64) -> Vector3!:
-    let length = area.length()
+    let length = area_length(area)
     if not math.is_finite(length) or not math.is_finite(extent2) or length <= math.max(1e-30,extent2*1e-14):
         error(errors.invalid,"polygon has degenerate area")
     return area.multiply_scalar(1.0/length)
@@ -28,9 +28,15 @@ pub func area_normal(area: Vector3, extent2: f64) -> Vector3!:
 ## points coincide or lie on a line). Meshes keep such faces: they are
 ## topology, and only their display has no area.
 pub func unit_or_zero(area: Vector3, extent2: f64) -> Vector3:
-    let length = area.length()
+    let length = area_length(area)
     if not math.is_finite(length) or not math.is_finite(extent2) or length <= math.max(1e-30,extent2*1e-14): return Vector3()
     return area.multiply_scalar(1.0/length)
+
+## The length of a face's area vector: `sqrt(dot)` rather than `hypot`, which is
+## several times slower. Coordinates are bounded to 1e6, so the squares cannot
+## overflow, and an area small enough for them to underflow is degenerate anyway.
+pub func area_length(area: Vector3) -> f64:
+    return math.sqrt(area.x * area.x + area.y * area.y + area.z * area.z)
 
 ## Whether a face normal marks a face without an area.
 pub func is_degenerate(normal: Vector3) -> bool:

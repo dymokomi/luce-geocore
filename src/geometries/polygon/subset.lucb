@@ -95,8 +95,8 @@ extend Mesh:
         defer exact.release()
         var work = SubsetWork(offsets, corners, self.triangles.view(), self.normals.view(), self.positions.view(), self.precise.view(),
                               face_parents.view(), no, point_map, point_parents.view(), new_corners.span(), corner_parents.span(), new_triangles.span(), new_normals.span(), new_positions.span(), exact.span())
-        parallel.parallel_for(face_total, 4096, subset_faces, (void*)&work)
-        parallel.parallel_for(point_total, 65536, subset_points, (void*)&work)
+        try parallel.for_each_range(face_total, 4096, (void*)&work, subset_faces)
+        try parallel.for_each_range(point_total, 65536, (void*)&work, subset_points)
         let storage = try assembled(new_positions.take(), self.origin, new_offsets.take(), new_corners.take(), new_triangles.take(), new_normals.take(), exact.take())
         errdefer dispose_detached(storage)
         try self.transfer_attributes(storage, point_parents.view(), face_parents.view(), corner_parents.view(), true)
@@ -120,8 +120,8 @@ struct SubsetWork:
     let out_positions: Float3[]
     let out_exact: Vector3[]
 
-func subset_faces(context: void*?, first: usize, end: usize):
-    let work = (SubsetWork*)(context else return)
+func subset_faces(context: void*, first: usize, end: usize, worker: usize):
+    let work = (SubsetWork*)context
     for face in first..<end:
         let old = (usize)work.face_parents[face]
         let start = (usize)work.offsets[old]
@@ -138,8 +138,8 @@ func subset_faces(context: void*?, first: usize, end: usize):
             work.out_triangles[to_triangle + at] = work.triangles[from_triangle + at] + shift
         work.out_normals[face] = work.normals[old]
 
-func subset_points(context: void*?, first: usize, end: usize):
-    let work = (SubsetWork*)(context else return)
+func subset_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (SubsetWork*)context
     for point in first..<end:
         let old = (usize)work.point_parents[point]
         work.out_positions[point] = work.positions[old]

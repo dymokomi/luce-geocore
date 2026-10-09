@@ -4,8 +4,9 @@
 ## are hashed in fixed chunks in parallel and the chunk hashes combined in
 ## order, so the value depends on neither the thread count nor how the arrays
 ## are stored.
-import core.parallel
+from luce_std import parallel
 from core.hash import mix
+import core.ranges
 
 ## core.limits (8M faces, 32M corners) keep the chunks under 1024.
 let chunk: usize = 65536
@@ -18,7 +19,7 @@ pub func topology_hash(points: usize, offsets: const i32[], corners: const i32[]
     let chunks = (total + chunk - 1) // chunk
     var results: u64[1024] = ---
     var work = Work(offsets, corners, faces, total, results[..<chunks])
-    parallel.parallel_for(chunks, 1, chunk_hashes, (void*)&work)
+    ranges.each_range(chunks, 1, (void*)&work, chunk_hashes)
     var state = mix(mix(0x6A09E667F3BCC908, (u64)points), (u64)faces)
     for value in results[..<chunks]: state = mix(state, value)
     # fmix64 avalanche so nearby topologies spread over all 64 bits.
@@ -35,8 +36,8 @@ struct Work:
     let results: u64[]
 
 ## Each chunk of the sequence face sizes, then corners.
-func chunk_hashes(context: void*?, first: usize, end: usize):
-    let work = (Work*)(context else return)
+func chunk_hashes(context: void*, first: usize, end: usize, worker: usize):
+    let work = (Work*)context
     for index in first..<end:
         let start = index * chunk
         let stop = start + chunk if work.total - start > chunk else work.total

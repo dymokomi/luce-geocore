@@ -5,7 +5,7 @@
 ## ready. A mesh that never asks for edges never pays for them.
 import memory
 import sync
-import core.parallel
+from luce_std import parallel
 from core.shared import Column
 from geometries.topology.topology_hash import topology_hash
 
@@ -45,7 +45,7 @@ pub struct TopologyCache:
             if self.faces_ready.load(.acquire) == 0:
                 var column = try Column[i32].allocate(corners)
                 var work = FaceWork(offsets, column.span())
-                parallel.parallel_for(offsets.length - 1, 4096, fill_faces, (void*)&work)
+                try parallel.for_each_range(offsets.length - 1, 4096, (void*)&work, fill_faces)
                 self.corner_faces = column
                 self.faces_ready.store(1, .release)
         return self.corner_faces.view()
@@ -112,7 +112,7 @@ pub struct TopologyCache:
         let low = try new i32[count] --- in memory.heap
         defer free(low) in memory.heap
         var ends = EndWork(offsets, corners, low, high)
-        parallel.parallel_for(offsets.length - 1, 4096, fill_ends, (void*)&ends)
+        try parallel.for_each_range(offsets.length - 1, 4096, (void*)&ends, fill_ends)
         let starts = try new i32[points + 1] --- in memory.heap
         defer free(starts) in memory.heap
         for at in 0..<starts.length: starts[at] = 0
@@ -129,7 +129,7 @@ pub struct TopologyCache:
             cursor[point] += 1
         # Reuse `low` for each corner's first corner of its edge.
         var groups = GroupWork(starts, bucket, high, low)
-        parallel.parallel_for(points, 4096, first_corners, (void*)&groups)
+        try parallel.for_each_range(points, 4096, (void*)&groups, first_corners)
         let ids = try new i32[count] --- in memory.heap
         defer free(ids) in memory.heap
         var next: i32 = 0
@@ -141,7 +141,7 @@ pub struct TopologyCache:
         errdefer edge_points.release()
         var corner_edges = try Column[i32].allocate(count)
         var fill = EdgeWork(offsets, corners, low, ids, edge_points.span(), corner_edges.span())
-        parallel.parallel_for(offsets.length - 1, 4096, fill_edges, (void*)&fill)
+        try parallel.for_each_range(offsets.length - 1, 4096, (void*)&fill, fill_edges)
         self.edge_points = edge_points
         self.corner_edges = corner_edges
 
@@ -222,8 +222,8 @@ struct FaceWork:
     let offsets: const i32[]
     let faces: i32[]
 
-func fill_faces(context: void*?, first: usize, end: usize):
-    let work = (FaceWork*)(context else return)
+func fill_faces(context: void*, first: usize, end: usize, worker: usize):
+    let work = (FaceWork*)context
     for face in first..<end:
         for corner in (usize)work.offsets[face]..<(usize)work.offsets[face + 1]:
             work.faces[corner] = (i32)face
@@ -234,8 +234,8 @@ struct EndWork:
     let low: i32[]
     let high: i32[]
 
-func fill_ends(context: void*?, first: usize, end: usize):
-    let work = (EndWork*)(context else return)
+func fill_ends(context: void*, first: usize, end: usize, worker: usize):
+    let work = (EndWork*)context
     for face in first..<end:
         let start = (usize)work.offsets[face]
         let stop = (usize)work.offsets[face + 1]
@@ -253,8 +253,8 @@ struct GroupWork:
 
 ## Within one low point's corners (in corner order), a corner's edge starts
 ## at the earliest corner with the same high point.
-func first_corners(context: void*?, first: usize, end: usize):
-    let work = (GroupWork*)(context else return)
+func first_corners(context: void*, first: usize, end: usize, worker: usize):
+    let work = (GroupWork*)context
     for point in first..<end:
         let start = (usize)work.starts[point]
         let stop = (usize)work.starts[point + 1]
@@ -276,8 +276,8 @@ struct EdgeWork:
     let edge_points: i32[]
     let corner_edges: i32[]
 
-func fill_edges(context: void*?, first: usize, end: usize):
-    let work = (EdgeWork*)(context else return)
+func fill_edges(context: void*, first: usize, end: usize, worker: usize):
+    let work = (EdgeWork*)context
     for face in first..<end:
         let start = (usize)work.offsets[face]
         let stop = (usize)work.offsets[face + 1]

@@ -163,9 +163,8 @@ func build_shape(curves: const Curves*, cache: CurveCache*) -> !:
     errdefer eval_offsets.release()
     var basis_first = try Column[i32].allocate(count)
     errdefer basis_first.release()
-    var work = ShapeWork(curves, eval_offsets.span(), basis_first.span(), FirstError())
-    parallel.parallel_for(count, 256, count_curves, (void*)&work)
-    try work.errors.check()
+    var work = ShapeWork(curves, eval_offsets.span(), basis_first.span())
+    try parallel.for_each_range(count, 256, (void*)&work, count_curves)
     # Counts to offsets: evaluated points, and NURBS slots.
     let offsets = eval_offsets.span()
     let firsts = basis_first.span()
@@ -185,9 +184,8 @@ func build_shape(curves: const Curves*, cache: CurveCache*) -> !:
     var weights = try Column[f32].allocate(slots * most_order)
     errdefer weights.release()
     if slots > 0:
-        var basis = BasisWork(curves, eval_offsets.view(), basis_first.view(), starts.span(), weights.span(), FirstError())
-        parallel.parallel_for(count, 64, fill_basis, (void*)&basis)
-        try basis.errors.check()
+        var basis = BasisWork(curves, eval_offsets.view(), basis_first.view(), starts.span(), weights.span())
+        try parallel.for_each_range(count, 64, (void*)&basis, fill_basis)
     cache.eval_offsets.release()
     cache.basis_first.release()
     cache.basis_starts.release()
@@ -203,10 +201,9 @@ struct ShapeWork:
     let counts: i32[]
     ## 0 for NURBS curves, -1 for others (their slots after the scan).
     let nurbs: i32[]
-    var errors: FirstError
 
-func count_curves(context: void*?, first: usize, end: usize):
-    let work = (ShapeWork*)(context else return)
+func count_curves(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (ShapeWork*)context
     for curve in first..<end:
         let (start, points) = work.curves.range(curve)
         _ = start
@@ -221,9 +218,7 @@ func count_curves(context: void*?, first: usize, end: usize):
                 let segments = points if settings.cyclic else points - 1
                 work.counts[curve] = (i32)(segments * settings.resolution + (0 if settings.cyclic else 1))
             _:
-                let spans = nurbs_spans(work.curves, curve, &settings, points) catch failure:
-                    work.errors.record(failure.code, failure.message)
-                    recover 0
+                let spans = try nurbs_spans(work.curves, curve, &settings, points)
                 if spans == 0:
                     work.counts[curve] = (i32)points
                 else:
@@ -314,14 +309,12 @@ struct BasisWork:
     let firsts: const i32[]
     let starts: i32[]
     let weights: f32[]
-    var errors: FirstError
 
-func fill_basis(context: void*?, first: usize, end: usize):
-    let work = (BasisWork*)(context else return)
+func fill_basis(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (BasisWork*)context
     for curve in first..<end:
         if work.firsts[curve] < 0: continue
-        curve_basis(work, curve) catch failure:
-            work.errors.record(failure.code, failure.message)
+        try curve_basis(work, curve)
 
 func curve_basis(work: BasisWork*, curve: usize) -> !:
     let points = work.curves.range(curve).1
@@ -376,7 +369,7 @@ func build_points(curves: const Curves*, cache: CurveCache*) -> !:
     errdefer evaluated.release()
     var work = PointWork(curves, offsets, cache.basis_first.view(), cache.basis_starts.view(), cache.basis_weights.view(),
                          float3_span(curves, "handle_l"), float3_span(curves, "handle_r"), weight_span(curves), evaluated.span())
-    parallel.parallel_for(curves.curve_count(), 64, evaluate_curves, (void*)&work)
+    try parallel.for_each_range(curves.curve_count(), 64, (void*)&work, evaluate_curves)
     cache.evaluated.release()
     cache.evaluated = evaluated.take()
     # Frames follow the points.
@@ -393,8 +386,8 @@ struct PointWork:
     let w: const f32[]?
     let out: Float3[]
 
-func evaluate_curves(context: void*?, first: usize, end: usize):
-    let work = (PointWork*)(context else return)
+func evaluate_curves(context: void*, first: usize, end: usize, worker: usize):
+    let work = (PointWork*)context
     for curve in first..<end: evaluate_curve(work, curve)
 
 func evaluate_curve(work: PointWork*, curve: usize):
