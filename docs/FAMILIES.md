@@ -235,13 +235,29 @@ The viewport draws an SDF or a level set by its surface preview:
 - a level set's zero set.
 
 A fog volume has no surface preview: viewports ray-march its densities
-(luce-3d's `FogVolume`). How it looks is Houdini's Volume Visualization:
-the **Volume Visualization** verb puts volvis_* detail attributes on the set
-(`volvis_densityscale`, `volvis_smokecolor`, `volvis_shadowscale`,
-`volvis_emitscale`, `volvis_emitcolor`, `volvis_emitfield`,
-`volvis_stepsize`) and leaves the grids shared and untouched; `volume_look`
-reads them back over the defaults. The emission field names a grid whose
-values emit light; it is not drawn as smoke itself.
+(luce-3d's `FogVolume`). How it looks is Houdini's Volume Visualization.
+Houdini keeps a look in volvis_* attributes on each volume primitive; here
+each grid carries its own `VolumeLook` (fields/look.lucb), as a VDB grid
+carries metadata, so two fog grids of one set can show two smoke colors:
+
+- density scale, smoke color, shadow scale and the ray-marching step;
+- emission: a scale, the **emission field** (a grid whose values emit
+  light), and its color, either one color or an **emission color ramp**
+  (luce-std ramp numbers) spanning the field's values from the emission
+  min to the emission max;
+- the **density field**: a grid whose values show as this grid's density.
+
+The **Volume Visualization** verb puts a look on the grids its Group row
+names (names and globs, `#2` the third grid; empty, all), sharing their
+voxels (`restyled`), so a display keyed by voxel columns keeps its texels.
+A look travels with its grid through joins and placements, a Voxels run
+that rewrites a grid keeps it, and files save it.
+
+What draws is `fog_show`: every fog grid with voxels, with its own look,
+except a grid another grid's look names as its emission or density field,
+which lends its values instead. A grid naming a density field shows that
+grid's values (nothing when the volume lacks it). A name reaches the grid of
+that name with the same voxels as the grid naming it, else the first one.
 
 The preview is built once and kept with the component. A drag's frames may
 ask for a quick SDF preview instead (1/40 of the extent), kept apart, so the

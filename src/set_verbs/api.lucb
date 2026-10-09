@@ -69,12 +69,13 @@ pub struct GeometryVerbs:
         return -1
 
     ## Run set verb `name` on `input` (and `second`): `group` read on
-    ## `group_type`'s domain, the parameter values in order.
-    pub static func run(name: str, input: interop.Reference[GeometrySet], second: interop.Reference[GeometrySet]?, group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[SetVerbResult]!:
+    ## `group_type`'s domain, the parameter values in order, and the texts
+    ## of its text rows.
+    pub static func run(name: str, input: interop.Reference[GeometrySet], second: interop.Reference[GeometrySet]?, group: str, group_type: i64, numbers: const f64[], texts: const str[]) -> interop.Reference[SetVerbResult]!:
         let verb = find_set_verb(name) else error(errors.invalid, "unknown operation")
         var other: const GeometrySet*? = none
         if let given = second: other = try given.get()
-        var output = try run_set_verb(&verb, try input.get(), other, group, group_type, numbers)
+        var output = try run_set_verb(&verb, try input.get(), other, group, group_type, numbers, texts)
         let made = output.set else trap("a set verb made no set")
         output.set = none
         let storage = new SetVerbResult[1] --- in memory.heap catch failure:
@@ -151,10 +152,27 @@ pub struct VerbCatalog:
     pub static func grouped(index: i64) -> bool:
         return entry(checked(index)).grouped
 
-    ## The label of the text row its node shows in place of Group ("" for none; the
-    ## Volume node's "Name"): the row's text goes to the run as its `group`.
-    pub static func text_row(index: i64) -> str:
-        return entry(checked(index)).text_row
+    ## How many text rows its node shows in place of Group (the Volume
+    ## node's Name): their texts go to the run as its `texts`, in order.
+    pub static func text_row_count(index: i64) -> i64:
+        return (i64)entry(checked(index)).text_rows.length
+
+    ## Text row `row`'s label.
+    pub static func text_row_label(index: i64, row: i64) -> str:
+        return text_row_of(index, row).label
+
+    ## Text row `row`'s tooltip.
+    pub static func text_row_doc(index: i64, row: i64) -> str:
+        return text_row_of(index, row).doc
+
+    ## Whether text row `row` is a color ramp (its text luce-std ramp's
+    ## numbers, comma apart).
+    pub static func text_row_ramp(index: i64, row: i64) -> bool:
+        return text_row_of(index, row).ramp
+
+    ## The text row `row` reads when its text is empty.
+    pub static func text_row_initial(index: i64, row: i64) -> str:
+        return text_row_of(index, row).initial
 
     ## How many parameters verb `index` has.
     pub static func parm_count(index: i64) -> i64:
@@ -217,14 +235,15 @@ struct Entry:
     let grouped: bool
     let parms: const ParmSpec[]
     let trailing: bool
-    let text_row: str
+    let text_rows: const TextRow[]
 
 func entry(index: usize) -> Entry:
     if index < verb_count():
         let verb = verb_at(index)
-        return Entry(verb.name, verb.category, verb.description, 1, false, true, verb.parms, verb.trailing, "")
+        var rows: const TextRow[]
+        return Entry(verb.name, verb.category, verb.description, 1, false, true, verb.parms, verb.trailing, rows)
     let verb = set_verb_at(index - verb_count())
-    return Entry(verb.name, verb.category, verb.description, verb.inputs, verb.second_required, verb.grouped, verb.parms, false, verb.text_row)
+    return Entry(verb.name, verb.category, verb.description, verb.inputs, verb.second_required, verb.grouped, verb.parms, false, verb.text_rows)
 
 func checked(index: i64) -> usize:
     if index < 0 or index >= VerbCatalog.count(): trap("verb index out of range")
@@ -234,3 +253,8 @@ func parm_of(index: i64, parm: i64) -> ParmSpec:
     let parms = entry(checked(index)).parms
     if parm < 0 or (usize)parm >= parms.length: trap("verb parameter out of range")
     return parms[(usize)parm]
+
+func text_row_of(index: i64, row: i64) -> TextRow:
+    let rows = entry(checked(index)).text_rows
+    if row < 0 or (usize)row >= rows.length: trap("verb text row out of range")
+    return rows[(usize)row]

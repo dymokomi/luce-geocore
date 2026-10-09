@@ -1,6 +1,7 @@
 # Verbs, Houdini's hou.Geometry.execute and SOP verbs: any node of the menu that geocore
 # runs (PolyExtrude, Subdivide, Boolean, Resample, SDF shapes...), by its name, its
-# parameters set by the labels the node's rows show.
+# parameters set by the labels the node's rows show, its text rows (a Volume's Name,
+# Volume Visualization's fields) by theirs.
 
 ## What a verb's group names, as the node's Group Type menu.
 pub enum GroupKind as u8:
@@ -16,6 +17,8 @@ pub struct Verb:
     var numbers: Growing[f64]
     var group_text: str
     var group_kind: GroupKind
+    ## The text rows' texts, heap copies ("" until set).
+    var texts: Growing[str]
 
     ## The verb of the node menu called `name` ("Subdivide", "PolyExtrude", "Resample
     ## Curve"; case and spaces or underscores do not matter).
@@ -24,8 +27,9 @@ pub struct Verb:
         for at in 0..<VerbCatalog.count():
             if same_label(VerbCatalog.name(at), name): index = at
         if index < 0: error(errors.invalid, "no verb has that name; verbs are named as the node menu names them: Subdivide, PolyExtrude, Resample Curve...")
-        var verb = Verb(index = index, numbers = Growing[f64](), group_text = "", group_kind = GroupKind.guess)
+        var verb = Verb(index = index, numbers = Growing[f64](), group_text = "", group_kind = GroupKind.guess, texts = Growing[str]())
         errdefer verb.close()
+        for _ in 0..<VerbCatalog.text_row_count(index): try verb.texts.push("")
         for parm in 0..<VerbCatalog.parm_count(index):
             for _ in 0..<VerbCatalog.parm_components(index, parm): try verb.numbers.push(VerbCatalog.parm_initial(index, parm))
         return verb
@@ -40,6 +44,17 @@ pub struct Verb:
     pub func parm_vec3(label: str, value: f32[4]) -> !:
         let (first, count) = try self.slots(label)
         for k in 0..<count: self.numbers.items[first + k] = (f64)value[k if k < 3 else 2]
+
+    ## Set the text row labeled `label` (as its row shows it): a Volume's Name, Volume
+    ## Visualization's Emission field; a ramp row takes luce-std ramp numbers comma apart.
+    pub func text(label: str, value: str) -> !:
+        for row in 0..<VerbCatalog.text_row_count(self.index):
+            if same_label(VerbCatalog.text_row_label(self.index, row), label):
+                let copy = try heap_text(value)
+                release_text(self.texts.items[(usize)row])
+                self.texts.items[(usize)row] = copy
+                return
+        error(errors.invalid, "the verb has no text row of that label")
 
     ## Run on the elements group `group` names (Houdini's group syntax), as the node's
     ## Group and Group Type rows.
@@ -56,7 +71,7 @@ pub struct Verb:
         if VerbCatalog.is_set(self.index):
             var other: interop.Reference[GeometrySet]? = none
             if let given = second: other = try given.adopted()
-            let result = GeometryVerbs.run(name, set, other, self.group_text, (i64)(u8)self.group_kind, self.numbers.view()) catch failure:
+            let result = GeometryVerbs.run(name, set, other, self.group_text, (i64)(u8)self.group_kind, self.numbers.view(), self.texts.view()) catch failure:
                 if let held = other: held.release()
                 error(failure.code, failure.message)
             if let held = other: held.release()
@@ -78,6 +93,8 @@ pub struct Verb:
         self.numbers.close()
         release_text(self.group_text)
         self.group_text = ""
+        for text in self.texts.view(): release_text(text)
+        self.texts.close()
 
     ## The first number and count of the parameter labeled `label`.
     func slots(label: str) -> (usize, usize)!:

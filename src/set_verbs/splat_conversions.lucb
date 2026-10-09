@@ -68,8 +68,10 @@ let to_volume_parms: ParmSpec[4] = [
 ## surface then meshes to well under Convert to Mesh's point limit.
 let auto_voxel_budget: f64 = 16777216.0
 
+let to_volume_rows: TextRow[1] = [TextRow("Name", "The fog grid's name: density when empty. A grid of that name in the input is replaced.")]
+
 func gsplats_to_volume_verb() -> SetVerb:
-    return SetVerb("GSplats to Volume", gsplats_category, "The splats' density as a fog volume; Convert to Mesh after it makes a surface", 1, false, false, to_volume_parms, cook_to_volume, "Name")
+    return SetVerb("GSplats to Volume", gsplats_category, "The splats' density as a fog volume; Convert to Mesh after it makes a surface", 1, false, false, to_volume_parms, cook_to_volume, to_volume_rows)
 
 func cook_to_volume(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     let cloud = input_cloud(input, output) else return
@@ -83,7 +85,7 @@ func cook_to_volume(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
         var sizes = Floats.of(store.entry((usize)float_attribute(store, scale_name, 3)))
         voxel = try capture_voxel(cloud_positions(cloud), &sizes, auto_voxel_budget)
     if not (voxel > 0.0): error(errors.invalid, "the splats have no size: set a Voxel Size")
-    var name = strings.trim(input.group)
+    var name = input.text(0)
     if name.length == 0: name = "density"
     let options = SplatDensityOptions(voxel, p.at(2), p.at(1))
     let grid = try splat_density(cloud_positions(cloud), cloud_origin(cloud), store, &options, name)

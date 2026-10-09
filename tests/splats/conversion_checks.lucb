@@ -25,7 +25,7 @@ pub func run() -> !:
 ## Run set verb `name` on `set` with `numbers` and the text row `text`.
 func run_with(name: str, set: interop.Reference[GeometrySet], numbers: const f64[], text: str = "") -> interop.Reference[GeometrySet]!:
     let verb = find_set_verb(name) else trap("a GSplats verb is missing")
-    var output = try run_set_verb(&verb, set.value(), none, text, 0, numbers)
+    var output = try run_set_verb(&verb, set.value(), none, "", 0, numbers, [text])
     let made = output.set else trap("a set verb made no set")
     output.set = none
     return try adopt_set(made)

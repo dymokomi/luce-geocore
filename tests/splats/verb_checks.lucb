@@ -173,7 +173,7 @@ pub func ply_cloud(vectors: bool) -> interop.Reference[GeometrySet]!:
 ## Run set verb `name` on `set` with `numbers`, returning its output set.
 pub func run_verb(name: str, set: interop.Reference[GeometrySet], numbers: const f64[]) -> interop.Reference[GeometrySet]!:
     let verb = find_set_verb(name) else trap("a GSplats verb is missing")
-    var output = try run_set_verb(&verb, set.value(), none, "", 0, numbers)
+    var output = try run_set_verb(&verb, set.value(), none, "", 0, numbers, [""])
     let made = output.set else trap("a set verb made no set")
     output.set = none
     return try adopt_set(made)

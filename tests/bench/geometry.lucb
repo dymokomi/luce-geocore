@@ -36,7 +36,7 @@ func set_of(curves: Curves*) -> interop.Reference[GeometrySet]!:
 
 func verb(name: str, set: const GeometrySet*, numbers: const f64[]) -> interop.Reference[GeometrySet]!:
     let found = find_set_verb(name) else trap("no verb")
-    var output = try run_set_verb(&found, set, none, "", 0, numbers)
+    var output = try run_set_verb(&found, set, none, "", 0, numbers, [""])
     defer output.close()
     let made = output.set else trap("no set")
     output.set = none

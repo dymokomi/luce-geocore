@@ -164,8 +164,10 @@ let clean_parms: ParmSpec[9] = [
     ParmSpec("Min Neighbors", ParmKind.integer, 4.0, 1.0, 64.0, 1, "", "A splat with fewer neighbors in the radius is a floater."),
     ParmSpec("Output", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Delete|Group", "Delete the splats, or put them in the point group named by Group Name (\"cleaned\" when empty).")]
 
+let clean_rows: TextRow[1] = [TextRow("Group Name", "With Output Group: the point group the splats go in (cleaned when empty).")]
+
 func clean_gsplats_verb() -> SetVerb:
-    return SetVerb("Clean GSplats", gsplats_category, "Remove faint, huge, needle-like, broken and isolated splats, or group them", 1, false, false, clean_parms, cook_clean_gsplats, "Group Name")
+    return SetVerb("Clean GSplats", gsplats_category, "Remove faint, huge, needle-like, broken and isolated splats, or group them", 1, false, false, clean_parms, cook_clean_gsplats, clean_rows)
 
 func cook_clean_gsplats(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     let cloud = input_cloud(input, output) else return
@@ -184,7 +186,7 @@ func cook_clean_gsplats(input: const SetVerbInput*, output: SetVerbOutput*) -> !
         if keep[at] == 0: bits.set(at)
     var store = try cloud_store(cloud).shared()
     errdefer store.close()
-    let name = input.group if not is_blank(input.group) else "cleaned"
+    let name = input.text(0) if not is_blank(input.text(0)) else "cleaned"
     try store.put(try Attribute.group_of(name, Domain.point, count, bits.view().words))
     let handed = store
     store = AttributeStore()

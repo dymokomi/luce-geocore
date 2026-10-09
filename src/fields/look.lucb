@@ -1,19 +1,27 @@
-## How a set's fog volumes look in a viewport, Houdini's Volume Visualization:
-## detail attributes the display reads (volvis_*), set by the Volume
-## Visualization verb and leaving the grids alone. Detail attributes suit a
-## look: they exist on a volume-only set, travel with it through other verbs
-## (joins keep the first set's), and a changed look shares every grid, so a
-## display keyed by grid contents keeps its uploaded texels.
+## How a fog grid looks in a viewport, Houdini's Volume Visualization. Houdini
+## keeps a look in volvis_* primitive attributes, one set per volume primitive;
+## here each grid carries its own VolumeLook, as a VDB grid carries metadata, so
+## two grids of one set can show two smoke colors. The Volume Visualization verb
+## puts a look on the grids its group names, sharing their voxels (`restyled`):
+## a display keyed by the voxel columns keeps its texels when only a look
+## changes. A look travels with its grid through joins and placements, a Voxels
+## run that rewrites a grid keeps it, and geometry files save it.
+##
+## Which grids draw, and from which values, is `fog_shows`: a grid a look names
+## as its density or emission field lends its values to that grid's drawing and
+## is not drawn as smoke itself.
+import strings
+from luce_std import ramp
+from core.paths import glob
 
-let look_density: str = "volvis_densityscale"
-let look_smoke: str = "volvis_smokecolor"
-let look_shadow: str = "volvis_shadowscale"
-let look_emission: str = "volvis_emitscale"
-let look_emission_color: str = "volvis_emitcolor"
-let look_emission_field: str = "volvis_emitfield"
-let look_step: str = "volvis_stepsize"
+## The longest field name a look keeps (a grid name's limit).
+let name_room: usize = 64
+## The most points an emission color ramp keeps, and the numbers they take
+## (luce-std ramp's header and five numbers a point of a color ramp).
+pub let most_ramp_points: usize = 32
+let ramp_room: usize = 163
 
-## A set's volume look; the defaults where it sets none.
+## A grid's look; a grid made without one draws with these defaults.
 pub struct VolumeLook:
     ## Multiplies every density (extinction per world unit at density 1).
     pub var density: f64 = 1.0
@@ -21,55 +29,179 @@ pub struct VolumeLook:
     pub var smoke: Vector3 = Vector3(1.0, 1.0, 1.0)
     ## Multiplies the optical depth toward the light: 0 unshadowed.
     pub var shadow: f64 = 1.0
-    ## Light emitted per world unit at field value 1, and its color.
+    ## Light emitted per world unit at emission field value 1.
     pub var emission: f64 = 0.0
+    ## The emitted light's color, where no emission ramp is set.
     pub var emission_color: Vector3 = Vector3(1.0, 1.0, 1.0)
-    ## The grid whose values emit ("" none); it is not drawn as smoke. It
-    ## borrows the set's storage.
-    pub var emission_field: str = ""
+    ## The emission field's values the ramp spans: `emission_low` reads its
+    ## first point, `emission_high` its last (Houdini's emission range).
+    pub var emission_low: f64 = 0.0
+    pub var emission_high: f64 = 1.0
     ## The ray-marching step, in voxels.
     pub var step: f64 = 1.0
+    ## The density and emission field names ("" none), kept in place.
+    var density_label: u8[64]
+    var density_length: usize
+    var emission_label: u8[64]
+    var emission_length: usize
+    ## The emission color ramp: luce-std ramp numbers, none when empty.
+    var ramp_numbers: f64[163]
+    var ramp_length: usize
 
-## `set`'s volume look: its volvis_* detail attributes over the defaults.
-pub func volume_look(set: const GeometrySet*) -> VolumeLook:
-    let store = set_detail(set)
-    var look = VolumeLook()
-    look.density = look_number(store, look_density, look.density)
-    look.smoke = look_vector(store, look_smoke, look.smoke)
-    look.shadow = look_number(store, look_shadow, look.shadow)
-    look.emission = look_number(store, look_emission, look.emission)
-    look.emission_color = look_vector(store, look_emission_color, look.emission_color)
-    look.step = look_number(store, look_step, look.step)
-    let field = store.find(look_emission_field, Domain.detail)
-    if field >= 0: look.emission_field = store.entry((usize)field).text_at(0)
-    return look
+    ## The grid whose values show as this grid's density ("" its own):
+    ## Houdini's density field.
+    pub func density_field() -> str:
+        return (str)self.density_label[..<self.density_length]
 
-## Put `look` on `set` as volvis_* detail attributes.
-pub func put_volume_look(set: GeometrySet*, look: const VolumeLook*) -> !:
-    try put_numbers(set, look_density, [look.density])
-    try put_numbers(set, look_smoke, [look.smoke.x, look.smoke.y, look.smoke.z])
-    try put_numbers(set, look_shadow, [look.shadow])
-    try put_numbers(set, look_emission, [look.emission])
-    try put_numbers(set, look_emission_color, [look.emission_color.x, look.emission_color.y, look.emission_color.z])
-    try put_numbers(set, look_step, [look.step])
-    var table = TableBuilder()
-    defer table.close()
-    let index: i32[1] = [try table.intern(look.emission_field)]
-    var column = try table.finish()
-    defer column.release()
-    try set_put_detail(set, try Attribute.text(look_emission_field, Domain.detail, 1, column, index, Storage.single))
+    ## The grid whose values emit light ("" none): Houdini's emission field.
+    pub func emission_field() -> str:
+        return (str)self.emission_label[..<self.emission_length]
 
-func put_numbers(set: GeometrySet*, name: str, values: const f64[]) -> !:
-    try set_put_detail(set, try Attribute.from_numbers(name, Domain.detail, values.length, values, false))
+    pub func set_density_field(name: str) -> !:
+        if name.length > name_room: error(errors.invalid, "a field name is at most 64 bytes")
+        memory.copy(self.density_label[..<name.length], name.bytes, name.length)
+        self.density_length = name.length
 
-func look_number(store: const AttributeStore*, name: str, fallback: f64) -> f64:
-    let index = store.find(name, Domain.detail)
-    if index < 0: return fallback
-    return store.entry((usize)index).number(0, 0)
+    pub func set_emission_field(name: str) -> !:
+        if name.length > name_room: error(errors.invalid, "a field name is at most 64 bytes")
+        memory.copy(self.emission_label[..<name.length], name.bytes, name.length)
+        self.emission_length = name.length
 
-func look_vector(store: const AttributeStore*, name: str, fallback: Vector3) -> Vector3:
-    let index = store.find(name, Domain.detail)
-    if index < 0: return fallback
-    let entry = store.entry((usize)index)
-    if entry.width < 3: return fallback
-    return Vector3(entry.number(0, 0), entry.number(0, 1), entry.number(0, 2))
+    ## The emission color ramp's numbers (luce-std ramp's form); empty when
+    ## the emission color is used throughout.
+    pub func emission_ramp() -> const f64[]:
+        return self.ramp_numbers[..<self.ramp_length]
+
+    ## Map the emission field through `data`, a color ramp in luce-std ramp's
+    ## form of at most `most_ramp_points` points; empty clears it.
+    pub func set_emission_ramp(data: const f64[]) -> !:
+        if data.length > 0:
+            try ramp.check(data)
+            if ramp.channels(data) != 3: error(errors.invalid, "an emission ramp is a color ramp")
+            if data.length > ramp_room: error(errors.invalid, "an emission ramp has at most 32 points")
+            memory.copy(self.ramp_numbers[..<data.length], data, data.length)
+        self.ramp_length = data.length
+
+    ## The color emitted at emission field value `value`, before the
+    ## emission scale and the value itself weight it: the ramp at the value's
+    ## place in the emission range, or the emission color.
+    pub func emission_color_at(value: f64) -> Vector3:
+        if self.ramp_length == 0: return self.emission_color
+        let span = self.emission_high - self.emission_low
+        let t = (value - self.emission_low) / span if span != 0.0 else (0.0 if value < self.emission_low else 1.0)
+        let color = ramp.lookup_color(self.emission_ramp(), math.clamp(t, 0.0, 1.0))
+        return Vector3(color.red, color.green, color.blue)
+
+    ## Whether two looks are the same.
+    pub func same(other: const VolumeLook*) -> bool:
+        if self.density != other.density or self.smoke != other.smoke or self.shadow != other.shadow or self.emission != other.emission: return false
+        if self.emission_color != other.emission_color or self.emission_low != other.emission_low or self.emission_high != other.emission_high: return false
+        if self.step != other.step or self.density_field() != other.density_field() or self.emission_field() != other.emission_field(): return false
+        if self.ramp_length != other.ramp_length: return false
+        for at in 0..<self.ramp_length:
+            if self.ramp_numbers[at] != other.ramp_numbers[at]: return false
+        return true
+
+## `grid` with `look`: a new grid sharing its voxels, name and transform.
+pub func restyled(grid: const SparseGrid*, look: const VolumeLook*) -> SparseGrid*!:
+    let made = try new_grid(grid.name(), grid.class, grid.background, grid.transform, grid.keys.share(), grid.values.share(), grid.masks.share())
+    made.look = *look
+    return made
+
+# mark: What draws
+
+## One fog drawing of a volume: the grid whose look it takes, the grid whose
+## values show as its density (itself, or its density field) and its emission
+## field's grid, if any. They borrow the volume.
+pub struct FogShow:
+    pub let styled: const SparseGrid*
+    pub let density: const SparseGrid*
+    pub let emission: const SparseGrid*?
+
+## Fog drawing `index` of `volume` (see `fog_show_count`), or none past them.
+## A fog grid with leaves draws with its own look unless a drawn grid's look
+## names it as its density or emission field, or another grid's look names it
+## as an emission field; it shows its density field's values when its look
+## names one (nothing when the volume lacks it), else its own. A name reaches
+## the grid of that name with the same voxels as the grid naming it, else the
+## first of that name.
+pub func fog_show(volume: const Volume*, index: usize) -> FogShow?:
+    var seen: usize = 0
+    for at in 0..<volume.grid_count():
+        let grid = volume.grid(at)
+        if not drawable(grid) or is_emission_field(volume, grid) or is_lent_density(volume, grid): continue
+        let look = &grid.look
+        var density = grid
+        if look.density_field().length > 0 and look.density_field() != grid.name():
+            density = field_of(volume, look.density_field(), grid) else continue
+        if seen == index:
+            var emission: const SparseGrid*? = none
+            if look.emission_field().length > 0: emission = field_of(volume, look.emission_field(), density)
+            return FogShow(grid, density, emission)
+        seen += 1
+    return none
+
+## How many fog drawings `volume` makes.
+pub func fog_show_count(volume: const Volume*) -> usize:
+    var count: usize = 0
+    while fog_show(volume, count) != none: count += 1
+    return count
+
+## A fog grid with voxels to draw.
+func drawable(grid: const SparseGrid*) -> bool:
+    return grid.class == GridClass.fog and grid.leaf_count() > 0
+
+## Whether a fog grid's look in `volume` names `grid` as its emission field.
+func is_emission_field(volume: const Volume*, grid: const SparseGrid*) -> bool:
+    for at in 0..<volume.grid_count():
+        let other = volume.grid(at)
+        if other == grid or not drawable(other): continue
+        let name = other.look.emission_field()
+        if name.length > 0 and field_of(volume, name, other) == grid: return true
+    return false
+
+## Whether another fog grid, itself no emission field, shows `grid`'s values
+## as its density.
+func is_lent_density(volume: const Volume*, grid: const SparseGrid*) -> bool:
+    for at in 0..<volume.grid_count():
+        let other = volume.grid(at)
+        if other == grid or not drawable(other) or is_emission_field(volume, other): continue
+        let name = other.look.density_field()
+        if name.length > 0 and field_of(volume, name, other) == grid: return true
+    return false
+
+## The fog grid named `name` that goes with `beside`: the one of that name
+## with the same voxels, else the first of that name; none when the volume
+## has no fog grid of that name with voxels.
+func field_of(volume: const Volume*, name: str, beside: const SparseGrid*) -> const SparseGrid*?:
+    var first: const SparseGrid*? = none
+    for at in 0..<volume.grid_count():
+        let grid = volume.grid(at)
+        if grid.name() != name or not drawable(grid): continue
+        # Grids a Voxels run wrote side by side share their leaf keys.
+        if grid.keys.id() == beside.keys.id() or same_voxels(grid, beside): return grid
+        if first == none: first = grid
+    return first
+
+# mark: Choosing grids by name
+
+## Whether `grid`, the `index`th of its volume, is among `group`: names and
+## globs apart by spaces (density*), `#2` the third grid; an empty group holds
+## every grid.
+pub func grid_in_group(group: str, grid: const SparseGrid*, index: usize) -> bool:
+    let text = strings.trim(group)
+    if text.length == 0: return true
+    var start: usize = 0
+    while start < text.length:
+        while start < text.length and text.bytes[start] == ' ': start += 1
+        var end = start
+        while end < text.length and text.bytes[end] != ' ': end += 1
+        if end > start:
+            let token = (str)text.bytes[start..<end]
+            if token.bytes[0] == '#':
+                if let at = strings.parse_i64((str)token.bytes[1..]):
+                    if at >= 0 and (usize)at == index: return true
+            elif glob(token, grid.name()):
+                return true
+        start = end
+    return false

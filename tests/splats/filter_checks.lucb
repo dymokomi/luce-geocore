@@ -30,7 +30,7 @@ func run_with(name: str, set: interop.Reference[GeometrySet], second: interop.Re
     let verb = find_set_verb(name) else trap("a GSplats verb is missing")
     var other: const GeometrySet*? = none
     if let given = second: other = given.value()
-    var output = try run_set_verb(&verb, set.value(), other, group, 0, numbers)
+    var output = try run_set_verb(&verb, set.value(), other, group, 0, numbers, [group])
     let made = output.set else trap("a set verb made no set")
     output.set = none
     return try adopt_set(made)

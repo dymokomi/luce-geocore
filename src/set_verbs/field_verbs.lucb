@@ -287,15 +287,18 @@ let volume_parms: ParmSpec[7] = [
     ParmSpec("Initial value", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "The value every voxel starts with.", 1.0),
     ParmSpec("Dense", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Every voxel of the box active; off, the grid starts with none.")]
 
-func volume_verb() -> SetVerb:
-    return SetVerb("Volume", "Volumes", "A grid of voxels over a box, by name, to fill with a Voxels Code node", 1, false, false, volume_parms, cook_volume, "Name")
+let volume_rows: TextRow[1] = [
+    TextRow("Name", "The grid's name: empty is density for fog, surface for a level set. A grid of that name in the input is replaced.")]
 
-## The grid joins the input's volume, replacing a grid of its name; the Name row is
-## the run's group text ("density" for fog, "surface" for a level set when empty).
+func volume_verb() -> SetVerb:
+    return SetVerb("Volume", "Volumes", "A grid of voxels over a box, by name, to fill with a Voxels Code node", 1, false, false, volume_parms, cook_volume, volume_rows)
+
+## The grid joins the input's volume, replacing a grid of its name (the Name
+## row: "density" for fog, "surface" for a level set when empty).
 func cook_volume(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     let p = input.parms
     let level_set = p.at(0) != 0.0
-    var name = strings.trim(input.group)
+    var name = input.text(0)
     if name.length == 0: name = "surface" if level_set else "density"
     let center = Vector3(p.at(1), p.at(2), p.at(3))
     let half = Vector3(p.at(4) * 0.5, p.at(5) * 0.5, p.at(6) * 0.5)
@@ -333,25 +336,75 @@ func with_added_grid(input: const SetVerbInput*, grid: SparseGrid*, output: SetV
 
 # mark: Volume Visualization
 
-let look_parms: ParmSpec[6] = [
+## A flame's colors along the emission range: dark red, deep orange, orange,
+## then pale yellow (luce-std ramp numbers, linear between points).
+let flame_ramp: str = "1,3,4,0,0.2,0.01,0,1,0.35,1,0.18,0.01,1,0.7,1,0.55,0.08,1,1,1,0.85,0.4,1"
+
+let look_rows: TextRow[4] = [
+    TextRow("Group", "The grids the look goes on, by name: names and globs apart by spaces (smoke*), #2 the third grid. Empty: every grid."),
+    TextRow("Density field", "The grid whose values show as the density, as Houdini's density field; it is not drawn as smoke itself. Empty: each grid shows its own."),
+    TextRow("Emission field", "The grid whose values emit light (heat, temperature); it is not drawn as smoke itself. Empty: no emission."),
+    TextRow("Emission color ramp", "With Emission ramp on, the emitted color along the emission range: its left end at Emission min, its right at Emission max.", true, flame_ramp)]
+
+let look_parms: ParmSpec[9] = [
     ParmSpec("Density scale", ParmKind.number, 1.0, 0.0, 1000000.0, 1, "", "Multiplies every density: how thick the smoke looks.", 10.0),
     ParmSpec("Smoke color", ParmKind.vector, 1.0, 0.0, 1.0, 3, "", "The color light scatters off the smoke with."),
     ParmSpec("Shadow scale", ParmKind.number, 1.0, 0.0, 100.0, 1, "", "Multiplies the smoke's shadowing of itself: 0 lit throughout.", 4.0),
     ParmSpec("Emission scale", ParmKind.number, 0.0, 0.0, 1000000.0, 1, "", "Light emitted per unit at an emission field value of 1.", 10.0),
-    ParmSpec("Emission color", ParmKind.vector, 1.0, 0.0, 1.0, 3, "", "The color of the emitted light."),
+    ParmSpec("Emission color", ParmKind.vector, 1.0, 0.0, 1.0, 3, "", "The color of the emitted light, without the ramp."),
+    ParmSpec("Emission ramp", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Color the emission by the emission color ramp along the emission range (Houdini's Emission Color Ramp); off, the emission color throughout."),
+    ParmSpec("Emission min", ParmKind.number, 0.0, -1000000.0, 1000000.0, 1, "", "The emission field value at the ramp's left end.", 1.0),
+    ParmSpec("Emission max", ParmKind.number, 1.0, -1000000.0, 1000000.0, 1, "", "The emission field value at the ramp's right end.", 1.0),
     ParmSpec("Step", ParmKind.number, 1.0, 0.25, 8.0, 1, "", "The viewport's ray-marching step, in voxels: smaller is finer and slower.")]
 
 func volume_visualization_verb() -> SetVerb:
-    return SetVerb("Volume Visualization", "Volumes", "How the viewport draws fog volumes: density scale, smoke and emission colors, shadows", 1, false, false, look_parms, cook_visualization, "Emission field")
+    return SetVerb("Volume Visualization", "Volumes", "How the viewport draws fog grids: density, smoke color, shadows, emission and its color ramp", 1, false, false, look_parms, cook_visualization, look_rows)
 
-## The input with its look as volvis_* detail attributes; the grids are
-## shared untouched. The text row names the emission field.
+## The input with the look on the grids of the Group row, as Houdini's volvis_*
+## primitive attributes: each such grid becomes one sharing its voxels with the
+## new look; the others are shared as they are.
 func cook_visualization(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
     let p = input.parms
-    let look = VolumeLook(density = p.at(0), smoke = Vector3(p.at(1), p.at(2), p.at(3)), shadow = p.at(4), emission = p.at(5),
-                          emission_color = Vector3(p.at(6), p.at(7), p.at(8)), emission_field = strings.trim(input.group), step = p.at(9))
+    var look = VolumeLook(density = p.at(0), smoke = Vector3(p.at(1), p.at(2), p.at(3)), shadow = p.at(4), emission = p.at(5),
+                          emission_color = Vector3(p.at(6), p.at(7), p.at(8)), emission_low = p.at(10), emission_high = p.at(11), step = p.at(12))
+    try look.set_density_field(input.text(1))
+    try look.set_emission_field(input.text(2))
+    if p.at(9) != 0.0:
+        var numbers = try ramp_numbers(input.text(3) if input.text(3).length > 0 else flame_ramp)
+        defer numbers.close()
+        try look.set_emission_ramp(numbers.view())
+    if set_volume(input.set) == none:
+        output.warning = "The input has no volume; the look waits for one"
+        return
+    let source = set_volume(input.set) else return
+    let volume = try new_volume()
+    errdefer release_volume(volume)
+    var styled: usize = 0
+    for at in 0..<source.grid_count():
+        let grid = source.grid(at)
+        if grid_in_group(input.text(0), grid, at):
+            try add_grid(volume, try restyled(grid, &look))
+            styled += 1
+        else:
+            try add_grid(volume, share_grid((SparseGrid*)grid))
     let storage = try input.set.storage()
     errdefer dispose_set(storage)
-    try put_volume_look(storage, &look)
+    try storage.put(volume_type(), (void*)volume)
     output.set = storage
-    if set_volume(input.set) == none: output.warning = "The input has no volume; the look waits for one"
+    if styled == 0: output.warning = "The group names no grid of the input"
+
+## A ramp row's text, numbers comma apart, as numbers.
+func ramp_numbers(text: str) -> Growing[f64]!:
+    var numbers = Growing[f64]()
+    errdefer numbers.close()
+    var start: usize = 0
+    while start <= text.length:
+        var end = start
+        while end < text.length and text.bytes[end] != ',': end += 1
+        let piece = strings.trim((str)text.bytes[start..<end])
+        if piece.length > 0:
+            let value = strings.parse_f64(piece) catch failure:
+                error(errors.invalid, "a ramp's text is numbers apart by commas")
+            try numbers.push(value)
+        start = end + 1
+    return numbers

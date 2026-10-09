@@ -8,7 +8,9 @@
 pub func densified(grid: const SparseGrid*) -> SparseGrid*!:
     let keys = grid.keys.view()
     if keys.length == 0:
-        return try new_grid(grid.name(), grid.class, grid.background, grid.transform, try Column[u64].allocate(0), try Column[f32].allocate(0), try Column[u64].allocate(0))
+        let empty = try new_grid(grid.name(), grid.class, grid.background, grid.transform, try Column[u64].allocate(0), try Column[f32].allocate(0), try Column[u64].allocate(0))
+        empty.look = grid.look
+        return empty
     let (x0, y0, z0) = key_leaf(keys[0])
     var low: i64[3] = [x0, y0, z0]
     var high: i64[3] = [x0, y0, z0]
@@ -29,7 +31,9 @@ pub func densified(grid: const SparseGrid*) -> SparseGrid*!:
             for x in 0..<nx:
                 try box_keys.push(leaf_key(low[0] + x, low[1] + y, low[2] + z))
     var fill = DenseFill(source = grid)
-    return try grid_of_leaves(grid.name(), grid.class, grid.background, grid.transform, box_keys.view(), fill_dense_leaf, (void*)&fill)
+    let made = try grid_of_leaves(grid.name(), grid.class, grid.background, grid.transform, box_keys.view(), fill_dense_leaf, (void*)&fill)
+    made.look = grid.look
+    return made
 
 struct DenseFill:
     let source: const SparseGrid*

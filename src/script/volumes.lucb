@@ -8,6 +8,7 @@
 # grid for reading and writing as a `VoxelGrid`: its voxels in leaf order, 512 a leaf, x
 # fastest (the Voxels mode's lanes), by lane or by (i, j, k). A grid is read where it is
 # until the first write copies it; the copy becomes the set's grid at the next flush.
+# `set_look` is the Volume Visualization node on one grid: how the viewport draws it.
 
 ## A grid's class, as the Volume node's Class menu.
 pub enum VolumeClass as u8:
@@ -29,6 +30,8 @@ pub struct VoxelGrid:
     var values_owned: Growing[f32]
     var masks: Growing[u64]
     var order: Growing[u32]
+    ## How the viewport draws it (the grid's look, until `set_look`).
+    var styled: VolumeLook
     ## Written since the set last took it; part of an input (read-only).
     var dirty: bool
     var locked: bool
@@ -40,7 +43,8 @@ pub struct VoxelGrid:
     static func open(grid: const SparseGrid*, locked: bool) -> VoxelGrid!:
         return VoxelGrid(label = try heap_text(grid.name()), class = grid.class, background_value = grid.background, transform = grid.transform,
                          inverse = grid.inverse, source = share_grid((SparseGrid*)grid), keys = Growing[u64](), values_owned = Growing[f32](),
-                         masks = Growing[u64](), order = Growing[u32](), dirty = false, locked = locked, cached_key = 0xFFFFFFFFFFFFFFFF, cached_leaf = -1)
+                         masks = Growing[u64](), order = Growing[u32](), styled = grid.look, dirty = false, locked = locked, cached_key = 0xFFFFFFFFFFFFFFFF,
+                         cached_leaf = -1)
 
     # mark: What it is ================================================================
 
@@ -69,6 +73,43 @@ pub struct VoxelGrid:
         var total: i64 = 0
         for word in self.mask_view(): total += (i64)popcount(word)
         return total
+
+    # mark: How it looks ===============================================================
+
+    ## How the viewport draws it: its look's density, smoke, shadow and emission
+    ## numbers, its fields (`density_field()`, `emission_field()`) and emission ramp.
+    pub func look() -> VolumeLook:
+        return self.styled
+
+    ## Draw a fog grid as Volume Visualization does: `density` scales its densities,
+    ## `smoke` is the scattered color, `shadow` scales its self-shadowing; it emits
+    ## `emission` times grid `emission_field`'s values ("" none) in `emission_color`; it
+    ## shows grid `density_field`'s values as its density ("" its own); `step` is the
+    ## ray-marching step in voxels. The emission ramp stays as it was.
+    pub func set_look(density: f64 = 1.0, smoke: f32[4] = [1.0, 1.0, 1.0, 0.0], shadow: f64 = 1.0, emission: f64 = 0.0, emission_color: f32[4] = [1.0, 1.0, 1.0, 0.0],
+                      emission_field: str = "", density_field: str = "", step: f64 = 1.0) -> !:
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        var look = self.styled
+        look.density = density
+        look.smoke = vec3(smoke)
+        look.shadow = shadow
+        look.emission = emission
+        look.emission_color = vec3(emission_color)
+        look.step = step
+        try look.set_emission_field(emission_field)
+        try look.set_density_field(density_field)
+        self.styled = look
+        self.dirty = true
+
+    ## Color the emission by `data`, a color ramp in luce-std ramp's form,
+    ## along emission field values `low` to `high`; empty data clears it, back to the
+    ## emission color.
+    pub func set_emission_ramp(data: const f64[], low: f64 = 0.0, high: f64 = 1.0) -> !:
+        if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
+        try self.styled.set_emission_ramp(data)
+        self.styled.emission_low = low
+        self.styled.emission_high = high
+        self.dirty = true
 
     # mark: By lane: the Voxels mode's order ===========================================
 
@@ -222,7 +263,9 @@ pub struct VoxelGrid:
 
     ## The grid as a published one, its leaves sorted by key (the caller owns it).
     func publish() -> SparseGrid*!:
-        if let grid = self.source: return share_grid(grid)
+        if let grid = self.source:
+            # Only the look changed: the voxels are shared.
+            return share_grid(grid) if self.styled.same(&grid.look) else try restyled(grid, &self.styled)
         let leaves = self.keys.count
         var keys = try Column[u64].allocate(leaves)
         errdefer keys.release()
@@ -238,7 +281,9 @@ pub struct VoxelGrid:
             out_keys[at] = self.keys.items[leaf]
             memory.copy(out_values[at * leaf_voxels..<(at + 1) * leaf_voxels], self.values_owned.items[leaf * leaf_voxels..<(leaf + 1) * leaf_voxels], leaf_voxels)
             memory.copy(out_masks[at * mask_words..<(at + 1) * mask_words], self.masks.items[leaf * mask_words..<(leaf + 1) * mask_words], mask_words)
-        return try new_grid(self.label, self.class, self.background_value, self.transform, keys.take(), values.take(), masks.take())
+        let made = try new_grid(self.label, self.class, self.background_value, self.transform, keys.take(), values.take(), masks.take())
+        made.look = self.styled
+        return made
 
     func close():
         if let grid = self.source: release_grid(grid)

@@ -1,6 +1,7 @@
 ## Codecs of the field families: a volume's grids as child elements (name,
-## class, background, the 12 transform numbers, and the leaf keys, values
-## and masks as columns), and an SDF's program (ops and parameters).
+## class, background, the 12 transform numbers, the leaf keys, values and
+## masks as columns, and a look other than the default: its 12 numbers, field
+## names and emission ramp), and an SDF's program (ops and parameters).
 
 func encode_volume(data: const void*, writer: GeometryWriter*, path: str) -> !:
     let volume = (const Volume*)data
@@ -28,6 +29,19 @@ func encode_volume(data: const void*, writer: GeometryWriter*, path: str) -> !:
         try writer.column_borrowed("values", dtype_float32, values.length // leaf_voxels, leaf_voxels, bytes_view(values))
         let masks = grid.masks.view()
         try writer.column_borrowed("masks", dtype_uint64, masks.length // mask_words, mask_words, bytes_view(masks))
+        try encode_look(writer, &grid.look)
+
+## A grid's look, when it is not the default.
+func encode_look(writer: GeometryWriter*, look: const VolumeLook*) -> !:
+    let plain = VolumeLook()
+    if look.same(&plain): return
+    let numbers: f64[12] = [look.density, look.smoke.x, look.smoke.y, look.smoke.z, look.shadow, look.emission, look.emission_color.x, look.emission_color.y,
+                            look.emission_color.z, look.emission_low, look.emission_high, look.step]
+    try writer.crate.copied_array("look", dtype_float64, 12, u8[]((u8*)&numbers[0], 96))
+    if look.density_field().length > 0: try writer.crate.text("density_field", look.density_field())
+    if look.emission_field().length > 0: try writer.crate.text("emission_field", look.emission_field())
+    let ramp = look.emission_ramp()
+    if ramp.length > 0: try writer.crate.copied_array("emission_ramp", dtype_float64, ramp.length, u8[]((u8*)ramp.data, ramp.length * 8))
 
 func decode_volume(reader: GeometryReader*, path: str) -> void*!:
     while let header = try reader.next_property(): _ = header
@@ -46,6 +60,7 @@ func decode_volume(reader: GeometryReader*, path: str) -> void*!:
         defer values.release()
         var masks: Column[u64]
         defer masks.release()
+        var look = VolumeLook()
         while let header = try reader.next_property():
             let label = header.name
             if label == "name": try reader.text(header, &name)
@@ -61,6 +76,30 @@ func decode_volume(reader: GeometryReader*, path: str) -> void*!:
             elif label == "keys" or label == "keys_chunks": keys = try reader.column[u64](header)
             elif label == "values" or label == "values_chunks": values = try reader.column[f32](header)
             elif label == "masks" or label == "masks_chunks": masks = try reader.column[u64](header)
+            elif label == "look":
+                var parts: f64[12]
+                if header.dtype != dtype_float64 or header.bytes != 96: error(errors.invalid, "a grid look is twelve float64s")
+                try reader.crate.read_payload(u8[]((u8*)&parts[0], 96))
+                look.density = parts[0]
+                look.smoke = Vector3(parts[1], parts[2], parts[3])
+                look.shadow = parts[4]
+                look.emission = parts[5]
+                look.emission_color = Vector3(parts[6], parts[7], parts[8])
+                look.emission_low = parts[9]
+                look.emission_high = parts[10]
+                look.step = parts[11]
+            elif label == "density_field" or label == "emission_field":
+                var text = Growing[u8]()
+                defer text.close()
+                try reader.text(header, &text)
+                if label == "density_field": try look.set_density_field((str)text.view())
+                else: try look.set_emission_field((str)text.view())
+            elif label == "emission_ramp":
+                var ramp: f64[163]
+                if header.dtype != dtype_float64 or header.bytes % 8 != 0 or header.bytes > 163 * 8: error(errors.invalid, "a grid's emission ramp is at most 163 float64s")
+                let count = header.bytes // 8
+                try reader.crate.read_payload(u8[]((u8*)&ramp[0], count * 8))
+                try look.set_emission_ramp(ramp[..<count])
         let leaves = keys.count()
         if values.count() != leaves * leaf_voxels or masks.count() != leaves * mask_words: error(errors.invalid, "a saved grid's columns disagree")
         let sorted = keys.view()
@@ -69,6 +108,7 @@ func decode_volume(reader: GeometryReader*, path: str) -> void*!:
         let transform = Matrix4(Vector3(numbers[0], numbers[1], numbers[2]), Vector3(numbers[3], numbers[4], numbers[5]),
                                 Vector3(numbers[6], numbers[7], numbers[8]), Vector3(numbers[9], numbers[10], numbers[11]))
         let grid = try new_grid((str)name.view(), GridClass.level_set if class == 1 else GridClass.fog, (f32)background, transform, keys.take(), values.take(), masks.take())
+        grid.look = look
         try add_grid(volume, grid)
     return (void*)volume
 

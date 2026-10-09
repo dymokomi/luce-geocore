@@ -358,9 +358,9 @@ pub func point_clouds() -> !:
 pub func volumes() -> !:
     let none_numbers: f64[1] = [0.0]
     _ = none_numbers
-    let sphere = try GeometryVerbs.run("SDF Sphere", try support.empty_set(), none, "", 0, [0.75, 0.0, 0.0, 0.0])
+    let sphere = try GeometryVerbs.run("SDF Sphere", try support.empty_set(), none, "", 0, [0.75, 0.0, 0.0, 0.0], [""])
     let field = try (try sphere.get()).geometry()
-    let sampled = try GeometryVerbs.run("SDF to Volume", field, none, "", 0, [0.05, 3.0, 0.0])
+    let sampled = try GeometryVerbs.run("SDF to Volume", field, none, "", 0, [0.05, 3.0, 0.0], [""])
     let volume = try (try sampled.get()).geometry()
     let set = try support.big_grid_set(21)
     let body = "let g = k.input(1)\nlet q = p.P * 0.9 + [0.0, 0.1, 0.0, 0.0]\nlet d = g.volume_sample(\"surface\", q)\nlet n = normalized(g.volume_gradient(\"surface\", q))\nlet snapped = q - n * d\np.Cd = [d, length(snapped), dot(n, normalized(q)), 0.0]\nlet index = g.volume_pos_to_index(\"surface\", q)\nlet center = g.volume_index_to_pos(\"\", (i32)index[0], (i32)index[1], (i32)index[2])\np.set_f32(\"back\", length(center - q))\np.set_f32(\"voxel\", g.volume_index(\"#0\", (i32)index[0], (i32)index[1], (i32)index[2]) - g.volume_sample(\"surface\", center))\np.set_f32(\"size\", g.volume_voxel_size(\"surface\"))\np.set_f32(\"res\", g.volume_res(\"surface\")[0])\np.set_f32(\"exact\", k.input(0).volume_sample(\"\", q))\n"

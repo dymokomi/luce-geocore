@@ -28,7 +28,7 @@ from core.geometry import Bounds
 from math.vector import Vector3
 from math.matrix import Matrix4
 from geometries.polygon import Mesh, MeshPart, concatenated, assembled, put_attribute, mesh_dispose, mesh_share, mesh_adopt
-from geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, union_box, set_mesh, empty_storage, dispose_set, adopt_set, set_detail, set_put_detail
+from geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, union_box, set_mesh, empty_storage, dispose_set, adopt_set
 from geometries.builder import MeshBuilder
 from groups import group_bits
 from verbs import ComponentTransform
@@ -88,6 +88,9 @@ pub struct SparseGrid:
     pub var keys: Column[u64]
     pub var values: Column[f32]
     pub var masks: Column[u64]
+    ## How a viewport draws it (look.lucb): set on a grid being made, before
+    ## it is shared.
+    pub var look: VolumeLook
 
     pub func name() -> str:
         return (str)self.label[..<self.label_length]
@@ -133,7 +136,9 @@ pub struct SparseGrid:
     ## The same leaves under another transform (placement), sharing columns.
     pub func placed(matrix: Matrix4) -> SparseGrid*!:
         let transform = matrix.multiply(self.transform)
-        return try new_grid(self.name(), self.class, self.background, transform, self.keys.share(), self.values.share(), self.masks.share())
+        let made = try new_grid(self.name(), self.class, self.background, transform, self.keys.share(), self.values.share(), self.masks.share())
+        made.look = self.look
+        return made
 
     pub func close():
         self.keys.release()

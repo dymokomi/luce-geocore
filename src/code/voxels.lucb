@@ -233,11 +233,13 @@ struct GridList:
         for grid in self.list.view(): release_grid(grid)
         self.list.destroy()
 
-## `grid` (taken) in place of the grid of its name in `grids`, or after them.
+## `grid` (taken, not yet shared) in place of the grid of its name in `grids`,
+## keeping that grid's look, or after them.
 func replace_grid(grids: collections.List[SparseGrid*]*, grid: SparseGrid*) -> !:
     for at in 0..<grids.length():
         let old = grids.at(at)
         if old.name() == grid.name():
+            grid.look = old.look
             grids.set(at, grid)
             release_grid(old)
             return

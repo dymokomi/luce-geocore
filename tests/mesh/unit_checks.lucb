@@ -133,7 +133,7 @@ func spiral() -> !:
     let empty = try adopt_set(try empty_set())
     defer empty.release()
     let verb = find_set_verb("Curve Spiral") else trap("no Curve Spiral")
-    var output = try run_set_verb(&verb, empty.value(), none, "", 0, [2.0, 8.0, 1.0, 2.0, 2.0])
+    var output = try run_set_verb(&verb, empty.value(), none, "", 0, [2.0, 8.0, 1.0, 2.0, 2.0], [""])
     defer output.close()
     let made = output.set else trap("no set")
     let curves = set_curves(made) else trap("no curves")

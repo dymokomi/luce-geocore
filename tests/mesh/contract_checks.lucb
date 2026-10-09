@@ -70,7 +70,7 @@ func registry_sweep() -> !:
     defer set.release()
     for index in Verbs.count()..<count:
         let verb = find_set_verb(VerbCatalog.name(index)) else trap("a catalog verb is registered")
-        var output = run_set_verb(&verb, set.value(), set.value(), "", 0, no_numbers()) catch failure:
+        var output = run_set_verb(&verb, set.value(), set.value(), "", 0, no_numbers(), [""]) catch failure:
             if failure.code == memory.exhausted: error(failure.code, failure.message)
             assert(failure.code == geocore.invalid)
             continue

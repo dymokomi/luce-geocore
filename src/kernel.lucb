@@ -277,7 +277,8 @@ pub type GridSampler = fields.GridSampler
 pub let leaf_key = fields.leaf_key
 ## The leaf coordinates of a leaf key.
 pub let key_leaf = fields.key_leaf
-## Release a heap grid.
+## Share a heap grid (one more user), and release one.
+pub let share_grid = fields.share_grid
 pub let release_grid = fields.release_grid
 ## A grid built from a list of leaves filled in parallel.
 pub let grid_of_leaves = fields.grid_of_leaves
@@ -287,12 +288,17 @@ pub type Volume = fields.Volume
 pub let volume_type = fields.volume_type
 ## A set's volume, borrowed while the set lives.
 pub let set_volume = fields.set_volume
-## How a set's fog volumes look (Volume Visualization's volvis_* details).
+## How a fog grid looks in a viewport (Volume Visualization), carried by
+## each grid.
 pub type VolumeLook = fields.VolumeLook
-## A set's volume look, the defaults where it sets none.
-pub let volume_look = fields.volume_look
-## Put a volume look on a set as detail attributes.
-pub let put_volume_look = fields.put_volume_look
+## A grid with another look, sharing its voxels.
+pub let restyled = fields.restyled
+## One fog drawing of a volume: the grid whose look it takes, its density
+## grid and its emission field.
+pub type FogShow = fields.FogShow
+## Fog drawing `index` of a volume, and how many it makes.
+pub let fog_show = fields.fog_show
+pub let fog_show_count = fields.fog_show_count
 ## A new volume of no grids.
 pub let new_volume = fields.new_volume
 ## Add a grid (taken) to a volume being built.
