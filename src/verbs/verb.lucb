@@ -284,13 +284,17 @@ func finish(source: const Mesh*, output: VerbOutput*) -> Mesh*!:
         output.builder.selected_edges.clear()
         return try mesh_share(source)
     if not output.positions.is_empty():
-        # Points moved onto each other collapse faces: nothing sensible to
-        # make, so the input passes through with a warning.
+        # Meshes keep faces without an area, but a modeling verb that collapses
+        # faces (points moved onto each other) has nothing sensible to make: the
+        # input passes through with a warning, as for built faces above.
         let moved: Mesh*? = moved_storage(source, output.positions, output.moved.view()) catch failure:
             if failure.code != errors.invalid: error(failure.code, failure.message)
             output.warning = "The operation would collapse faces; the input passes through"
             recover none
-        if let made = moved: return made
+        if let made = moved:
+            if degenerate_faces(made) <= degenerate_faces(source): return made
+            mesh_dispose(made)
+            output.warning = "The operation would collapse faces; the input passes through"
     return try mesh_share(source)
 
 ## The output selection as the edges between the builder's selected point

@@ -8,6 +8,22 @@ pub func bounds_distance(p: Vector3, lo: Vector3, hi: Vector3) -> f64:
     let z = math.max(math.max(lo.z - p.z, p.z - hi.z), 0.0)
     return x * x + y * y + z * z
 
+## `triangle_distance` when it is below `best`, otherwise any value at least `best`:
+## the triangle's box and then its plane (both lower bounds, the plane's with a margin
+## for rounding) skip the exact test for most triangles a nearest search meets.
+pub func triangle_distance_below(p: Vector3, a: Vector3, b: Vector3, c: Vector3, best: f64) -> f64:
+    # The box test written out: called per candidate, a call costs more than the test.
+    let x = math.max(math.max(math.min(a.x, math.min(b.x, c.x)) - p.x, p.x - math.max(a.x, math.max(b.x, c.x))), 0.0)
+    let y = math.max(math.max(math.min(a.y, math.min(b.y, c.y)) - p.y, p.y - math.max(a.y, math.max(b.y, c.y))), 0.0)
+    let z = math.max(math.max(math.min(a.z, math.min(b.z, c.z)) - p.z, p.z - math.max(a.z, math.max(b.z, c.z))), 0.0)
+    if x * x + y * y + z * z >= best: return best
+    let normal = b.subtract(a).cross(c.subtract(a))
+    let area2 = normal.dot(normal)
+    if area2 > 0.0:
+        let height = p.subtract(a).dot(normal)
+        if height * height / area2 * 0.999999 >= best: return best
+    return triangle_distance(p, a, b, c)
+
 func segment(p: Vector3, a: Vector3, b: Vector3) -> f64:
     let ab = b.subtract(a)
     let length = ab.dot(ab)

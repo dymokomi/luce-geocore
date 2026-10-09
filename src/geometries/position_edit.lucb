@@ -15,7 +15,7 @@ from core.attributes import AttributeStore, DataType
 from core.attribute_ops import typed_mut
 from math.vector import Vector3
 from math.matrix import Matrix4
-from geometries.triangulation.polygon_triangulation import triangulate, area_normal, is_degenerate
+from geometries.triangulation.polygon_triangulation import triangulate, is_degenerate
 import geometries.triangulation.face_scratch
 
 ## Owned columns for the new mesh. `triangles` is empty when the previous
@@ -110,11 +110,6 @@ pub func reposition(shape: const Shape*, normals: Column[Float3], moved: const u
     let output = fresh.span() if every else try fresh.writable()
     var work = NormalWork(shape, list, every, normals.view(), output, rigid)
     try parallel.for_each_range(faces if every else list.length, 2048, (void*)&work, face_normals)
-    if work.failed.load(.acquire) != 0:
-        # A serial pass reports the lowest failing face's own error.
-        for at in 0..<(faces if every else list.length):
-            let face = at if every else (usize)list[at]
-            if not is_degenerate(output[face].vector()): _ = try face_normal(shape, face)
     var triangles: Column[i32]
     errdefer triangles.release()
     if work.folded.load(.acquire) != 0:
@@ -153,8 +148,7 @@ struct NormalWork:
     let previous: const Float3[]
     let normals: Float3[]
     let rigid: bool
-    ## Whether any face's normal failed, and whether any triangle folded.
-    var failed: @u32
+    ## Whether any triangle folded.
     var folded: @u32
 
 func face_normals(context: void*, first: usize, end: usize, worker: usize):
@@ -164,10 +158,10 @@ func face_normals(context: void*, first: usize, end: usize, worker: usize):
         if let normal = quick_normal(work.shape, face):
             work.normals[face] = normal
         else:
-            # A face that had no area keeps its zero normal; one that collapses now
-            # fails the edit (the serial pass names it).
-            work.normals[face] = work.previous[face]
-            if not is_degenerate(work.previous[face].vector()): work.failed.store(1, .relaxed)
+            # A face without an area is legal (its points met): a zero normal, and its
+            # display triangles become a fan if they folded.
+            work.normals[face] = Float3()
+            if not work.rigid and folded(work.shape, face): work.folded.store(1, .relaxed)
             continue
         if not work.rigid and folded(work.shape, face):
             work.folded.store(1, .relaxed)
@@ -212,19 +206,6 @@ func quick_normal(shape: const Shape*, face: usize) -> Float3?:
 ## Positions as flat floats, three to a point.
 func flat(positions: const Float3[]) -> const f32[]:
     return f32[]((f32*)positions.data, positions.length * 3)
-
-## The unit area normal of `face` from the new positions.
-pub func face_normal(shape: const Shape*, face: usize) -> Vector3!:
-    let start = (usize)shape.offsets[face]
-    let count = (usize)shape.offsets[face + 1] - start
-    let origin = shape.positions[(usize)shape.corners[start]].vector()
-    var area = Vector3()
-    var extent2: f64 = 0.0
-    for at in 0..<count:
-        let delta = shape.positions[(usize)shape.corners[start + at]].vector().subtract(origin)
-        extent2 = math.max(extent2, delta.dot(delta))
-        area = area.add(delta.cross(shape.positions[(usize)shape.corners[start + (at + 1) % count]].vector().subtract(origin)))
-    return try area_normal(area, extent2)
 
 ## A kept triangle folds when it degenerates or turns against its old facing
 ## (lengths compared squared).

@@ -8,9 +8,6 @@ func point_before(a: PointAdd, b: PointAdd) -> bool:
 func prim_before(a: PrimAdd, b: PrimAdd) -> bool:
     return a.key < b.key
 
-func set_before(a: AttributeSet, b: AttributeSet) -> bool:
-    return a.key < b.key
-
 ## The index a provisional number `number` is among `adds` (ascending), or none.
 func added_point(adds: const PointAdd[], number: i64) -> usize?:
     var low: usize = 0
@@ -54,7 +51,6 @@ struct Numbering:
 func applied(source: const Mesh*?, edits: Edits*) -> Mesh*!:
     sort.stable(edits.point_adds.items(), point_before)
     sort.stable(edits.prim_adds.items(), prim_before)
-    sort.stable(edits.sets.items(), set_before)
     var old_points: usize = 0
     var old_prims: usize = 0
     var origin = Vector3()
@@ -207,32 +203,42 @@ func no_floats() -> const Float3[]:
     var none_given: const Float3[]
     return none_given
 
-## Each attribute the sets name, made (or widened) on `mesh` and written in set order.
+## Each attribute the sets name, made (or widened) on `mesh`; an element set more than
+## once takes the set with the highest key (its highest lane, then that lane's last).
 func apply_sets(mesh: Mesh*, edits: const Edits*, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[]) -> !:
-    let sets = edits.sets.view()
-    # The distinct (domain, name) pairs, in first-set order: a few, however many sets.
-    var named: collections.List[usize]
+    # The distinct (domain, name) pairs: a few, however many sets.
+    var named: collections.List[AttributeSet]
     defer named.destroy()
-    for (at, set) in sets.indexed():
-        var seen = false
-        for first in named.view():
-            if sets[first].domain == set.domain and sets[first].name == set.name:
-                seen = true
-                break
-        if not seen: try named.append(at)
-    for first in named.view():
-        try apply_named(mesh, sets, first, numbering, point_map, prim_map)
+    for queue in edits.sets.view():
+        for set in queue.view():
+            var seen = false
+            for earlier in named.view():
+                if earlier.domain == set.domain and earlier.name == set.name:
+                    seen = true
+                    break
+            if not seen: try named.append(set)
+    for set in named.view():
+        try apply_named(mesh, edits, set, numbering, point_map, prim_map)
 
-## The sets of the attribute set `first` names, in set order.
-func apply_named(mesh: Mesh*, sets: const AttributeSet[], first: usize, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[]) -> !:
-    let set = sets[first]
+## The element a set lands on after removals (-1: removed), or an error for a number
+## that never existed.
+func target_of(set: const AttributeSet*, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[]) -> i64!:
+    if set.domain == .point:
+        let at = numbering.point(set.index) else error(errors.invalid, "a set_point names a point that does not exist")
+        return point_map[at]
+    let at = numbering.prim(set.index) else error(errors.invalid, "a set_prim names a primitive that does not exist")
+    return prim_map[at]
+
+## The sets of the attribute `first` names.
+func apply_named(mesh: Mesh*, edits: const Edits*, first: AttributeSet, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[]) -> !:
     # The attribute: the existing one, widened to the widest set, or a new one.
-    var width = set.width
-    var kind = set.kind
-    for later in sets[first..]:
-        if later.domain == set.domain and later.name == set.name and later.width > width: width = later.width
-    let elements = try mesh.domain_size(set.domain)
-    let found = mesh.find_attribute(set.name, (i64)(u8)set.domain)
+    var width = first.width
+    var kind = first.kind
+    for queue in edits.sets.view():
+        for set in queue.view():
+            if set.domain == first.domain and set.name == first.name and set.width > width: width = set.width
+    let elements = try mesh.domain_size(first.domain)
+    let found = mesh.find_attribute(first.name, (i64)(u8)first.domain)
     var existing: const Attribute*? = none
     if found >= 0:
         let entry = try mesh.attribute_entry(found)
@@ -241,21 +247,23 @@ func apply_named(mesh: Mesh*, sets: const AttributeSet[], first: usize, numberin
             if entry.width > width: width = entry.width
             existing = entry
     let data_type = data_type_of(kind) else error(errors.invalid, "a set of a type no attribute stores")
-    var attribute = try Attribute.create(set.name, set.domain, data_type, width, elements)
+    var attribute = try Attribute.create(first.name, first.domain, data_type, width, elements)
     errdefer attribute.release()
     let bytes = attribute.data.span()
     if let entry = existing:
         fill_from(bytes, kind, width, elements, entry)
-    for later in sets[first..]:
-        if later.domain != set.domain or later.name != set.name: continue
-        var target: i64 = -1
-        if later.domain == .point:
-            if let at = numbering.point(later.index): target = point_map[at]
-            else: error(errors.invalid, "a set_point names a point that does not exist")
-        else:
-            if let at = numbering.prim(later.index):
-                target = prim_map[at]
-            else: error(errors.invalid, "a set_prim names a primitive that does not exist")
-        if target < 0: continue
-        for k in 0..<later.width: put_number(bytes, kind, (usize)target * width + k, later.values[k])
+    # Each element's winning key (plus one; 0: not set), then the winners' values.
+    let winners = try new u64[(usize)elements] in memory.heap
+    defer free(winners) in memory.heap
+    for queue in edits.sets.view():
+        for set in queue.view():
+            if set.domain != first.domain or set.name != first.name: continue
+            let target = try target_of(&set, numbering, point_map, prim_map)
+            if target >= 0 and set.key + 1 > winners[(usize)target]: winners[(usize)target] = set.key + 1
+    for queue in edits.sets.view():
+        for set in queue.view():
+            if set.domain != first.domain or set.name != first.name: continue
+            let target = try target_of(&set, numbering, point_map, prim_map)
+            if target < 0 or winners[(usize)target] != set.key + 1: continue
+            for k in 0..<set.width: put_number(bytes, kind, (usize)target * width + k, set.values[k])
     try put_attribute(mesh, attribute)

@@ -10,7 +10,7 @@ from luce_std import parallel
 from core.float3 import Float3
 from core.growing import Growing
 from math.vector import Vector3
-from geometries.distance import bounds_distance, triangle_distance
+from geometries.distance import bounds_distance, triangle_distance, triangle_distance_below
 
 ## Leaves hold at most this many triangles.
 let leaf_size: usize = 8
@@ -133,25 +133,33 @@ pub struct TriangleIndex:
         if self.nodes.length == 0: return RayHit()
         var best: f64 = bound * bound
         var face: i64 = -1
+        # Nodes to visit with their box distances, the nearer child on top: each box
+        # is measured once, and a node is dropped when the best has passed it since.
         var stack: u32[64]
+        var reach: f64[64]
         var count: usize = 1
         stack[0] = 0
+        reach[0] = 0.0
         while count > 0:
             count -= 1
+            if reach[count] >= best: continue
             let id = (usize)stack[count]
-            let node = self.nodes[id]
-            if bounds_distance(point, node.lo.vector(), node.hi.vector()) >= best: continue
+            let node = &self.nodes[id]
             if node.count == 0:
-                let a = self.nodes[id + 1]
-                let b = self.nodes[(usize)node.first]
-                let closer = bounds_distance(point, a.lo.vector(), a.hi.vector()) < bounds_distance(point, b.lo.vector(), b.hi.vector())
+                let a = &self.nodes[id + 1]
+                let b = &self.nodes[(usize)node.first]
+                let near_a = box_distance(point, a)
+                let near_b = box_distance(point, b)
+                let closer = near_a < near_b
                 stack[count] = node.first if closer else (u32)(id + 1)
+                reach[count] = near_b if closer else near_a
                 stack[count + 1] = (u32)(id + 1) if closer else node.first
+                reach[count + 1] = near_a if closer else near_b
                 count += 2
             else:
                 for at in node.first..<node.first + node.count:
                     let triangle = (usize)self.order[(usize)at]
-                    let distance = triangle_distance(point, self.point(triangle, 0), self.point(triangle, 1), self.point(triangle, 2))
+                    let distance = triangle_distance_below(point, self.point(triangle, 0), self.point(triangle, 1), self.point(triangle, 2), best)
                     if distance < best:
                         best = distance
                         face = self.face_of(triangle)
@@ -160,6 +168,13 @@ pub struct TriangleIndex:
     pub func close():
         free(self.order) in memory.heap
         if self.nodes.length > 0: free(self.nodes) in memory.heap
+
+## `bounds_distance` to a node's box, written out for the nearest search's inner loop.
+func box_distance(p: Vector3, node: const Node*) -> f64:
+    let x = math.max(math.max((f64)node.lo.x - p.x, p.x - (f64)node.hi.x), 0.0)
+    let y = math.max(math.max((f64)node.lo.y - p.y, p.y - (f64)node.hi.y), 0.0)
+    let z = math.max(math.max((f64)node.lo.z - p.z, p.z - (f64)node.hi.z), 0.0)
+    return x * x + y * y + z * z
 
 # mark: Building ==============================================================================
 

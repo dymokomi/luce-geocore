@@ -161,6 +161,36 @@ pub func removals() -> !:
     expect((try mixed.point(24)).y == 1.0 and (try mixed.point(24)).x == (try mixed.point(0)).x, "the first kept new point is point 1's")
     let negative = failure(set, support.points_mode, "if p.ptnum == 3:\n    k.remove_point(-1)\n")
     expect(strings.ends_with(negative, "index out of bounds (point 3)"), "a negative removal faults")
+    # Scattered sets: the highest lane wins, then its last call, at any worker count.
+    let many = try support.big_grid_set(200)
+    let worker_counts: usize[2] = [1, 16]
+    for threads in worker_counts:
+        let written = try support.mesh_of(try support.run_inputs(many, none, support.points_mode, "k.set_point_f32(p.ptnum % 7, \"w\", (f32)p.ptnum)\nk.set_point_f32(p.ptnum % 7, \"w\", (f32)p.ptnum + 0.5)\n", 0, threads))
+        for at: i64 in 0..<7:
+            let highest = (40000 - 1) - ((40000 - 1 - at) % 7)
+            expect(try support.value(written, "w", 0, at) == (f64)highest + 0.5, "the highest lane's last set wins")
     let limited = failure(try support.empty_set(), support.numbers_mode, "for i in 0..<1100:\n    _ = k.add_point([(f32)i, 0.0, 0.0, 0.0])\n", count = 2)
     expect(strings.ends_with(limited, "too many additions from one element (number 0)"), "1024 adds per element")
     print("ok    stage 4: removals by a condition, set_point precedence, the add limit")
+
+## Collapsed polygons are legal (Houdini's rule): smoothing a noisy sphere until its
+## pole triangles have no area cooks, and those faces get a zero normal.
+pub func collapsed_faces() -> !:
+    let sphere = try GeometrySet.of_mesh(try MeshPrimitives.sphere(1.0, 16))
+    let noisy = try support.run(sphere, support.points_mode, "p.P = p.P + rand3(p.ptnum) * 0.02\n")
+    var smoothed = noisy
+    for _ in 0..<4:
+        smoothed = try support.run(smoothed, support.points_mode, "let near = k.input(0).nearpoints(p.P, 0.6, 16)\nvar sum: f32[4] = [0.0, 0.0, 0.0, 0.0]\nfor i in 0..<near.count:\n    sum = sum + k.input(0).point_P(near.points[i])\np.P = sum * (1.0 / (f32)near.count)\n")
+    # Every point near a pole onto the pole itself: their triangles have no area at all.
+    let collapsed = try support.run(smoothed, support.points_mode, "if math32.abs(p.P[1]) > 0.5:\n    p.P = [0.0, 1.0 if p.P[1] > 0.0 else -1.0, 0.0, 0.0]\n")
+    let mesh = try (try support.mesh_of(collapsed)).get()
+    var zero: i64 = 0
+    for face in 0..<mesh.face_count():
+        let n = try mesh.face_normal(face)
+        if n.x == 0.0 and n.y == 0.0 and n.z == 0.0: zero += 1
+    expect(zero > 0 and zero < mesh.face_count(), "collapsed faces keep a zero normal, the rest a real one")
+    # A new polygon without an area is accepted too.
+    let flat = try (try support.mesh_of(try support.run_inputs(try support.empty_set(), none, support.numbers_mode, "var points: i32[16]\nfor i in 0..<3:\n    points[i] = k.add_point([(f32)i, 0.0, 0.0, 0.0])\n_ = k.add_prim(points, 3)\n", count = 1))).get()
+    let flat_normal = try flat.face_normal(0)
+    expect(flat.face_count() == 1 and flat_normal.x == 0.0 and flat_normal.y == 0.0 and flat_normal.z == 0.0, "a new polygon on a line")
+    print(f"ok    collapsed polygons cook: {zero} of {mesh.face_count()} faces without an area")

@@ -30,7 +30,8 @@ struct Removal:
     let domain: Domain
     let index: i64
 
-## A queued attribute set.
+## A queued attribute set. `name` is the call site's text, alive while the cook holds
+## the program.
 struct AttributeSet:
     let key: u64
     let domain: Domain
@@ -47,8 +48,10 @@ struct Edits:
     var point_adds: collections.List[PointAdd]
     var prim_adds: collections.List[PrimAdd]
     var removals: collections.List[Removal]
-    var sets: collections.List[AttributeSet]
-    var texts: collections.TextPool
+    ## Attribute sets, one queue per worker (filled without a lock), and each worker's
+    ## call count (its calls run one at a time, so it orders a lane's sets).
+    var sets: collections.List[collections.List[AttributeSet]]
+    var set_calls: u64[]
     ## Adds so far per lane (lanes of the run), and the input's counts.
     var point_counts: u16[]
     var prim_counts: u16[]
@@ -66,15 +69,27 @@ struct Edits:
         self.point_adds.destroy()
         self.prim_adds.destroy()
         self.removals.destroy()
+        for at in 0..<self.sets.length(): self.sets.items()[at].destroy()
         self.sets.destroy()
-        self.texts.destroy()
+        if self.set_calls.length > 0: free(self.set_calls) in memory.heap
         if self.point_counts.length > 0: free(self.point_counts) in memory.heap
         if self.prim_counts.length > 0: free(self.prim_counts) in memory.heap
         if self.points_gone.length > 0: free(self.points_gone) in memory.heap
         if self.prims_gone.length > 0: free(self.prims_gone) in memory.heap
 
     func any() -> bool:
-        return self.masked.load(.acquire) or self.point_adds.length() + self.prim_adds.length() + self.removals.length() + self.sets.length() > 0
+        return self.masked.load(.acquire) or self.point_adds.length() + self.prim_adds.length() + self.removals.length() + self.set_count() > 0
+
+    ## How many attribute sets are queued.
+    func set_count() -> usize:
+        var count: usize = 0
+        for queue in self.sets.view(): count += queue.length()
+        return count
+
+    ## One empty set queue per worker of the run.
+    func prepare_sets(workers: usize) -> !:
+        for _ in 0..<workers: try self.sets.append(collections.List[AttributeSet]())
+        self.set_calls = try new u64[workers] in memory.heap
 
     ## The run's lanes and the input's counts, before the run.
     func prepare(lanes: usize, points: usize, prims: usize) -> !:
@@ -260,12 +275,14 @@ func set_attribute(call: engine.Call*):
     let context = call.context else return
     let setter = *(const Setter*)context
     let indices = call.i32_argument(0)
-    let order = state.edits.calls.add(1, .relaxed)
-    state.edits.lock.lock()
-    defer state.edits.lock.unlock()
-    let name = state.edits.texts.keep_text(call.text(0).bytes) catch failure:
-        call.fail(0)
+    let worker = call.worker_number()
+    if worker >= state.edits.sets.length():
+        for lane in 0..<call.lanes: call.fail(lane)
         return
+    let order = state.edits.set_calls[worker]
+    state.edits.set_calls[worker] = order + 1
+    let queue = &state.edits.sets.items()[worker]
+    let name = call.text(0)
     for lane in 0..<call.lanes:
         call.i32_result(0)[lane] = 0
         if not call.active(lane): continue
@@ -277,5 +294,5 @@ func set_attribute(call: engine.Call*):
                 .i32 => (f64)call.i32_argument(1 + k)[lane]
                 _ => (f64)call.i64_argument(1 + k)[lane]
         let set = AttributeSet(key = key_of(call.first + lane, order), domain = setter.domain, name = name, kind = setter.kind, width = setter.components, index = (i64)indices[lane], values = values)
-        state.edits.sets.append(set) catch failure:
+        queue.append(set) catch failure:
             call.fail(lane)

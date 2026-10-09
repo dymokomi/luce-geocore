@@ -57,6 +57,7 @@ pub func run_code(set: const GeometrySet*, input1: const GeometrySet*?, run_over
     if not groups.is_blank(group) and mode != .detail and mode != .numbers:
         try cook.restrict(group, group_type)
     let request = Request(count = lanes, inputs = cook.inputs.view(), outputs = cook.engine_outputs.view(), uniforms = cook.uniforms.view(), threads = threads, active = cook.active, context = (void*)&state)
+    try state.edits.prepare_sets(engine.workers_of(&request))
     if let fault = try engine.run(&compiled.program, &request):
         var room: u8[1024]
         error(errors.invalid, fault_message(room, compiled, fault, mode, header, body))
