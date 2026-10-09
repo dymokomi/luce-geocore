@@ -1,10 +1,11 @@
 ## Stage 3 (reading geometry and a second input) and stage 4 (editing geometry from
 ## parallel code), with cases after common Houdini wrangle tutorials.
 import interop
+import memory
 import strings
 from luce_std import math, math32
 from luce_geocore import kernel as geocore_kernel
-from luce_geocore.geocore import Mesh, GeometrySet, MeshPrimitives, Vector3
+from luce_geocore.geocore import Mesh, GeometrySet, MeshPrimitives, Vector3, Matrix4, mesh_overlay_points
 import support
 
 func expect(condition: bool, what: str):
@@ -194,3 +195,40 @@ pub func collapsed_faces() -> !:
     let flat_normal = try flat.face_normal(0)
     expect(flat.face_count() == 1 and flat_normal.x == 0.0 and flat_normal.y == 0.0 and flat_normal.z == 0.0, "a new polygon on a line")
     print(f"ok    collapsed polygons cook: {zero} of {mesh.face_count()} faces without an area")
+
+## luced-3d's Sphere sits on the ground (y 0..2): averaging each point with its 8
+## nearest stays inside that box and pulls the equator in. The smoothed sphere has
+## collapsed faces (pole ring points with the same neighbors meet), and its face
+## guides still draw (a zero-length guide for a face without an area).
+pub func neighbor_average() -> !:
+    let ball = try GeometrySet.of_mesh(try MeshPrimitives.sphere(1.0, 32))
+    let before = try (try support.mesh_of(ball)).get()
+    # The pieces: a point's own position, and its nearest point at radius 0.
+    for body in ["p.Cd = k.input(0).point_P(p.ptnum) - p.P\n", "let near = k.input(0).nearpoints(p.P, 0.0, 1)\np.Cd = k.input(0).point_P(near.points[0]) - p.P\n"]:
+        let probe = try support.mesh_of(try support.run(ball, support.points_mode, body))
+        for at in 0..<before.point_count():
+            for c: i64 in 0..<3:
+                expect(try support.value(probe, "Cd", 0, at, c) == 0.0, "point_P and nearpoints name the point itself")
+    let smoothed = try support.mesh_of(try support.run(ball, support.points_mode, "let g = k.input(0)\nlet near = g.nearpoints(p.P, 0.3, 8)\nvar sum: f32[4] = [0.0, 0.0, 0.0, 0.0]\nfor i in 0..<near.count:\n    sum = sum + g.point_P(near.points[i])\np.P = sum * (1.0 / (f32)near.count)\n"))
+    let after = try smoothed.get()
+    let box = after.bounds()
+    expect(box.minimum.y >= 0.0 and box.maximum.y <= 2.0 and box.minimum.x >= -1.0 and box.maximum.x <= 1.0, "averages stay inside the input's box")
+    var equator: i64 = -1
+    for at in 0..<before.point_count():
+        let o = try before.point(at)
+        if equator < 0 and math.abs(o.y - 1.0) < 0.01 and o.x > 0.99: equator = at
+    expect(equator >= 0 and (try after.point(equator)).x < (try before.point(equator)).x - 0.001, "an equator point moves inward")
+    let guides = try mesh_overlay_points(after, Matrix4(), true)
+    defer free(guides) in memory.heap
+    expect(guides.length == (usize)after.face_count() * 2, "a guide per face, collapsed ones included")
+    print(f"ok    nearpoints averaging stays inside the input (y {box.minimum.y}..{box.maximum.y}), guides draw")
+
+## An array read with an element-dependent index inside an element-dependent loop.
+pub func varying_gathers() -> !:
+    let set = try support.grid_set(4)
+    let mesh = try support.mesh_of(try support.run(set, support.points_mode, "var picks: i32[16]\nfor j in 0..<16:\n    picks[j] = (i32)j * 10 + p.ptnum\nvar total: i32 = 0\nfor i in 0..<p.ptnum % 5:\n    total += picks[(i + p.ptnum) % 16]\np.Cd = [(f32)total, 0.0, 0.0, 0.0]\n"))
+    for at: i64 in 0..<25:
+        var total: i64 = 0
+        for i in 0..<at % 5: total += ((i + at) % 16) * 10 + at
+        expect(try support.value(mesh, "Cd", 0, at) == (f64)total, "a varying index in a varying loop")
+    print("ok    gathers with element-dependent indices and bounds")
