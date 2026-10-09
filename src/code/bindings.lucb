@@ -73,6 +73,7 @@ func make_host(mode: RunOver, layout: const Layout*?) -> Host!:
     try bind_texts(&host)
     try bind_text_sets(&host)
     try bind_arrays(&host)
+    try bind_array_attributes(&host)
     if let given = layout:
         host.missing_reads_zero()
         for column in given.columns.view():

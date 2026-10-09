@@ -1,5 +1,6 @@
 ## luce-geocore's Code node checks (`luc test` runs them); `--bench` times whole cooks
 ## over 1M points instead (tests/code/bench.py).
+import array_attributes
 import bench
 import checks
 import stages
@@ -34,4 +35,5 @@ pub func main(arguments: str[]) -> i32!:
     try stages.arrays()
     try stages.array_median()
     try stages.text_groups()
+    try array_attributes.run_all()
     return 0

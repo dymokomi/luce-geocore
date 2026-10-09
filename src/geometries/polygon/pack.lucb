@@ -23,6 +23,7 @@ extend Mesh:
     ## for the positions and smooth normals: a Move's neighborhood.
     pub func attribute_changed(index: i64) -> (usize, usize)!:
         let entry = try self.attribute_entry(index)
+        if entry.storage == Storage.ragged: return (0, entry.elements)
         let bytes = entry.data.changed()
         let tuple = entry.tuple_bytes()
         return (bytes.0 // tuple, (bytes.1 + tuple - 1) // tuple)
@@ -42,7 +43,7 @@ extend Mesh:
     ## Tuples first..<end of a width-3 float attribute as f32 triples.
     pub func pack_attribute3_range(index: i64, first: usize, end: usize, out: f32[]) -> !:
         let entry = try self.attribute_entry(index)
-        if entry.width != 3 or (entry.kind != DataType.float32 and entry.kind != DataType.float64) or (u8)entry.storage == 1: error(errors.invalid, "range packing needs a float attribute of three components")
+        if entry.width != 3 or (entry.kind != DataType.float32 and entry.kind != DataType.float64) or entry.storage != Storage.array: error(errors.invalid, "range packing needs a float attribute of three components")
         if end > entry.elements or first > end or out.length != (end - first) * 3: error(errors.invalid, "attribute range leaves the mesh")
         let bytes = entry.data.view()
         if entry.kind == DataType.float32:

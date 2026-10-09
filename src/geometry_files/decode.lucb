@@ -108,6 +108,7 @@ pub struct GeometryReader:
         defer kind.close()
         var width: i64 = 1
         var single: i64 = 0
+        var ragged: i64 = 0
         var flags: i64 = 0
         var role: i64 = 0
         var elements: i64 = 0
@@ -115,6 +116,8 @@ pub struct GeometryReader:
         defer table.release()
         var data: Column[u8]
         defer data.release()
+        var offsets: Column[u8]
+        defer offsets.release()
         while let header = try self.next_property():
             let label = header.name
             if label == "name": try self.text(header, &name)
@@ -122,6 +125,10 @@ pub struct GeometryReader:
             elif label == "type": try self.text(header, &kind)
             elif label == "width": width = try self.integer(header)
             elif label == "single": single = try self.integer(header)
+            elif label == "ragged": ragged = try self.integer(header)
+            elif label == "offsets" or label == "offsets_chunks":
+                offsets.release()
+                offsets = try self.column[u8](header)
             elif label == "flags": flags = try self.integer(header)
             elif label == "role": role = try self.integer(header)
             elif label == "elements": elements = try self.integer(header)
@@ -132,6 +139,10 @@ pub struct GeometryReader:
                 data.release()
                 data = try self.column[u8](header)
         let data_type = try type_of((str)kind.view())
+        if ragged != 0:
+            var array = try Attribute.ragged((str)name.view(), try domain_of((str)domain.view()), data_type, (usize)width, offsets.take(), data.take())
+            array.flags = (u8)flags
+            return array
         let storage = Storage.single if single != 0 else Storage.array
         var attribute = try Attribute.create((str)name.view(), try domain_of((str)domain.view()), data_type, (usize)width, (usize)elements, storage)
         errdefer attribute.release()

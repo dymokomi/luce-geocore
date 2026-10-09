@@ -55,6 +55,9 @@ struct Edits:
     ## Text sets, a queue and a pool of copied texts per worker.
     var text_sets: collections.List[collections.List[TextSet]]
     var text_pools: collections.List[collections.TextPool]
+    ## Array sets, a queue and a buffer of copied items per worker.
+    var array_sets: collections.List[collections.List[ArraySet]]
+    var array_items: collections.List[Growing[u8]]
     ## Adds so far per lane (lanes of the run), and the input's counts.
     var point_counts: u16[]
     var prim_counts: u16[]
@@ -78,6 +81,10 @@ struct Edits:
         self.text_sets.destroy()
         for at in 0..<self.text_pools.length(): self.text_pools.items()[at].destroy()
         self.text_pools.destroy()
+        for at in 0..<self.array_sets.length(): self.array_sets.items()[at].destroy()
+        self.array_sets.destroy()
+        for at in 0..<self.array_items.length(): self.array_items.items()[at].close()
+        self.array_items.destroy()
         if self.set_calls.length > 0: free(self.set_calls) in memory.heap
         if self.point_counts.length > 0: free(self.point_counts) in memory.heap
         if self.prim_counts.length > 0: free(self.prim_counts) in memory.heap
@@ -92,6 +99,7 @@ struct Edits:
         var count: usize = 0
         for queue in self.sets.view(): count += queue.length()
         for queue in self.text_sets.view(): count += queue.length()
+        for queue in self.array_sets.view(): count += queue.length()
         return count
 
     ## One empty set queue per worker of the run.
@@ -100,6 +108,8 @@ struct Edits:
             try self.sets.append(collections.List[AttributeSet]())
             try self.text_sets.append(collections.List[TextSet]())
             try self.text_pools.append(collections.TextPool())
+            try self.array_sets.append(collections.List[ArraySet]())
+            try self.array_items.append(Growing[u8]())
         self.set_calls = try new u64[workers] in memory.heap
 
     ## The run's lanes and the input's counts, before the run.

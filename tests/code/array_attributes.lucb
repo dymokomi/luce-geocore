@@ -1,0 +1,120 @@
+## Array attributes (Houdini's f[]@, i[]@, v[]@): written and read by Code on every
+## element type, carried through the verb families and the geometry file, shown as text,
+## and the 64-item read cap.
+import interop
+import strings
+from io import path
+from luce_std import math
+from luce_geocore.geocore import Code, Verbs, GeometryFile, Mesh, GeometrySet, MeshPrimitives
+import support
+
+func expect(condition: bool, what: str):
+    if not condition:
+        print(f"FAIL  {what}")
+        trap("array attribute checks")
+
+pub func run_all() -> !:
+    try neighbor_lists()
+    try every_domain()
+    try through_verbs()
+    try cap_and_text()
+
+## Houdini's classic idiom: i[]@nbrs = neighbours(0, @ptnum), then a downstream average.
+func neighbor_lists() -> !:
+    let grid = try support.grid_set(8)
+    let listed = try support.run(grid, support.points_mode, "let g = k.input(0)\nvar nbrs = k.ints()\nfor i in 0..<g.neighbor_count(p.ptnum):\n    nbrs = nbrs.append(g.neighbor(p.ptnum, i))\np.set_i32_array(\"nbrs\", nbrs)\n")
+    let averaged = try support.mesh_of(try support.run(listed, support.points_mode, "let n = p.i32_array(\"nbrs\")\nvar sum: f32[4] = [0.0, 0.0, 0.0, 0.0]\nfor i in 0..<n.len():\n    sum = sum + k.input(0).point_P(n.at(i))\np.P = sum * (1.0 / (f32)n.len())\np.set_f32(\"first\", (f32)k.input(0).point_i32_array(0, \"nbrs\").len())\n"))
+    let direct = try support.mesh_of(try support.run(grid, support.points_mode, "let g = k.input(0)\nvar sum: f32[4] = [0.0, 0.0, 0.0, 0.0]\nfor i in 0..<g.neighbor_count(p.ptnum):\n    sum = sum + g.point_P(g.neighbor(p.ptnum, i))\np.P = sum * (1.0 / (f32)g.neighbor_count(p.ptnum))\n"))
+    let a = try averaged.get()
+    let b = try direct.get()
+    for at: i64 in 0..<a.point_count():
+        let pa = try a.point(at)
+        let pb = try b.point(at)
+        expect(pa.x == pb.x and pa.y == pb.y and pa.z == pb.z, "the stored neighbor lists average as the neighbors do")
+        expect(try support.value(averaged, "first", 0, at) == 2.0, "point_i32_array reads another point's list")
+    let mesh = try (try support.mesh_of(listed)).get()
+    let index = mesh.find_attribute("nbrs", 0)
+    expect(try mesh.attribute_is_array(index) and try mesh.attribute_item_count(index, 10) == 4, "an i32 array attribute on the points")
+    print("ok    array attributes: neighbor lists stored and averaged downstream")
+
+## Primitive and vertex arrays, float and vector items.
+func every_domain() -> !:
+    let grid = try support.grid_set(4)
+    let prims = try support.run(grid, support.primitives_mode, "var a = k.floats()\nfor i in 0..<f.primnum % 3 + 1:\n    a = a.append((f32)(f.primnum * 10 + i))\nf.set_f32_array(\"tags\", a)\n")
+    let verts = try support.run(prims, support.vertices_mode, "v.set_vec3_array(\"pair\", k.vectors().append([(f32)v.vtxnum, 1.0, 2.0, 0.0]).append([0.0, 0.0, (f32)v.vtxnum, 0.0]))\n")
+    let read = try support.mesh_of(try support.run(verts, support.primitives_mode, "let a = f.f32_array(\"tags\")\nf.set_f32(\"n\", (f32)a.len() + a.at(a.len() - 1) * 100.0)\nf.set_f32(\"v\", k.input(0).vertex_vec3_array(f.primnum * 4, \"pair\").at(1)[2])\n"))
+    for face: i64 in 0..<16:
+        let count = face % 3 + 1
+        expect(try support.value(read, "n", 2, face) == (f64)count + (f64)(face * 10 + count - 1) * 100.0, "primitive float arrays")
+        expect(try support.value(read, "v", 2, face) == (f64)(face * 4), "vertex vector arrays")
+    print("ok    array attributes: primitives and vertices, floats and vectors")
+
+## [ptnum, 2 ptnum] on every point and the same by primitive: each verb family keeps
+## arrays whole (a copied element its parent's, an interpolated one its heaviest
+## parent's), the file keeps them, Merge joins them, Promote concatenates them.
+func through_verbs() -> !:
+    let grid = try support.grid_set(4)
+    let tagged = try support.run(grid, support.points_mode, "p.set_i32_array(\"own\", k.ints().append(p.ptnum).append(p.ptnum * 2))\n")
+    let mesh = try support.mesh_of(tagged)
+    try expect_whole(mesh, "the Code output")
+    # The geometry file.
+    var room: u8[512]
+    let file = try strings.format(room, f"{path.temp()}/luce-geocore-arrays.lucg")
+    _ = try GeometryFile.save(tagged, file)
+    let loaded = try GeometryFile.load(file)
+    let back = try support.mesh_of(loaded)
+    for at: i64 in 0..<(try mesh.get()).point_count():
+        let index = (try mesh.get()).find_attribute("own", 0)
+        let again = (try back.get()).find_attribute("own", 0)
+        expect((try (try mesh.get()).attribute_array_text(index, at)).value == (try (try back.get()).attribute_array_text(again, at)).value, "the geometry file keeps arrays")
+    # Verb families: subset, extrusion and subdivision.
+    for (verb, group) in [("Delete", "0-3"), ("PolyExtrude", "5"), ("Subdivide", "")]:
+        let result = try Verbs.run(verb, mesh, group, 0, support.no_values())
+        try expect_whole(try (try result.get()).mesh(), verb)
+    # Merge joins the two inputs' arrays in turn.
+    let merged = try (try tagged.get()).merged(tagged)
+    let both = try support.mesh_of(merged)
+    try expect_whole(both, "Merge")
+    expect((try both.get()).point_count() == 50, "Merge keeps every point")
+    # Promote joins each face's points' arrays.
+    let faces = try (try mesh.get()).promoted_attribute("own", 0, 2)
+    let promoted = try faces.get()
+    let index = promoted.find_attribute("own", 2)
+    for face: i64 in 0..<promoted.face_count():
+        expect(try promoted.attribute_item_count(index, face) == 2 * (try promoted.face_size(face)), "Promote joins the points' arrays")
+    print("ok    array attributes: Code output, geometry file, Delete, PolyExtrude, Subdivide, Merge, Promote")
+
+## Every point's array is [n, 2n] for the point n it came from, which sits where it did.
+func expect_whole(mesh: interop.Reference[Mesh], what: str) -> !:
+    let m = try mesh.get()
+    let index = m.find_attribute("own", 0)
+    expect(index >= 0 and try m.attribute_is_array(index), what)
+    for at: i64 in 0..<m.point_count():
+        expect(try m.attribute_item_count(index, at) == 2, what)
+        let n = try m.attribute_item(index, at, 0)
+        expect(try m.attribute_item(index, at, 1) == 2.0 * n, what)
+
+## A stored array longer than 64 items faults when read, naming the element; the
+## spreadsheet's text form.
+func cap_and_text() -> !:
+    let grid = try support.grid_set(2)
+    let m = try (try support.mesh_of(grid)).get()
+    let counts: i64[9] = [1, 0, 70, 2, 1, 1, 1, 1, 1]
+    var values: f64[78]
+    for at in 0..<78: values[at] = (f64)at
+    let big = try m.with_array_attribute("big", 0, false, 1, counts[..<9], values[..<78])
+    let set = try GeometrySet.of_mesh(big)
+    var room: u8[512]
+    var message = ""
+    _ = Code.cook(set, support.points_mode, "", "p.set_f32(\"n\", (f32)p.f32_array(\"big\").len())\n", "", 0, support.no_names(), support.no_values(), 1.0, 0.0, 24.0, 0) catch refusal:
+        message = strings.format(room, f"{refusal.message}") else ""
+        recover try Code.cook(set, support.points_mode, "", "", "", 0, support.no_names(), support.no_values(), 1.0, 0.0, 24.0, 0)
+    expect(strings.ends_with(message, "the array attribute holds more than 64 items (point 2)"), "reads past 64 items fault, naming the element")
+    let b = try big.get()
+    let index = b.find_attribute("big", 0)
+    expect((try b.attribute_array_text(index, 3)).value == "[71.0, 72.0]" and (try b.attribute_array_text(index, 1)).value == "[]", "the spreadsheet's text form")
+    let face_counts: i64[4] = [2, 0, 0, 0]
+    let items: f64[6] = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    let vectors = try (try b.with_array_attribute("v", 2, true, 3, face_counts[..<4], items[..<6])).get()
+    expect((try vectors.attribute_array_text(vectors.find_attribute("v", 2), 0)).value == "[(1, 2, 3), (4, 5, 6)]", "vectors as text")
+    print("ok    array attributes: the 64-item read cap, the spreadsheet text")

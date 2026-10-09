@@ -49,6 +49,9 @@ struct Numbering:
 
 ## The mesh `edits` make of `source` (none: no input mesh).
 func applied(source: const Mesh*?, edits: Edits*) -> Mesh*!:
+    if let old = source:
+        if edits.point_adds.length() + edits.prim_adds.length() + edits.removals.length() == 0 and not edits.masked.load(.acquire):
+            return try with_sets(old, edits)
     sort.stable(edits.point_adds.items(), point_before)
     sort.stable(edits.prim_adds.items(), prim_before)
     var old_points: usize = 0
@@ -172,6 +175,37 @@ func applied(source: const Mesh*?, edits: Edits*) -> Mesh*!:
         try transfer_attributes(old, made, point_parents, face_parents, corner_parents, true)
     try apply_sets(made, edits, &numbering, point_map, prim_map)
     try apply_text_sets(made, edits, &numbering, point_map, prim_map)
+    if edits.array_sets.length() > 0:
+        # The new corner of each old corner (-1: gone), for vertex array writes.
+        let old_corners_count = old_corners.length
+        let corner_map = i64_view(try scratch.bytes(old_corners_count * 8))
+        for at in 0..<old_corners_count: corner_map[at] = -1
+        for (at, parent) in corner_parents.indexed():
+            if parent >= 0: corner_map[(usize)parent] = (i64)at
+        try apply_array_sets(made, edits, &numbering, point_map, prim_map, corner_map)
+    return made
+
+## Only attribute sets: the input's columns shared, the sets put on them with every
+## element keeping its number (a full rebuild costs tens of ms on 1M points).
+func with_sets(source: const Mesh*, edits: const Edits*) -> Mesh*!:
+    let made = try mesh_share(source)
+    errdefer mesh_dispose(made)
+    let points = (usize)source.point_count()
+    let prims = (usize)source.face_count()
+    let corners = source.corner_span().length
+    let numbering = Numbering(old_points = points, old_prims = prims, point_adds = edits.point_adds.view(), prim_adds = edits.prim_adds.view())
+    var scratch = Scratch()
+    defer scratch.close()
+    let point_map = i64_view(try scratch.bytes(points * 8))
+    for at in 0..<points: point_map[at] = (i64)at
+    let prim_map = i64_view(try scratch.bytes(prims * 8))
+    for at in 0..<prims: prim_map[at] = (i64)at
+    try apply_sets(made, edits, &numbering, point_map, prim_map)
+    try apply_text_sets(made, edits, &numbering, point_map, prim_map)
+    if edits.array_sets.length() > 0:
+        let corner_map = i64_view(try scratch.bytes(corners * 8))
+        for at in 0..<corners: corner_map[at] = (i64)at
+        try apply_array_sets(made, edits, &numbering, point_map, prim_map, corner_map)
     return made
 
 func prim_size(face: usize, old_prims: usize, offsets: const i32[], adds: const PrimAdd[]) -> usize:

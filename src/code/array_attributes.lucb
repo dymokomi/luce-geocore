@@ -1,0 +1,224 @@
+# Array attributes in snippets (Houdini's f[]@, i[]@ and v[]@): `p.f32_array("name")`,
+# `i32_array`, `vec3_array` on points, primitives and vertices read the running element's
+# array; `g.point_f32_array(i, "name")` (and the prim/vertex forms) read any element of
+# an input; `p.set_f32_array("name", a)` and `k.set_point_f32_array(i, "name", a)` (and
+# the prim forms) queue writes, applied after the run like the other sets: the
+# attribute becomes an array attribute of the written kind, keeping its old arrays where
+# nothing was written, and an element written twice takes the highest key (writes of
+# another item kind to the same name are dropped: the first write's kind wins). An
+# element whose stored array holds more than 64 items faults when read.
+
+## The message of a read past the array cap (static: a fault's message must outlast the run).
+let too_long: str = "the array attribute holds more than 64 items"
+
+## A read or write builtin: the item kind, the domain and whether it names its element.
+struct ArrayAccess:
+    let kind: i32
+    let domain: Domain
+    let explicit: bool
+
+let owners: str[3] = ["Point", "Prim", "Vertex"]
+let owner_domains: Domain[3] = [Domain.point, Domain.face, Domain.corner]
+let geometry_prefixes: str[3] = ["point", "prim", "vertex"]
+let item_names: str[3] = ["f32", "i32", "vec3"]
+
+## The builtins' contexts and names: [owner][kind] reads, explicit reads, writes,
+## explicit writes (vertices are not written by number).
+var array_access: ArrayAccess[36]
+let read_names: str[9] = ["point_f32_array_own", "point_i32_array_own", "point_vec3_array_own", "prim_f32_array_own", "prim_i32_array_own", "prim_vec3_array_own", "vertex_f32_array_own", "vertex_i32_array_own", "vertex_vec3_array_own"]
+let input_names: str[9] = ["point_f32_array", "point_i32_array", "point_vec3_array", "prim_f32_array", "prim_i32_array", "prim_vec3_array", "vertex_f32_array", "vertex_i32_array", "vertex_vec3_array"]
+let write_names: str[9] = ["set_point_f32_array_own", "set_point_i32_array_own", "set_point_vec3_array_own", "set_prim_f32_array_own", "set_prim_i32_array_own", "set_prim_vec3_array_own", "set_vertex_f32_array_own", "set_vertex_i32_array_own", "set_vertex_vec3_array_own"]
+let kernel_write_names: str[6] = ["set_point_f32_array", "set_point_i32_array", "set_point_vec3_array", "set_prim_f32_array", "set_prim_i32_array", "set_prim_vec3_array"]
+
+## Register the array attribute reads and writes.
+func bind_array_attributes(host: Host*) -> !:
+    for owner: usize in 0..<3:
+        for kind: usize in 0..<3:
+            let at = owner * 3 + kind
+            array_access[at] = ArrayAccess(kind = (i32)kind, domain = owner_domains[owner], explicit = false)
+            array_access[9 + at] = ArrayAccess(kind = (i32)kind, domain = owner_domains[owner], explicit = true)
+            array_access[18 + at] = ArrayAccess(kind = (i32)kind, domain = owner_domains[owner], explicit = false)
+            array_access[27 + at] = ArrayAccess(kind = (i32)kind, domain = owner_domains[owner], explicit = true)
+            var read_room: u8[24]
+            let read_member = try strings.format(read_room, f"{item_names[kind]}_array")
+            try host.builtin(owners[owner], read_member, engine.Builtin.of(read_names[at], no_kinds(), [Kind.i64], array_read_lanes, (void*)&array_access[at]))
+            try host.builtin("Geometry", input_names[at], engine.Builtin.of(input_names[at], [Kind.i64, Kind.i32], [Kind.i64], array_read_lanes, (void*)&array_access[9 + at]))
+            var write_room: u8[24]
+            let write_member = try strings.format(write_room, f"set_{item_names[kind]}_array")
+            try host.builtin(owners[owner], write_member, engine.Builtin.of(write_names[at], [Kind.i64], [Kind.i32], array_write_lanes, (void*)&array_access[18 + at]))
+            if owner < 2:
+                try host.builtin("Kernel", kernel_write_names[at], engine.Builtin.of(kernel_write_names[at], [Kind.i32, Kind.i64], [Kind.i32], array_write_lanes, (void*)&array_access[27 + at]))
+
+## The source and element count of a domain of `source`.
+func domain_count(source: const Source*, domain: Domain) -> usize:
+    let mesh = source.mesh else return 0
+    if domain == .point: return (usize)mesh.point_count()
+    if domain == .face: return (usize)mesh.face_count()
+    return mesh.corner_span().length
+
+## Read an element's array attribute into this site's array value.
+func array_read_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let access = *(const ArrayAccess*)context
+    let made = state.values.block(call, array_items * item_size(access.kind))
+    if made == none:
+        for lane in 0..<call.lanes: call.fail(lane)
+        return
+    let block = made else return
+    let name = call.text(0)
+    let out = call.i64_result(0)
+    let size = item_size(access.kind)
+    for lane in 0..<call.lanes:
+        out[lane] = 0
+        if not call.active(lane): continue
+        var source: Source* = &state.first
+        var element = call.first + lane
+        if access.explicit:
+            let named = source_or_fail(state, call, lane) else continue
+            source = named
+            let at = element_or_fail(call, lane, call.i32_argument(1)[lane], domain_count(source, access.domain)) else continue
+            element = at
+        block.lengths[lane] = 0
+        block.widths[lane] = (u8)access.kind
+        out[lane] = value_handle(call, call.first + lane)
+        let mesh = source.mesh else continue
+        let found = mesh.find_attribute(name, (i64)(u8)access.domain)
+        if found < 0: continue
+        let entry = mesh.attribute_entry(found) catch failure: continue
+        if entry.storage != Storage.ragged or element >= entry.elements: continue
+        let count = entry.item_count(element)
+        if count > array_items:
+            call.fail_with(lane, too_long)
+            continue
+        let target = block.lane_bytes(lane)
+        let lanes: usize = 3 if access.kind == item_vector else 1
+        for i in 0..<count:
+            for k in 0..<lanes:
+                let value = entry.item(element, i, k if k < entry.width else 0) if k < entry.width else 0.0
+                if access.kind == item_int:
+                    memory.write[i32]((void*)&target[i * size + k * 4], (i32)value)
+                else:
+                    memory.write[f32]((void*)&target[i * size + k * 4], (f32)value)
+        block.lengths[lane] = (u32)count
+
+## A queued array write: the element, the attribute, and its items (in the worker's
+## item buffer at `first`, `count` items of the kind).
+struct ArraySet:
+    let key: u64
+    let domain: Domain
+    let name: str
+    let kind: i32
+    let index: i64
+    let first: usize
+    let count: usize
+
+func array_write_lanes(call: engine.Call*):
+    let state = state_of(call) else return
+    let context = call.context else return
+    let access = *(const ArrayAccess*)context
+    let worker = call.worker_number()
+    if worker >= state.edits.array_sets.length():
+        for lane in 0..<call.lanes: call.fail(lane)
+        return
+    let order = state.edits.set_calls[worker]
+    state.edits.set_calls[worker] = order + 1
+    let queue = &state.edits.array_sets.items()[worker]
+    let items = &state.edits.array_items.items()[worker]
+    let handles = call.i64_argument(1 if access.explicit else 0)
+    let size = item_size(access.kind)
+    for lane in 0..<call.lanes:
+        call.i32_result(0)[lane] = 0
+        if not call.active(lane): continue
+        let index = (i64)call.i32_argument(0)[lane] if access.explicit else (i64)(call.first + lane)
+        let (bytes, count) = items_of(state, handles[lane])
+        let first = items.count
+        items.reserve(first + count * size) catch failure:
+            call.fail(lane)
+            continue
+        if count > 0: memory.copy(items.items[first..<first + count * size], bytes[..<count * size], count * size)
+        items.count = first + count * size
+        queue.append(ArraySet(key = key_of(call.first + lane, order), domain = access.domain, name = call.text(0), kind = access.kind, index = index, first = first, count = count)) catch failure: call.fail(lane)
+
+## Each array attribute the writes name, rebuilt on `mesh`.
+func apply_array_sets(mesh: Mesh*, edits: const Edits*, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[], corner_map: const i64[]) -> !:
+    var named: collections.List[ArraySet]
+    defer named.destroy()
+    for queue in edits.array_sets.view():
+        for set in queue.view():
+            var seen = false
+            for earlier in named.view():
+                if earlier.domain == set.domain and earlier.name == set.name:
+                    seen = true
+                    break
+            if not seen: try named.append(set)
+    for first in named.view():
+        try apply_named_arrays(mesh, edits, first, numbering, point_map, prim_map, corner_map)
+
+## The element a write lands on after the edits (-1: removed).
+func array_target(set: const ArraySet*, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[], corner_map: const i64[]) -> i64!:
+    if set.domain == .point:
+        let at = numbering.point(set.index) else error(errors.invalid, "an array set names a point that does not exist")
+        return point_map[at]
+    if set.domain == .face:
+        let at = numbering.prim(set.index) else error(errors.invalid, "an array set names a primitive that does not exist")
+        return prim_map[at]
+    if set.index < 0 or (usize)set.index >= corner_map.length: error(errors.invalid, "an array set names a vertex that does not exist")
+    return corner_map[(usize)set.index]
+
+func apply_named_arrays(mesh: Mesh*, edits: const Edits*, first: ArraySet, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[], corner_map: const i64[]) -> !:
+    let elements = try mesh.domain_size(first.domain)
+    let kind = DataType.int32 if first.kind == item_int else DataType.float32
+    let width: usize = 3 if first.kind == item_vector else 1
+    let item = width * 4
+    # The winning write per element (index + 1 into `winners`), by the highest key.
+    let keys = try new u64[elements] in memory.heap
+    defer free(keys) in memory.heap
+    let won_worker = try new u32[elements] --- in memory.heap
+    defer free(won_worker) in memory.heap
+    let won_set = try new u32[elements] --- in memory.heap
+    defer free(won_set) in memory.heap
+    for (worker, queue) in edits.array_sets.view().indexed():
+        for (at, set) in queue.view().indexed():
+            # Writes of another item kind to the same name lose to the first's kind.
+            if set.domain != first.domain or set.name != first.name or set.kind != first.kind: continue
+            let target = try array_target(&set, numbering, point_map, prim_map, corner_map)
+            if target < 0: continue
+            let slot = (usize)target
+            if set.key + 1 > keys[slot]:
+                keys[slot] = set.key + 1
+                won_worker[slot] = (u32)worker
+                won_set[slot] = (u32)at
+    # The old arrays stay where nothing was written, when they are of the same kind.
+    var old: const Attribute*? = none
+    let found = mesh.find_attribute(first.name, (i64)(u8)first.domain)
+    if found >= 0:
+        let entry = try mesh.attribute_entry(found)
+        if entry.storage == Storage.ragged and entry.kind == kind and entry.width == width and entry.elements == elements: old = entry
+    var offsets = try SharedColumn[u8].allocate((elements + 1) * 4)
+    errdefer offsets.release()
+    let ranges = u32[]((u32*)offsets.span().data, elements + 1)
+    var total: usize = 0
+    for at in 0..<elements:
+        ranges[at] = (u32)total
+        if keys[at] > 0:
+            total += edits.array_sets.view()[(usize)won_worker[at]].view()[(usize)won_set[at]].count
+        elif let kept = old:
+            total += kept.item_count(at)
+    ranges[elements] = (u32)total
+    var values = try SharedColumn[u8].allocate(total * item)
+    errdefer values.release()
+    let output = values.span()
+    for at in 0..<elements:
+        let to_item = (usize)ranges[at]
+        if keys[at] > 0:
+            let worker = (usize)won_worker[at]
+            let set = edits.array_sets.view()[worker].view()[(usize)won_set[at]]
+            let bytes = edits.array_items.view()[worker].view()
+            # A vector write into a vector attribute, or the same kind: copied as is.
+            memory.copy(output[to_item * item..<(to_item + set.count) * item], bytes[set.first..<set.first + set.count * item], set.count * item)
+        elif let kept = old:
+            let count = kept.item_count(at)
+            let from_item = kept.first_item(at)
+            memory.copy(output[to_item * item..<(to_item + count) * item], kept.data.view()[from_item * item..<(from_item + count) * item], count * item)
+    try put_attribute(mesh, try Attribute.ragged(first.name, first.domain, kind, width, offsets, values))

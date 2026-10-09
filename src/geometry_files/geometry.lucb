@@ -191,6 +191,10 @@ pub struct GeometryWriter:
             try self.crate.integer("role", (i64)(u8)entry.role)
             try self.crate.integer("elements", (i64)entry.elements)
             if entry.kind == DataType.text: try self.column_of("table", dtype_uint8, entry.table.count(), 1, &entry.table)
+            if entry.storage == Storage.ragged:
+                # An array attribute: its item ranges, then its items as the values.
+                try self.crate.integer("ragged", 1)
+                try self.column_of("offsets", dtype_int32, entry.offsets.count() // 4, 1, &entry.offsets)
             let data = entry.data.view()
             match entry.kind:
                 .boolean: try self.column_of("value", dtype_uint64, data.length // 8, 1, &entry.data)

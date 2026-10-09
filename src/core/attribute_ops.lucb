@@ -6,6 +6,7 @@ from luce_std import parallel
 import errors
 from core.attributes import Attribute, DataType, Domain, Storage, is_integer, scalar_bytes
 from core.strings import TableBuilder, table_count, table_text
+from core.shared import Column
 
 ## `source` over a new domain of `elements`, element i taking its value from
 ## element `parents[i]` (-1: zero, or "" for text). An empty map keeps the
@@ -19,6 +20,8 @@ pub func remapped(source: const Attribute*, parents: const i32[], elements: usiz
     if parents.length == 0 and elements == source.elements:
         return source.share()
     if parents.length != elements: error(errors.invalid, "an attribute parent map needs one parent per element")
+    if source.storage == Storage.ragged:
+        return try remapped_ragged(source, parents, elements)
     var result = try Attribute.create(source.name(), source.domain, source.kind, source.width, elements)
     errdefer result.release()
     result.flags = source.flags
@@ -41,6 +44,62 @@ pub func remapped(source: const Attribute*, parents: const i32[], elements: usiz
         var work = GatherWork(typed[u32](input), typed_mut[u32](output), words, parents, 0xFFFFFFFF if source.kind == DataType.text else 0)
         try parallel.for_each_range(elements, 65536, (void*)&work, gather_words)
     return result
+
+## An array attribute through a parent map: each element copies its parent's items
+## (an element without a parent gets an empty array).
+func remapped_ragged(source: const Attribute*, parents: const i32[], elements: usize) -> Attribute!:
+    var offsets = try Column[u8].allocate((elements + 1) * 4)
+    errdefer offsets.release()
+    let bounds = u32[]((u32*)offsets.span().data, elements + 1)
+    var total: u32 = 0
+    for at in 0..<elements:
+        bounds[at] = total
+        let parent = parents[at]
+        if parent >= 0: total += (u32)source.item_count((usize)parent)
+    bounds[elements] = total
+    let item = source.width * 4
+    var values = try Column[u8].allocate((usize)total * item)
+    errdefer values.release()
+    let output = values.span()
+    let input = source.data.view()
+    for at in 0..<elements:
+        let parent = parents[at]
+        if parent < 0: continue
+        let count = source.item_count((usize)parent)
+        let from_item = source.first_item((usize)parent)
+        memory.copy(output[(usize)bounds[at] * item..<((usize)bounds[at] + count) * item], input[from_item * item..<(from_item + count) * item], count * item)
+    return try Attribute.ragged(source.name(), source.domain, source.kind, source.width, offsets, values)
+
+## The array attribute of a concatenation: each piece's elements' arrays in turn, empty
+## arrays where a piece lacks it. Pieces must agree on item kind and width.
+func concatenated_ragged(first: const Attribute*, pieces: const Piece[]) -> Attribute!:
+    var elements: usize = 0
+    var items: usize = 0
+    for piece in pieces:
+        elements += piece.count
+        if let attribute = piece.attribute:
+            if attribute.storage != Storage.ragged or attribute.kind != first.kind or attribute.width != first.width:
+                error(errors.invalid, "Merge inputs have conflicting attribute schemas")
+            items += (usize)memory.read[u32]((void*)&attribute.offsets.view()[attribute.elements * 4])
+    var offsets = try Column[u8].allocate((elements + 1) * 4)
+    errdefer offsets.release()
+    let bounds = u32[]((u32*)offsets.span().data, elements + 1)
+    let item = first.width * 4
+    var values = try Column[u8].allocate(items * item)
+    errdefer values.release()
+    var element: usize = 0
+    var written: usize = 0
+    for piece in pieces:
+        for local in 0..<piece.count:
+            bounds[element] = (u32)written
+            if let attribute = piece.attribute:
+                let count = attribute.item_count(local)
+                let from_item = attribute.first_item(local)
+                memory.copy(values.span()[written * item..<(written + count) * item], attribute.data.view()[from_item * item..<(from_item + count) * item], count * item)
+                written += count
+            element += 1
+    bounds[elements] = (u32)written
+    return try Attribute.ragged(first.name(), first.domain, first.kind, first.width, offsets, values)
 
 struct GatherWork:
     let input: const u32[]
@@ -105,6 +164,8 @@ pub func concatenated(pieces: const Piece[]) -> Attribute!:
             model = attribute
             kind = attribute.kind
     let first = model else error(errors.invalid, "a concatenation needs the attribute on some input")
+    if first.storage == Storage.ragged:
+        return try concatenated_ragged(first, pieces)
     if first.domain == Domain.detail:
         return first.share()
     var total: usize = 0

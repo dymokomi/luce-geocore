@@ -65,10 +65,13 @@ pub func role_of(name: str) -> Role:
     if name == "id" or name == "class": return Role.index
     return Role.generic
 
-## An element per tuple (array), or one tuple for the whole domain (single).
+## An element per tuple (array), one tuple for the whole domain (single), or a list of
+## tuples per element (ragged: Houdini's array attributes, f[]@ i[]@ v[]@), its items
+## packed in `data` and each element's range in `offsets`.
 pub enum Storage as u8:
     array = 0
     single = 1
+    ragged = 2
 
 ## Bytes of one scalar of `kind`; 0 for packed booleans.
 pub func scalar_bytes(kind: DataType) -> usize:
@@ -110,6 +113,9 @@ pub struct Attribute:
     pub var role: Role = Role.generic
     ## The string table of a text attribute; empty otherwise.
     pub var table: Column[u8]
+    ## A ragged attribute's item ranges: element i's items are offsets[i]..<offsets[i + 1]
+    ## (u32 each, elements + 1 of them); empty otherwise.
+    pub var offsets: Column[u8]
 
     ## An attribute whose column the caller fills: `elements` tuples, or one
     ## tuple for single storage. Booleans need width 1.
@@ -117,6 +123,8 @@ pub struct Attribute:
         try check_name(name)
         if width < 1 or width > 4 or ((kind == DataType.boolean or kind == DataType.text) and width != 1):
             error(errors.invalid, "attribute tuples have 1..4 components; booleans and text have one")
+        if storage == Storage.ragged:
+            error(errors.invalid, "an array attribute is made by Attribute.ragged")
         let stored = 1 if storage == Storage.single else elements
         let bytes = (stored + 63) // 64 * 8 if kind == DataType.boolean else stored * width * scalar_bytes(kind)
         var label: u8[64]
@@ -185,6 +193,48 @@ pub struct Attribute:
             _: memory.copy(f64[]((f64*)stored.data, count), values[..<count], count)
         return attribute
 
+    ## A ragged (array) attribute over `elements` = offsets.count / 4 - 1 elements: f32 or
+    ## i32 items (`kind` float32 or int32), each of `width` 1 or 3 components (3: vectors),
+    ## `values` holding every element's items in order. Takes both columns' shares.
+    pub static func ragged(name: str, domain: Domain, kind: DataType, width: usize, offsets: Column[u8], values: Column[u8]) -> Attribute!:
+        try check_name(name)
+        if (kind != DataType.float32 and kind != DataType.int32) or (width != 1 and width != 3):
+            error(errors.invalid, "array attributes hold f32 or i32 items of 1 or 3 components")
+        let bounds = offsets.view()
+        if bounds.length < 4 or bounds.length % 4 != 0:
+            error(errors.invalid, "array attribute offsets need one more entry than elements")
+        let elements = bounds.length // 4 - 1
+        let last = (usize)memory.read[u32]((void*)&bounds[elements * 4])
+        if last * width * 4 != values.view().length:
+            error(errors.invalid, "array attribute values do not match their offsets")
+        var label: u8[64]
+        memory.copy(label[..<name.length], name.bytes, name.length)
+        var empty: Column[u8]
+        var attribute = Attribute(label, name.length, domain, kind, width, Storage.ragged, elements, values, 0, Role.generic, empty)
+        attribute.offsets = offsets
+        return attribute
+
+    ## Whether it is an array attribute (ragged storage).
+    pub func is_ragged() -> bool:
+        return self.storage == Storage.ragged
+
+    ## How many items element `element` of an array attribute has (0 otherwise).
+    pub func item_count(element: usize) -> usize:
+        if self.storage != Storage.ragged: return 0
+        let bounds = self.offsets.view()
+        return (usize)(memory.read[u32]((void*)&bounds[(element + 1) * 4]) - memory.read[u32]((void*)&bounds[element * 4]))
+
+    ## The first item of element `element` of an array attribute.
+    pub func first_item(element: usize) -> usize:
+        return (usize)memory.read[u32]((void*)&self.offsets.view()[element * 4])
+
+    ## Component `component` of item `index` of element `element` of an array attribute.
+    pub func item(element: usize, index: usize, component: usize) -> f64:
+        let at = (self.first_item(element) + index) * self.width + component
+        let bytes = self.data.view()
+        if self.kind == DataType.int32: return (f64)memory.read[i32]((void*)&bytes[at * 4])
+        return (f64)memory.read[f32]((void*)&bytes[at * 4])
+
     ## The attribute's name.
     pub func name() -> str:
         return (str)self.label[..<self.label_length]
@@ -206,6 +256,9 @@ pub struct Attribute:
     ## Component `component` of element `element`, as f64. Single storage
     ## answers its one tuple for every element.
     pub func number(element: usize, component: usize) -> f64:
+        # An array attribute answers its first item (0 for an empty array).
+        if self.storage == Storage.ragged:
+            return self.item(element, 0, component) if self.item_count(element) > 0 else 0.0
         let index = (0 if self.storage == Storage.single else element) * self.width + component
         let bytes = self.data.view()
         match self.kind:
@@ -225,6 +278,7 @@ pub struct Attribute:
         var copy = self
         copy.data = self.data.share()
         copy.table = self.table.share()
+        copy.offsets = self.offsets.share()
         return copy
 
     ## The same attribute under another name.
@@ -239,6 +293,7 @@ pub struct Attribute:
     pub func release():
         self.data.release()
         self.table.release()
+        self.offsets.release()
 
 ## i32 values of a column's bytes; columns are 64-byte aligned.
 func typed_mut_i32(bytes: u8[]) -> i32[]:
@@ -300,8 +355,13 @@ pub struct AttributeStore:
     ## After `writable`: only tuples first..<end of attribute `index` differ
     ## from the column it was written from.
     pub func set_changed(index: usize, first: usize, end: usize):
-        let tuple = self.entries.items[index].tuple_bytes()
-        self.entries.items[index].data.set_changed(first * tuple, end * tuple)
+        let entry = &self.entries.items[index]
+        if entry.storage == Storage.ragged:
+            # Item ranges do not follow element numbers: the whole column changed.
+            entry.data.set_changed(0, entry.data.bytes())
+            return
+        let tuple = entry.tuple_bytes()
+        entry.data.set_changed(first * tuple, end * tuple)
 
     ## Remove attribute `index`, releasing its share.
     pub func remove(index: usize):
@@ -330,6 +390,8 @@ pub struct AttributeStore:
         for index in 0..<self.entries.count:
             let entry = &self.entries.items[index]
             let domain = (usize)(u8)entry.domain
+            # Display reads these as one tuple per element: arrays never qualify.
+            if entry.storage == Storage.ragged: continue
             if entry.name() == "Cd": self.colors[domain] = (i64)index
             elif entry.name() == "uv": self.uvs[domain] = (i64)index
             elif entry.name() == "N": self.normals[domain] = (i64)index
@@ -337,7 +399,7 @@ pub struct AttributeStore:
     ## Bytes of every column, counting shared ones as if owned.
     pub func bytes() -> usize:
         var total: usize = 0
-        for entry in self.entries.view(): total += entry.data.bytes() + entry.table.bytes()
+        for entry in self.entries.view(): total += entry.data.bytes() + entry.table.bytes() + entry.offsets.bytes()
         return total
 
     ## Release every attribute.

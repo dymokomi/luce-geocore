@@ -107,6 +107,8 @@ extend Mesh:
         let entry = self.attributes.entry((usize)index)
         let count = (usize)(try self.domain_count(target))
         let source_count = (usize)(try self.domain_count(domain))
+        if entry.storage == Storage.ragged:
+            return try self.with_attribute_entry(try self.promoted_array(entry, domain, target, count, source_count))
         let width = entry.width
         let values = try new f64[count * width] --- in memory.heap
         defer free(values) in memory.heap
@@ -133,7 +135,116 @@ extend Mesh:
                         values[at * width + component] /= (f64)weights[at]
         return try self.with_attribute(name, target, (i64)width, values, entry.integer())
 
-    ## Construct topology and its imported corner data once, without rebuilding
+    ## An array attribute promoted from `domain` to `target`: each target element's array
+    ## is the arrays of the source elements that reach it, in source order, joined
+    ## (promoting to the detail joins them all; from the detail, every element copies it).
+    func promoted_array(entry: const Attribute*, domain: i64, target: i64, count: usize, source_count: usize) -> Attribute!:
+        let corners = self.corners.view()
+        let corner_faces = try self.corner_faces()
+        let contributions = count if domain == target or domain == 3 else (source_count if target == 3 else corners.length)
+        let item = entry.width * 4
+        # The contribution pairs (source, destination), then each destination's size.
+        let sources = try new u32[contributions] --- in memory.heap
+        defer free(sources) in memory.heap
+        let destinations = try new u32[contributions] --- in memory.heap
+        defer free(destinations) in memory.heap
+        var offsets = try Column[u8].allocate((count + 1) * 4)
+        errdefer offsets.release()
+        let bounds = u32[]((u32*)offsets.span().data, count + 1)
+        for at in 0..<count + 1: bounds[at] = 0
+        for at in 0..<contributions:
+            let source = at if domain == target or target == 3 else (0 if domain == 3 else ((usize)corners[at] if domain == 0 else ((usize)corner_faces[at] if domain == 2 else at)))
+            let destination = at if domain == target or domain == 3 else (0 if target == 3 else ((usize)corners[at] if target == 0 else ((usize)corner_faces[at] if target == 2 else at)))
+            sources[at] = (u32)source
+            destinations[at] = (u32)destination
+            bounds[destination + 1] += (u32)entry.item_count(source)
+        for at in 0..<count: bounds[at + 1] += bounds[at]
+        var values = try Column[u8].allocate((usize)bounds[count] * item)
+        errdefer values.release()
+        let filled = try new u32[count] in memory.heap
+        defer free(filled) in memory.heap
+        let output = values.span()
+        let input = entry.data.view()
+        for at in 0..<contributions:
+            let source = (usize)sources[at]
+            let destination = (usize)destinations[at]
+            let items = entry.item_count(source)
+            let from_item = entry.first_item(source)
+            let to_item = (usize)bounds[destination] + (usize)filled[destination]
+            memory.copy(output[to_item * item..<(to_item + items) * item], input[from_item * item..<(from_item + items) * item], items * item)
+            filled[destination] += (u32)items
+        return try Attribute.ragged(entry.name(), Domain((u8)target), entry.kind, entry.width, offsets, values)
+
+    ## A snapshot with array attribute `name` on `domain`: element i has `counts[i]` items
+    ## of `width` (1, or 3 for vectors) components, `values` holding them all in order;
+    ## i32 items when `integer`, else f32.
+    pub func with_array_attribute(name: str, domain: i64, integer: bool, width: i64, counts: const i64[], values: const f64[]) -> interop.Reference[Mesh]!:
+        let elements = (usize)(try self.domain_count(domain))
+        if counts.length != elements: error(errors.invalid, "an array attribute needs one count per element")
+        if width != 1 and width != 3: error(errors.invalid, "array attribute items have 1 or 3 components")
+        var offsets = try Column[u8].allocate((elements + 1) * 4)
+        errdefer offsets.release()
+        let spans = u32[]((u32*)offsets.span().data, elements + 1)
+        var total: usize = 0
+        for at in 0..<elements:
+            if counts[at] < 0: error(errors.invalid, "an array attribute count is negative")
+            spans[at] = (u32)total
+            total += (usize)counts[at]
+        spans[elements] = (u32)total
+        if values.length != total * (usize)width: error(errors.invalid, "array attribute values do not match their counts")
+        var column = try Column[u8].allocate(values.length * 4)
+        errdefer column.release()
+        let bytes = column.span()
+        for (at, value) in values.indexed():
+            if integer: memory.write[i32]((void*)&bytes[at * 4], (i32)value)
+            else: memory.write[f32]((void*)&bytes[at * 4], (f32)value)
+        return try self.with_attribute_entry(try Attribute.ragged(name, Domain((u8)domain), DataType.int32 if integer else DataType.float32, (usize)width, offsets, column))
+
+    ## Whether attribute `index` is an array attribute (Houdini's f[]@, i[]@, v[]@).
+    pub func attribute_is_array(index: i64) -> bool!:
+        try checked(index, self.attributes.count())
+        return self.attributes.entry((usize)index).storage == Storage.ragged
+
+    ## How many items element `element` of array attribute `index` holds (0 for others).
+    pub func attribute_item_count(index: i64, element: i64) -> i64!:
+        try checked(index, self.attributes.count())
+        let entry = self.attributes.entry((usize)index)
+        try checked(element, (try self.domain_size(entry.domain)))
+        return (i64)entry.item_count((usize)element)
+
+    ## Component `component` of item `item` of element `element` of array attribute `index`.
+    pub func attribute_item(index: i64, element: i64, item: i64, component: i64 = 0) -> f64!:
+        try checked(index, self.attributes.count())
+        let entry = self.attributes.entry((usize)index)
+        try checked(element, (try self.domain_size(entry.domain)))
+        try checked(item, entry.item_count((usize)element))
+        try checked(component, entry.width)
+        return entry.item((usize)element, (usize)item, (usize)component)
+
+    ## Element `element` of array attribute `index` as text for a spreadsheet: "[1, 2, 3]",
+    ## vectors as "[(1, 0, 0.5), …]"; "" for an attribute that is not an array.
+    pub func attribute_array_text(index: i64, element: i64) -> interop.Owned[str]!:
+        try checked(index, self.attributes.count())
+        let entry = self.attributes.entry((usize)index)
+        try checked(element, (try self.domain_size(entry.domain)))
+        var text = Growing[u8]()
+        defer text.close()
+        if entry.storage == Storage.ragged:
+            try append_bytes(&text, "[")
+            for at in 0..<entry.item_count((usize)element):
+                if at > 0: try append_bytes(&text, ", ")
+                if entry.width > 1: try append_bytes(&text, "(")
+                for component in 0..<entry.width:
+                    if component > 0: try append_bytes(&text, ", ")
+                    let value = entry.item((usize)element, at, component)
+                    var room: u8[48]
+                    let shown = (strings.format(room, f"{(i64)value}") else "") if entry.kind == DataType.int32 else (strings.format(room, f"{(f32)value}") else "")
+                    try append_bytes(&text, shown)
+                if entry.width > 1: try append_bytes(&text, ")")
+            try append_bytes(&text, "]")
+        return try interop.copy_text((str)text.view())
+
+    ## Construct topology and its imported corner data once    ## Construct topology and its imported corner data once, without rebuilding
     ## triangulation, edge tables and BVH for each attribute. Empty spans omit it.
     pub static func from_corner_data(points: const Vector3[], sizes: const i64[], corners: const i64[], uv: const f64[], normals: const f64[]) -> interop.Reference[Mesh]!:
         if (uv.length != 0 and uv.length != corners.length * 2) or (normals.length != 0 and normals.length != corners.length * 3):
@@ -149,3 +260,6 @@ extend Mesh:
     pub func column_bytes() -> i64:
         let columns = self.positions.bytes() + self.offsets.bytes() + self.corners.bytes() + self.normals.bytes() + self.triangles.bytes() + self.precise.bytes()
         return (i64)(columns + self.attributes.bytes())
+
+func append_bytes(out: Growing[u8]*, text: str) -> !:
+    for byte in text.bytes: try out.push(byte)

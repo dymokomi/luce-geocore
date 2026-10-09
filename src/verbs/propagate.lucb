@@ -1,8 +1,8 @@
 ## Carrying attributes and groups through a verb, one column at a time: an
 ## element with one parent copies it; an interpolated element mixes its
-## weighted parents (floats average, normals renormalize, integers and text
-## take the heaviest parent, a group keeps the element only when every parent
-## with weight is a member); a new element is zero, empty, not a member.
+## weighted parents (floats average, normals renormalize, integers, text and
+## arrays take the heaviest parent, a group keeps the element only when every
+## parent with weight is a member); a new element is zero, empty, not a member.
 ## Edges continue old edges by corner adjacency (Mesh.edge_parents).
 
 pub func propagate(source: const Mesh*, output: Mesh*, point_parents: const i32[], face_parents: const i32[], corner_parents: const i32[], point_mix: const Mix*, corner_mix: const Mix*) -> !:
@@ -24,6 +24,16 @@ pub func propagate(source: const Mesh*, output: Mesh*, point_parents: const i32[
             edge_map = try edge_parents(source, output, representatives)
         try put_attribute(output, try carried(entry, point_parents, face_parents, corner_parents, edge_map, point_mix, corner_mix))
 
+## Mix entry `entry`'s heaviest parent (the first on ties), or -1 for an empty entry.
+func heaviest(mix: const Mix*, entry: usize) -> i32:
+    let first = (usize)mix.offsets.items[entry]
+    let end = (usize)mix.offsets.items[entry + 1]
+    if end == first: return -1
+    var best = first
+    for at in first..<end:
+        if mix.weights.items[at] > mix.weights.items[best]: best = at
+    return (i32)mix.parents.items[best]
+
 func carried(entry: const Attribute*, point_parents: const i32[], face_parents: const i32[], corner_parents: const i32[], edge_map: const i32[], point_mix: const Mix*, corner_mix: const Mix*) -> Attribute!:
     match entry.domain:
         .point: return try mixed(entry, point_parents, point_mix)
@@ -38,11 +48,13 @@ func mixed(source: const Attribute*, parents: const i32[], mix: const Mix*) -> A
     var direct = try new i32[parents.length] --- in memory.heap
     defer free(direct) in memory.heap
     var any = false
+    # An array attribute takes the heaviest parent's array whole (arrays do not average).
+    let whole = source.storage == Storage.ragged
     for at in 0..<parents.length:
-        direct[at] = parents[at] if parents[at] >= -1 else -1
+        direct[at] = parents[at] if parents[at] >= -1 else (heaviest(mix, (usize)(-2 - parents[at])) if whole else -1)
         any = any or parents[at] < -1
     var result = try attribute_ops.remapped(source, direct, parents.length)
-    if not any or source.storage == Storage.single: return result
+    if not any or source.storage == Storage.single or whole: return result
     errdefer result.release()
     let bytes = try result.data.writable()
     # Corners sharing one large mix (a subdivided n-gon's centers) name the

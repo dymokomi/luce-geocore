@@ -8,6 +8,27 @@ let stub_text: str = """## The geometry a Code node's snippet runs against (luce
 
 ## The point a snippet runs for (Run Over Points).
 pub struct Point:
+    ## This point's array attribute `name` (Houdini's f[]@, i[]@, v[]@), empty without
+    ## one; more than 64 items faults. Setting one queues a write applied after the run
+    ## (the attribute becomes an array attribute of that kind).
+    pub func f32_array(name: str) -> const FloatArray*:
+        _ = name
+        return (const FloatArray*)(void*)4096
+    pub func set_f32_array(name: str, value: const FloatArray*):
+        _ = name
+        _ = value
+    pub func i32_array(name: str) -> const IntArray*:
+        _ = name
+        return (const IntArray*)(void*)4096
+    pub func set_i32_array(name: str, value: const IntArray*):
+        _ = name
+        _ = value
+    pub func vec3_array(name: str) -> const VectorArray*:
+        _ = name
+        return (const VectorArray*)(void*)4096
+    pub func set_vec3_array(name: str, value: const VectorArray*):
+        _ = name
+        _ = value
     ## This point's text attribute `name` ("" without one), and setting it (applied
     ## after the run, as `k.set_point_text`).
     pub func text(name: str) -> const Text*:
@@ -91,6 +112,27 @@ pub struct Point:
 
 ## The primitive (face) a snippet runs for (Run Over Primitives).
 pub struct Prim:
+    ## This primitive's array attribute `name` (Houdini's f[]@, i[]@, v[]@), empty without
+    ## one; more than 64 items faults. Setting one queues a write applied after the run
+    ## (the attribute becomes an array attribute of that kind).
+    pub func f32_array(name: str) -> const FloatArray*:
+        _ = name
+        return (const FloatArray*)(void*)4096
+    pub func set_f32_array(name: str, value: const FloatArray*):
+        _ = name
+        _ = value
+    pub func i32_array(name: str) -> const IntArray*:
+        _ = name
+        return (const IntArray*)(void*)4096
+    pub func set_i32_array(name: str, value: const IntArray*):
+        _ = name
+        _ = value
+    pub func vec3_array(name: str) -> const VectorArray*:
+        _ = name
+        return (const VectorArray*)(void*)4096
+    pub func set_vec3_array(name: str, value: const VectorArray*):
+        _ = name
+        _ = value
     ## This primitive's text attribute `name` ("" without one), and setting it (applied
     ## after the run, as `k.set_prim_text`).
     pub func text(name: str) -> const Text*:
@@ -175,6 +217,27 @@ pub struct Prim:
 
 ## The vertex (a face's corner) a snippet runs for (Run Over Vertices).
 pub struct Vertex:
+    ## This vertex's array attribute `name` (Houdini's f[]@, i[]@, v[]@), empty without
+    ## one; more than 64 items faults. Setting one queues a write applied after the run
+    ## (the attribute becomes an array attribute of that kind).
+    pub func f32_array(name: str) -> const FloatArray*:
+        _ = name
+        return (const FloatArray*)(void*)4096
+    pub func set_f32_array(name: str, value: const FloatArray*):
+        _ = name
+        _ = value
+    pub func i32_array(name: str) -> const IntArray*:
+        _ = name
+        return (const IntArray*)(void*)4096
+    pub func set_i32_array(name: str, value: const IntArray*):
+        _ = name
+        _ = value
+    pub func vec3_array(name: str) -> const VectorArray*:
+        _ = name
+        return (const VectorArray*)(void*)4096
+    pub func set_vec3_array(name: str, value: const VectorArray*):
+        _ = name
+        _ = value
     ## Texture coordinates and normal on the vertex.
     pub var uv: f32[2]
     pub var N: f32[4]
@@ -788,6 +851,44 @@ pub struct Geometry:
         _ = index
         _ = name
         return (const Text*)(void*)4096
+    ## Array attribute `name` of point, primitive or vertex `index` (Houdini's
+    ## point(0, "name", i) of an array attribute), empty without one.
+    pub func point_f32_array(index: i32, name: str) -> const FloatArray*:
+        _ = index
+        _ = name
+        return (const FloatArray*)(void*)4096
+    pub func point_i32_array(index: i32, name: str) -> const IntArray*:
+        _ = index
+        _ = name
+        return (const IntArray*)(void*)4096
+    pub func point_vec3_array(index: i32, name: str) -> const VectorArray*:
+        _ = index
+        _ = name
+        return (const VectorArray*)(void*)4096
+    pub func prim_f32_array(index: i32, name: str) -> const FloatArray*:
+        _ = index
+        _ = name
+        return (const FloatArray*)(void*)4096
+    pub func prim_i32_array(index: i32, name: str) -> const IntArray*:
+        _ = index
+        _ = name
+        return (const IntArray*)(void*)4096
+    pub func prim_vec3_array(index: i32, name: str) -> const VectorArray*:
+        _ = index
+        _ = name
+        return (const VectorArray*)(void*)4096
+    pub func vertex_f32_array(index: i32, name: str) -> const FloatArray*:
+        _ = index
+        _ = name
+        return (const FloatArray*)(void*)4096
+    pub func vertex_i32_array(index: i32, name: str) -> const IntArray*:
+        _ = index
+        _ = name
+        return (const IntArray*)(void*)4096
+    pub func vertex_vec3_array(index: i32, name: str) -> const VectorArray*:
+        _ = index
+        _ = name
+        return (const VectorArray*)(void*)4096
     ## Open a point cloud (VEX `pcopen`): the nearest `max_count` points (up to 64) within
     ## `radius` of `position`, nearest first, read through the PointCloud's methods. A
     ## later open at the same place in the snippet (a loop) replaces this one's points.
@@ -915,6 +1016,32 @@ pub struct Kernel:
         _ = name
         _ = value
     pub func set_prim_text(index: i32, name: str, value: const Text*):
+        _ = index
+        _ = name
+        _ = value
+    ## Queue setting array attribute `name` of point or primitive `index` (a new one's
+    ## number too; Houdini's setpointattrib of an array).
+    pub func set_point_f32_array(index: i32, name: str, value: const FloatArray*):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_point_i32_array(index: i32, name: str, value: const IntArray*):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_point_vec3_array(index: i32, name: str, value: const VectorArray*):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_prim_f32_array(index: i32, name: str, value: const FloatArray*):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_prim_i32_array(index: i32, name: str, value: const IntArray*):
+        _ = index
+        _ = name
+        _ = value
+    pub func set_prim_vec3_array(index: i32, name: str, value: const VectorArray*):
         _ = index
         _ = name
         _ = value

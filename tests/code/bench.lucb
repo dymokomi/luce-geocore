@@ -56,6 +56,9 @@ func families() -> !:
     try time_cook("windingnumber against a 10,082-face sphere", grid, ball, support.points_mode, "p.Cd = [k.input(1).windingnumber(p.P + [0.0, 1.0, 0.0, 0.0]), 0.0, 0.0, 0.0]\n", 0, 0.0)
     try time_cook("remove_point of half of 1M", grid, none, support.points_mode, "if p.ptnum % 2 == 0: k.remove_point(p.ptnum)\n", 0, 20.0)
     try time_cook("set_point_f32 x 1M (scattered)", grid, none, support.points_mode, "k.set_point_f32((p.ptnum * 7) % 1000000, \"mass\", 1.0)\n", 0, 0.0)
+    let arrays = try support.run(grid, support.points_mode, "p.set_f32_array(\"w\", k.floats().append(1.0).append(2.0).append(3.0).append((f32)p.ptnum))\n")
+    try time_cook("set_f32_array, 4 items x 1M", grid, none, support.points_mode, "p.set_f32_array(\"w\", k.floats().append(1.0).append(2.0).append(3.0).append((f32)p.ptnum))\n", 0, 0.0)
+    try time_cook("f32_array, 4 items x 1M (summed)", arrays, none, support.points_mode, "let a = p.f32_array(\"w\")\nvar sum: f32 = 0.0\nfor i in 0..<a.len():\n    sum += a.at(i)\np.P[1] = sum * 0.001\n", 0, 0.0)
     try time_cook("add_point x 1M (Numbers)", try support.empty_set(), none, support.numbers_mode, "_ = k.add_point([(f32)n * 0.001, 0.0, 0.0, 0.0])\n", 1000000, 60.0)
 
 ## MeshPrimitives.grid at its largest: 2048 divisions, 4.2M points.
