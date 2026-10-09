@@ -1,0 +1,116 @@
+## A splat's covariance Σ = R S Sᵀ Rᵀ (R from `orient`, S = diag(`scale`)),
+## and back: a symmetric 3×3 eigensolver turns any covariance into an orient
+## and a scale, which is how non-uniform placements stay exact.
+
+## A symmetric matrix's eigenvectors (the columns of a proper rotation) and
+## its eigenvalues, in the columns' order, unsorted.
+pub struct Eigen:
+    pub let vectors: Mat3
+    pub let values: Vector3
+
+## The eigen decomposition of symmetric `matrix` (only its upper triangle is
+## read) by cyclic Jacobi rotations in f64: orthonormal vectors even for
+## repeated values, converged to rounding in at most a few sweeps.
+pub func symmetric_eigen(matrix: Mat3) -> Eigen:
+    var a = matrix.m
+    a[3] = a[1]
+    a[6] = a[2]
+    a[7] = a[5]
+    var v = Mat3.identity().m
+    let scale = math.abs(a[0]) + math.abs(a[4]) + math.abs(a[8]) + math.abs(a[1]) + math.abs(a[2]) + math.abs(a[5])
+    for _ in 0..<(usize)24:
+        let off = math.abs(a[1]) + math.abs(a[2]) + math.abs(a[5])
+        if not (off > scale * 1.0e-17): break
+        jacobi_turn(a, v, 0, 1)
+        jacobi_turn(a, v, 0, 2)
+        jacobi_turn(a, v, 1, 2)
+    var vectors = Mat3(v)
+    # A reflection of one axis makes the vectors a proper rotation.
+    if vectors.determinant() < 0.0:
+        for row in 0..<(usize)3: vectors.m[row * 3 + 2] = -vectors.m[row * 3 + 2]
+    return Eigen(vectors, Vector3(a[0], a[4], a[8]))
+
+## One Jacobi rotation zeroing a[p][q] (Numerical Recipes' form): a becomes
+## Jᵀ a J and v becomes v J.
+func jacobi_turn(a: f64[], v: f64[], p: usize, q: usize):
+    let apq = a[p * 3 + q]
+    if apq == 0.0: return
+    let theta = (a[q * 3 + q] - a[p * 3 + p]) / (2.0 * apq)
+    var t = 0.5 / theta
+    if math.abs(theta) < 1.0e150:
+        t = 1.0 / (math.abs(theta) + math.sqrt(theta * theta + 1.0))
+        if theta < 0.0: t = -t
+    let cosine = 1.0 / math.sqrt(t * t + 1.0)
+    let sine = t * cosine
+    for k in 0..<(usize)3:
+        let akp = a[k * 3 + p]
+        let akq = a[k * 3 + q]
+        a[k * 3 + p] = cosine * akp - sine * akq
+        a[k * 3 + q] = sine * akp + cosine * akq
+    for k in 0..<(usize)3:
+        let apk = a[p * 3 + k]
+        let aqk = a[q * 3 + k]
+        a[p * 3 + k] = cosine * apk - sine * aqk
+        a[q * 3 + k] = sine * apk + cosine * aqk
+    a[p * 3 + q] = 0.0
+    a[q * 3 + p] = 0.0
+    for k in 0..<(usize)3:
+        let vkp = v[k * 3 + p]
+        let vkq = v[k * 3 + q]
+        v[k * 3 + p] = cosine * vkp - sine * vkq
+        v[k * 3 + q] = sine * vkp + cosine * vkq
+
+## Σ = R diag(scale²) Rᵀ, R the rotation of `orient`.
+pub func compose_covariance(orient: Quat, scale: Vector3) -> Mat3:
+    let r = orient.matrix()
+    let squares = Vector3(scale.x * scale.x, scale.y * scale.y, scale.z * scale.z)
+    return r.multiply(Mat3.diagonal(squares)).multiply(r.transposed())
+
+## A splat's orient and scale.
+pub struct Ellipsoid:
+    pub let orient: Quat
+    pub let scale: Vector3
+
+## The orient and scale of covariance `sigma`: its eigenvectors and the square
+## roots of its eigenvalues (negative rounding is clamped to 0). The axes come
+## in no particular order, and each up to sign: compose_covariance gives the
+## same Σ back.
+pub func decompose_covariance(sigma: Mat3) -> Ellipsoid:
+    let eigen = symmetric_eigen(sigma)
+    let values = eigen.values
+    return Ellipsoid(Quat.of_matrix(eigen.vectors), Vector3(math.sqrt(math.max(values.x, 0.0)), math.sqrt(math.max(values.y, 0.0)), math.sqrt(math.max(values.z, 0.0))))
+
+## The rotation of a linear map with a nonnegative determinant: Q of its polar
+## decomposition L = Q P (P symmetric, positive semidefinite), the rotation
+## nearest to L. Axes L flattens are completed to a right-handed frame.
+pub func rotation_part(linear: Mat3) -> Mat3:
+    let eigen = symmetric_eigen(linear.transposed().multiply(linear))
+    let values = eigen.values
+    let largest = math.max(values.x, math.max(values.y, values.z))
+    if not (largest > 0.0): return Mat3.identity()
+    var columns: Vector3[3] = [Vector3(), Vector3(), Vector3()]
+    var kept: bool[3] = [false, false, false]
+    var count: usize = 0
+    for axis in 0..<(usize)3:
+        let value = values.coordinate(axis)
+        if not (value > largest * 1.0e-20): continue
+        columns[axis] = linear.transform(eigen.vectors.column(axis)).multiply_scalar(1.0 / math.sqrt(value))
+        kept[axis] = true
+        count += 1
+    if count == 1:
+        # Any axis perpendicular to the one kept, then the third by the right hand.
+        let single = 0 if kept[0] else (1 if kept[1] else 2)
+        let known = columns[single]
+        let helper = Vector3(1.0, 0.0, 0.0) if math.abs(known.x) < 0.9 else Vector3(0.0, 1.0, 0.0)
+        let next = (single + 1) % 3
+        columns[next] = unit_or(known.cross(helper), Vector3(0.0, 0.0, 1.0))
+        kept[next] = true
+        count = 2
+    if count == 2:
+        let missing = 0 if not kept[0] else (1 if not kept[1] else 2)
+        columns[missing] = unit_or(columns[(missing + 1) % 3].cross(columns[(missing + 2) % 3]), Vector3(0.0, 0.0, 1.0))
+    let u = Mat3.of_columns(columns[0], columns[1], columns[2])
+    return u.multiply(eigen.vectors.transposed())
+
+func unit_or(value: Vector3, fallback: Vector3) -> Vector3:
+    return value.normalized() catch failure: return fallback

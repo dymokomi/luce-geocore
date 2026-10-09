@@ -1,0 +1,223 @@
+## The splat math: SH evaluation against the 3DGS reference, the basis's
+## orthonormality, Wigner-D rotation and reflection per band, the
+## eigensolver, covariance round trips, polar rotations, and the
+## activations.
+from luce_std import math
+from luce_geocore.geocore import Vector3
+from luce_geocore.splats import Quat, Mat3, ShSamples, ShRotation, sh_basis, sh_color, sh_bands, invert_sh, symmetric_eigen, compose_covariance, decompose_covariance, rotation_part, sigmoid, logit, color_of_dc, file_dc, display_color, ColorSpace
+import draws
+
+pub func run() -> !:
+    reference_values()
+    orthonormal_basis()
+    rotation_invariance()
+    reflections()
+    eigen_decompositions()
+    covariance_round_trips()
+    polar_rotations()
+    activations()
+
+func near(a: f64, b: f64, tolerance: f64) -> bool:
+    return math.abs(a - b) <= tolerance
+
+func near_vector(a: Vector3, b: Vector3, tolerance: f64) -> bool:
+    return near(a.x, b.x, tolerance) and near(a.y, b.y, tolerance) and near(a.z, b.z, tolerance)
+
+## 45 fixed coefficients, exact in f32: item i, channel k at i * 3 + k.
+func fixed_coefficients(out: f32[]):
+    for index in 0..<(usize)45: out[index] = (f32)((f64)((i64)((index * 5) % 11) - 5) * 0.125)
+
+## eval_sh of graphdeco-inria/gaussian-splatting (utils/sh_utils.py, C0 =
+## 0.28209479177387814 …) plus 0.5, evaluated separately in f64 (NumPy) for
+## dc (0.3, -0.2, 0.1), these coefficients and the direction (0.3, -0.5, 0.8)
+## normalized, at degrees 0..3. The orthonormality check below holds the
+## constants themselves to the definition.
+func reference_values():
+    var coefficients: f32[45]
+    fixed_coefficients(coefficients)
+    let expected: Vector3[4] = [Vector3(0.58462843753216343, 0.44358104164522438, 0.52820947917738781),
+                                Vector3(0.32550782542866186, 0.69653211536530923, 0.54671809432763785),
+                                Vector3(0.64956807278627071, 0.8675620362164882, 0.84271843336944019),
+                                Vector3(0.73098170325066558, 0.40094012127743095, 1.0507131808525969)]
+    let counts: usize[4] = [0, 3, 8, 15]
+    for degree in 0..<(usize)4:
+        let color = sh_color(Vector3(0.3, -0.2, 0.1), coefficients, counts[degree], Vector3(0.3, -0.5, 0.8))
+        assert(near_vector(color, expected[degree], 1.0e-14), "SH evaluation matches the 3DGS reference")
+
+## ∫ Y_i Y_j over the sphere is δ_ij: a Fibonacci lattice of 40000 points.
+func orthonormal_basis():
+    let points: usize = 40000
+    var sums: f64[256]
+    var basis: f64[16]
+    for at in 0..<points:
+        let z = 1.0 - (2.0 * (f64)at + 1.0) / (f64)points
+        let radius = math.sqrt(1.0 - z * z)
+        let angle = 2.399963229728653 * (f64)at
+        sh_basis(Vector3(radius * math.cos(angle), radius * math.sin(angle), z), basis)
+        for i in 0..<(usize)16:
+            for j in 0..<(usize)16: sums[i * 16 + j] += basis[i] * basis[j]
+    let weight = 4.0 * 3.141592653589793 / (f64)points
+    for i in 0..<(usize)16:
+        for j in 0..<(usize)16:
+            assert(near(sums[i * 16 + j] * weight, 1.0 if i == j else 0.0, 0.001), "the SH basis is orthonormal")
+
+## Only band `band`'s items of the fixed coefficients (the rest zero).
+func band_only(band: usize, out: f32[]):
+    fixed_coefficients(out)
+    let first = band * band - 1
+    let end = first + 2 * band + 1
+    for item in 0..<(usize)15:
+        if item >= first and item < end: continue
+        for channel in 0..<(usize)3: out[item * 3 + channel] = 0.0
+
+## Evaluating rotated SH toward a rotated direction gives the original color,
+## band by band, for random rotations; and two rotations compose.
+func rotation_invariance():
+    let samples = ShSamples.make()
+    var state = draws.Draws(7)
+    var turned: f32[45]
+    var original: f32[45]
+    for band in 1..<(usize)4:
+        band_only(band, original)
+        for _ in 0..<(usize)25:
+            let q = state.rotation()
+            let rotation = ShRotation.of(&samples, q)
+            for index in 0..<(usize)45: turned[index] = original[index]
+            rotation.apply(turned, 15)
+            for _ in 0..<(usize)8:
+                let d = state.direction()
+                let before = sh_bands(original, 15, d)
+                let after = sh_bands(turned, 15, q.rotate(d))
+                assert(near_vector(before, after, 0.00002), "rotated SH evaluate the same toward rotated directions")
+    # Composition: turning by a, then b, is turning by b · a.
+    fixed_coefficients(original)
+    let a = state.rotation()
+    let b = state.rotation()
+    for index in 0..<(usize)45: turned[index] = original[index]
+    ShRotation.of(&samples, a).apply(turned, 15)
+    ShRotation.of(&samples, b).apply(turned, 15)
+    var once: f32[45]
+    for index in 0..<(usize)45: once[index] = original[index]
+    ShRotation.of(&samples, b.multiply(a)).apply(once, 15)
+    for index in 0..<(usize)45: assert(near((f64)turned[index], (f64)once[index], 0.00002), "SH rotations compose")
+
+## A mirror (an improper orthogonal matrix) is a rotation and the point
+## inversion: evaluating mirrored SH toward mirrored directions gives the
+## original color, per band.
+func reflections():
+    let samples = ShSamples.make()
+    var state = draws.Draws(11)
+    var mirrored: f32[45]
+    var original: f32[45]
+    for band in 1..<(usize)4:
+        band_only(band, original)
+        for trial in 0..<(usize)12:
+            # Across x = 0, then across random planes (I - 2nnᵀ), some also turned.
+            var mirror = Mat3.diagonal(Vector3(-1.0, 1.0, 1.0))
+            if trial > 0:
+                let n = state.direction()
+                mirror = Mat3([1.0 - 2.0 * n.x * n.x, -2.0 * n.x * n.y, -2.0 * n.x * n.z,
+                               -2.0 * n.y * n.x, 1.0 - 2.0 * n.y * n.y, -2.0 * n.y * n.z,
+                               -2.0 * n.z * n.x, -2.0 * n.z * n.y, 1.0 - 2.0 * n.z * n.z])
+            if trial > 6: mirror = state.rotation().matrix().multiply(mirror)
+            let transform = ShRotation.of_matrix(&samples, mirror)
+            for index in 0..<(usize)45: mirrored[index] = original[index]
+            transform.apply(mirrored, 15)
+            for _ in 0..<(usize)8:
+                let d = state.direction()
+                assert(near_vector(sh_bands(original, 15, d), sh_bands(mirrored, 15, mirror.transform(d)), 0.00002), "mirrored SH evaluate the same toward mirrored directions")
+    # The point inversion alone.
+    fixed_coefficients(original)
+    for index in 0..<(usize)45: mirrored[index] = original[index]
+    invert_sh(mirrored, 15)
+    let d = Vector3(0.2, 0.7, -0.4)
+    assert(near_vector(sh_bands(original, 15, d), sh_bands(mirrored, 15, Vector3(-0.2, -0.7, 0.4)), 1.0e-12), "inverted SH evaluate the same toward -d")
+
+func check_eigen(matrix: Mat3):
+    let eigen = symmetric_eigen(matrix)
+    let v = eigen.vectors
+    let rebuilt = v.multiply(Mat3.diagonal(eigen.values)).multiply(v.transposed())
+    var scale: f64 = 1.0
+    for index in 0..<(usize)9: scale = math.max(scale, math.abs(matrix.m[index]))
+    assert(rebuilt.distance(matrix) <= 1.0e-12 * scale, "V Λ Vᵀ rebuilds the matrix")
+    assert(v.transposed().multiply(v).distance(Mat3.identity()) <= 1.0e-13, "eigenvectors are orthonormal")
+    assert(near(v.determinant(), 1.0, 1.0e-13), "eigenvectors form a proper rotation")
+
+func eigen_decompositions():
+    var state = draws.Draws(3)
+    for _ in 0..<(usize)200:
+        let r = state.rotation().matrix()
+        let values = Vector3(state.between(-5.0, 5.0), state.between(-5.0, 5.0), state.between(-5.0, 5.0))
+        check_eigen(r.multiply(Mat3.diagonal(values)).multiply(r.transposed()))
+    # Repeated, zero, tiny and huge spectra.
+    let r = state.rotation().matrix()
+    check_eigen(r.multiply(Mat3.diagonal(Vector3(2.0, 2.0, 5.0))).multiply(r.transposed()))
+    check_eigen(r.multiply(Mat3.diagonal(Vector3(1.0e-9, 1.0e-9, 1.0e-9))).multiply(r.transposed()))
+    check_eigen(r.multiply(Mat3.diagonal(Vector3(1.0e6, 1.0e-6, 0.0))).multiply(r.transposed()))
+    check_eigen(Mat3.diagonal(Vector3(0.0, 0.0, 0.0)))
+    check_eigen(Mat3.diagonal(Vector3(3.0, 1.0, 2.0)))
+
+## decompose(compose(q, s)) gives the same covariance, the same scales in some
+## order, and the same axes up to sign.
+func covariance_round_trips():
+    var state = draws.Draws(5)
+    for _ in 0..<(usize)200:
+        let q = state.rotation()
+        let s = Vector3(state.between(0.001, 2.0), state.between(0.001, 2.0), state.between(0.001, 2.0))
+        let sigma = compose_covariance(q, s)
+        let back = decompose_covariance(sigma)
+        assert(compose_covariance(back.orient, back.scale).distance(sigma) <= 1.0e-12 * 4.0, "decompose(compose) keeps the covariance")
+        let axes = q.matrix()
+        let found = back.orient.matrix()
+        for axis in 0..<(usize)3:
+            # The axis of s's component `axis` is one of the decomposition's, with the same scale.
+            var matched = false
+            for other in 0..<(usize)3:
+                let alignment = math.abs(axes.column(axis).dot(found.column(other)))
+                if near(alignment, 1.0, 1.0e-6) and near(s.coordinate(axis), back.scale.coordinate(other), 1.0e-9): matched = true
+            assert(matched, "each axis comes back up to sign and order")
+    # A degenerate (flat) splat keeps its zero scale.
+    let flat = decompose_covariance(compose_covariance(Quat.identity(), Vector3(1.0, 0.0, 0.5)))
+    assert(near(flat.scale.x * flat.scale.y * flat.scale.z, 0.0, 1.0e-12) and near(flat.scale.x + flat.scale.y + flat.scale.z, 1.5, 1.0e-9), "a flat splat stays flat")
+
+func polar_rotations():
+    var state = draws.Draws(9)
+    for _ in 0..<(usize)50:
+        let r = state.rotation().matrix()
+        let s = state.rotation().matrix()
+        let stretch = s.multiply(Mat3.diagonal(Vector3(2.0, 3.0, 0.5))).multiply(s.transposed())
+        assert(rotation_part(r.multiply(stretch)).distance(r) <= 1.0e-10, "the polar rotation of R P is R")
+        assert(rotation_part(r.scaled(3.0)).distance(r) <= 1.0e-12, "the polar rotation of a similarity is its rotation")
+    let flat = rotation_part(Mat3.diagonal(Vector3(2.0, 1.0, 0.0)))
+    assert(flat.distance(Mat3.identity()) <= 1.0e-12, "a flattening keeps its frame")
+    let line = rotation_part(Mat3.diagonal(Vector3(0.0, 4.0, 0.0)))
+    assert(near(line.determinant(), 1.0, 1.0e-12) and near(line.at(1, 1), 1.0, 1.0e-12), "a projection onto a line completes to a rotation")
+    # Quaternions back from their matrices, up to sign.
+    for _ in 0..<(usize)50:
+        let q = state.rotation()
+        let back = Quat.of_matrix(q.matrix())
+        let dot = q.x * back.x + q.y * back.y + q.z * back.z + q.w * back.w
+        assert(near(math.abs(dot), 1.0, 1.0e-12), "a quaternion survives its matrix")
+
+func activations():
+    assert(near(sigmoid(0.0), 0.5, 0.0) and near(sigmoid(40.0), 1.0, 1.0e-15) and sigmoid(-800.0) >= 0.0, "sigmoid")
+    for at in 0..<(usize)41:
+        let x = -10.0 + 0.5 * (f64)at
+        assert(near(logit(sigmoid(x)), x, 1.0e-9), "logit inverts sigmoid")
+    assert(math.is_finite(logit(0.0)) and math.is_finite(logit(1.0)), "logit stays finite at 0 and 1")
+    # Cd from a file's DC term and back, both color spaces.
+    let dc = Vector3(0.3, -1.2, 2.5)
+    assert(near_vector(file_dc(color_of_dc(dc, ColorSpace.srgb), ColorSpace.srgb), dc, 1.0e-12), "linearized Cd gives the file's DC back")
+    assert(near_vector(file_dc(color_of_dc(dc, ColorSpace.linear), ColorSpace.linear), dc, 1.0e-12), "linear Cd gives the file's DC back")
+    # The display color of a linearized capture is the trained color, decoded.
+    var coefficients: f32[45]
+    fixed_coefficients(coefficients)
+    let d = Vector3(-0.4, 0.1, 0.9)
+    let trained = sh_color(dc, coefficients, 15, d)
+    let shown = display_color(color_of_dc(dc, ColorSpace.srgb), coefficients, 15, d, ColorSpace.srgb)
+    let expected = Vector3(srgb_decode(math.max(trained.x, 0.0)), srgb_decode(math.max(trained.y, 0.0)), srgb_decode(math.max(trained.z, 0.0)))
+    assert(near_vector(shown, expected, 1.0e-12), "the display color is the trained color, decoded")
+
+## IEC 61966-2-1's decoding, written out for the check.
+func srgb_decode(value: f64) -> f64:
+    return value / 12.92 if value <= 0.04045 else math.pow((value + 0.055) / 1.055, 2.4)

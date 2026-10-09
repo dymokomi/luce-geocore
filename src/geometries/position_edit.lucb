@@ -11,12 +11,13 @@ from luce_std import parallel
 from core.geometry import Bounds
 from core.float3 import Float3
 from core.shared import Column
-from core.attributes import AttributeStore, DataType
+from core.attributes import AttributeStore, DataType, Role, Storage
 from core.attribute_ops import typed_mut
 from math.vector import Vector3
 from math.matrix import Matrix4
 from geometries.triangulation.polygon_triangulation import triangulate, is_degenerate
 import geometries.triangulation.face_scratch
+from splats import LinearPart, turn_rotations
 
 ## Owned columns for the new mesh. `triangles` is empty when the previous
 ## triangles remain valid and are shared.
@@ -266,11 +267,18 @@ func retriangulate(shape: const Shape*, face: usize, normal: Vector3, triangles:
     let first = (start - face * 2) * 3
     for at in 0..<size: triangles[first + at] = (i32)((i64)start + output[at])
 
-## Shading normals follow an affine placement by the inverse transpose. The
-## N columns are written copy-on-write, so snapshots sharing them keep theirs.
+## Shading normals follow an affine placement by the inverse transpose, and
+## rotations (Role.rotation, such as `orient`) turn by its polar rotation.
+## The columns are written copy-on-write, so snapshots sharing them keep
+## theirs.
 pub func transform_normals(attributes: AttributeStore*, matrix: Matrix4) -> !:
     for index in 0..<attributes.count():
         let entry = attributes.entry(index)
+        if entry.width == 4 and entry.role == Role.rotation and entry.storage == Storage.array and (entry.kind == DataType.float32 or entry.kind == DataType.float64):
+            let kind = entry.kind
+            let tuples = entry.elements
+            turn_rotations(try attributes.writable(index), kind, tuples, LinearPart.of(matrix).rotation)
+            continue
         if entry.name() != "N" or entry.width != 3 or (entry.kind != DataType.float64 and entry.kind != DataType.float32):
             continue
         let wide = entry.kind == DataType.float64

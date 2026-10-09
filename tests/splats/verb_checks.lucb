@@ -1,0 +1,291 @@
+## Merging splat clouds pads SH degrees; Bake GSplats from PLY names (one
+## attribute per property, and vectors), Houdini names and plain points;
+## GSplats SH Degree; and a baked cloud through the .prism codec.
+import interop
+from luce_std import math
+from io import path
+import strings
+from luce_geocore.geocore import Vector3, GeometrySet
+from luce_geocore.kernel import AttributeStore, Domain, find_set_verb, run_set_verb, set_detail, save_geometry, load_geometry, adopt_set
+from luce_geocore.core.growing import Growing
+from luce_geocore.splats import Quat, sh_c0, sigmoid
+import clouds
+
+pub func run() -> !:
+    try merge_pads_degrees()
+    try bake_from_ply()
+    try bake_from_ply_vectors()
+    try bake_from_houdini()
+    try bake_points()
+    try sh_degree_node()
+
+func near(a: f64, b: f64, tolerance: f64) -> bool:
+    return math.abs(a - b) <= tolerance
+
+func srgb_decode(value: f64) -> f64:
+    return value / 12.92 if value <= 0.04045 else math.pow((value + 0.055) / 1.055, 2.4)
+
+## A set's `gsplat_color_space` text ("" without one).
+func color_space(set: const GeometrySet*) -> str:
+    let detail = set_detail(set)
+    let index = detail.find("gsplat_color_space", Domain.detail)
+    if index < 0: return ""
+    return detail.entry((usize)index).text_at(0)
+
+## A splat cloud of `count` points with `items` SH items each (item i,
+## channel k of point p is p + i / 16 + k / 64), and restorient if asked.
+func degree_cloud(count: usize, items: usize, rest: bool, x: f64) -> interop.Reference[GeometrySet]!:
+    var builder = clouds.CloudBuilder(count)
+    defer builder.close()
+    var orient: f64[16]
+    var scale: f64[12]
+    var opacity: f64[4]
+    var sh: f64[180]
+    var positions: Vector3[4] = ---
+    for p in 0..<count:
+        let q = Quat.about(Vector3(0.0, 1.0, 0.0), 0.3 * (f64)(p + 1))
+        orient[p * 4] = q.x
+        orient[p * 4 + 1] = q.y
+        orient[p * 4 + 2] = q.z
+        orient[p * 4 + 3] = q.w
+        for k in 0..<(usize)3: scale[p * 3 + k] = 0.1
+        opacity[p] = 0.5
+        for i in 0..<items:
+            for k in 0..<(usize)3: sh[(p * items + i) * 3 + k] = (f64)p + (f64)i / 16.0 + (f64)k / 64.0
+        positions[p] = Vector3(x, (f64)p, 0.0)
+    try builder.floats("orient", 4, orient[..<count * 4])
+    if rest: try builder.floats("restorient", 4, orient[..<count * 4])
+    try builder.floats("scale", 3, scale[..<count * 3])
+    try builder.floats("opacity", 1, opacity[..<count])
+    if items > 0: try builder.array("sh", 3, items, sh[..<count * items * 3])
+    return try builder.finish(positions[..<count])
+
+## Merge: degree 1 (2 points) with degree 3 and restorient (3 points) gives
+## 15 items everywhere, the lower degree padded with zeros, and restorient on
+## the first cloud's points equal to their orient.
+func merge_pads_degrees() -> !:
+    let low = try degree_cloud(2, 3, false, 0.0)
+    defer low.release()
+    let high = try degree_cloud(3, 15, true, 5.0)
+    defer high.release()
+    let merged = try low.value().merged(high)
+    defer merged.release()
+    let store = clouds.points_of(merged.value())
+    var sh: f32[45]
+    for p in 0..<(usize)5:
+        assert(clouds.sh_of(store, p, sh) == 15, "every merged point has degree 3")
+        let local = p if p < 2 else p - 2
+        for i in 0..<(usize)15:
+            for k in 0..<(usize)3:
+                let kept = p >= 2 or i < 3
+                let expected = (f64)local + (f64)i / 16.0 + (f64)k / 64.0 if kept else 0.0
+                assert(near((f64)sh[i * 3 + k], expected, 1.0e-6), "merged SH keep their items and pad with zero bands")
+        let o = clouds.quat_of(store, "orient", p)
+        let r = clouds.quat_of(store, "restorient", p)
+        assert(near(o.x, r.x, 1.0e-7) and near(o.y, r.y, 1.0e-7) and near(o.w, r.w, 1.0e-7), "a cloud without restorient joins with its orient as one")
+    # Merging the other way round, and with plain points, pads too.
+    let reversed = try high.value().merged(low)
+    defer reversed.release()
+    assert(clouds.sh_of(clouds.points_of(reversed.value()), 4, sh) == 15, "the lower degree pads when it comes second")
+    var plain = clouds.CloudBuilder(1)
+    defer plain.close()
+    try plain.floats("pscale", 1, [0.2])
+    let positions: Vector3[1] = [Vector3(9.0, 9.0, 9.0)]
+    let dots = try plain.finish(positions)
+    defer dots.release()
+    let mixed = try high.value().merged(dots)
+    defer mixed.release()
+    let points = clouds.points_of(mixed.value())
+    let q = clouds.quat_of(points, "orient", 3)
+    assert(q.w == 1.0 and q.x == 0.0 and clouds.sh_of(points, 3, sh) == 15, "plain points merged into splats get identity orients and zero bands")
+
+## The 3DGS property values of point `p`.
+func ply_dc(p: usize, k: usize) -> f64:
+    return 0.4 * (f64)k - 0.3 + 0.1 * (f64)p
+
+func ply_rest(p: usize, index: usize) -> f64:
+    return ((f64)index - 22.0) / 64.0 + (f64)p / 8.0
+
+func ply_rotation(p: usize, k: usize) -> f64:
+    # w, x, y, z, not normalized.
+    let values: f64[4] = [2.0, 0.5, -1.0, 0.25]
+    return values[k] * (1.0 + (f64)p)
+
+## The baked attributes of point `p` match the PLY values: orient the
+## file's quaternion as x, y, z, w; scale exp; opacity sigmoid; Cd decode(0.5 + C0 dc);
+## sh item i, channel k = f_rest[k · 15 + i].
+func check_ply_point(store: const AttributeStore*, p: usize, items: usize) -> !:
+    let q = clouds.quat_of(store, "orient", p)
+    let w = ply_rotation(p, 0)
+    let x = ply_rotation(p, 1)
+    let y = ply_rotation(p, 2)
+    let z = ply_rotation(p, 3)
+    assert(q.x == x and q.y == y and q.z == z and q.w == w, "orient is rot reordered to x, y, z, w, as the file has it")
+    let s = clouds.vector_of(store, "scale", p)
+    assert(near(s.x, math.exp(-2.0), 1.0e-6) and near(s.y, math.exp(-1.5), 1.0e-6) and near(s.z, math.exp(-1.0 + (f64)p), 1.0e-5), "scale is exp of scale_*")
+    assert(near(clouds.attribute(store, "opacity").number(p, 0), sigmoid(0.5 - (f64)p), 1.0e-6), "opacity is the sigmoid of the logit")
+    let color = clouds.vector_of(store, "Cd", p)
+    let expected = Vector3(srgb_decode(0.5 + sh_c0 * ply_dc(p, 0)), srgb_decode(0.5 + sh_c0 * ply_dc(p, 1)), srgb_decode(0.5 + sh_c0 * ply_dc(p, 2)))
+    assert(near(color.x, expected.x, 1.0e-6) and near(color.y, expected.y, 1.0e-6) and near(color.z, expected.z, 1.0e-6), "Cd is the linearized DC color")
+    var sh: f32[45]
+    assert(clouds.sh_of(store, p, sh) == items, "sh has the kept degree's items")
+    for i in 0..<items:
+        for k in 0..<(usize)3: assert(near((f64)sh[i * 3 + k], ply_rest(p, k * 15 + i), 1.0e-6), "sh interleaves the channel-major f_rest")
+
+func ply_cloud(vectors: bool) -> interop.Reference[GeometrySet]!:
+    var builder = clouds.CloudBuilder(2)
+    defer builder.close()
+    var buffer: u8[16]
+    var dc: f64[6]
+    var rotation: f64[8]
+    var scale: f64[6]
+    var rest: f64[90]
+    for p in 0..<(usize)2:
+        for k in 0..<(usize)3: dc[p * 3 + k] = ply_dc(p, k)
+        for k in 0..<(usize)4: rotation[p * 4 + k] = ply_rotation(p, k)
+        scale[p * 3] = -2.0
+        scale[p * 3 + 1] = -1.5
+        scale[p * 3 + 2] = -1.0 + (f64)p
+        for index in 0..<(usize)45: rest[p * 45 + index] = ply_rest(p, index)
+    try builder.floats("opacity", 1, [0.5, -0.5])
+    if vectors:
+        try builder.floats("f_dc", 3, dc)
+        try builder.floats("rot", 4, rotation)
+        try builder.floats("scale", 3, scale)
+        try builder.array("f_rest", 1, 45, rest)
+    else:
+        var single: f64[2]
+        for k in 0..<(usize)3:
+            for p in 0..<(usize)2: single[p] = dc[p * 3 + k]
+            try builder.floats(try strings.format(buffer, f"f_dc_{k}"), 1, single)
+            for p in 0..<(usize)2: single[p] = scale[p * 3 + k]
+            try builder.floats(try strings.format(buffer, f"scale_{k}"), 1, single)
+        for k in 0..<(usize)4:
+            for p in 0..<(usize)2: single[p] = rotation[p * 4 + k]
+            try builder.floats(try strings.format(buffer, f"rot_{k}"), 1, single)
+        for index in 0..<(usize)45:
+            for p in 0..<(usize)2: single[p] = rest[p * 45 + index]
+            try builder.floats(try strings.format(buffer, f"f_rest_{index}"), 1, single)
+    let positions: Vector3[2] = [Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0)]
+    return try builder.finish(positions)
+
+## Run set verb `name` on `set` with `numbers`, returning its output set.
+pub func run_verb(name: str, set: interop.Reference[GeometrySet], numbers: const f64[]) -> interop.Reference[GeometrySet]!:
+    let verb = find_set_verb(name) else trap("a GSplats verb is missing")
+    var output = try run_set_verb(&verb, set.value(), none, "", 0, numbers)
+    let made = output.set else trap("a set verb made no set")
+    output.set = none
+    return try adopt_set(made)
+
+func bake_from_ply() -> !:
+    let source = try ply_cloud(false)
+    defer source.release()
+    let baked = try run_verb("Bake GSplats", source, [0.0])
+    defer baked.release()
+    let store = clouds.points_of(baked.value())
+    for p in 0..<(usize)2: try check_ply_point(store, p, 15)
+    assert(store.find("f_dc_0", Domain.point) < 0 and store.find("f_rest_44", Domain.point) < 0 and store.find("rot_3", Domain.point) < 0, "the PLY properties are removed")
+    assert(color_space(baked.value()) == "srgb", "the color space is recorded")
+    assert(baked.value().splat_count() == 2 and source.value().splat_count() == 0, "a baked cloud counts as splats")
+    # Through the codec: every splat attribute survives.
+    var file = Growing[u8]()
+    defer file.close()
+    try file.assign(path.temp().bytes)
+    try file.push(47)
+    for byte in "luce-geocore-splats.prism".bytes: try file.push(byte)
+    _ = try save_geometry(baked.value(), (str)file.view(), 3, 268435456)
+    let loaded = try adopt_set(try load_geometry((str)file.view()))
+    defer loaded.release()
+    for p in 0..<(usize)2: try check_ply_point(clouds.points_of(loaded.value()), p, 15)
+    assert(color_space(loaded.value()) == "srgb", "the color space survives the codec")
+    # Keeping the original attributes, and linear colors at degree 1.
+    let kept = try run_verb("Bake GSplats", source, [0.0, 1.0, 1.0, 1.0, 0.05, 0.0])
+    defer kept.release()
+    let kept_store = clouds.points_of(kept.value())
+    var items: f32[45]
+    assert(kept_store.find("f_rest_44", Domain.point) >= 0 and clouds.sh_of(kept_store, 0, items) == 3, "degree 1 keeps three items")
+    assert(color_space(kept.value()) == "linear", "a linear source is recorded")
+    let linear_color = clouds.vector_of(kept_store, "Cd", 1)
+    assert(near(linear_color.x, 0.5 + sh_c0 * ply_dc(1, 0), 1.0e-6), "linear sources keep 0.5 + C0 dc")
+
+func bake_from_ply_vectors() -> !:
+    let source = try ply_cloud(true)
+    defer source.release()
+    let baked = try run_verb("Bake GSplats", source, [0.0, 0.0, 2.0])
+    defer baked.release()
+    let store = clouds.points_of(baked.value())
+    for p in 0..<(usize)2: try check_ply_point(store, p, 8)
+    assert(store.find("f_dc", Domain.point) < 0 and store.find("f_rest", Domain.point) < 0, "the PLY vectors are removed")
+
+## Houdini's names: arrays of 16 per channel hold the DC term first, so Cd
+## comes from it; 15 items hold only bands and Cd is read as given.
+func bake_from_houdini() -> !:
+    for with_dc in 0..<(usize)2:
+        let held: usize = 16 if with_dc == 1 else 15
+        var builder = clouds.CloudBuilder(1)
+        defer builder.close()
+        try builder.floats("Cd", 3, [0.2, 0.4, 0.6])
+        try builder.floats("GS_Alpha", 1, [0.75])
+        try builder.floats("orient", 4, [0.0, 0.0, 0.6, 0.8])
+        try builder.floats("scale", 3, [0.1, 0.2, 0.3])
+        var channel: f64[16]
+        let names: str[3] = ["GS_SPH_R", "GS_SPH_G", "GS_SPH_B"]
+        for k in 0..<(usize)3:
+            for i in 0..<held: channel[i] = (f64)k + (f64)i / 32.0
+            try builder.array(names[k], 1, held, channel[..<held])
+        let positions: Vector3[1] = [Vector3()]
+        let source = try builder.finish(positions)
+        defer source.release()
+        let baked = try run_verb("Bake GSplats", source, [0.0])
+        defer baked.release()
+        let store = clouds.points_of(baked.value())
+        assert(near(clouds.attribute(store, "opacity").number(0, 0), 0.75, 1.0e-7), "GS_Alpha is the linear opacity")
+        let s = clouds.vector_of(store, "scale", 0)
+        assert(near(s.y, 0.2, 1.0e-7), "Houdini's scale is linear")
+        let q = clouds.quat_of(store, "orient", 0)
+        assert(near(q.z, 0.6, 1.0e-7) and near(q.w, 0.8, 1.0e-7), "Houdini's orient is xyzw")
+        let color = clouds.vector_of(store, "Cd", 0)
+        let first: usize = 1 if with_dc == 1 else 0
+        if with_dc == 1:
+            assert(near(color.y, srgb_decode(0.5 + sh_c0 * 1.0), 1.0e-6), "Cd comes from the arrays' DC term")
+        else:
+            assert(near(color.y, srgb_decode(0.4), 1.0e-6), "without a DC term Cd is decoded as given")
+        var sh: f32[45]
+        assert(clouds.sh_of(store, 0, sh) == 15, "fifteen band items")
+        for i in 0..<(usize)15:
+            for k in 0..<(usize)3: assert(near((f64)sh[i * 3 + k], (f64)k + (f64)(i + first) / 32.0, 1.0e-6), "the per-channel arrays interleave")
+        assert(store.find("GS_SPH_R", Domain.point) < 0 and store.find("GS_Alpha", Domain.point) < 0, "Houdini's names are removed")
+
+## Plain points become round splats sized by pscale (or Point Scale).
+func bake_points() -> !:
+    var builder = clouds.CloudBuilder(2)
+    defer builder.close()
+    try builder.floats("pscale", 1, [0.3, 0.6])
+    try builder.floats("Cd", 3, [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+    let positions: Vector3[2] = [Vector3(), Vector3(1.0, 0.0, 0.0)]
+    let source = try builder.finish(positions)
+    defer source.release()
+    let baked = try run_verb("Bake GSplats", source, [0.0, 0.0, 3.0, 0.5])
+    defer baked.release()
+    let store = clouds.points_of(baked.value())
+    let s = clouds.vector_of(store, "scale", 1)
+    assert(near(s.x, 0.6, 1.0e-7) and near(s.z, 0.6, 1.0e-7), "pscale sizes round splats")
+    assert(near(clouds.attribute(store, "opacity").number(0, 0), 0.5, 1.0e-7), "the Opacity parameter fills in")
+    assert(near(clouds.vector_of(store, "Cd", 1).y, 1.0, 0.0) and store.find("sh", Domain.point) < 0, "points keep their linear Cd and have no bands")
+    assert(clouds.quat_of(store, "orient", 0).w == 1.0, "round splats face along the axes")
+
+## GSplats SH Degree truncates and pads.
+func sh_degree_node() -> !:
+    let source = try degree_cloud(2, 15, false, 0.0)
+    defer source.release()
+    let low = try run_verb("GSplats SH Degree", source, [1.0])
+    defer low.release()
+    var sh: f32[45]
+    let store = clouds.points_of(low.value())
+    assert(clouds.sh_of(store, 1, sh) == 3 and near((f64)sh[3], 1.0 + 1.0 / 16.0, 1.0e-6), "degree 1 keeps the first band")
+    let padded = try run_verb("GSplats SH Degree", low, [2.0])
+    defer padded.release()
+    assert(clouds.sh_of(clouds.points_of(padded.value()), 1, sh) == 8 and sh[3 * 3] == 0.0 and near((f64)sh[3], 1.0 + 1.0 / 16.0, 1.0e-6), "a higher degree pads zero bands")
+    let none_left = try run_verb("GSplats SH Degree", source, [0.0])
+    defer none_left.release()
+    assert(clouds.points_of(none_left.value()).find("sh", Domain.point) < 0, "degree 0 removes sh")

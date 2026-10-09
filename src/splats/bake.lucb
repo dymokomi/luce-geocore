@@ -1,0 +1,281 @@
+## Bake GSplats' kernel: a cloud's splat attributes, under whichever names
+## they came with, into this package's conventions. It reads
+## - the 3DGS PLY's properties, expanded (`f_dc_0`.., `opacity` as a logit,
+##   `scale_0`.. as logs, `rot_0`.. as w, x, y, z) or as vectors (`f_dc`,
+##   `rot`, `scale`), with `f_rest_0`.. or a width-1 `f_rest` array
+##   channel-major, or (luce-ply's form) a width-3 `f_rest` array laid out
+##   as `sh` is;
+## - Houdini's baked names: `Cd`, `GS_Alpha` (or `Alpha`), `orient`, `scale` and
+##   the per-channel arrays `GS_SPH_R`, `GS_SPH_G`, `GS_SPH_B`, whose first item is
+##   the DC term when they hold (d + 1)² items;
+## - plain points, which become round splats sized by `pscale`.
+## The DC color is linearized into `Cd`; the SH bands keep their encoding
+## (see conventions.lucb). `Cd`, `scale` and `opacity` are written in f64
+## and `orient` keeps the file's quaternion as it is (only reordered), so
+## `unbaked_store` gives a file's values back bit for bit.
+
+## The attribute names a cloud's splats were found under.
+pub enum SplatNaming as u8:
+    ## No splat attributes: plain points.
+    plain = 0
+    ## 3DGS PLY properties, one attribute each (`f_dc_0`, `rot_0`, …).
+    ply = 1
+    ## 3DGS PLY properties as vectors (`f_dc`, `rot`, `scale`, `f_rest`).
+    ply_vectors = 2
+    ## Houdini's baked attributes (`GS_Alpha`, `GS_SPH_R`, …).
+    houdini = 3
+    ## This package's conventions already.
+    baked = 4
+
+## The names `store`'s splats carry, by the first one found of: PLY
+## expanded, PLY vectors, Houdini, ours.
+pub func splat_naming(store: const AttributeStore*) -> SplatNaming:
+    if store.find("f_dc_0", Domain.point) >= 0 or store.find("rot_0", Domain.point) >= 0: return SplatNaming.ply
+    if float_attribute(store, "f_dc", 3) >= 0 or float_attribute(store, "rot", 4) >= 0: return SplatNaming.ply_vectors
+    if store.find("GS_Alpha", Domain.point) >= 0 or store.find("GS_SPH_R", Domain.point) >= 0: return SplatNaming.houdini
+    if is_splat_store(store): return SplatNaming.baked
+    return SplatNaming.plain
+
+## What Bake GSplats does.
+pub struct BakeOptions:
+    ## Make round splats from points even when splat attributes are present.
+    pub let from_points: bool
+    ## The encoding of the source's colors and SH.
+    pub let space: ColorSpace
+    ## The highest SH degree kept (0..3).
+    pub let degree: usize
+    ## The opacity of splats whose source has none.
+    pub let opacity: f64
+    ## The σ of splats made from points without `pscale`.
+    pub let point_scale: f64
+    ## Remove the attributes read (PLY's and Houdini's names).
+    pub let delete_sources: bool
+
+## `store` (a cloud's `count` point attributes) with its splats in this
+## package's conventions: `orient`, `scale`, `opacity`, linear `Cd` and `sh`.
+## Columns it does not write are shared; the set's `gsplat_color_space` is
+## the caller's to record.
+pub func baked_store(store: const AttributeStore*, count: usize, options: const BakeOptions*) -> AttributeStore!:
+    let naming = SplatNaming.plain if options.from_points else splat_naming(store)
+    if naming == SplatNaming.baked: return try with_sh_degree(store, count, options.degree)
+    var work: BakeWork
+    work.naming = naming
+    work.space = options.space
+    work.opacity = options.opacity
+    work.point_scale = options.point_scale
+    try work.read_sources(store)
+    work.items = sh_count(sh_degree(work.source_items))
+    let most = sh_count(options.degree if options.degree < 3 else 3)
+    if work.items > most: work.items = most
+    var orient = try float32_points(orient_name, 4, count)
+    defer orient.release()
+    var scale = try float64_points(scale_name, 3, count)
+    defer scale.release()
+    var opacity = try float64_points(opacity_name, 1, count)
+    defer opacity.release()
+    var color = try float64_points(color_name, 3, count)
+    defer color.release()
+    var sh = try uniform_sh(none, count, work.items)
+    defer sh.release()
+    work.orient = float32_values(&orient)
+    work.scale = float64_values(&scale)
+    work.opacity_out = float64_values(&opacity)
+    work.color = float64_values(&color)
+    work.sh = attribute_ops.typed_mut[f32](sh.data.span())
+    ranges.each_range(count, 4096, (void*)&work, bake_range)
+    var result = try store.shared()
+    errdefer result.close()
+    if options.delete_sources: try remove_sources(&result, naming)
+    try result.put(orient.share())
+    try result.put(scale.share())
+    try result.put(opacity.share())
+    try result.put(color.share())
+    let old_sh = sh_attribute(&result)
+    if work.items > 0: try result.put(sh.share())
+    elif old_sh >= 0: result.remove((usize)old_sh)
+    return result
+
+## One input value: a component of a float attribute (`f_dc_1`, or `f_dc`'s
+## component 1); absent reads as none.
+struct Lane:
+    var floats: Floats
+    var component: usize
+
+    func at(element: usize) -> f64:
+        return self.floats.at(element, self.component)
+
+    func present() -> bool:
+        return self.floats.present()
+
+func lane(store: const AttributeStore*, name: str, width: usize, component: usize) -> Lane:
+    var found: Lane
+    let index = store.find(name, Domain.point)
+    if index < 0: return found
+    let entry = store.entry((usize)index)
+    if entry.width != width or entry.is_ragged() or entry.kind == DataType.text: return found
+    found.floats = Floats.of(entry)
+    found.component = component
+    return found
+
+## The ragged point attribute `name` with items of `width`, if any.
+func array_attribute(store: const AttributeStore*, name: str, width: usize = 1) -> const Attribute*?:
+    let index = store.find(name, Domain.point)
+    if index < 0: return none
+    let entry = store.entry((usize)index)
+    if not entry.is_ragged() or entry.width != width: return none
+    return entry
+
+## The `f_rest_<index>` name, in `buffer`.
+func rest_name(buffer: u8[], index: usize) -> str:
+    return strings.format(buffer, f"f_rest_{index}") catch failure: return ""
+
+struct BakeWork:
+    var naming: SplatNaming
+    var space: ColorSpace
+    var opacity: f64
+    var point_scale: f64
+    ## SH items per channel in the source, and the first item of a Houdini
+    ## array that is not the DC term.
+    var source_items: usize
+    var band_start: usize
+    ## SH items written per point.
+    var items: usize
+    var dc: Lane[3]
+    var rotation: Lane[4]
+    var scales: Lane[3]
+    var alpha: Lane
+    var colors: Lane[3]
+    var pscale: Lane
+    var rest: Lane[45]
+    var rest_array: const Attribute*?
+    var channels: (const Attribute*?)[3]
+    var orient: f32[]
+    var scale: f64[]
+    var opacity_out: f64[]
+    var color: f64[]
+    var sh: f32[]
+
+    ## Find the lanes the naming reads.
+    func read_sources(store: const AttributeStore*) -> !:
+        var buffer: u8[16]
+        if self.naming == SplatNaming.ply or self.naming == SplatNaming.ply_vectors:
+            let expanded = self.naming == SplatNaming.ply
+            for k in 0..<(usize)3:
+                self.dc[k] = lane(store, "f_dc_0" if k == 0 else ("f_dc_1" if k == 1 else "f_dc_2"), 1, 0) if expanded else lane(store, "f_dc", 3, k)
+                self.scales[k] = lane(store, "scale_0" if k == 0 else ("scale_1" if k == 1 else "scale_2"), 1, 0) if expanded else lane(store, scale_name, 3, k)
+            for k in 0..<(usize)4:
+                let expanded_name = "rot_0" if k == 0 else ("rot_1" if k == 1 else ("rot_2" if k == 2 else "rot_3"))
+                self.rotation[k] = lane(store, expanded_name, 1, 0) if expanded else lane(store, "rot", 4, k)
+            self.alpha = lane(store, opacity_name, 1, 0)
+            var properties: usize = 0
+            while properties < 45 and store.find(rest_name(buffer, properties), Domain.point) >= 0:
+                self.rest[properties] = lane(store, rest_name(buffer, properties), 1, 0)
+                properties += 1
+            self.source_items = properties // 3
+            if properties > 0: return
+            if let interleaved = array_attribute(store, "f_rest", 3):
+                # luce-ply's form: RGB items, coefficient-major, as `sh` is.
+                self.rest_array = interleaved
+                self.source_items = interleaved.item_count(0) if interleaved.elements > 0 else 0
+                return
+            if let array = array_attribute(store, "f_rest"):
+                self.rest_array = array
+                self.source_items = (array.item_count(0) if array.elements > 0 else 0) // 3
+            return
+        if self.naming == SplatNaming.houdini:
+            for k in 0..<(usize)3:
+                self.colors[k] = lane(store, color_name, 3, k)
+                self.scales[k] = lane(store, scale_name, 3, k)
+            for k in 0..<(usize)4: self.rotation[k] = lane(store, orient_name, 4, k)
+            self.alpha = lane(store, "GS_Alpha", 1, 0)
+            if not self.alpha.present(): self.alpha = lane(store, "Alpha", 1, 0)
+            self.channels = [array_attribute(store, "GS_SPH_R"), array_attribute(store, "GS_SPH_G"), array_attribute(store, "GS_SPH_B")]
+            let first = self.channels[0] else return
+            let held = first.item_count(0) if first.elements > 0 else 0
+            # (d + 1)² items hold the DC term first; d² + 2d hold only the bands.
+            let root = (usize)math.sqrt((f64)held)
+            self.band_start = 1 if root * root == held and held > 0 else 0
+            self.source_items = held - self.band_start
+            return
+        # Plain points.
+        for k in 0..<(usize)3: self.colors[k] = lane(store, color_name, 3, k)
+        self.pscale = lane(store, "pscale", 1, 0)
+        self.alpha = lane(store, opacity_name, 1, 0)
+        if not self.alpha.present(): self.alpha = lane(store, "Alpha", 1, 0)
+
+    ## Item `item` of channel `channel` of point `element`'s source SH (bands only).
+    func band(element: usize, channel: usize, item: usize) -> f64:
+        if self.naming == SplatNaming.houdini:
+            let array = self.channels[channel] else return 0.0
+            let at = self.band_start + item
+            return array.item(element, at, 0) if at < array.item_count(element) else 0.0
+        if let array = self.rest_array:
+            if array.width == 3: return array.item(element, item, channel) if item < array.item_count(element) else 0.0
+            let at = channel * self.source_items + item
+            return array.item(element, at, 0) if at < array.item_count(element) else 0.0
+        return self.rest[channel * self.source_items + item].at(element)
+
+    func bake(element: usize):
+        var q = Quat.identity()
+        var s = Vector3(self.point_scale, self.point_scale, self.point_scale)
+        var alpha = self.opacity
+        var linear = Vector3(0.5, 0.5, 0.5)
+        if self.naming == SplatNaming.ply or self.naming == SplatNaming.ply_vectors:
+            q = Quat(self.rotation[1].at(element), self.rotation[2].at(element), self.rotation[3].at(element), self.rotation[0].at(element))
+            s = Vector3(math.exp(self.scales[0].at(element)), math.exp(self.scales[1].at(element)), math.exp(self.scales[2].at(element)))
+            if self.alpha.present(): alpha = sigmoid(self.alpha.at(element))
+            linear = color_of_dc(Vector3(self.dc[0].at(element), self.dc[1].at(element), self.dc[2].at(element)), self.space)
+        elif self.naming == SplatNaming.houdini:
+            q = Quat(self.rotation[0].at(element), self.rotation[1].at(element), self.rotation[2].at(element), self.rotation[3].at(element))
+            s = Vector3(self.scales[0].at(element), self.scales[1].at(element), self.scales[2].at(element))
+            if self.alpha.present(): alpha = self.alpha.at(element)
+            if self.band_start == 1:
+                linear = color_of_dc(Vector3(self.dc_item(element, 0), self.dc_item(element, 1), self.dc_item(element, 2)), self.space)
+            elif self.colors[0].present():
+                linear = Vector3(to_linear(self.colors[0].at(element), self.space), to_linear(self.colors[1].at(element), self.space), to_linear(self.colors[2].at(element), self.space))
+        else:
+            if self.pscale.present():
+                let size = self.pscale.at(element)
+                s = Vector3(size, size, size)
+            if self.alpha.present(): alpha = self.alpha.at(element)
+            # A plain cloud's Cd is linear already.
+            if self.colors[0].present(): linear = Vector3(self.colors[0].at(element), self.colors[1].at(element), self.colors[2].at(element))
+        self.orient[element * 4] = (f32)q.x
+        self.orient[element * 4 + 1] = (f32)q.y
+        self.orient[element * 4 + 2] = (f32)q.z
+        self.orient[element * 4 + 3] = (f32)q.w
+        self.scale[element * 3] = s.x
+        self.scale[element * 3 + 1] = s.y
+        self.scale[element * 3 + 2] = s.z
+        self.opacity_out[element] = alpha
+        self.color[element * 3] = linear.x
+        self.color[element * 3 + 1] = linear.y
+        self.color[element * 3 + 2] = linear.z
+        let base = element * self.items * 3
+        for item in 0..<self.items:
+            for channel in 0..<(usize)3: self.sh[base + item * 3 + channel] = (f32)self.band(element, channel, item)
+
+    ## A Houdini array's DC term of channel `channel`.
+    func dc_item(element: usize, channel: usize) -> f64:
+        let array = self.channels[channel] else return 0.0
+        return array.item(element, 0, 0) if array.item_count(element) > 0 else 0.0
+
+func bake_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (BakeWork*)context
+    for element in first..<end: work.bake(element)
+
+## Remove the attributes a naming's bake read and did not overwrite.
+func remove_sources(store: AttributeStore*, naming: SplatNaming) -> !:
+    if naming == SplatNaming.ply or naming == SplatNaming.ply_vectors:
+        let names: str[13] = ["f_dc_0", "f_dc_1", "f_dc_2", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3", "f_dc", "rot", "f_rest"]
+        for name in names: remove_point(store, name)
+        var buffer: u8[16]
+        for index in 0..<(usize)45: remove_point(store, rest_name(buffer, index))
+    elif naming == SplatNaming.houdini:
+        let names: str[5] = ["GS_Alpha", "Alpha", "GS_SPH_R", "GS_SPH_G", "GS_SPH_B"]
+        for name in names: remove_point(store, name)
+
+func remove_point(store: AttributeStore*, name: str):
+    let index = store.find(name, Domain.point)
+    if index >= 0: store.remove((usize)index)

@@ -1,0 +1,118 @@
+## Column helpers for the splat kernels: reading float attributes of any
+## float type quickly, making f32 point attributes, and the `sh` array at a
+## uniform item count.
+
+## Read access to a float (or any numeric) attribute's tuples as f64: typed
+## spans for f32 and f64 array storage, the attribute's own `number`
+## otherwise. The zero value reads zeros.
+pub struct Floats:
+    let attribute: const Attribute*?
+    let narrow: const f32[]
+    let wide: const f64[]
+    let width: usize
+
+    pub static func of(attribute: const Attribute*) -> Floats:
+        var narrow: const f32[]
+        var wide: const f64[]
+        if attribute.storage == Storage.array:
+            if attribute.kind == DataType.float32: narrow = attribute_ops.typed[f32](attribute.data.view())
+            elif attribute.kind == DataType.float64: wide = attribute_ops.typed[f64](attribute.data.view())
+        return Floats(attribute, narrow, wide, attribute.width)
+
+    ## Whether it reads an attribute.
+    pub func present() -> bool:
+        return self.attribute != none
+
+    ## Component `component` of element `element`.
+    pub func at(element: usize, component: usize) -> f64:
+        let index = element * self.width + component
+        if self.narrow.length > 0: return (f64)self.narrow[index]
+        if self.wide.length > 0: return self.wide[index]
+        let attribute = self.attribute else return 0.0
+        return attribute.number(element, component)
+
+## The Floats of point attribute `name` of `width` (any numeric type with one
+## tuple per point, or single storage), if there is one.
+pub func point_floats(store: const AttributeStore*, name: str, width: usize) -> Floats?:
+    let index = store.find(name, Domain.point)
+    if index < 0: return none
+    let entry = store.entry((usize)index)
+    if entry.width != width or entry.is_ragged() or entry.kind == DataType.text: return none
+    return Floats.of(entry)
+
+## A new f32 point attribute of `count` tuples, its values for the caller to
+## fill.
+pub func float32_points(name: str, width: usize, count: usize) -> Attribute!:
+    return try Attribute.create(name, Domain.point, DataType.float32, width, count)
+
+## A new f64 point attribute of `count` tuples, for values computed through
+## a nonlinear activation, which f32 would not give back exactly.
+pub func float64_points(name: str, width: usize, count: usize) -> Attribute!:
+    return try Attribute.create(name, Domain.point, DataType.float64, width, count)
+
+## The writable f64 values of a new attribute (which no one shares yet).
+pub func float64_values(attribute: const Attribute*) -> f64[]:
+    return attribute_ops.typed_mut[f64](attribute.data.span())
+
+## The writable f32 values of a new attribute (which no one shares yet).
+pub func float32_values(attribute: const Attribute*) -> f32[]:
+    return attribute_ops.typed_mut[f32](attribute.data.span())
+
+## Make point attribute `index` of `store` f32 array storage (a copy when it
+## is another type), and return its writable values: what in-place kernels
+## write.
+pub func writable_float32(store: AttributeStore*, index: usize, count: usize) -> f32[]!:
+    let entry = store.entry(index)
+    if entry.kind == DataType.float32 and entry.storage == Storage.array:
+        return attribute_ops.typed_mut[f32](try store.writable(index))
+    let width = entry.width
+    var made = try Attribute.create(entry.name(), Domain.point, DataType.float32, width, count)
+    made.role = entry.role
+    made.flags = entry.flags
+    let values = float32_values(&made)
+    let source = Floats.of(entry)
+    for element in 0..<count:
+        for component in 0..<width: values[element * width + component] = (f32)source.at(element, component)
+    try store.put(made)
+    return values
+
+## The `sh` array of `count` points with exactly `items` items each: each
+## point's first items of `source` (none: zeros), padded with zeros. f32 × 3,
+## item-major, RGB interleaved.
+pub func uniform_sh(source: const Attribute*?, count: usize, items: usize) -> Attribute!:
+    var offsets = try Column[u8].allocate((count + 1) * 4)
+    errdefer offsets.release()
+    let bounds = u32[]((u32*)offsets.span().data, count + 1)
+    for element in 0..<count + 1: bounds[element] = (u32)(element * items)
+    var values = try Column[u8].allocate(count * items * 12)
+    errdefer values.release()
+    let out = attribute_ops.typed_mut[f32](values.span())
+    var work = PadWork(source, out, items)
+    ranges.each_range(count, 16384, (void*)&work, pad_items)
+    return try Attribute.ragged(sh_name, Domain.point, DataType.float32, 3, offsets, values)
+
+struct PadWork:
+    let source: const Attribute*?
+    let out: f32[]
+    let items: usize
+
+func pad_items(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (PadWork*)context
+    let items = work.items
+    for element in first..<end:
+        let base = element * items * 3
+        var have: usize = 0
+        if let source = work.source:
+            have = source.item_count(element)
+            if have > items: have = items
+            if have > 0:
+                let from_item = source.first_item(element)
+                let input = attribute_ops.typed[f32](source.data.view())
+                memory.copy(work.out[base..<base + have * 3], input[from_item * 3..<(from_item + have) * 3], have * 3)
+        for at in base + have * 3..<base + items * 3: work.out[at] = 0.0
+
+## The writable items of `store`'s `sh` (attribute `index`), copied on write;
+## a point's items are `first_item`.. of the attribute.
+pub func writable_sh(store: AttributeStore*, index: usize) -> f32[]!:
+    return attribute_ops.typed_mut[f32](try store.writable(index))

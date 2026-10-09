@@ -165,6 +165,14 @@ pub let cloud_origin = geometry_set.cloud_origin
 pub let cloud_store = geometry_set.cloud_store
 ## A heap cloud owning given columns.
 pub let cloud_assembled = geometry_set.cloud_assembled
+## A cloud sharing another's positions with new point attributes (taken).
+pub let cloud_with_store = geometry_set.cloud_with_store
+## A set's point cloud when it is a Gaussian splat cloud (luce_geocore.splats
+## has the conventions and math).
+pub let set_splats = geometry_set.set_splats
+## A set with its splat cloud in the raw 3DGS PLY names, for writers (the
+## inverse of Bake GSplats; GeometrySet.unbaked_splats in Luce).
+pub let unbaked_set = geometry_set.unbaked_set
 ## Placed copies of prototype sets.
 pub type Instances = geometry_set.Instances
 ## A new, empty instances component.

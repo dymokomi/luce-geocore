@@ -46,6 +46,7 @@ from geometries.builder import MeshBuilder
 from verbs import ComponentTransform
 from geometry_set import GeometrySet, ComponentType, Placement, no_trace, append_text, append_number, placed_box, empty_storage, dispose_set, adopt_set, set_detail
 from core.limits import max_points, max_corners
+from splats import LinearPart, turn_rotations
 
 ## Curve size limits, like a mesh's (core.limits).
 let max_curve_points: usize = 33554432

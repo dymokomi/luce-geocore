@@ -1,0 +1,96 @@
+## Building point clouds with given attributes, and reading them back, for
+## the placement, merge and verb checks.
+import interop
+from luce_geocore.geocore import Vector3, GeometrySet
+from luce_geocore.kernel import Attribute, AttributeStore, Domain, DataType, Float3, PointCloud, empty_set, adopt_set, dispose_set, points_component, cloud_assembled, cloud_store
+from luce_geocore.core.shared import Column
+from luce_geocore.splats import Quat
+
+## Point attributes being gathered for a new cloud.
+pub struct CloudBuilder:
+    pub var count: usize
+    pub var store: AttributeStore
+
+    pub func init(count: usize):
+        self.count = count
+        self.store = AttributeStore()
+
+    ## An f32 point attribute of `width` filled by `values` (count × width).
+    pub func floats(name: str, width: usize, values: const f64[]) -> !:
+        let made = try Attribute.create(name, Domain.point, DataType.float32, width, self.count)
+        let out = f32[]((f32*)made.data.span().data, self.count * width)
+        for at in 0..<self.count * width: out[at] = (f32)values[at]
+        try self.store.put(made)
+
+    ## A ragged f32 point attribute: `items` items of `width` per point.
+    pub func array(name: str, width: usize, items: usize, values: const f64[]) -> !:
+        var offsets = try Column[u8].allocate((self.count + 1) * 4)
+        defer offsets.release()
+        let bounds = u32[]((u32*)offsets.span().data, self.count + 1)
+        for at in 0..<self.count + 1: bounds[at] = (u32)(at * items)
+        var data = try Column[u8].allocate(self.count * items * width * 4)
+        defer data.release()
+        let out = f32[]((f32*)data.span().data, self.count * items * width)
+        for at in 0..<out.length: out[at] = (f32)values[at]
+        try self.store.put(try Attribute.ragged(name, Domain.point, DataType.float32, width, offsets.take(), data.take()))
+
+    ## The set holding the cloud at `positions` (taking the attributes).
+    pub func finish(positions: const Vector3[]) -> interop.Reference[GeometrySet]!:
+        var column = try Column[Float3].allocate(self.count)
+        let out = column.span()
+        for at in 0..<self.count: out[at] = Float3.of(positions[at])
+        let attributes = self.store
+        self.store = AttributeStore()
+        let cloud = try cloud_assembled(column, Vector3(), attributes)
+        let storage = empty_set() catch failure:
+            let close = points_component().close
+            close((void*)cloud)
+            error(failure.code, failure.message)
+        storage.put(points_component(), (void*)cloud) catch failure:
+            dispose_set(storage)
+            error(failure.code, failure.message)
+        return try adopt_set(storage)
+
+    pub func close():
+        self.store.close()
+
+## The point attributes of a set's cloud.
+pub func points_of(set: const GeometrySet*) -> const AttributeStore*:
+    let data = set.find(points_component()) else trap("the set has no point cloud")
+    return cloud_store((const PointCloud*)data)
+
+## A set's cloud point `index`.
+pub func point_of(set: const GeometrySet*, index: usize) -> Vector3:
+    let data = set.find(points_component()) else trap("the set has no point cloud")
+    return ((const PointCloud*)data).point(index)
+
+## Point attribute `name`, which must be there.
+pub func attribute(store: const AttributeStore*, name: str) -> const Attribute*:
+    let index = store.find(name, Domain.point)
+    if index < 0: trap("a point attribute is missing")
+    return store.entry((usize)index)
+
+## Point `element`'s 4-tuple of `name` as a quaternion.
+pub func quat_of(store: const AttributeStore*, name: str, element: usize) -> Quat:
+    let entry = attribute(store, name)
+    return Quat(entry.number(element, 0), entry.number(element, 1), entry.number(element, 2), entry.number(element, 3))
+
+## Point `element`'s 3-tuple of `name`.
+pub func vector_of(store: const AttributeStore*, name: str, element: usize) -> Vector3:
+    let entry = attribute(store, name)
+    return Vector3(entry.number(element, 0), entry.number(element, 1), entry.number(element, 2))
+
+## Point `element`'s `sh` items, into `out` (15 × 3, zeros past its own).
+pub func sh_of(store: const AttributeStore*, element: usize, out: f32[]) -> usize:
+    return items_of(store, "sh", element, out)
+
+## Point `element`'s items of RGB array `name` (`sh`, or a raw `f_rest`).
+pub func items_of(store: const AttributeStore*, name: str, element: usize, out: f32[]) -> usize:
+    for at in 0..<out.length: out[at] = 0.0
+    let index = store.find(name, Domain.point)
+    if index < 0: return 0
+    let entry = store.entry((usize)index)
+    let items = entry.item_count(element)
+    for item in 0..<items:
+        for channel in 0..<(usize)3: out[item * 3 + channel] = (f32)entry.item(element, item, channel)
+    return items

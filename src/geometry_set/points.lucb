@@ -64,6 +64,41 @@ pub func cloud_of_mesh(mesh: const Mesh*) -> PointCloud*!:
     storage[0] = PointCloud(mesh_positions(mesh), mesh.position_origin(), attributes)
     return storage.data
 
+## The set's point cloud when it is a splat cloud (its points carry orient,
+## scale and opacity: splats/conventions.lucb), for renderers and exporters.
+pub func set_splats(set: const GeometrySet*) -> const PointCloud*?:
+    let data = set.find(&points_component) else return none
+    let cloud = (const PointCloud*)data
+    if not is_splat_store(&cloud.attributes): return none
+    return cloud
+
+## A heap copy of `set` whose splat cloud carries the raw 3DGS PLY names
+## again (f_dc_*, opacity and scale_* as logit and logs, rot_* w, x, y, z, and
+## `f_rest`; splats/unbake.lucb), its colors encoded back into the set's
+## `gsplat_color_space`, which it drops: what a PLY writer writes. A set
+## without splats is shared as it is.
+pub func unbaked_set(set: const GeometrySet*) -> GeometrySet*!:
+    let storage = try set.storage()
+    errdefer dispose_set(storage)
+    let cloud = set_splats(set) else return storage
+    let made = try cloud_with_store(cloud, try unbaked_store(&cloud.attributes, cloud.count(), detail_color_space(&set.detail)))
+    try storage.put(&points_component, (void*)made)
+    let index = storage.detail.find(color_space_name, Domain.detail)
+    if index >= 0: storage.detail.remove((usize)index)
+    return storage
+
+extend GeometrySet:
+    ## How many Gaussian splats the set holds: its point cloud's points when
+    ## they are splats, else 0.
+    pub func splat_count() -> i64:
+        let cloud = set_splats(&self) else return 0
+        return (i64)cloud.count()
+
+    ## This set with its splats back in the raw 3DGS PLY names, for export
+    ## (see unbaked_set); Bake GSplats is the way in.
+    pub func unbaked_splats() -> interop.Reference[GeometrySet]!:
+        return try adopt_set(try unbaked_set(&self))
+
 pub let points_component: ComponentType = ComponentType("points", share_cloud, close_cloud, cloud_size, cloud_bytes, cloud_bounds, place_cloud, join_clouds, no_paths, keep_cloud, describe_cloud, "", no_trace)
 
 func share_cloud(data: const void*) -> void*!:
@@ -91,6 +126,8 @@ func cloud_bounds(data: const void*, matrix: Matrix4, out: Bounds*) -> bool!:
     *out = placed_box(positions_bounds(cloud.positions.view(), cloud.origin), matrix)
     return true
 
+## Positions move with the placement; attributes by role, and a splat
+## cloud's orient, scale, restorient and SH exactly (splats/placement.lucb).
 func place_cloud(data: const void*, placement: const Placement*) -> void*!:
     let cloud = (const PointCloud*)data
     var positions = try Column[Float3].allocate(cloud.count())
@@ -99,12 +136,15 @@ func place_cloud(data: const void*, placement: const Placement*) -> void*!:
     let origin = placement.matrix.transform_point(cloud.origin)
     for at in 0..<out.length:
         out[at] = Float3.of(placement.matrix.transform_point(cloud.point(at)).subtract(origin))
-    var attributes = try cloud.attributes.shared()
+    var attributes = try placed_point_store(&cloud.attributes, cloud.count(), placement.matrix)
     errdefer attributes.close()
     let storage = try new PointCloud[1] --- in memory.heap
     storage[0] = PointCloud(positions.take(), origin, attributes)
     return (void*)storage.data
 
+## Both clouds' points, the first's origin kept. Splat clouds agree first:
+## SH padded to the larger degree, orient and restorient where either has
+## them (splats/merging.lucb).
 func join_clouds(first: const void*, second: const void*) -> void*!:
     let a = (const PointCloud*)first
     let b = (const PointCloud*)second
@@ -113,17 +153,21 @@ func join_clouds(first: const void*, second: const void*) -> void*!:
     let out = positions.span()
     for at in 0..<a.count(): out[at] = Float3.of(a.point(at).subtract(a.origin))
     for at in 0..<b.count(): out[a.count() + at] = Float3.of(b.point(at).subtract(a.origin))
+    var left = try conformed_for_join(&a.attributes, a.count(), &b.attributes)
+    defer left.close()
+    var right = try conformed_for_join(&b.attributes, b.count(), &a.attributes)
+    defer right.close()
     var attributes = AttributeStore()
     errdefer attributes.close()
     for side in 0..<(usize)2:
-        let store = &a.attributes if side == 0 else &b.attributes
+        let store = &left if side == 0 else &right
         for index in 0..<store.count():
             let entry = store.entry(index)
-            if side == 1 and a.attributes.find(entry.name(), entry.domain) >= 0: continue
-            let left = a.attributes.find(entry.name(), entry.domain)
-            let right = b.attributes.find(entry.name(), entry.domain)
-            let pieces: attribute_ops.Piece[2] = [attribute_ops.Piece(a.attributes.entry((usize)left) if left >= 0 else none, a.count()),
-                                                  attribute_ops.Piece(b.attributes.entry((usize)right) if right >= 0 else none, b.count())]
+            if side == 1 and left.find(entry.name(), entry.domain) >= 0: continue
+            let first_index = left.find(entry.name(), entry.domain)
+            let second_index = right.find(entry.name(), entry.domain)
+            let pieces: attribute_ops.Piece[2] = [attribute_ops.Piece(left.entry((usize)first_index) if first_index >= 0 else none, a.count()),
+                                                  attribute_ops.Piece(right.entry((usize)second_index) if second_index >= 0 else none, b.count())]
             try attributes.put(try attribute_ops.concatenated(pieces))
     let storage = try new PointCloud[1] --- in memory.heap
     storage[0] = PointCloud(positions.take(), a.origin, attributes)

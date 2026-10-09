@@ -1,0 +1,163 @@
+## Placing splats: the cheap rigid path equals the general covariance path;
+## a Transform of a splat cloud keeps every splat's covariance (L Σ Lᵀ) and
+## its view-dependent color (rotations turn the SH frame, mirrors reflect the
+## SH); and plain clouds move their attributes by role.
+from luce_std import math
+from luce_geocore.geocore import Vector3, Matrix4
+from luce_geocore.kernel import AttributeStore, Domain
+from luce_geocore.splats import Quat, Mat3, LinearPart, place_splat, compose_covariance, sh_bands, sh_frame
+import draws
+import clouds
+
+pub func run() -> !:
+    rigid_equals_general()
+    try transformed_clouds()
+    try plain_cloud_roles()
+
+func near(a: f64, b: f64, tolerance: f64) -> bool:
+    return math.abs(a - b) <= tolerance
+
+## Whether two quaternions are the same rotation.
+func same_rotation(a: Quat, b: Quat, tolerance: f64) -> bool:
+    let p = a.normalized()
+    let q = b.normalized()
+    return near(math.abs(p.x * q.x + p.y * q.y + p.z * q.z + p.w * q.w), 1.0, tolerance)
+
+## For similarities (rotations, uniform scales, mirrors and point inversions)
+## the cheap path and the general one give the same covariance and SH frame.
+func rigid_equals_general():
+    var state = draws.Draws(21)
+    for trial in 0..<(usize)200:
+        let angles = Vector3(state.between(-3.0, 3.0), state.between(-3.0, 3.0), state.between(-3.0, 3.0))
+        var size = state.between(0.2, 3.0)
+        if trial % 4 == 1: size = -size
+        var scale = Vector3(size, size, size)
+        if trial % 4 == 2: scale = Vector3(-size, size, size)
+        let matrix = Matrix4.compose(Vector3(1.0, 2.0, 3.0), angles, scale)
+        let part = LinearPart.of(matrix)
+        assert(part.uniform > 0.0, "a similarity is recognized")
+        let o = state.rotation()
+        let r = state.rotation() if trial % 2 == 0 else o
+        let s = Vector3(state.between(0.01, 1.0), state.between(0.01, 1.0), state.between(0.01, 1.0))
+        let cheap = place_splat(o, s, r, &part, false)
+        let general = place_splat(o, s, r, &part, true)
+        let expected = part.linear.multiply(compose_covariance(o, s)).multiply(part.linear.transposed())
+        assert(compose_covariance(cheap.orient, cheap.scale).distance(expected) <= 1.0e-11 * 9.0, "the rigid path keeps L Σ Lᵀ")
+        assert(compose_covariance(general.orient, general.scale).distance(expected) <= 1.0e-11 * 9.0, "the general path keeps L Σ Lᵀ")
+        assert(same_rotation(sh_frame(cheap.orient, cheap.restorient), sh_frame(general.orient, general.restorient), 1.0e-10), "both paths turn the SH frame alike")
+
+## Random splats with degree-3 SH, as a cloud.
+func splat_cloud(state: draws.Draws*, count: usize, with_rest: bool) -> clouds.CloudBuilder!:
+    var builder = clouds.CloudBuilder(count)
+    errdefer builder.close()
+    var orient: f64[64]
+    var rest: f64[64]
+    var scale: f64[48]
+    var opacity: f64[16]
+    var color: f64[48]
+    var sh: f64[720]
+    for at in 0..<count:
+        let q = state.rotation()
+        let r = state.rotation()
+        let quats: f64[8] = [q.x, q.y, q.z, q.w, r.x, r.y, r.z, r.w]
+        for k in 0..<(usize)4:
+            orient[at * 4 + k] = quats[k]
+            rest[at * 4 + k] = quats[4 + k]
+        for k in 0..<(usize)3:
+            scale[at * 3 + k] = state.between(0.01, 0.5)
+            color[at * 3 + k] = state.between(0.0, 1.0)
+        opacity[at] = state.between(0.1, 1.0)
+        for k in 0..<(usize)45: sh[at * 45 + k] = state.between(-0.3, 0.3)
+    try builder.floats("orient", 4, orient[..<count * 4])
+    if with_rest: try builder.floats("restorient", 4, rest[..<count * 4])
+    try builder.floats("scale", 3, scale[..<count * 3])
+    try builder.floats("opacity", 1, opacity[..<count])
+    try builder.floats("Cd", 3, color[..<count * 3])
+    try builder.array("sh", 3, 15, sh[..<count * 45])
+    return builder
+
+## A splat's SH-band color toward world direction `d`.
+func world_bands(store: const AttributeStore*, element: usize, d: Vector3) -> Vector3:
+    var sh: f32[45]
+    let items = clouds.sh_of(store, element, sh)
+    let o = clouds.quat_of(store, "orient", element)
+    var r = o
+    if store.find("restorient", Domain.point) >= 0: r = clouds.quat_of(store, "restorient", element)
+    return sh_bands(sh, items, sh_frame(o, r).conjugate().rotate(d))
+
+## Transforms of splat clouds: rotations with uniform scale, non-uniform
+## scales and mirrors, with and without restorient.
+func transformed_clouds() -> !:
+    var state = draws.Draws(33)
+    let count: usize = 16
+    let scales: Vector3[5] = [Vector3(2.0, 2.0, 2.0), Vector3(1.0, 3.0, 0.5), Vector3(-1.0, 1.0, 1.0), Vector3(-0.5, -0.5, -0.5), Vector3(1.0, -2.0, 0.7)]
+    for trial in 0..<(usize)10:
+        var builder = try splat_cloud(&state, count, trial % 2 == 1)
+        defer builder.close()
+        var positions: Vector3[16] = ---
+        for at in 0..<count: positions[at] = Vector3(state.between(-5.0, 5.0), state.between(-5.0, 5.0), state.between(-5.0, 5.0))
+        let set = try builder.finish(positions)
+        defer set.release()
+        let translation = Vector3(0.5, -1.0, 2.0)
+        let angles = Vector3(state.between(-3.0, 3.0), state.between(-3.0, 3.0), state.between(-3.0, 3.0))
+        let scale = scales[trial % 5]
+        let moved = try set.value().transformed(translation, angles, scale)
+        defer moved.release()
+        let matrix = Matrix4.compose(translation, angles, scale)
+        let linear = Mat3.of_matrix4(matrix)
+        let part = LinearPart.of(matrix)
+        let before = clouds.points_of(set.value())
+        let after = clouds.points_of(moved.value())
+        for at in 0..<count:
+            let p = matrix.transform_point(positions[at])
+            let q = clouds.point_of(moved.value(), at)
+            assert(near(p.x, q.x, 1.0e-5) and near(p.y, q.y, 1.0e-5) and near(p.z, q.z, 1.0e-5), "positions move")
+            let sigma = compose_covariance(clouds.quat_of(before, "orient", at), clouds.vector_of(before, "scale", at))
+            let expected = linear.multiply(sigma).multiply(linear.transposed())
+            let placed = compose_covariance(clouds.quat_of(after, "orient", at), clouds.vector_of(after, "scale", at))
+            assert(placed.distance(expected) <= 1.0e-5, "a splat's covariance becomes L Σ Lᵀ")
+            # The view-dependent color follows the transform's orthogonal part.
+            var turn = part.rotation.matrix()
+            if part.reflects: turn = turn.scaled(-1.0)
+            for _ in 0..<(usize)4:
+                let d = state.direction()
+                let original = world_bands(before, at, d)
+                let shown = world_bands(after, at, turn.transform(d))
+                assert(near(original.x, shown.x, 1.0e-5) and near(original.y, shown.y, 1.0e-5) and near(original.z, shown.z, 1.0e-5), "colors turn and mirror with the splat")
+        # Rotations keep the SH untouched (the frame turns); only mirrors rewrite them.
+        var first: f32[45]
+        var second: f32[45]
+        _ = clouds.sh_of(before, 0, first)
+        _ = clouds.sh_of(after, 0, second)
+        let mirrored = scale.x * scale.y * scale.z < 0.0
+        for item in 0..<(usize)15:
+            # A mirror negates bands 1 and 3 (items 0..2 and 8..14).
+            let odd = item < 3 or item >= 8
+            let sign: f32 = -1.0 if mirrored and odd else 1.0
+            for channel in 0..<(usize)3: assert(second[item * 3 + channel] == sign * first[item * 3 + channel], "only mirrors rewrite the SH, negating odd bands")
+        assert(after.find("restorient", Domain.point) >= 0, "a turning transform records the SH frame")
+
+## A plain cloud's normals, vectors and rotations move with a Transform.
+func plain_cloud_roles() -> !:
+    var builder = clouds.CloudBuilder(1)
+    defer builder.close()
+    try builder.floats("N", 3, [1.0, 0.0, 0.0])
+    try builder.floats("v", 3, [0.0, 2.0, 0.0])
+    try builder.floats("orient", 4, [0.0, 0.0, 0.0, 1.0])
+    try builder.floats("weight", 3, [1.0, 2.0, 3.0])
+    let positions: Vector3[1] = [Vector3(1.0, 0.0, 0.0)]
+    let set = try builder.finish(positions)
+    defer set.release()
+    # A quarter turn about Z, doubled.
+    let moved = try set.value().transformed(Vector3(), Vector3(0.0, 0.0, 1.5707963267948966), Vector3(2.0, 2.0, 2.0))
+    defer moved.release()
+    let store = clouds.points_of(moved.value())
+    let n = clouds.vector_of(store, "N", 0)
+    assert(near(n.x, 0.0, 1.0e-6) and near(n.y, 1.0, 1.0e-6), "normals turn")
+    let v = clouds.vector_of(store, "v", 0)
+    assert(near(v.x, -4.0, 1.0e-5) and near(v.y, 0.0, 1.0e-5), "vectors turn and scale")
+    let q = clouds.quat_of(store, "orient", 0)
+    assert(same_rotation(q, Quat.about(Vector3(0.0, 0.0, 1.0), 1.5707963267948966), 1.0e-6), "orient turns (Role.rotation)")
+    let w = clouds.vector_of(store, "weight", 0)
+    assert(near(w.x, 1.0, 0.0) and near(w.y, 2.0, 0.0) and near(w.z, 3.0, 0.0), "generic attributes stay")
+    assert(store.find("restorient", Domain.point) < 0, "a plain cloud gets no restorient")

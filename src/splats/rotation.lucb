@@ -1,0 +1,141 @@
+## Rotations for splats in f64: unit quaternions (x, y, z, w, Houdini's
+## order) and 3×3 matrices, row-major. A quaternion q turns vectors as its
+## matrix does; `a.multiply(b)` turns by b first, then by a.
+
+## A quaternion x, y, z, w; a rotation when unit.
+pub struct Quat:
+    pub var x: f64
+    pub var y: f64
+    pub var z: f64
+    pub var w: f64
+
+    ## No rotation.
+    pub static func identity() -> Quat:
+        return Quat(0.0, 0.0, 0.0, 1.0)
+
+    ## The rotation by `angle` radians about `axis` (right-handed); none when the
+    ## axis has no direction.
+    pub static func about(axis: Vector3, angle: f64) -> Quat:
+        let length = axis.length()
+        if not (length > 0.0): return Quat.identity()
+        let s = math.sin(0.5 * angle) / length
+        return Quat(axis.x * s, axis.y * s, axis.z * s, math.cos(0.5 * angle))
+
+    ## This rotation after `other`: turning by the result turns by `other`, then by this.
+    pub func multiply(other: Quat) -> Quat:
+        return Quat(self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y,
+                    self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x,
+                    self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w,
+                    self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z)
+
+    ## The inverse rotation of a unit quaternion.
+    pub func conjugate() -> Quat:
+        return Quat(-self.x, -self.y, -self.z, self.w)
+
+    ## At unit length; the identity when it has none (or is not finite).
+    pub func normalized() -> Quat:
+        let length = math.sqrt(self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w)
+        if not (length > 1.0e-300 and math.is_finite(length)): return Quat.identity()
+        let inverse = 1.0 / length
+        return Quat(self.x * inverse, self.y * inverse, self.z * inverse, self.w * inverse)
+
+    ## Its rotation matrix (of the normalized quaternion).
+    pub func matrix() -> Mat3:
+        let q = self.normalized()
+        let xx = q.x * q.x
+        let yy = q.y * q.y
+        let zz = q.z * q.z
+        let xy = q.x * q.y
+        let xz = q.x * q.z
+        let yz = q.y * q.z
+        let wx = q.w * q.x
+        let wy = q.w * q.y
+        let wz = q.w * q.z
+        return Mat3([1.0 - 2.0 * (yy + zz), 2.0 * (xy - wz), 2.0 * (xz + wy),
+                     2.0 * (xy + wz), 1.0 - 2.0 * (xx + zz), 2.0 * (yz - wx),
+                     2.0 * (xz - wy), 2.0 * (yz + wx), 1.0 - 2.0 * (xx + yy)])
+
+    ## `value` turned by this rotation.
+    pub func rotate(value: Vector3) -> Vector3:
+        return self.matrix().transform(value)
+
+    ## The unit quaternion of rotation matrix `m` (Shepperd's method: the
+    ## largest of w, x, y, z is found first, so it is stable for any angle).
+    pub static func of_matrix(m: Mat3) -> Quat:
+        let a = m.m
+        let trace = a[0] + a[4] + a[8]
+        if trace > 0.0:
+            let s = 2.0 * math.sqrt(trace + 1.0)
+            return Quat((a[7] - a[5]) / s, (a[2] - a[6]) / s, (a[3] - a[1]) / s, 0.25 * s).normalized()
+        if a[0] > a[4] and a[0] > a[8]:
+            let s = 2.0 * math.sqrt(1.0 + a[0] - a[4] - a[8])
+            return Quat(0.25 * s, (a[1] + a[3]) / s, (a[2] + a[6]) / s, (a[7] - a[5]) / s).normalized()
+        if a[4] > a[8]:
+            let s = 2.0 * math.sqrt(1.0 + a[4] - a[0] - a[8])
+            return Quat((a[1] + a[3]) / s, 0.25 * s, (a[5] + a[7]) / s, (a[2] - a[6]) / s).normalized()
+        let s = 2.0 * math.sqrt(1.0 + a[8] - a[0] - a[4])
+        return Quat((a[2] + a[6]) / s, (a[5] + a[7]) / s, 0.25 * s, (a[3] - a[1]) / s).normalized()
+
+## A 3×3 matrix, row-major: `m[row * 3 + column]`.
+pub struct Mat3:
+    pub var m: f64[9]
+
+    pub static func identity() -> Mat3:
+        return Mat3([1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0])
+
+    ## The diagonal matrix of `values`.
+    pub static func diagonal(values: Vector3) -> Mat3:
+        return Mat3([values.x, 0.0, 0.0, 0.0, values.y, 0.0, 0.0, 0.0, values.z])
+
+    ## The linear part of an affine matrix.
+    pub static func of_matrix4(matrix: Matrix4) -> Mat3:
+        return Mat3([matrix.x.x, matrix.y.x, matrix.z.x,
+                     matrix.x.y, matrix.y.y, matrix.z.y,
+                     matrix.x.z, matrix.y.z, matrix.z.z])
+
+    ## The matrix with these columns.
+    pub static func of_columns(a: Vector3, b: Vector3, d: Vector3) -> Mat3:
+        return Mat3([a.x, b.x, d.x, a.y, b.y, d.y, a.z, b.z, d.z])
+
+    ## Element (row, column).
+    pub func at(row: usize, column: usize) -> f64:
+        return self.m[row * 3 + column]
+
+    ## Column `index`.
+    pub func column(index: usize) -> Vector3:
+        return Vector3(self.m[index], self.m[3 + index], self.m[6 + index])
+
+    ## This matrix times `value`.
+    pub func transform(value: Vector3) -> Vector3:
+        let a = self.m
+        return Vector3(a[0] * value.x + a[1] * value.y + a[2] * value.z,
+                       a[3] * value.x + a[4] * value.y + a[5] * value.z,
+                       a[6] * value.x + a[7] * value.y + a[8] * value.z)
+
+    ## This matrix times `other`.
+    pub func multiply(other: Mat3) -> Mat3:
+        var result: f64[9]
+        for row in 0..<(usize)3:
+            for column in 0..<(usize)3:
+                result[row * 3 + column] = self.m[row * 3] * other.m[column] + self.m[row * 3 + 1] * other.m[3 + column] + self.m[row * 3 + 2] * other.m[6 + column]
+        return Mat3(result)
+
+    pub func transposed() -> Mat3:
+        let a = self.m
+        return Mat3([a[0], a[3], a[6], a[1], a[4], a[7], a[2], a[5], a[8]])
+
+    pub func determinant() -> f64:
+        let a = self.m
+        return a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6]) + a[2] * (a[3] * a[7] - a[4] * a[6])
+
+    ## This matrix times `scale`.
+    pub func scaled(scale: f64) -> Mat3:
+        var result = self.m
+        for index in 0..<(usize)9: result[index] = result[index] * scale
+        return Mat3(result)
+
+    ## The largest absolute difference from `other`'s elements.
+    pub func distance(other: Mat3) -> f64:
+        var most: f64 = 0.0
+        for index in 0..<(usize)9: most = math.max(most, math.abs(self.m[index] - other.m[index]))
+        return most

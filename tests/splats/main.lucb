@@ -1,0 +1,86 @@
+## luce-geocore's Gaussian splat checks (`luc test` runs them): SH evaluation,
+## rotation and reflection, covariances, placement, merging and the GSplats
+## verbs, each cloud check also with allocation failure injected at every
+## stage and no allocation left live afterwards.
+import memory
+import ownership
+import sync
+from luce_std import parallel
+from luce_geocore.kernel import clear_group_cache
+import math_checks
+import placement_checks
+import verb_checks
+import unbake_checks
+
+## Counts live blocks and fails the allocation after `remaining` more.
+## Kernels allocate on pool workers too, so it takes a lock.
+struct Tracker: memory.Allocator:
+    var upstream: memory.Allocator
+    var live: usize
+    var remaining: usize?
+    var lock: sync.Mutex
+
+    pub func allocate(size: usize, alignment: usize) -> u8[]?:
+        if size == 0: return self.upstream.allocate(size, alignment)
+        self.lock.lock()
+        defer self.lock.unlock()
+        if let remaining = self.remaining:
+            if remaining == 0: return none
+            self.remaining = remaining - 1
+        let block = self.upstream.allocate(size, alignment) else return none
+        self.live += 1
+        return block
+
+    pub func resize(block: u8[], size: usize) -> bool:
+        return self.upstream.resize(block, size)
+
+    pub func release(block: u8[]):
+        if block.length == 0: return
+        self.lock.lock()
+        defer self.lock.unlock()
+        assert(self.live > 0)
+        self.live -= 1
+        self.upstream.release(block)
+
+func settle(tracker: Tracker*):
+    tracker.remaining = none
+    clear_group_cache()
+    ownership.collect()
+    _ = ownership.finish_run(0)
+    assert(tracker.live == 0, "no allocation stays live")
+
+## Fail the first allocation of `check`, then the second, and so on, until a
+## run allocates no more than it is allowed and succeeds: every failure must
+## be memory.exhausted and leave nothing allocated.
+func inject(tracker: Tracker*, check: func() -> unit!):
+    for stage in 0..<(usize)100000:
+        tracker.remaining = stage
+        var failed = false
+        check() catch failure:
+            assert(failure.code == memory.exhausted, "an injected failure surfaces as memory.exhausted")
+            failed = true
+        settle(tracker)
+        if not failed: return
+    trap("a check kept allocating")
+
+func restore(previous: memory.Allocator):
+    memory.heap = previous
+
+pub func main(arguments: str[]) -> i32!:
+    _ = arguments
+    # Start the pool first: its starting threads free blocks in the current heap.
+    parallel.warm()
+    let previous = memory.heap
+    var tracker = Tracker(previous, 0, none, sync.Mutex())
+    memory.heap = &tracker
+    defer restore(previous)
+    try math_checks.run()
+    settle(&tracker)
+    print("PASS splat math: SH reference values, basis, rotation and reflection per band, eigensolver, covariances, activations")
+    inject(&tracker, placement_checks.run)
+    print("PASS splat placement: rigid equals general, covariances and colors through Transform and mirrors, roles on plain clouds")
+    inject(&tracker, verb_checks.run)
+    print("PASS splat merge and verbs: degree padding, Bake GSplats from PLY, PLY vectors, Houdini and points, SH Degree, codec")
+    inject(&tracker, unbake_checks.run)
+    print("PASS splat unbake: luce-ply's raw form through bake and unbake bit for bit, restorient baked into f_rest")
+    return 0

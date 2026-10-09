@@ -250,6 +250,45 @@ full one is built after the release. The codec writes:
 - grids with their keys, values and masks as columns;
 - SDF programs as `ops` and `params`.
 
+## Gaussian splats
+
+A splat cloud is the points family with conventional point attributes, as in
+Houdini: `orient` (x, y, z, w), `scale` (linear σ), `opacity` (linear), `Cd`
+(linear), one ragged vec3 `sh` array (SH bands 1..d, coefficient-major, RGB per
+item: 0, 3, 8 or 15 items), an optional `restorient`, and the detail
+`gsplat_color_space` (`srgb` or `linear`). `src/splats/conventions.lucb` states
+them, and the design is luced-3d's `docs/research/GAUSSIAN-SPLATS.md`.
+
+- **Color.** Bake decodes only the DC color into a linear `Cd`. The SH bands are
+  offsets in the file's encoding and stay as they are, so a splat's color toward
+  a direction is decode(encode(`Cd`) + bands): exactly the trained color
+  (`display_color`). Export encodes `Cd` back (`file_dc`).
+- **Math** (`luce_geocore.splats`): sigmoid and logit; the 3DGS SH basis and
+  evaluation (degrees 0..3); `ShRotation`, each band's real Wigner D-matrix solved
+  from the basis at sample directions, with mirrors as a rotation plus the point
+  inversion; a Jacobi symmetric 3×3 eigensolver; covariance compose and
+  decompose; the polar rotation of a linear map.
+- **Placement.** A Transform moves cloud attributes by role (position, vector,
+  normal, and the new `Role.rotation`, which `orient` has; meshes, curves and
+  details turn rotations too). A splat cloud's covariances become L Σ Lᵀ: a
+  similarity turns `orient` and scales `scale`, anything else is decomposed.
+  The SH are never rotated: `restorient` keeps the SH frame,
+  orient · restorient⁻¹, and is written (as `orient`) the first time a
+  transform turns it. A mirror negates the odd SH bands.
+- **Merge** pads the lower SH degree with zero bands and adds `orient` and
+  `restorient` where one side lacks them.
+- **Nodes** (category GSplats): **Bake GSplats** reads the 3DGS PLY's raw names
+  (`f_dc_*`, `opacity` logits, `scale_*` logs, `rot_*` w, x, y, z, with `f_rest`
+  as `f_rest_*`, a channel-major array or luce-ply's coefficient-major vec3
+  array), Houdini's (`GS_Alpha`, `GS_SPH_R/G/B`), or plain points (round splats
+  from `pscale`). **GSplats SH Degree** truncates or pads the bands.
+- **Export.** `unbaked_set` (`GeometrySet.unbaked_splats` in Luce) gives the raw
+  names back, `restorient` baked into `f_rest`. Bake keeps `scale`, `opacity`
+  and `Cd` in f64 and the file's quaternion as it is, so a file's values come
+  back bit for bit (`tests/splats`).
+- **Renderers** find a set's splats with `set_splats` (Base) or
+  `GeometrySet.splat_count` (Luce).
+
 ## Set verbs and the verb catalog
 
 A set verb (`luce_geocore.set_verbs`) takes whole geometry sets. Mesh verbs

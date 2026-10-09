@@ -8,7 +8,8 @@
 ## groups): its bits are the members. Text attributes store an i32 index per
 ## element into a string table (strings.lucb) shared like any column. A role
 ## says how geometric operations treat the values (Houdini's type info):
-## transforms move positions and vectors, turn normals, and leave the rest.
+## transforms move positions and vectors, turn normals and rotations, and
+## leave the rest.
 from luce_std import math
 import memory
 import errors
@@ -52,6 +53,9 @@ pub enum Role as u8:
     uv = 5
     ## An element or class id: copied, never interpolated.
     index = 6
+    ## A unit quaternion x, y, z, w (Houdini's `orient`): turned by the
+    ## rotation of a transform's polar decomposition.
+    rotation = 7
 
 ## Attribute flags.
 pub let group_flag: u8 = 1
@@ -63,6 +67,7 @@ pub func role_of(name: str) -> Role:
     if name == "uv": return Role.uv
     if name == "v" or name == "up": return Role.vector
     if name == "id" or name == "class": return Role.index
+    if name == "orient": return Role.rotation
     return Role.generic
 
 ## An element per tuple (array), one tuple for the whole domain (single), or a list of

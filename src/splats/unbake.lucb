@@ -1,0 +1,96 @@
+## Unbaking, for writers: a splat cloud back in the raw 3DGS names a PLY
+## holds (luce-ply writes them in the reference layout):
+## - `f_dc_0..2` = (encode(Cd) - 0.5) / C0, undoing the bake's linearization
+##   in the cloud's `gsplat_color_space`;
+## - `opacity` = logit(opacity), `scale_0..2` = log(scale);
+## - `rot_0..3` = orient as w, x, y, z;
+## - `f_rest`: `sh` as a width-3 array (RGB items, coefficient-major), first
+##   turned into the world frame when the cloud has a `restorient`.
+## All are f32. A cloud baked from such a file comes back bit for bit
+## (`Cd`, `scale` and `opacity` are f64, so their activations invert
+## exactly), opacities closer to 0 or 1 than f64 resolves (|logit| > 36)
+## excepted. `N` and other attributes stay.
+
+## The raw-name attributes of a splat cloud's `count` points (`store`), with
+## the colors encoded in `space`. A store that is not a splat cloud comes
+## back shared as it is.
+pub func unbaked_store(store: const AttributeStore*, count: usize, space: ColorSpace) -> AttributeStore!:
+    var result = try store.shared()
+    errdefer result.close()
+    if not is_splat_store(store): return result
+    var work: UnbakeWork
+    work.space = space
+    work.samples = ShSamples.make()
+    for k in 0..<(usize)4: work.orient[k] = lane(store, orient_name, 4, k)
+    for k in 0..<(usize)3:
+        work.scale[k] = lane(store, scale_name, 3, k)
+        work.color[k] = lane(store, color_name, 3, k)
+    work.opacity = lane(store, opacity_name, 1, 0)
+    let rest = float_attribute(store, restorient_name, 4)
+    for k in 0..<(usize)4:
+        if rest >= 0: work.rest[k] = lane(store, restorient_name, 4, k)
+    let sh_index = sh_attribute(store)
+    let items = sh_items(store)
+    # The SH need a copy only when a restorient turns them into the world frame.
+    var turned: Attribute
+    defer turned.release()
+    if sh_index >= 0 and rest >= 0:
+        turned = try uniform_sh(store.entry((usize)sh_index), count, items)
+        work.sh = attribute_ops.typed_mut[f32](turned.data.span())
+        work.items = items
+    # The eleven columns, made first (in a store that owns them) and filled on the pool.
+    var made = AttributeStore()
+    defer made.close()
+    let names: str[11] = ["f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]
+    for index in 0..<(usize)11:
+        try made.put(try float32_points(names[index], 1, count))
+        work.columns[index] = float32_values(made.entry(index))
+    ranges.each_range(count, 4096, (void*)&work, unbake_range)
+    let removed: str[6] = [orient_name, restorient_name, scale_name, color_name, sh_name, opacity_name]
+    for name in removed:
+        let index = result.find(name, Domain.point)
+        if index >= 0: result.remove((usize)index)
+    for index in 0..<(usize)11: try result.put(made.entry(index).share())
+    if sh_index < 0: return result
+    if rest >= 0:
+        try result.put(try turned.renamed("f_rest"))
+    else:
+        try result.put(try store.entry((usize)sh_index).renamed("f_rest"))
+    return result
+
+struct UnbakeWork:
+    var space: ColorSpace
+    var samples: ShSamples
+    var orient: Lane[4]
+    var rest: Lane[4]
+    var scale: Lane[3]
+    var color: Lane[3]
+    var opacity: Lane
+    ## The `sh` copy to turn (empty when the SH stay as they are), and its items per point.
+    var sh: f32[]
+    var items: usize
+    ## f_dc_0..2, opacity, scale_0..2, rot_0..3.
+    var columns: (f32[])[11]
+
+    func unbake(element: usize):
+        let dc = file_dc(Vector3(self.color[0].at(element), self.color[1].at(element), self.color[2].at(element)), self.space)
+        let o = Quat(self.orient[0].at(element), self.orient[1].at(element), self.orient[2].at(element), self.orient[3].at(element))
+        let values: f64[11] = [dc.x, dc.y, dc.z, logit(self.opacity.at(element)),
+                               scale_log(self.scale[0].at(element)), scale_log(self.scale[1].at(element)), scale_log(self.scale[2].at(element)),
+                               o.w, o.x, o.y, o.z]
+        for index in 0..<(usize)11: self.columns[index][element] = (f32)values[index]
+        if self.sh.length == 0 or self.items == 0: return
+        let r = Quat(self.rest[0].at(element), self.rest[1].at(element), self.rest[2].at(element), self.rest[3].at(element))
+        let frame = sh_frame(o, r)
+        if math.abs(frame.w) >= 1.0: return
+        let rotation = ShRotation.of(&self.samples, frame)
+        rotation.apply(self.sh[element * self.items * 3..<(element + 1) * self.items * 3], self.items)
+
+## log σ, kept finite for a flat axis.
+func scale_log(value: f64) -> f64:
+    return math.log(math.max(value, 1.0e-45))
+
+func unbake_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (UnbakeWork*)context
+    for element in first..<end: work.unbake(element)

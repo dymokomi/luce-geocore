@@ -1,0 +1,102 @@
+## luce-ply's raw splat form (f32 `f_dc_0..2`, `opacity` logits, `scale_0..2`
+## logs, `rot_0..3` w, x, y, z, a width-3 `f_rest` array and `N`) goes through
+## Bake GSplats and unbaked_set and comes back bit for bit, in both color
+## spaces; a turned cloud's restorient is baked into `f_rest`.
+import interop
+from luce_geocore.geocore import Vector3, GeometrySet
+from luce_geocore.kernel import AttributeStore, Domain, unbaked_set, adopt_set
+from luce_geocore.splats import sh_bands, sh_frame
+import draws
+import clouds
+import verb_checks
+
+let points: usize = 64
+
+pub func run() -> !:
+    try round_trip(false)
+    try round_trip(true)
+    try turned_round_trip()
+
+## Seeded raw values: f_dc in ±2, logits in ±20 (opacities 2e-9 from the
+## ends), log σ in -9..1, unnormalized quaternions, bands in ±0.5.
+func raw_cloud() -> interop.Reference[GeometrySet]!:
+    var state = draws.Draws(77)
+    var builder = clouds.CloudBuilder(points)
+    defer builder.close()
+    var column: f64[64]
+    let names: str[11] = ["f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3"]
+    let lows: f64[11] = [-2.0, -2.0, -2.0, -20.0, -9.0, -9.0, -9.0, -1.0, -1.0, -1.0, -1.0]
+    let highs: f64[11] = [2.0, 2.0, 2.0, 20.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    for index in 0..<(usize)11:
+        for p in 0..<points: column[p] = state.between(lows[index], highs[index])
+        try builder.floats(names[index], 1, column)
+    var rest: f64[2880]
+    for at in 0..<rest.length: rest[at] = state.between(-0.5, 0.5)
+    try builder.array("f_rest", 3, 15, rest)
+    var normals: f64[192]
+    for at in 0..<normals.length: normals[at] = state.between(-1.0, 1.0)
+    try builder.floats("N", 3, normals)
+    var positions: Vector3[64] = ---
+    for p in 0..<points: positions[p] = Vector3(state.between(-1.0, 1.0), state.between(-1.0, 1.0), state.between(-1.0, 1.0))
+    return try builder.finish(positions)
+
+## Whether `name` holds the same f32 bits in both stores.
+func same_floats(a: const AttributeStore*, b: const AttributeStore*, name: str) -> bool:
+    let left = clouds.attribute(a, name)
+    let right = clouds.attribute(b, name)
+    if left.width != right.width or left.elements != right.elements: return false
+    for element in 0..<left.elements:
+        for component in 0..<left.width:
+            if (f32)left.number(element, component) != (f32)right.number(element, component): return false
+    return true
+
+func round_trip(linear: bool) -> !:
+    let source = try raw_cloud()
+    defer source.release()
+    let space: f64 = 1.0 if linear else 0.0
+    let baked = try verb_checks.run_verb("Bake GSplats", source, [0.0, space])
+    defer baked.release()
+    assert(baked.value().splat_count() == (i64)points, "the raw form bakes to splats")
+    let back = try adopt_set(try unbaked_set(baked.value()))
+    defer back.release()
+    let before = clouds.points_of(source.value())
+    let after = clouds.points_of(back.value())
+    let names: str[12] = ["f_dc_0", "f_dc_1", "f_dc_2", "opacity", "scale_0", "scale_1", "scale_2", "rot_0", "rot_1", "rot_2", "rot_3", "N"]
+    for name in names: assert(same_floats(before, after, name), "every raw value comes back bit for bit")
+    var first: f32[45]
+    var second: f32[45]
+    for p in 0..<points:
+        assert(clouds.items_of(before, "f_rest", p, first) == 15 and clouds.items_of(after, "f_rest", p, second) == 15, "f_rest keeps its items")
+        for at in 0..<(usize)45: assert(first[at] == second[at], "f_rest comes back bit for bit")
+    assert(after.find("orient", Domain.point) < 0 and after.find("sh", Domain.point) < 0 and after.find("Cd", Domain.point) < 0, "the baked names are gone")
+    assert(back.value().splat_count() == 0 and not back.value().has_detail("gsplat_color_space"), "an unbaked set is raw again")
+
+## After a rotation the cloud has a restorient; unbaking turns `f_rest` into
+## the world frame, so the file shows the same colors.
+func turned_round_trip() -> !:
+    let source = try raw_cloud()
+    defer source.release()
+    let baked = try verb_checks.run_verb("Bake GSplats", source, [0.0])
+    defer baked.release()
+    let angles = Vector3(0.4, -1.1, 2.0)
+    let turned = try baked.value().transformed(Vector3(), angles, Vector3(1.0, 1.0, 1.0))
+    defer turned.release()
+    let back = try adopt_set(try unbaked_set(turned.value()))
+    defer back.release()
+    let store = clouds.points_of(turned.value())
+    let raw = clouds.points_of(back.value())
+    var state = draws.Draws(5)
+    var bands: f32[45]
+    var rest: f32[45]
+    for p in 0..<points:
+        _ = clouds.sh_of(store, p, bands)
+        _ = clouds.items_of(raw, "f_rest", p, rest)
+        let frame = sh_frame(clouds.quat_of(store, "orient", p), clouds.quat_of(store, "restorient", p))
+        for _ in 0..<(usize)3:
+            let d = state.direction()
+            let shown = sh_bands(bands, 15, frame.conjugate().rotate(d))
+            let written = sh_bands(rest, 15, d)
+            assert(near(shown.x, written.x) and near(shown.y, written.y) and near(shown.z, written.z), "f_rest shows the world-frame colors")
+
+func near(a: f64, b: f64) -> bool:
+    return a - b <= 0.00002 and b - a <= 0.00002

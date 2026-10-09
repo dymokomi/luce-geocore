@@ -1,0 +1,200 @@
+## Placing point attributes by role, and splats exactly. A Transform (or any
+## placement) moves positions and turns vectors, normals and rotations. A
+## splat cloud's orient, scale and SH frame follow its covariance: a
+## similarity (rotation and uniform scale) turns `orient` and scales `scale`;
+## any other linear map takes each covariance to L Σ Lᵀ and decomposes it.
+## `restorient` keeps Houdini's meaning: the SH frame, orient · restorient⁻¹,
+## turns with the placement's rotation and the SH are never rewritten, except
+## that a reflection, which no rotation can hold, negates their odd bands.
+
+## What a placement's linear part does to orientations.
+pub struct LinearPart:
+    ## The 3×3 part.
+    pub let linear: Mat3
+    ## The rotation of its polar decomposition (of -linear when it reflects).
+    pub let rotation: Quat
+    ## Whether its determinant is negative.
+    pub let reflects: bool
+    ## c when the part is ±c times a rotation (a similarity), else 0.
+    pub let uniform: f64
+
+    pub static func of(matrix: Matrix4) -> LinearPart:
+        let linear = Mat3.of_matrix4(matrix)
+        let reflects = linear.determinant() < 0.0
+        let proper = linear.scaled(-1.0 if reflects else 1.0)
+        let gram = proper.transposed().multiply(proper)
+        let square = (gram.m[0] + gram.m[4] + gram.m[8]) / 3.0
+        var uniform: f64 = 0.0
+        if square > 0.0 and gram.distance(Mat3.identity().scaled(square)) <= 1.0e-10 * square:
+            uniform = math.sqrt(square)
+        let turn = proper.scaled(1.0 / uniform) if uniform > 0.0 else rotation_part(proper)
+        return LinearPart(linear, Quat.of_matrix(turn), reflects, uniform)
+
+    ## Whether the part is the identity (a translation at most).
+    pub func is_identity() -> bool:
+        return self.linear.distance(Mat3.identity()) == 0.0
+
+## A placed splat's orient, scale and restorient.
+pub struct PlacedSplat:
+    pub let orient: Quat
+    pub let scale: Vector3
+    pub let restorient: Quat
+
+## One splat placed by `part`: `restorient` is the splat's (its `orient` when
+## it has none). A similarity takes the cheap path unless `general`; both give
+## the same covariance and SH frame.
+pub func place_splat(orient: Quat, scale: Vector3, restorient: Quat, part: const LinearPart*, general: bool) -> PlacedSplat:
+    let o = orient.normalized()
+    let r = restorient.normalized()
+    if part.uniform > 0.0 and not general:
+        return PlacedSplat(part.rotation.multiply(o), scale.multiply_scalar(part.uniform), r)
+    let sigma = part.linear.multiply(compose_covariance(o, scale)).multiply(part.linear.transposed())
+    let shape = decompose_covariance(sigma)
+    let frame = part.rotation.multiply(o.multiply(r.conjugate()))
+    return PlacedSplat(shape.orient, shape.scale, frame.conjugate().multiply(shape.orient))
+
+## `store` (a cloud's `count` point attributes) placed by `matrix`: float
+## attributes move by role (positions as points, vectors, normals, rotations),
+## a splat cloud's orient, scale, restorient and sh exactly. Other columns are
+## shared.
+pub func placed_point_store(store: const AttributeStore*, count: usize, matrix: Matrix4) -> AttributeStore!:
+    var result = try store.shared()
+    errdefer result.close()
+    let part = LinearPart.of(matrix)
+    let splats = is_splat_store(store)
+    for index in 0..<result.count():
+        let entry = result.entry(index)
+        if entry.storage != Storage.array or (entry.kind != DataType.float32 and entry.kind != DataType.float64): continue
+        if splats and (entry.name() == orient_name or entry.name() == restorient_name): continue
+        let role = entry.role
+        if entry.width == 4 and role == Role.rotation:
+            if not part.is_identity(): turn_rotations(try result.writable(index), entry.kind, count, part.rotation)
+            continue
+        if entry.width != 3 or (role != Role.position and role != Role.vector and role != Role.normal): continue
+        if role != Role.position and part.is_identity(): continue
+        try place_vectors(try result.writable(index), entry.kind == DataType.float64, role, matrix)
+    if splats and not part.is_identity(): try place_splats(&result, count, &part)
+    return result
+
+## Width-3 tuples by role: points take the whole matrix, vectors its linear
+## part, normals its inverse transpose (renormalized; zero normals stay).
+func place_vectors(bytes: u8[], wide: bool, role: Role, matrix: Matrix4) -> !:
+    let count = bytes.length // (24 if wide else 12)
+    for at in 0..<count:
+        var value = Vector3()
+        if wide:
+            let values = attribute_ops.typed_mut[f64](bytes)
+            value = Vector3(values[at * 3], values[at * 3 + 1], values[at * 3 + 2])
+        else:
+            let values = attribute_ops.typed_mut[f32](bytes)
+            value = Vector3((f64)values[at * 3], (f64)values[at * 3 + 1], (f64)values[at * 3 + 2])
+        var moved = matrix.transform_direction(value)
+        if role == Role.position: moved = matrix.transform_point(value)
+        elif role == Role.normal:
+            if value.length() <= 0.000000001: continue
+            moved = try matrix.transform_normal(value)
+        if wide:
+            let values = attribute_ops.typed_mut[f64](bytes)
+            values[at * 3] = moved.x
+            values[at * 3 + 1] = moved.y
+            values[at * 3 + 2] = moved.z
+        else:
+            let values = attribute_ops.typed_mut[f32](bytes)
+            values[at * 3] = (f32)moved.x
+            values[at * 3 + 1] = (f32)moved.y
+            values[at * 3 + 2] = (f32)moved.z
+
+## Quaternion tuples (x, y, z, w; f32 or f64) turned by `rotation`: each q
+## becomes rotation · q. What every Role.rotation attribute gets from a
+## transform, on any component.
+pub func turn_rotations(bytes: u8[], kind: DataType, count: usize, rotation: Quat):
+    for at in 0..<count:
+        if kind == DataType.float64:
+            let values = attribute_ops.typed_mut[f64](bytes)
+            let turned = rotation.multiply(Quat(values[at * 4], values[at * 4 + 1], values[at * 4 + 2], values[at * 4 + 3]))
+            values[at * 4] = turned.x
+            values[at * 4 + 1] = turned.y
+            values[at * 4 + 2] = turned.z
+            values[at * 4 + 3] = turned.w
+        else:
+            let values = attribute_ops.typed_mut[f32](bytes)
+            let turned = rotation.multiply(Quat((f64)values[at * 4], (f64)values[at * 4 + 1], (f64)values[at * 4 + 2], (f64)values[at * 4 + 3]))
+            values[at * 4] = (f32)turned.x
+            values[at * 4 + 1] = (f32)turned.y
+            values[at * 4 + 2] = (f32)turned.z
+            values[at * 4 + 3] = (f32)turned.w
+
+## Place a splat cloud's orient, scale and restorient in `store` (a private
+## copy) on the pool, writing `restorient` first when the cloud has none and
+## the part turns its SH frame, and reflect its SH when the part reflects.
+func place_splats(store: AttributeStore*, count: usize, part: const LinearPart*) -> !:
+    let orient = try writable_float32(store, (usize)float_attribute(store, orient_name, 4), count)
+    let scale = try writable_float32(store, (usize)float_attribute(store, scale_name, 3), count)
+    let rest_index = float_attribute(store, restorient_name, 4)
+    var restorient: f32[]
+    if rest_index >= 0:
+        restorient = try writable_float32(store, (usize)rest_index, count)
+    elif part.uniform == 0.0 or math.abs(part.rotation.w) < 1.0:
+        # The SH frame turns, and so far it is the identity: restorient starts as orient.
+        let made = try float32_points(restorient_name, 4, count)
+        restorient = float32_values(&made)
+        memory.copy(restorient, orient, count * 4)
+        try store.put(made)
+    var work = PlaceWork(orient, scale, restorient, part)
+    ranges.each_range(count, 4096, (void*)&work, place_range)
+    if not part.reflects: return
+    let sh_index = sh_attribute(store)
+    if sh_index < 0: return
+    let entry = store.entry((usize)sh_index)
+    let items = entry.item_count(0) if count > 0 else 0
+    # Uniform arrays reflect as one block; ragged ones point by point.
+    var uniform = true
+    for element in 0..<count: uniform = uniform and entry.item_count(element) == items
+    let values = try writable_sh(store, (usize)sh_index)
+    let reflected = store.entry((usize)sh_index)
+    if uniform:
+        var mirror = MirrorWork(values, items)
+        ranges.each_range(count, 16384, (void*)&mirror, mirror_range)
+        return
+    for element in 0..<count:
+        let first = reflected.first_item(element)
+        let have = reflected.item_count(element)
+        invert_sh(values[first * 3..<(first + have) * 3], have)
+
+struct PlaceWork:
+    let orient: f32[]
+    let scale: f32[]
+    let restorient: f32[]
+    let part: const LinearPart*
+
+func place_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (PlaceWork*)context
+    for at in first..<end:
+        let o = Quat((f64)work.orient[at * 4], (f64)work.orient[at * 4 + 1], (f64)work.orient[at * 4 + 2], (f64)work.orient[at * 4 + 3])
+        # Without a restorient (a scaling only) the frame is orient's own.
+        var r = o
+        if work.restorient.length > 0: r = Quat((f64)work.restorient[at * 4], (f64)work.restorient[at * 4 + 1], (f64)work.restorient[at * 4 + 2], (f64)work.restorient[at * 4 + 3])
+        let s = Vector3((f64)work.scale[at * 3], (f64)work.scale[at * 3 + 1], (f64)work.scale[at * 3 + 2])
+        let placed = place_splat(o, s, r, work.part, false)
+        write_quat(work.orient, at, placed.orient)
+        if work.restorient.length > 0: write_quat(work.restorient, at, placed.restorient)
+        work.scale[at * 3] = (f32)placed.scale.x
+        work.scale[at * 3 + 1] = (f32)placed.scale.y
+        work.scale[at * 3 + 2] = (f32)placed.scale.z
+
+func write_quat(values: f32[], at: usize, q: Quat):
+    values[at * 4] = (f32)q.x
+    values[at * 4 + 1] = (f32)q.y
+    values[at * 4 + 2] = (f32)q.z
+    values[at * 4 + 3] = (f32)q.w
+
+struct MirrorWork:
+    let values: f32[]
+    let items: usize
+
+func mirror_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (MirrorWork*)context
+    let stride = work.items * 3
+    for at in first..<end: invert_sh(work.values[at * stride..<(at + 1) * stride], work.items)

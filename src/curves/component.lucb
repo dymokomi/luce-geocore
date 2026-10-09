@@ -72,12 +72,18 @@ func place_curves(data: const void*, placement: const Placement*) -> void*!:
     attributes = AttributeStore()
     return (void*)(try curves_assembled(positions.take(), origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), handed, curves.cache))
 
-## Width-3 float attributes by role: positions and vectors take the linear
-## part (they are measured in the positions' frame), normals its inverse
-## transpose. Columns are written copy-on-write.
+## Float attributes by role: positions and vectors take the linear part
+## (they are measured in the positions' frame), normals its inverse
+## transpose, rotations its polar rotation. Columns are written
+## copy-on-write.
 pub func transform_attributes(attributes: AttributeStore*, matrix: Matrix4) -> !:
     for index in 0..<attributes.count():
         let entry = attributes.entry(index)
+        if entry.width == 4 and entry.role == Role.rotation and entry.storage == Storage.array and (entry.kind == DataType.float32 or entry.kind == DataType.float64):
+            let kind = entry.kind
+            let tuples = entry.elements
+            turn_rotations(try attributes.writable(index), kind, tuples, LinearPart.of(matrix).rotation)
+            continue
         if entry.width != 3 or (entry.kind != DataType.float32 and entry.kind != DataType.float64): continue
         if entry.role != Role.position and entry.role != Role.vector and entry.role != Role.normal: continue
         let role = entry.role

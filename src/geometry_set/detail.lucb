@@ -46,10 +46,10 @@ extend GeometrySet:
         return entry.number(0, (usize)component)
 
     ## This set with float detail attribute `name` set to `values` (1..4
-    ## components) with `role` (Role: 1 position, 2 vector, 3 normal move
-    ## with a Transform; 0 generic).
+    ## components) with `role` (Role: 1 position, 2 vector, 3 normal and
+    ## 7 rotation move with a Transform; 0 generic).
     pub func with_detail(name: str, values: const f64[], role: i64 = 0) -> interop.Reference[GeometrySet]!:
-        if values.length < 1 or values.length > 4 or role < 0 or role > 6: error(errors.invalid, "a detail attribute has 1..4 components and a role 0..6")
+        if values.length < 1 or values.length > 4 or role < 0 or role > 7: error(errors.invalid, "a detail attribute has 1..4 components and a role 0..7")
         var attribute = try Attribute.from_numbers(name, Domain.detail, values.length, values, false)
         attribute.role = Role((u8)role)
         let storage = self.storage() catch failure:
@@ -76,13 +76,17 @@ pub func set_put_detail(set: GeometrySet*, attribute: Attribute) -> !:
     try set.detail.put(attribute)
 
 ## `store` placed by `matrix`: float position attributes (width 3) move,
-## vectors turn and scale, normals take the inverse transpose; the rest
-## are shared as they are.
+## vectors turn and scale, normals take the inverse transpose, rotations
+## (width 4) turn; the rest are shared as they are.
 func placed_detail(store: const AttributeStore*, matrix: Matrix4) -> AttributeStore!:
     var result = try store.shared()
     errdefer result.close()
     for index in 0..<result.count():
         let entry = result.entry(index)
+        if entry.width == 4 and entry.role == Role.rotation and (entry.kind == DataType.float32 or entry.kind == DataType.float64):
+            let kind = entry.kind
+            turn_rotations(try result.writable(index), kind, 1, LinearPart.of(matrix).rotation)
+            continue
         if entry.width != 3 or (entry.kind != DataType.float32 and entry.kind != DataType.float64): continue
         let role = entry.role
         if role != Role.position and role != Role.vector and role != Role.normal: continue

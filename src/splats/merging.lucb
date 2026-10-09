@@ -1,0 +1,67 @@
+## Merging splat clouds, and changing their SH degree. Every point of a cloud
+## has the same number of SH items, so a merge pads the lower degree with
+## zero bands; a side without `orient` gets the identity, and one without
+## `restorient` gets its own orient (its SH frame is the identity).
+
+## `store` (one cloud's `count` point attributes) made ready to join a cloud
+## with `other`'s attributes: unchanged (shared) unless either is a splat
+## cloud, else with `sh` at the larger item count of the two, and `orient`
+## and `restorient` wherever the other side has them.
+pub func conformed_for_join(store: const AttributeStore*, count: usize, other: const AttributeStore*) -> AttributeStore!:
+    var result = try store.shared()
+    errdefer result.close()
+    if not is_splat_store(store) and not is_splat_store(other): return result
+    let mine = sh_items(store)
+    let theirs = sh_items(other)
+    let items = mine if mine > theirs else theirs
+    if items > 0 and not uniform_items(store, items):
+        let index = sh_attribute(store)
+        try result.put(try uniform_sh(store.entry((usize)index) if index >= 0 else none, count, items))
+    if float_attribute(store, orient_name, 4) < 0 and float_attribute(other, orient_name, 4) >= 0:
+        try result.put(try identity_orients(orient_name, count))
+    if float_attribute(store, restorient_name, 4) < 0 and float_attribute(other, restorient_name, 4) >= 0:
+        let index = float_attribute(&result, orient_name, 4)
+        if index < 0:
+            try result.put(try identity_orients(restorient_name, count))
+        else:
+            let copy = try float32_points(restorient_name, 4, count)
+            let values = float32_values(&copy)
+            let source = Floats.of(result.entry((usize)index))
+            for element in 0..<count:
+                for component in 0..<(usize)4: values[element * 4 + component] = (f32)source.at(element, component)
+            try result.put(copy)
+    return result
+
+## Whether every point of `store` has exactly `items` SH items.
+func uniform_items(store: const AttributeStore*, items: usize) -> bool:
+    let index = sh_attribute(store)
+    if index < 0: return false
+    let entry = store.entry((usize)index)
+    for element in 0..<entry.elements:
+        if entry.item_count(element) != items: return false
+    return true
+
+## `count` identity quaternions as point attribute `name`.
+func identity_orients(name: str, count: usize) -> Attribute!:
+    let made = try float32_points(name, 4, count)
+    let values = float32_values(&made)
+    for element in 0..<count:
+        values[element * 4] = 0.0
+        values[element * 4 + 1] = 0.0
+        values[element * 4 + 2] = 0.0
+        values[element * 4 + 3] = 1.0
+    return made
+
+## `store` with its `sh` at `degree` (0..3): higher bands dropped, missing
+## ones zero; degree 0 removes `sh`. Other columns are shared.
+pub func with_sh_degree(store: const AttributeStore*, count: usize, degree: usize) -> AttributeStore!:
+    var result = try store.shared()
+    errdefer result.close()
+    let items = sh_count(degree if degree < 3 else 3)
+    let index = sh_attribute(store)
+    if items == 0:
+        if index >= 0: result.remove((usize)index)
+        return result
+    if uniform_items(store, items): return result
+    try result.put(try uniform_sh(store.entry((usize)index) if index >= 0 else none, count, items))
+    return result

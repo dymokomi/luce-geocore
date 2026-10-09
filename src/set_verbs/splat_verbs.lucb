@@ -1,0 +1,78 @@
+## GSplats nodes: Gaussian splat clouds (point clouds with orient, scale,
+## opacity, Cd and sh; splats/conventions.lucb). Bake GSplats mirrors
+## Houdini's Bake GSplats; GSplats SH Degree is its Compute SPH choice as a
+## node of its own. Kernels live in luce_geocore.splats.
+
+let gsplats_category: str = "GSplats"
+
+## The input set with its point cloud's attributes replaced by `store`
+## (taken, even on failure).
+func with_cloud_store(input: const SetVerbInput*, cloud: const PointCloud*, store: AttributeStore, output: SetVerbOutput*) -> !:
+    let made = try cloud_with_store(cloud, store)
+    let storage = input.set.storage() catch failure:
+        close_cloud_storage(made)
+        error(failure.code, failure.message)
+    storage.put(&points_component, (void*)made) catch failure:
+        dispose_set(storage)
+        error(failure.code, failure.message)
+    output.set = storage
+
+func close_cloud_storage(cloud: PointCloud*):
+    let close = points_component.close
+    close((void*)cloud)
+
+## The input's point cloud, or a warning that it has none (the set passes).
+func input_cloud(input: const SetVerbInput*, output: SetVerbOutput*) -> const PointCloud*?:
+    let data = input.set.find(&points_component)
+    if data == none: output.warning = "The input has no point cloud; it passes through"
+    let found = data else return none
+    return (const PointCloud*)found
+
+# mark: Bake GSplats
+
+let bake_parms: ParmSpec[6] = [
+    ParmSpec("Source", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Auto|Points", "Auto reads 3DGS PLY attributes (f_dc_0, rot_0, … or f_dc, rot, …) or Houdini's (GS_Alpha, GS_SPH_R, …); Points makes round splats from pscale and Cd."),
+    ParmSpec("Color Space", ParmKind.menu, 0.0, 0.0, 1.0, 1, "sRGB|Linear", "How the source's colors and SH are encoded: sRGB for trained captures. Cd is decoded to linear; the SH bands keep the encoding, recorded in gsplat_color_space."),
+    ParmSpec("SH Degree", ParmKind.integer, 3.0, 0.0, 3.0, 1, "", "The highest spherical harmonics degree kept: 0 is view-independent color, 3 is the most."),
+    ParmSpec("Opacity", ParmKind.number, 1.0, 0.0, 1.0, 1, "", "Opacity of splats whose source has none."),
+    ParmSpec("Point Scale", ParmKind.number, 0.05, 0.0, 100000.0, 1, "", "Size (one standard deviation) of splats made from points without pscale.", 1.0),
+    ParmSpec("Delete Original Attributes", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Remove the PLY or Houdini attributes the bake read.")]
+
+func bake_gsplats_verb() -> SetVerb:
+    return SetVerb("Bake GSplats", gsplats_category, "Turn PLY or Houdini splat attributes, or plain points, into Gaussian splats: orient, scale, opacity, linear Cd and sh", 1, false, false, bake_parms, cook_bake_gsplats)
+
+func cook_bake_gsplats(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let cloud = input_cloud(input, output) else return
+    let p = input.parms
+    let space = ColorSpace.linear if p.at(1) == 1.0 else ColorSpace.srgb
+    let options = BakeOptions(p.at(0) == 1.0, space, (usize)math.clamp(p.at(2), 0.0, 3.0), math.clamp(p.at(3), 0.0, 1.0), math.max(p.at(4), 0.0), p.at(5) != 0.0)
+    let store = cloud_store(cloud)
+    let naming = splat_naming(store)
+    if naming == SplatNaming.plain and p.at(0) == 0.0: output.warning = "No splat attributes found; the points become round splats"
+    try with_cloud_store(input, cloud, try baked_store(store, cloud.count(), &options), output)
+    let made = output.set else return
+    # A cloud that was baked already keeps its recorded color space.
+    if naming == SplatNaming.baked and made.has_detail(color_space_name): return
+    var table = TableBuilder()
+    defer table.close()
+    let index: i32[1] = [try table.intern(color_space_text(space))]
+    var column = try table.finish()
+    defer column.release()
+    try set_put_detail(made, try Attribute.text(color_space_name, Domain.detail, 1, column, index, Storage.single))
+
+# mark: GSplats SH Degree
+
+let sh_degree_parms: ParmSpec[1] = [
+    ParmSpec("Degree", ParmKind.integer, 1.0, 0.0, 3.0, 1, "", "The spherical harmonics degree every splat keeps: higher bands are dropped, missing ones are zero.")]
+
+func gsplats_sh_degree_verb() -> SetVerb:
+    return SetVerb("GSplats SH Degree", gsplats_category, "Set the splats' spherical harmonics degree: drop higher bands, or pad with zero bands", 1, false, false, sh_degree_parms, cook_sh_degree)
+
+func cook_sh_degree(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let cloud = input_cloud(input, output) else return
+    let store = cloud_store(cloud)
+    if not is_splat_store(store):
+        output.warning = "The input's points are not splats (no orient, scale and opacity); it passes through"
+        return
+    let degree = (usize)math.clamp(input.parms.at(0), 0.0, 3.0)
+    try with_cloud_store(input, cloud, try with_sh_degree(store, cloud.count(), degree), output)

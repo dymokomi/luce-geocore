@@ -1,0 +1,40 @@
+## Seeded pseudo-random draws for the checks (SplitMix64), so every run
+## sees the same rotations and directions.
+from luce_std import math
+from luce_geocore.geocore import Vector3
+from luce_geocore.splats import Quat
+
+pub struct Draws:
+    var state: u64
+
+    pub func init(seed: u64):
+        self.state = seed
+
+    ## A uniform number in [0, 1).
+    pub func unit() -> f64:
+        self.state = self.state +% 0x9E3779B97F4A7C15
+        var z = self.state
+        z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) *% 0x94D049BB133111EB
+        z = z ^ (z >> 31)
+        return (f64)(z >> 11) / 9007199254740992.0
+
+    ## A uniform number in [low, high).
+    pub func between(low: f64, high: f64) -> f64:
+        return low + (high - low) * self.unit()
+
+    ## A uniform unit direction.
+    pub func direction() -> Vector3:
+        let z = self.between(-1.0, 1.0)
+        let angle = self.between(0.0, 6.283185307179586)
+        let radius = math.sqrt(1.0 - z * z)
+        return Vector3(radius * math.cos(angle), radius * math.sin(angle), z)
+
+    ## A uniform rotation (Shoemake's subgroup algorithm).
+    pub func rotation() -> Quat:
+        let u1 = self.unit()
+        let u2 = self.between(0.0, 6.283185307179586)
+        let u3 = self.between(0.0, 6.283185307179586)
+        let a = math.sqrt(1.0 - u1)
+        let b = math.sqrt(u1)
+        return Quat(a * math.sin(u2), a * math.cos(u2), b * math.sin(u3), b * math.cos(u3))

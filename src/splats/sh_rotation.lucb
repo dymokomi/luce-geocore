@@ -1,0 +1,145 @@
+## Turning SH coefficients with their splat: band l transforms by its real
+## Wigner D-matrix, (2l + 1) × (2l + 1). Rather than the Ivanic-Ruedenberg
+## recurrences (whose sign conventions must match the basis), each D is
+## solved from the basis itself: a rotated band-l function is again band l,
+## so its 2l + 1 coefficients are fixed by its values at 2l + 1 sample
+## directions, D = A⁻¹ B with A[s][i] = Y_i(d_s) and B[s][j] = Y_j(Rᵀ d_s).
+## That is exact in any convention, and A⁻¹ is computed once per ShSamples.
+## A reflection is a rotation after the point inversion d → -d, which
+## negates the odd bands (Y_l(-d) = (-1)^l Y_l(d)).
+
+## Seven directions whose leading 3, 5 and 7 condition bands 1, 2 and 3
+## well (each A's condition number is under 4); found by a seeded search.
+let sample_directions: f64[21] = [-0.377, -0.665, -0.644, -0.922, -0.314, -0.226, 0.662, -0.714, 0.228,
+                                  -0.171, -0.98, 0.101, -0.192, 0.64, -0.744, -0.235, -0.201, 0.951,
+                                  -0.838, 0.214, 0.502]
+
+func sample_direction(index: usize) -> Vector3:
+    return Vector3(sample_directions[index * 3], sample_directions[index * 3 + 1], sample_directions[index * 3 + 2])
+
+## The inverse basis matrices of bands 1..3 at the sample directions: what
+## every ShRotation is solved with. Make one per batch of rotations.
+pub struct ShSamples:
+    var band1: f64[9]
+    var band2: f64[25]
+    var band3: f64[49]
+
+    pub static func make() -> ShSamples:
+        var samples: ShSamples
+        var basis_values: f64[16]
+        var a: f64[49]
+        for band in 1..<(usize)4:
+            let size = 2 * band + 1
+            for sample in 0..<size:
+                sh_basis(sample_direction(sample), basis_values)
+                for item in 0..<size: a[sample * size + item] = basis_values[band * band + item]
+            let inverse = samples.band_span(band)
+            invert(a[..<size * size], size, inverse)
+        return samples
+
+    func band_span(band: usize) -> f64[]:
+        if band == 1: return self.band1
+        if band == 2: return self.band2
+        return self.band3
+
+    func inverse(band: usize) -> const f64[]:
+        if band == 1: return self.band1
+        if band == 2: return self.band2
+        return self.band3
+
+## The D-matrices of one rotation for bands 1..3, and whether odd bands are
+## negated after (an improper transform).
+pub struct ShRotation:
+    var band1: f64[9]
+    var band2: f64[25]
+    var band3: f64[49]
+    var inverted: bool
+
+    ## The SH rotation of unit quaternion `rotation`.
+    pub static func of(samples: const ShSamples*, rotation: Quat) -> ShRotation:
+        return ShRotation.of_matrix(samples, rotation.matrix())
+
+    ## The SH transform of orthogonal `matrix`: a rotation, or with a negative
+    ## determinant a rotation of -matrix and the point inversion.
+    pub static func of_matrix(samples: const ShSamples*, matrix: Mat3) -> ShRotation:
+        let inverted = matrix.determinant() < 0.0
+        let turn = matrix.scaled(-1.0 if inverted else 1.0).transposed()
+        var result: ShRotation
+        result.inverted = inverted
+        var basis_values: f64[16]
+        var b: f64[49]
+        for band in 1..<(usize)4:
+            let size = 2 * band + 1
+            for sample in 0..<size:
+                sh_basis(turn.transform(sample_direction(sample)), basis_values)
+                for item in 0..<size: b[sample * size + item] = basis_values[band * band + item]
+            let inverse = samples.inverse(band)
+            let target = result.band_span(band)
+            for row in 0..<size:
+                for column in 0..<size:
+                    var sum: f64 = 0.0
+                    for k in 0..<size: sum += inverse[row * size + k] * b[k * size + column]
+                    target[row * size + column] = sum
+        return result
+
+    func band_span(band: usize) -> f64[]:
+        if band == 1: return self.band1
+        if band == 2: return self.band2
+        return self.band3
+
+    func band_matrix(band: usize) -> const f64[]:
+        if band == 1: return self.band1
+        if band == 2: return self.band2
+        return self.band3
+
+    ## Turn `count` items of `coefficients` (RGB interleaved) in place: the
+    ## function they describe becomes f(Rᵀ d). Whole bands only; items past the
+    ## last whole band are left.
+    pub func apply(coefficients: f32[], count: usize):
+        let degree = sh_degree(count)
+        var before: f64[21]
+        for band in 1..<degree + 1:
+            let size = 2 * band + 1
+            let first = band * band - 1
+            for at in 0..<size * 3: before[at] = (f64)coefficients[first * 3 + at]
+            let d = self.band_matrix(band)
+            for row in 0..<size:
+                for channel in 0..<(usize)3:
+                    var sum: f64 = 0.0
+                    for column in 0..<size: sum += d[row * size + column] * before[column * 3 + channel]
+                    coefficients[(first + row) * 3 + channel] = (f32)sum
+        if self.inverted: invert_sh(coefficients, count)
+
+## The SH of f(-d): odd bands (1 and 3) negated, in place.
+pub func invert_sh(coefficients: f32[], count: usize):
+    for item in 0..<count:
+        if sh_band(item) % 2 == 0: continue
+        for channel in 0..<(usize)3: coefficients[item * 3 + channel] = -coefficients[item * 3 + channel]
+
+## `matrix` (n × n, row-major) inverted into `out` by Gauss-Jordan elimination
+## with partial pivoting; n is at most 7 and the matrix well conditioned.
+func invert(matrix: const f64[], n: usize, out: f64[]):
+    var work: f64[98]
+    let width = 2 * n
+    for row in 0..<n:
+        for column in 0..<n:
+            work[row * width + column] = matrix[row * n + column]
+            work[row * width + n + column] = 1.0 if row == column else 0.0
+    for pivot in 0..<n:
+        var best = pivot
+        for row in pivot + 1..<n:
+            if math.abs(work[row * width + pivot]) > math.abs(work[best * width + pivot]): best = row
+        if best != pivot:
+            for column in 0..<width:
+                let held = work[pivot * width + column]
+                work[pivot * width + column] = work[best * width + column]
+                work[best * width + column] = held
+        let scale = 1.0 / work[pivot * width + pivot]
+        for column in 0..<width: work[pivot * width + column] = work[pivot * width + column] * scale
+        for row in 0..<n:
+            if row == pivot: continue
+            let factor = work[row * width + pivot]
+            if factor == 0.0: continue
+            for column in 0..<width: work[row * width + column] = work[row * width + column] - factor * work[pivot * width + column]
+    for row in 0..<n:
+        for column in 0..<n: out[row * n + column] = work[row * width + n + column]

@@ -1,0 +1,93 @@
+## Real spherical harmonics of degree 0..3 as 3D Gaussian Splatting
+## evaluates them: the constants and signs of the reference code
+## (graphdeco-inria/gaussian-splatting, utils/sh_utils.py, eval_sh; Kerbl et
+## al. 2023), which include the Condon-Shortley phase. Basis index k is band
+## l = ⌊√k⌋ and m = k - l² - l; a cloud's `sh` item i is basis index i + 1.
+
+## The DC basis constant, 1 / (2√π).
+pub let sh_c0: f64 = 0.28209479177387814
+let sh_c1: f64 = 0.4886025119029199
+let sh_c2: f64[5] = [1.0925484305920792, -1.0925484305920792, 0.31539156525252005, -1.0925484305920792, 0.5462742152960396]
+let sh_c3: f64[7] = [-0.5900435899266435, 2.890611442640554, -0.4570457994644658, 0.3731763325901154, -0.4570457994644658, 1.445305721320277, -0.5900435899266435]
+
+## The 16 basis values toward `direction` (normalized here; all bands 0 when it
+## has no direction) into `out`.
+pub func sh_basis(direction: Vector3, out: f64[]):
+    out[0] = sh_c0
+    let length = direction.length()
+    if not (length > 0.0) or not math.is_finite(length):
+        for index in 1..<(usize)16: out[index] = 0.0
+        return
+    let x = direction.x / length
+    let y = direction.y / length
+    let z = direction.z / length
+    let xx = x * x
+    let yy = y * y
+    let zz = z * z
+    out[1] = -sh_c1 * y
+    out[2] = sh_c1 * z
+    out[3] = -sh_c1 * x
+    out[4] = sh_c2[0] * x * y
+    out[5] = sh_c2[1] * y * z
+    out[6] = sh_c2[2] * (2.0 * zz - xx - yy)
+    out[7] = sh_c2[3] * x * z
+    out[8] = sh_c2[4] * (xx - yy)
+    out[9] = sh_c3[0] * y * (3.0 * xx - yy)
+    out[10] = sh_c3[1] * x * y * z
+    out[11] = sh_c3[2] * y * (4.0 * zz - xx - yy)
+    out[12] = sh_c3[3] * z * (2.0 * zz - 3.0 * xx - 3.0 * yy)
+    out[13] = sh_c3[4] * x * (4.0 * zz - xx - yy)
+    out[14] = sh_c3[5] * z * (xx - yy)
+    out[15] = sh_c3[6] * x * (xx - 3.0 * yy)
+
+## The bands' part of the color toward `direction`: the sum over `count` items
+## (at most 15) of `coefficients` (RGB interleaved) times their basis values.
+pub func sh_bands(coefficients: const f32[], count: usize, direction: Vector3) -> Vector3:
+    var basis: f64[16]
+    sh_basis(direction, basis)
+    var r: f64 = 0.0
+    var g: f64 = 0.0
+    var b: f64 = 0.0
+    let items = count if count < 15 else 15
+    for item in 0..<items:
+        let weight = basis[item + 1]
+        r += weight * (f64)coefficients[item * 3]
+        g += weight * (f64)coefficients[item * 3 + 1]
+        b += weight * (f64)coefficients[item * 3 + 2]
+    return Vector3(r, g, b)
+
+## 3DGS's color toward `direction` before its clamp at 0: 0.5 + C0 · dc + the
+## bands, in the file's color space (`dc` is the file's f_dc).
+pub func sh_color(dc: Vector3, coefficients: const f32[], count: usize, direction: Vector3) -> Vector3:
+    return encoded_dc(dc).add(sh_bands(coefficients, count, direction))
+
+## The file's DC color, 0.5 + C0 · dc, still in the file's color space.
+pub func encoded_dc(dc: Vector3) -> Vector3:
+    return Vector3(0.5 + sh_c0 * dc.x, 0.5 + sh_c0 * dc.y, 0.5 + sh_c0 * dc.z)
+
+## The linear `Cd` of a file's DC term in `space`.
+pub func color_of_dc(dc: Vector3, space: ColorSpace) -> Vector3:
+    let encoded = encoded_dc(dc)
+    return Vector3(to_linear(encoded.x, space), to_linear(encoded.y, space), to_linear(encoded.z, space))
+
+## The file's DC term of a linear `Cd`, for export: the inverse of
+## `color_of_dc`.
+pub func file_dc(color: Vector3, space: ColorSpace) -> Vector3:
+    return Vector3((from_linear(color.x, space) - 0.5) / sh_c0, (from_linear(color.y, space) - 0.5) / sh_c0, (from_linear(color.z, space) - 0.5) / sh_c0)
+
+## A splat's linear color toward `direction`, given in its SH frame (see
+## `sh_frame`): the bands are added to `Cd` in the cloud's color space,
+## clamped at 0 as 3DGS clamps, and decoded. For a capture this is exactly
+## the color it was trained to show.
+pub func display_color(color: Vector3, coefficients: const f32[], count: usize, direction: Vector3, space: ColorSpace) -> Vector3:
+    let bands = sh_bands(coefficients, count, direction)
+    let r = math.max(from_linear(color.x, space) + bands.x, 0.0)
+    let g = math.max(from_linear(color.y, space) + bands.y, 0.0)
+    let b = math.max(from_linear(color.z, space) + bands.z, 0.0)
+    return Vector3(to_linear(r, space), to_linear(g, space), to_linear(b, space))
+
+## The rotation from a splat's SH frame to the world: orient · restorient⁻¹
+## (the identity without a `restorient`). A renderer evaluates the SH toward
+## `sh_frame(...).conjugate().rotate(view direction)`.
+pub func sh_frame(orient: Quat, restorient: Quat) -> Quat:
+    return orient.normalized().multiply(restorient.normalized().conjugate())

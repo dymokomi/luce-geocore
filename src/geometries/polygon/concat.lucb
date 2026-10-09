@@ -161,8 +161,17 @@ func concatenate_attributes(meshes: const (const Mesh*)[], matrices: const Matri
             # `put` releases the attribute itself when it fails.
             try output.attributes.put(joined)
 
-## Normals and vectors of each part turned by the part's matrix.
+## Normals, vectors and rotations of each part turned by the part's matrix.
 func turn_pieces(attribute: Attribute*, meshes: const (const Mesh*)[], matrices: const Matrix4[]) -> !:
+    if attribute.width == 4 and attribute.role == Role.rotation and attribute.storage == Storage.array and (attribute.kind == DataType.float32 or attribute.kind == DataType.float64):
+        let tuple = attribute.tuple_bytes()
+        var first: usize = 0
+        for at in 0..<meshes.length:
+            let count = try meshes[at].domain_size(attribute.domain)
+            if not matrices[at].is_identity():
+                turn_rotations(attribute.data.span()[first * tuple..<(first + count) * tuple], attribute.kind, count, LinearPart.of(matrices[at]).rotation)
+            first += count
+        return
     if attribute.width != 3 or (attribute.role != Role.normal and attribute.role != Role.vector) or attribute.storage == Storage.single: return
     if attribute.kind != DataType.float32 and attribute.kind != DataType.float64: return
     var base: usize = 0
