@@ -47,6 +47,10 @@ pub struct Instances:
     pub func count() -> usize:
         return self.size
 
+    ## Drop the prototypes' components that trace objects (GeometrySet.plain_storage).
+    pub func drop_traced():
+        for prototype in self.prototypes.view(): prototype.drop_traced()
+
     pub func prototype_count() -> usize:
         return self.prototypes.count
 

@@ -83,6 +83,17 @@ func trace_nothing(data: const void*, visit: func(ownership.Object*, void*) -> u
 
 pub let no_trace: func(const void*, func(ownership.Object*, void*) -> unit, void*) -> unit = trace_nothing
 
+## Whether a component holds Luce-visible objects: its trace visits one.
+func holds_objects(entry: const Component*) -> bool:
+    var count: usize = 0
+    let trace = entry.kind.trace
+    trace(entry.data, count_object, (void*)&count)
+    return count > 0
+
+func count_object(object: ownership.Object*, context: void*):
+    _ = object
+    *(usize*)context += 1
+
 # mark: Registry =====================================================================
 
 var registry_lock: sync.Mutex
@@ -162,6 +173,30 @@ pub struct GeometrySet:
     func remove_at(index: usize):
         for at in index + 1..<self.entries.count: self.entries.items[at - 1] = self.entries.items[at]
         self.entries.count -= 1
+
+    ## A storage of this set that another thread may own: its components but
+    ## those holding Luce-visible objects (whose kind traces them: CAD models),
+    ## which belong to the thread that made them, dropped from the instances'
+    ## prototypes too. Arrays stay shared (their counts are atomic).
+    pub func plain_storage() -> GeometrySet*!:
+        let storage = try self.storage()
+        storage.drop_traced()
+        return storage
+
+    ## Drop the components whose kind traces objects, through the instances.
+    pub func drop_traced():
+        var index: usize = 0
+        while index < self.entries.count:
+            let entry = self.entries.items[index]
+            if entry.kind == &instances_component:
+                ((Instances*)entry.data).drop_traced()
+                index += 1
+            elif holds_objects(&entry):
+                self.remove_at(index)
+                let close = entry.kind.close
+                close(entry.data)
+            else:
+                index += 1
 
     ## Drop the `kind` component, if there is one.
     pub func remove(kind: const ComponentType*):
