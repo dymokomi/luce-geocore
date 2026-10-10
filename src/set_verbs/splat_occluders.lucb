@@ -36,30 +36,36 @@ pub struct SplatOccluders:
 
 pub let splat_occluders_type: interop.Type[SplatOccluders] = interop.Type[SplatOccluders]("SplatOccluders", SplatOccluders.close, closeable = true)
 
-## A splat cloud as it may hide another: a mesh without faces sharing its
-## points and point attributes (none for plain points, which hide nothing),
-## and its placement. luce-3d keeps one with each cloud it draws.
+## A splat cloud as it may hide another: the cloud itself, sharing its
+## columns (none for plain points, which hide nothing; any size, where a
+## mesh holds at most 8M points), and its placement. luce-3d keeps one with
+## each cloud it draws.
 pub struct OccludingCloud:
-    var points: Mesh*?
+    var points: PointCloud*?
     var placement: Matrix4
 
     ## `set`'s cloud placed by `placement`.
     pub static func of(set: const GeometrySet*, placement: Matrix4) -> OccludingCloud!:
         let cloud = set_cloud(set) else return OccludingCloud(points = none, placement = placement)
         if not is_splat_store(cloud_store(cloud)): return OccludingCloud(points = none, placement = placement)
-        return OccludingCloud(points = try cloud_mesh(cloud), placement = placement)
+        return OccludingCloud(points = try shared_cloud(cloud), placement = placement)
 
     pub func close():
-        if let points = self.points: mesh_dispose(points)
+        if let points = self.points: close_cloud_storage(points)
         self.points = none
 
 ## Add `cloud` to `occluders`, sharing its columns.
 pub func add_occluding_cloud(occluders: SplatOccluders*, cloud: const OccludingCloud*) -> !:
     let points = cloud.points else return
-    let shared = try mesh_share(points)
+    let shared = try shared_cloud(points)
     occluders.clouds.push(OccludingCloud(points = shared, placement = cloud.placement)) catch failure:
-        mesh_dispose(shared)
+        close_cloud_storage(shared)
         error(failure.code, failure.message)
+
+## Another owner of `cloud`'s columns.
+func shared_cloud(cloud: const PointCloud*) -> PointCloud*!:
+    let share = points_component.share
+    return (PointCloud*)(try share((const void*)cloud))
 
 ## `occluders` as splats/occluding.lucb reads them, for one selection: the
 ## clouds' footprint inputs and the meshes' spatial indexes (built here,
@@ -82,8 +88,8 @@ func occluder_inputs(occluders: const SplatOccluders*) -> OccluderInputs!:
     errdefer inputs.close()
     for at in 0..<occluders.clouds.count:
         let held = &occluders.clouds.items[at]
-        let mesh = held.points else continue
-        try inputs.clouds.push(OccluderCloud(cloud = try footprint_cloud(mesh), placement = held.placement))
+        let cloud = held.points else continue
+        try inputs.clouds.push(OccluderCloud(cloud = try cloud_footprints(cloud), placement = held.placement))
     for at in 0..<occluders.meshes.count:
         let mesh = try occluders.meshes.items[at].get()
         if mesh.face_count() == 0: continue

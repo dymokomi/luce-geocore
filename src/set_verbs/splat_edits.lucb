@@ -143,6 +143,20 @@ func footprint_cloud(mesh: const Mesh*) -> FootprintCloud!:
     return FootprintCloud(points = mesh.point_span(), origin = mesh.position_origin(), orient = try mesh_floats(mesh, orient_name, 4),
                           scale = try mesh_floats(mesh, scale_name, 3), opacity = try mesh_floats(mesh, opacity_name, 1))
 
+## A splat cloud's points as footprint selection reads them.
+func cloud_footprints(cloud: const PointCloud*) -> FootprintCloud!:
+    let store = cloud_store(cloud)
+    return FootprintCloud(points = cloud_positions(cloud), origin = cloud_origin(cloud), orient = try store_floats(store, orient_name, 4),
+                          scale = try store_floats(store, scale_name, 3), opacity = try store_floats(store, opacity_name, 1))
+
+## The Floats of a store's point attribute `name` of `width`, or none.
+func store_floats(store: const AttributeStore*, name: str, width: usize) -> Floats!:
+    let index = store.find(name, Domain.point)
+    if index < 0: return Floats.empty()
+    let found = store.entry((usize)index)
+    if found.width != width or found.is_ragged() or found.kind == DataType.text: return Floats.empty()
+    return Floats.of(found)
+
 ## The Floats of a mesh's point attribute `name` of `width`, or none.
 func mesh_floats(mesh: const Mesh*, name: str, width: usize) -> Floats!:
     let index = mesh.attribute_on(name, Domain.point)
