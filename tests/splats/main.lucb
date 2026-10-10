@@ -1,6 +1,6 @@
 ## luce-geocore's Gaussian splat checks (`luc test` runs them): SH evaluation,
 ## rotation and reflection, covariances, placement, merging, the GSplats verbs
-## and Edit GSplats' selections and edits, each cloud check also with
+## Delight and Relight GSplats, and Edit GSplats' selections and edits, each cloud check also with
 ## allocation failure injected at every stage and no allocation left live
 ## afterwards.
 import memory
@@ -15,6 +15,7 @@ import unbake_checks
 import filter_checks
 import conversion_checks
 import edit_checks
+import lighting_checks
 
 ## Counts live blocks and fails the allocation after `remaining` more.
 ## Kernels allocate on pool workers too, so it takes a lock.
@@ -91,6 +92,8 @@ pub func main(arguments: str[]) -> i32!:
     print("PASS splat filters: Up Axis turns exactly, Crop counts, Clean thresholds, Reduce keeps mass and centroid, cloud groups, Blast and Promote")
     inject(&tracker, conversion_checks.run)
     print("PASS splat conversions: GSplats from Polygons makes coplanar discs, GSplats to Volume integrates to the mass and surfaces, Normals from GSplats point outward")
+    inject(&tracker, lighting_checks.run)
+    print("PASS splat lighting: Delight GSplats flattens a light gradient and keeps materials apart, Relight GSplats' Lambert term, highlight in the SH, shadows through the splats")
     inject(&tracker, edit_checks.run)
     # Without injected failures (edit_checks.visible_across says why).
     try edit_checks.visible_across()

@@ -1,0 +1,122 @@
+## GSplats lighting (stage 9): Delight GSplats takes a capture's baked light
+## out into `albedo`; Relight GSplats lights `albedo` again with the scene's
+## lights and bakes the result into Cd and the SH. They follow Houdini 22's
+## Labs Delight GSplats and Labs Relight GSplats; kernels in
+## splats/lighting.lucb and fields/splat_shadows.lucb.
+from splats import DelightOptions, delit_albedo, RelightOptions, SplatLight, SplatLightKind, relit_store, detail_color_space, float32_points
+from fields import splat_light_visibility
+from geometry_set import SceneObjects, SceneKind, Light, LightShape, scene_flattened, set_detail
+
+# mark: Delight GSplats
+
+let delight_parms: ParmSpec[13] = [
+    ParmSpec("Delight Amount", ParmKind.number, 1.0, 0.0, 1.0, 1, "", "How much of the estimated light is divided out: 0 keeps Cd as albedo."),
+    ParmSpec("Light Blur Radius", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "How far neighbors are averaged for each splat's light; 0 is four times the splats' median size.", 1.0),
+    ParmSpec("Max Blur Points", ParmKind.integer, 16.0, 1.0, 16.0, 1, "", "Neighbors averaged per splat (at most 16)."),
+    ParmSpec("Spatial Falloff Sigma", ParmKind.number, 0.5, 0.01, 10.0, 1, "", "The distance falloff's σ, as a fraction of the blur radius.", 1.0),
+    ParmSpec("Edge Preservation Sigma", ParmKind.number, 0.05, 0.0001, 1.0, 1, "", "How different in chromaticity a neighbor may be and still share a splat's light: smaller keeps material edges sharper.", 0.2),
+    ParmSpec("Chroma Influence", ParmKind.number, 1.0, 0.0, 10.0, 1, "", "How much chromaticity differences count: 0 blurs the light across every edge.", 2.0),
+    ParmSpec("AO Amount", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "How much neighbors in front of a splat (with N) darken its estimated light, so crevices come out brighter."),
+    ParmSpec("AO Radius", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "How far occluding neighbors are looked for; 0 is the blur radius.", 1.0),
+    ParmSpec("Crevice Shadow Lift", ParmKind.number, 0.0, 0.0, 4.0, 1, "", "Brightens occluded splats further, by this much at full occlusion.", 1.0),
+    ParmSpec("White Balance", ParmKind.number, 0.0, 0.0, 1.0, 1, "", "Pulls each channel's mean toward their gray: 1 neutralizes a tinted capture."),
+    ParmSpec("Exposure", ParmKind.number, 0.0, -10.0, 10.0, 1, "", "Stops of brightness on the albedo.", 2.0),
+    ParmSpec("Gamma", ParmKind.number, 1.0, 0.1, 10.0, 1, "", "A gamma on the albedo: above 1 lifts the darks.", 2.0),
+    ParmSpec("Saturation", ParmKind.number, 1.0, 0.0, 4.0, 1, "", "0 is gray, 1 keeps the colors.", 2.0)]
+
+func delight_gsplats_verb() -> SetVerb:
+    return SetVerb("Delight GSplats", gsplats_category, "Take a capture's baked lighting out of its colors: each splat's albedo from its color over its neighborhood's light", 1, false, false, delight_parms, cook_delight)
+
+func cook_delight(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let cloud = input_cloud(input, output) else return
+    let store = cloud_store(cloud)
+    if not is_splat_store(store):
+        output.warning = "The input's points are not splats (no orient, scale and opacity); it passes through"
+        return
+    let p = input.parms
+    let options = DelightOptions(p.at(0), p.at(1), (usize)p.at(2), p.at(3), p.at(4), p.at(5), p.at(6), p.at(7), p.at(8), p.at(9), p.at(10), p.at(11), p.at(12))
+    var albedo = try float32_points("albedo", 3, cloud.count())
+    defer albedo.release()
+    try delit_albedo(cloud_positions(cloud), store, &options, float32_values(&albedo))
+    var result = try store.shared()
+    errdefer result.close()
+    try result.put(albedo.share())
+    let handed = result
+    result = AttributeStore()
+    try with_cloud_store(input, cloud, handed, output)
+
+# mark: Relight GSplats
+
+let relight_parms: ParmSpec[10] = [
+    ParmSpec("SH Degree", ParmKind.integer, 3.0, 0.0, 3.0, 1, "", "The spherical harmonics degree the relit light is stored in: 0 keeps only the view-independent color (no highlights)."),
+    ParmSpec("Enable Shadows", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Shadow the lights through the splats' own density."),
+    ParmSpec("Shadow Voxel Size", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "The density grid's voxel size; 0 sizes it to the capture (about 128 voxels across).", 1.0),
+    ParmSpec("Shadow Bias", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "How far past its own extent (3σ) a splat's shadow ray starts.", 0.1),
+    ParmSpec("Roughness", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "Specular roughness where splats have no roughness attribute."),
+    ParmSpec("Metalness", ParmKind.number, 0.0, 0.0, 1.0, 1, "", "Metalness where splats have no metalness attribute."),
+    ParmSpec("Specular", ParmKind.number, 1.0, 0.0, 1.0, 1, "", "The highlight's weight (F0 0.04, as glass or plastic; metals take the albedo) where splats have no specular attribute."),
+    ParmSpec("Diffuse Wrap", ParmKind.number, 0.0, 0.0, 1.0, 1, "", "Light wraps past the terminator by this much."),
+    ParmSpec("Normal Softness", ParmKind.number, 0.0, 0.0, 1.0, 1, "", "0 lights by the normal; 1 lights as if from every side, for splats whose normals are poor."),
+    ParmSpec("Use Second Input Lights Only", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Light by the second input's lights alone, not the first's.")]
+
+func relight_gsplats_verb() -> SetVerb:
+    return SetVerb("Relight GSplats", gsplats_category, "Light the splats' albedo (Delight GSplats) with the scene's lights, shadowed through the splats, into Cd and the SH", 2, false, false, relight_parms, cook_relight)
+
+func cook_relight(input: const SetVerbInput*, output: SetVerbOutput*) -> !:
+    let cloud = input_cloud(input, output) else return
+    let store = cloud_store(cloud)
+    if not is_splat_store(store):
+        output.warning = "The input's points are not splats (no orient, scale and opacity); it passes through"
+        return
+    let p = input.parms
+    var objects = SceneObjects()
+    defer objects.close()
+    if p.at(9) == 0.0: try scene_flattened(input.set, Matrix4(), &objects)
+    if let second = input.second: try scene_flattened(second, Matrix4(), &objects)
+    var lights = Growing[SplatLight]()
+    defer lights.close()
+    for index in 0..<objects.count():
+        let item = objects.object(index)
+        if item.kind != SceneKind.light: continue
+        try lights.push(try splat_light(item.light, item.matrix))
+    if lights.count == 0: output.warning = "No lights: the splats come out black (add Light nodes, in either input)"
+    elif lights.count > 8: output.warning = "Only the first 8 lights light the splats"
+    var visibility: f32[]
+    defer:
+        if visibility.length > 0: free(visibility) in memory.heap
+    if p.at(1) != 0.0 and lights.count > 0:
+        var voxel = p.at(2)
+        if not (voxel > 0.0):
+            var sizes = Floats.of(store.entry((usize)float_attribute(store, scale_name, 3)))
+            voxel = try capture_voxel(cloud_positions(cloud), &sizes, 128.0 * 128.0 * 128.0)
+        if voxel > 0.0: visibility = try splat_light_visibility(cloud_positions(cloud), cloud_origin(cloud), store, lights.view(), voxel, p.at(3))
+    let options = RelightOptions((usize)p.at(0), p.at(4), p.at(5), p.at(6), p.at(7), p.at(8))
+    let relit = try relit_store(cloud_positions(cloud), cloud_origin(cloud), store, lights.view(), visibility, &options, detail_color_space(set_detail(input.set)))
+    try with_cloud_store(input, cloud, relit, output)
+
+## A scene light as Relight GSplats lights with it: radiance color ×
+## intensity × 2^exposure (divided by its area when it normalizes), as
+## luce-render reads UsdLux; a distant light's intensity is its irradiance.
+func splat_light(light: Light, m: Matrix4) -> SplatLight!:
+    var scale = light.intensity * math.exp2(light.exposure)
+    let emits = try m.z.multiply_scalar(-1.0).normalized()
+    if light.shape == LightShape.distant:
+        return SplatLight(SplatLightKind.distant, m.translation, emits.multiply_scalar(-1.0), light.color.multiply_scalar(scale), 0.0, false)
+    if light.shape == LightShape.dome:
+        return SplatLight(SplatLightKind.dome, m.translation, Vector3(), light.color.multiply_scalar(scale), 0.0, false)
+    var area: f64 = 0.0
+    var seen: f64 = 0.0
+    var one_sided = true
+    if light.shape == LightShape.rect:
+        area = m.transform_direction(Vector3(light.width, 0.0, 0.0)).cross(m.transform_direction(Vector3(0.0, light.height, 0.0))).length()
+        seen = area
+    elif light.shape == LightShape.disk:
+        area = math.pi * m.transform_direction(Vector3(light.radius, 0.0, 0.0)).cross(m.transform_direction(Vector3(0.0, light.radius, 0.0))).length()
+        seen = area
+    else:
+        let r = light.radius * math.cbrt(math.abs(m.determinant()))
+        area = 4.0 * math.pi * r * r
+        seen = math.pi * r * r
+        one_sided = false
+    if light.normalize and area > 0.0: scale = scale / area
+    return SplatLight(SplatLightKind.local, m.translation, emits, light.color.multiply_scalar(scale), seen, one_sided)

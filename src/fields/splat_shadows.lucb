@@ -1,0 +1,88 @@
+## Relight GSplats' shadows: how much of each light reaches each splat
+## through the others (Houdini's Labs Relight GSplats ray traces a surface
+## built from the splats instead; a density field keeps soft, partial
+## shadows from thin and translucent splats).
+##
+## The splats' density (GSplats to Volume's kernel, splat_density.lucb) is
+## built with each splat's opacity divided by √(2π) times its geometric mean
+## σ, so a ray through a splat's center gathers an optical depth near its
+## opacity, as a ray tracer's 1 - α would take for a thin one. From each
+## splat a ray marches toward the light in half-voxel steps, from past the
+## splat's own extent (3 σ of its largest axis, plus the bias) to the light,
+## or across the cloud for a distant light; the light kept is exp(-depth).
+from splats import SplatLight, SplatLightKind, float32_values, float32_points
+
+## Each splat's visibility of each light (splat-major, 1 for domes) for a
+## splat cloud (`points` relative to `origin`, attributes `store`), through a
+## density grid of voxels `voxel` wide; marches start `bias` past the splat.
+pub func splat_light_visibility(points: const Float3[], origin: Vector3, store: const AttributeStore*, lights: const SplatLight[], voxel: f64, bias: f64) -> f32[]!:
+    let count = points.length
+    let out = try new f32[count * lights.length] --- in memory.heap
+    errdefer free(out) in memory.heap
+    for at in 0..<out.length: out[at] = 1.0
+    if count == 0 or lights.length == 0: return out
+    let scale = Floats.of(store.entry((usize)float_attribute(store, scale_name, 3)))
+    let opacity_index = float_attribute(store, opacity_name, 1)
+    let opacity = Floats.of(store.entry((usize)opacity_index)) if opacity_index >= 0 else Floats()
+    # Opacity per unit of length through the center.
+    var thinned = try float32_points(opacity_name, 1, count)
+    defer thinned.release()
+    let values = float32_values(&thinned)
+    for at in 0..<count:
+        let mean = math.cbrt(math.max(math.abs(scale.at(at, 0) * scale.at(at, 1) * scale.at(at, 2)), 1.0e-30))
+        values[at] = (f32)(math.clamp(opacity.at(at, 0), 0.0, 1.0) / (math.sqrt(2.0 * math.pi) * mean))
+    var density_store = try store.shared()
+    defer density_store.close()
+    try density_store.put(thinned.share())
+    let options = SplatDensityOptions(voxel, 3.0, 1.0)
+    let grid = try splat_density(points, origin, &density_store, &options, "density")
+    defer release_grid(grid)
+    # The cloud's diagonal bounds a distant light's march.
+    var low = Vector3(1.0e300, 1.0e300, 1.0e300)
+    var high = Vector3(-1.0e300, -1.0e300, -1.0e300)
+    for p in points:
+        let v = p.vector()
+        low = Vector3(math.min(low.x, v.x), math.min(low.y, v.y), math.min(low.z, v.z))
+        high = Vector3(math.max(high.x, v.x), math.max(high.y, v.y), math.max(high.z, v.z))
+    var work = ShadowWork(points = points, origin = origin, scale = scale, lights = lights, grid = grid, voxel = voxel, bias = bias,
+                          reach = high.subtract(low).length() + 4.0 * voxel, out = out)
+    ranges.each_range(count, 512, (void*)&work, shadow_range)
+    return out
+
+struct ShadowWork:
+    let points: const Float3[]
+    let origin: Vector3
+    let scale: Floats
+    let lights: const SplatLight[]
+    let grid: const SparseGrid*
+    let voxel: f64
+    let bias: f64
+    let reach: f64
+    var out: f32[]
+
+func shadow_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (ShadowWork*)context
+    var sampler = GridSampler.of(work.grid)
+    let step = 0.5 * work.voxel
+    for at in first..<end:
+        let p = work.points[at].vector().add(work.origin)
+        let largest = math.max(math.abs(work.scale.at(at, 0)), math.max(math.abs(work.scale.at(at, 1)), math.abs(work.scale.at(at, 2))))
+        let start = 3.0 * largest + work.bias
+        for index in 0..<work.lights.length:
+            let light = work.lights[index]
+            if light.kind == SplatLightKind.dome: continue
+            var l = light.direction
+            var distance = work.reach
+            if light.kind == SplatLightKind.local:
+                let offset = light.position.subtract(p)
+                distance = offset.length()
+                if not (distance > 0.0): continue
+                l = offset.multiply_scalar(1.0 / distance)
+            var depth: f64 = 0.0
+            var t = start
+            while t < distance:
+                depth += sampler.sample(p.add(l.multiply_scalar(t))) * step
+                if depth > 20.0: break
+                t += step
+            work.out[at * work.lights.length + index] = (f32)math.exp(-depth)

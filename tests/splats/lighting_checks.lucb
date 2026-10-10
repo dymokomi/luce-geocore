@@ -1,0 +1,210 @@
+## Stage 9, lighting: Delight GSplats takes a light gradient out of a plane
+## of one material and keeps a second material's color apart; Relight GSplats
+## gives a diffuse splat albedo / π · E · cos θ from a distant light (exactly,
+## in its DC term), puts a highlight toward the mirror direction into the SH,
+## and shadows splats under a dense blob through the splats' density.
+import interop
+import memory
+from luce_std import math
+from luce_geocore.geocore import Vector3, GeometrySet
+from luce_geocore.kernel import find_set_verb, run_set_verb, adopt_set, set_cloud, cloud_store
+from luce_geocore.splats import Quat, display_color, ColorSpace
+import clouds
+
+pub func run() -> !:
+    try delight_gradient()
+    try relight_diffuse()
+    try relight_highlight()
+    try relight_shadow()
+
+func run_with(name: str, set: interop.Reference[GeometrySet], numbers: const f64[]) -> interop.Reference[GeometrySet]!:
+    let verb = find_set_verb(name) else trap("a GSplats verb is missing")
+    var output = try run_set_verb(&verb, set.value(), none, "", 0, numbers, [""])
+    let made = output.set else trap("a set verb made no set")
+    output.set = none
+    return try adopt_set(made)
+
+## A 40 × 40 grid of flat splats in XZ (spacing 0.05, σ 0.04 across), facing
+## +Y, opacity 0.9; `color(x, z)` gives each its Cd.
+func plane(color: func(f64, f64) -> Vector3, normals: bool) -> interop.Reference[GeometrySet]!:
+    let side: usize = 40
+    let count = side * side
+    var builder = clouds.CloudBuilder(count)
+    defer builder.close()
+    var positions = try new Vector3[count] --- in memory.heap
+    defer free(positions) in memory.heap
+    var orient = try new f64[count * 4] --- in memory.heap
+    defer free(orient) in memory.heap
+    var scale = try new f64[count * 3] --- in memory.heap
+    defer free(scale) in memory.heap
+    var opacity = try new f64[count] --- in memory.heap
+    defer free(opacity) in memory.heap
+    var cd = try new f64[count * 3] --- in memory.heap
+    defer free(cd) in memory.heap
+    var n = try new f64[count * 3] --- in memory.heap
+    defer free(n) in memory.heap
+    for at in 0..<count:
+        let x = (f64)(at % side) * 0.05 - 1.0
+        let z = (f64)(at // side) * 0.05 - 1.0
+        positions[at] = Vector3(x, 0.0, z)
+        # Shortest axis along Y.
+        let q: f64[4] = [0.0, 0.0, 0.0, 1.0]
+        for k in 0..<(usize)4: orient[at * 4 + k] = q[k]
+        scale[at * 3] = 0.04
+        scale[at * 3 + 1] = 0.004
+        scale[at * 3 + 2] = 0.04
+        opacity[at] = 0.9
+        let c = color(x, z)
+        cd[at * 3] = c.x
+        cd[at * 3 + 1] = c.y
+        cd[at * 3 + 2] = c.z
+        n[at * 3] = 0.0
+        n[at * 3 + 1] = 1.0
+        n[at * 3 + 2] = 0.0
+    try builder.floats("orient", 4, orient)
+    try builder.floats("scale", 3, scale)
+    try builder.floats("opacity", 1, opacity)
+    try builder.floats("Cd", 3, cd)
+    if normals: try builder.floats("N", 3, n)
+    return try builder.finish(positions)
+
+## Light falling from 1.0 at x = -1 to 0.3 at x = 1; gray 0.6 where z < 0.4,
+## red beyond.
+func lit(x: f64, z: f64) -> Vector3:
+    let light = 1.0 - 0.35 * (x + 1.0)
+    let albedo = Vector3(0.6, 0.6, 0.6) if z < 0.4 else Vector3(0.7, 0.15, 0.1)
+    return albedo.multiply_scalar(light)
+
+## Delight GSplats at full amount: the gray part's albedo varies far less
+## than its Cd did, and the red part stays red.
+func delight_gradient() -> !:
+    let set = try plane(lit, false)
+    defer set.release()
+    # Radius 0.3 so a splat's 16 nearest stay within it; AO off.
+    let delit = try run_with("Delight GSplats", set, [1.0, 0.3, 16.0, 2.0, 0.05, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0])
+    defer delit.release()
+    let store = clouds.points_of(delit.value())
+    let count: usize = 1600
+    var before = Spread()
+    var after = Spread()
+    var red: usize = 0
+    for at in 0..<count:
+        let p = clouds.point_of(delit.value(), at)
+        let albedo = clouds.vector_of(store, "albedo", at)
+        if p.z < 0.3 and math.abs(p.x) < 0.85:
+            before.add(lit(p.x, p.z).y)
+            after.add(albedo.y)
+        if p.z > 0.5 and albedo.x > 3.0 * albedo.y: red += 1
+    assert(before.deviation() / before.mean() > 0.2, "the input carries a strong gradient")
+    assert(after.deviation() / after.mean() < 0.35 * before.deviation() / before.mean(), "the albedo loses most of the gradient")
+    assert(red >= 300, "the red material stays red (360 splats)")
+
+struct Spread:
+    var sum: f64 = 0.0
+    var squares: f64 = 0.0
+    var count: f64 = 0.0
+
+    func add(value: f64):
+        self.sum += value
+        self.squares += value * value
+        self.count += 1.0
+
+    func mean() -> f64:
+        return self.sum / self.count
+
+    func deviation() -> f64:
+        let m = self.mean()
+        return math.sqrt(math.max(self.squares / self.count - m * m, 0.0))
+
+func gray(x: f64, z: f64) -> Vector3:
+    _ = x
+    _ = z
+    return Vector3(0.5, 0.5, 0.5)
+
+## A distant light of irradiance 2 at 60° from the normal, no specular, SH
+## degree 0 and no shadows: every splat's Cd is 0.5 / π · 2 · cos 60°.
+func relight_diffuse() -> !:
+    let set = try plane(gray, true)
+    defer set.release()
+    let lit_set = try set.value().with_light("/sun", Vector3(), Vector3(-math.pi / 6.0, 0.0, 0.0), 3, Vector3(1.0, 1.0, 1.0), 2.0, 0.0, 0.0, false, 1.0, 1.0, 0.5, 0.0, false)
+    defer lit_set.release()
+    let relit = try run_with("Relight GSplats", lit_set, [0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
+    defer relit.release()
+    let store = clouds.points_of(relit.value())
+    let wanted = 0.5 / math.pi * 2.0 * 0.5
+    for at in 0..<(usize)1600:
+        let cd = clouds.vector_of(store, "Cd", at)
+        assert(math.abs(cd.x - wanted) < 1.0e-3 * wanted and math.abs(cd.z - wanted) < 1.0e-3 * wanted, "Lambert's albedo / π · E · cos θ")
+
+## Specular 1, roughness 0.3, a light 45° off the normal in the YZ plane, SH
+## degree 3: seen from the mirror direction a splat is brighter than seen
+## from straight above, and that brighter than from the light's own side.
+func relight_highlight() -> !:
+    let set = try plane(gray, true)
+    defer set.release()
+    let lit_set = try set.value().with_light("/sun", Vector3(), Vector3(-math.pi / 4.0, 0.0, 0.0), 3, Vector3(1.0, 1.0, 1.0), 2.0, 0.0, 0.0, false, 1.0, 1.0, 0.5, 0.0, false)
+    defer lit_set.release()
+    let relit = try run_with("Relight GSplats", lit_set, [3.0, 0.0, 0.0, 0.0, 0.3, 0.0, 1.0, 0.0, 0.0, 0.0])
+    defer relit.release()
+    let store = clouds.points_of(relit.value())
+    var sh: f32[45]
+    let items = clouds.sh_of(store, 800, sh)
+    assert(items == 15, "degree 3: fifteen items")
+    let cd = clouds.vector_of(store, "Cd", 800)
+    # The light comes from +Z and up (its -Z axis turned down 45°); the
+    # mirror direction leaves toward -Z and up.
+    let s = (f64)0.7071067811865476
+    let mirror = display_color(cd, sh, items, Vector3(0.0, s, -s), ColorSpace.srgb).y
+    let above = display_color(cd, sh, items, Vector3(0.0, 1.0, 0.0), ColorSpace.srgb).y
+    let back = display_color(cd, sh, items, Vector3(0.0, s, s), ColorSpace.srgb).y
+    assert(mirror > 1.3 * above and above > back, "the highlight shows toward the mirror direction")
+
+## A dense blob of opaque splats 0.5 above the plane's middle, the sun
+## straight down: the plane's splats under it keep less than half the light
+## of those far from it.
+func relight_shadow() -> !:
+    let set = try plane(gray, true)
+    defer set.release()
+    var builder = clouds.CloudBuilder(27)
+    defer builder.close()
+    var positions = try new Vector3[27] --- in memory.heap
+    defer free(positions) in memory.heap
+    var orient: f64[108]
+    var scale: f64[81]
+    var opacity: f64[27]
+    var cd: f64[81]
+    for at in 0..<(usize)27:
+        positions[at] = Vector3(0.08 * (f64)(at % 3) - 0.08, 0.5 + 0.08 * (f64)((at // 3) % 3), 0.08 * (f64)(at // 9) - 0.08)
+        for k in 0..<(usize)4: orient[at * 4 + k] = 1.0 if k == 3 else 0.0
+        for k in 0..<(usize)3:
+            scale[at * 3 + k] = 0.08
+            cd[at * 3 + k] = 0.5
+        opacity[at] = 1.0
+    try builder.floats("orient", 4, orient)
+    try builder.floats("scale", 3, scale)
+    try builder.floats("opacity", 1, opacity)
+    try builder.floats("Cd", 3, cd)
+    let blob = try builder.finish(positions)
+    defer blob.release()
+    let both = try set.value().merged(blob)
+    defer both.release()
+    let lit_set = try both.value().with_light("/sun", Vector3(), Vector3(-0.5 * math.pi, 0.0, 0.0), 3, Vector3(1.0, 1.0, 1.0), 2.0, 0.0, 0.0, false, 1.0, 1.0, 0.5, 0.0, false)
+    defer lit_set.release()
+    let relit = try run_with("Relight GSplats", lit_set, [0.0, 1.0, 0.04, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0])
+    defer relit.release()
+    let store = clouds.points_of(relit.value())
+    var under: f64 = 0.0
+    var away: f64 = 0.0
+    var under_count: f64 = 0.0
+    var away_count: f64 = 0.0
+    for at in 0..<(usize)1600:
+        let p = clouds.point_of(relit.value(), at)
+        let shade = clouds.vector_of(store, "Cd", at)
+        if math.abs(p.x) < 0.06 and math.abs(p.z) < 0.06:
+            under += shade.y
+            under_count += 1.0
+        elif math.abs(p.x) > 0.6 and math.abs(p.z) > 0.6:
+            away += shade.y
+            away_count += 1.0
+    assert(under_count > 0.0 and away_count > 0.0)
+    assert(under / under_count < 0.5 * away / away_count, "splats under the blob are in its shadow")
