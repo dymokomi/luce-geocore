@@ -1,0 +1,125 @@
+## What else is on screen when Visible only picks a cloud's splats
+## (visible.lucb): the splats of the other displayed clouds, laid over the
+## region's cells with the cloud's own in one front-to-back order but never
+## picked, and opaque surfaces (the displayed meshes), which end every cell
+## where a ray through its center meets one.
+##
+## An occluding cloud is read as placed: its points and covariances turned
+## by its placement, as the viewport packs them. Its splats are first
+## checked against the region's box by a bound on their reach (3 standard
+## deviations of the largest scale, stretched by the placement), so a large
+## cloud far from the region costs a projection of its centers only.
+
+## Another cloud's splats, placed by `placement`.
+pub struct OccluderCloud:
+    pub let cloud: FootprintCloud
+    pub let placement: Matrix4
+
+## What hides a cloud's splats besides its own.
+pub struct Occluding:
+    pub let clouds: const OccluderCloud[]
+    ## Whether there are opaque surfaces: then `ray(context, origin, direction)`
+    ## is the distance along a ray (a unit direction) to the nearest, negative
+    ## for none. It is called on the pool.
+    pub let surfaces: bool
+    pub let context: void*
+    pub let ray: func(void*, Vector3, Vector3) -> f64
+
+## The footprints of `occluding`'s splats whose footprint reaches the box
+## (low_x, low_y)..(high_x, high_y), appended to `found`.
+func occluder_footprints(occluding: const Occluding*, view: const ScreenView*, cut: f64, low_x: f64, low_y: f64, high_x: f64, high_y: f64,
+                         found: Growing[Footprint]*) -> !:
+    for at in 0..<occluding.clouds.length:
+        let other = &occluding.clouds[at]
+        let count = other.cloud.points.length
+        if count == 0 or not (other.cloud.orient.present() and other.cloud.scale.present() and other.cloud.opacity.present()): continue
+        let marks = try new u8[count] --- in memory.heap
+        defer free(marks) in memory.heap
+        let linear = Mat3.of_matrix4(other.placement)
+        var stretch = 0.0
+        for value in linear.m: stretch += value * value
+        var work = OccluderWork(other = other, view = view, cut = cut, linear = linear, stretch = math.sqrt(stretch),
+                                low_x = low_x, low_y = low_y, high_x = high_x, high_y = high_y, near = marks)
+        ranges.each_range(count, 4096, (void*)&work, occluder_near_range)
+        for index in 0..<count:
+            if marks[index] == 0: continue
+            let made = occluder_footprint(&work, index) else continue
+            try found.push(made)
+
+struct OccluderWork:
+    let other: const OccluderCloud*
+    let view: const ScreenView*
+    let cut: f64
+    let linear: Mat3
+    ## The Frobenius norm of `linear`: no direction grows by more.
+    let stretch: f64
+    let low_x: f64
+    let low_y: f64
+    let high_x: f64
+    let high_y: f64
+    var near: u8[]
+
+## Mark the splats that may reach the box: their center's projection grown
+## by the bound on their footprint, then their footprint itself.
+func occluder_near_range(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (OccluderWork*)context
+    let cloud = &work.other.cloud
+    let view = work.view
+    for index in first..<end:
+        work.near[index] = 0
+        if not (cloud.opacity.at(index, 0) > work.cut): continue
+        let center = work.other.placement.transform_point(cloud.points[index].vector().add(cloud.origin))
+        let found = center_footprint(view, center) else continue
+        let largest = math.max(math.abs(cloud.scale.at(index, 0)), math.max(math.abs(cloud.scale.at(index, 1)), math.abs(cloud.scale.at(index, 2))))
+        let bound = math.min(3.0 * largest * work.stretch * math.max(view.fx, view.fy) / found.depth + 2.0, widest_footprint)
+        if found.x + bound < work.low_x or found.x - bound > work.high_x or found.y + bound < work.low_y or found.y - bound > work.high_y: continue
+        let shaped = occluder_footprint(work, index) else continue
+        let reach = math.max(shaped.a, shaped.b)
+        if shaped.x + reach < work.low_x or shaped.x - reach > work.high_x or shaped.y + reach < work.low_y or shaped.y - reach > work.high_y: continue
+        work.near[index] = 1
+
+## Splat `index` of an occluding cloud as placed: its center and covariance
+## L Σ Lᵀ turned by the placement's linear part L; none when it is too faint
+## to hide anything or has no shape.
+func occluder_footprint(work: const OccluderWork*, index: usize) -> Footprint?:
+    let cloud = &work.other.cloud
+    let center = work.other.placement.transform_point(cloud.points[index].vector().add(cloud.origin))
+    let q = Quat(cloud.orient.at(index, 0), cloud.orient.at(index, 1), cloud.orient.at(index, 2), cloud.orient.at(index, 3))
+    if q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w < 1.0e-30: return none
+    var result = center_footprint(work.view, center) else return none
+    if not weigh(&result, cloud.opacity.at(index, 0), work.cut): return none
+    let own = compose_covariance(q.normalized(), Vector3(math.abs(cloud.scale.at(index, 0)), math.abs(cloud.scale.at(index, 1)), math.abs(cloud.scale.at(index, 2))))
+    shape_footprint(&result, work.view, center, work.linear.multiply(own).multiply(work.linear.transposed()))
+    return result
+
+## Into `blocked` (a depth along the view per cell, infinite for none), where
+## a ray through each cell's center of `wanted` meets an opaque surface.
+func surface_depths(occluding: const Occluding*, view: const ScreenView*, grid: const CellGrid*, wanted: const u8[], blocked: f64[]):
+    for at in 0..<blocked.length: blocked[at] = math.infinity
+    if not occluding.surfaces: return
+    var work = OpaqueRays(occluding = occluding, view = view, grid = grid, wanted = wanted, blocked = blocked)
+    ranges.each_range(grid.rows, 1, (void*)&work, opaque_rows)
+
+struct OpaqueRays:
+    let occluding: const Occluding*
+    let view: const ScreenView*
+    let grid: const CellGrid*
+    let wanted: const u8[]
+    var blocked: f64[]
+
+func opaque_rows(context: void*, first: usize, end: usize, worker: usize):
+    _ = worker
+    let work = (OpaqueRays*)context
+    let view = work.view
+    let grid = work.grid
+    for row in first..<end:
+        let y = grid.y + ((f64)row + 0.5) * grid.cell
+        for column in 0..<grid.columns:
+            let at = row * grid.columns + column
+            if work.wanted[at] == 0: continue
+            let x = grid.x + ((f64)column + 0.5) * grid.cell
+            let toward = view.forward.add(view.right.multiply_scalar((x - view.width * 0.5) / view.fx)).subtract(view.up.multiply_scalar((y - view.height * 0.5) / view.fy))
+            let direction = toward.multiply_scalar(1.0 / toward.length())
+            let distance = work.occluding.ray(work.occluding.context, view.eye, direction)
+            if distance >= 0.0: work.blocked[at] = distance * direction.dot(view.forward)

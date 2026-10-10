@@ -19,6 +19,11 @@
 ## behind an opaque layer do not, and those behind a translucent one
 ## (T above `surface_light` through it) do.
 ##
+## Other clouds' splats and opaque surfaces (`occluding`; occluding.lucb)
+## hide the cloud's too: the other splats are laid in the same front-to-back
+## order, never picked, and a cell whose center's ray meets a surface lays
+## nothing behind it and has its surface there at the latest.
+##
 ## A splat smaller than a cell counts at its center's cell, its alpha scaled
 ## down by the share of the cell it covers (its Gaussian's integral,
 ## 2π σ₁σ₂ · opacity, over the cell's area). The splats are projected on the
@@ -29,8 +34,9 @@ let surface_light: f64 = 0.5
 ## The most cells a side of the region's box.
 let most_cells: f64 = 256.0
 
-## Keep, of `work.selected`, the splats seen in the region.
-func keep_visible(work: FootprintWork*) -> !:
+## Keep, of `work.selected`, the splats seen in the region, `occluding` (if
+## any) hiding them too.
+func keep_visible(work: FootprintWork*, occluding: const Occluding*?) -> !:
     let view = work.view
     # The region's box on screen, in cells; half a unit wider, so a click's
     # empty box still holds its cell.
@@ -59,6 +65,11 @@ func keep_visible(work: FootprintWork*) -> !:
     for at in 0..<cells:
         light[at] = 1.0
         surface[at] = math.infinity
+    # Where opaque surfaces end each cell the region tests.
+    let blocked = try new f64[cells] --- in memory.heap
+    defer free(blocked) in memory.heap
+    for at in 0..<cells: blocked[at] = math.infinity
+    if let other = occluding: surface_depths(other, view, &grid, near_region, blocked)
     # The splats whose footprint reaches the box, nearest first.
     let count = work.cloud.points.length
     let near = try new u8[count + 1] --- in memory.heap
@@ -71,14 +82,20 @@ func keep_visible(work: FootprintWork*) -> !:
         if near[at] != 0: try order.push((u32)at)
     let found = try new Footprint[order.count + 1] --- in memory.heap
     defer free(found) in memory.heap
-    var projecting = ProjectWork(work = work, order = order.items[..<order.count], found = found)
+    var others = Growing[Footprint]()
+    defer others.close()
+    if let other = occluding: try occluder_footprints(other, view, work.cut, low_x, low_y, high_x, high_y, &others)
+    var projecting = ProjectWork(work = work, order = order.items[..<order.count], found = found[..<order.count], others = others.items[..<others.count])
     ranges.each_range(order.count, 1024, (void*)&projecting, project_range)
-    let ranked = try new u32[order.count + 1] --- in memory.heap
+    # The cloud's splats and the others', nearest first, laid in that order.
+    let total = order.count + others.count
+    let ranked = try new u32[total + 1] --- in memory.heap
     defer free(ranked) in memory.heap
-    for at in 0..<order.count: ranked[at] = (u32)at
-    sort.using(ranked[..<order.count], &projecting, nearer_first)
-    var cover = Cover(grid = grid, cut = work.cut, inside = near_region, light = light, surface = surface, testing = false)
-    for at in ranked[..<order.count]: _ = visit_cells(&cover, &found[(usize)at])
+    for at in 0..<total: ranked[at] = (u32)at
+    sort.using(ranked[..<total], &projecting, nearer_first)
+    var cover = Cover(grid = grid, cut = work.cut, inside = near_region, light = light, surface = surface, blocked = blocked, testing = false)
+    for at in ranked[..<total]: _ = visit_cells(&cover, projecting.footprint((usize)at))
+    for at in 0..<cells: surface[at] = math.min(surface[at], blocked[at])
     # Then each picked splat against the surfaces.
     cover.testing = true
     for at in 0..<order.count:
@@ -149,6 +166,8 @@ struct Cover:
     var inside: const u8[]
     var light: f64[]
     var surface: f64[]
+    ## Where an opaque surface ends a cell (infinite for none).
+    var blocked: const f64[]
     var testing: bool
 
 ## The cells `found` covers (alpha at least `cut`): laying it, dim their light
@@ -186,6 +205,7 @@ func visit_cells(cover: Cover*, found: const Footprint*) -> bool:
 ## One cell of `visit_cells`: lay (answer false) or test.
 func cover_cell(cover: Cover*, at: usize, alpha: f64, depth: f64, front: f64) -> bool:
     if cover.testing: return cover.inside[at] != 0 and front <= cover.surface[at]
+    if depth >= cover.blocked[at]: return false
     let before = cover.light[at]
     let after = before * (1.0 - math.clamp(alpha, 0.0, 0.99))
     cover.light[at] = after
@@ -217,10 +237,17 @@ func near_range(context: void*, first: usize, end: usize, worker: usize):
         if found.x + reach < finding.low_x or found.x - reach > finding.high_x or found.y + reach < finding.low_y or found.y - reach > finding.high_y: continue
         finding.near[index] = 1
 
+## The cloud's footprints (`found`, of the points in `order`) and, after
+## them in one index space, the occluding splats' (`others`).
 struct ProjectWork:
     var work: const FootprintWork*
     var order: const u32[]
     var found: Footprint[]
+    var others: const Footprint[]
+
+    ## Footprint `at` of the index space.
+    func footprint(at: usize) -> const Footprint*:
+        return &self.found[at] if at < self.found.length else &self.others[at - self.found.length]
 
 func project_range(context: void*, first: usize, end: usize, worker: usize):
     _ = worker
@@ -228,8 +255,8 @@ func project_range(context: void*, first: usize, end: usize, worker: usize):
     for at in first..<end:
         projecting.found[at] = footprint_of(projecting.work, (usize)projecting.order[at]) else Footprint(x = 0.0, y = 0.0, cos = 1.0, sin = 0.0, a = 0.0, b = 0.0, depth = 1.0e300)
 
-## Nearer first (ties: the lower point number).
+## Nearer first (ties: the cloud's own by point number, then the others in order).
 func nearer_first(projecting: const ProjectWork*, a: u32, b: u32) -> bool:
-    let da = projecting.found[(usize)a].depth
-    let db = projecting.found[(usize)b].depth
-    return da < db or (da == db and projecting.order[(usize)a] < projecting.order[(usize)b])
+    let da = projecting.footprint((usize)a).depth
+    let db = projecting.footprint((usize)b).depth
+    return da < db or (da == db and a < b)

@@ -22,7 +22,8 @@
 ## on the pool, a byte per splat, then becomes bits.
 ##
 ## By default selection goes through the depth, as SuperSplat's does.
-## `visible_only` keeps only the splats seen in the region (visible.lucb).
+## `visible_only` keeps only the splats seen in the region (visible.lucb),
+## behind other clouds and meshes too (occluding.lucb).
 
 ## The view the footprints are taken in: the camera and the screen, in the
 ## units of the region's coordinates (x right, y down from the top left).
@@ -65,8 +66,10 @@ pub struct FootprintCloud:
 
 ## Into `marked` (a byte per point, 1 selected), the points whose footprint
 ## meets `region` in `view`; `cut` is the footprint alpha. `visible_only`
-## keeps those not hidden behind others there.
-pub func select_footprints(cloud: const FootprintCloud*, view: const ScreenView*, region: const ScreenRegion*, cut: f64, marked: u8[], visible_only: bool = false) -> !:
+## keeps those not hidden behind others there: the cloud's own splats, and
+## `occluding`'s other clouds and surfaces.
+pub func select_footprints(cloud: const FootprintCloud*, view: const ScreenView*, region: const ScreenRegion*, cut: f64, marked: u8[], visible_only: bool = false,
+                           occluding: const Occluding*? = none) -> !:
     let count = cloud.points.length
     if count == 0: return
     if region.points.length < 2 or region.points.length % 2 != 0: error(errors.invalid, "a screen region needs x, y pairs")
@@ -89,7 +92,7 @@ pub func select_footprints(cloud: const FootprintCloud*, view: const ScreenView*
                              splats = cloud.orient.present() and cloud.scale.present() and cloud.opacity.present(),
                              low_x = low_x - grow, low_y = low_y - grow, high_x = high_x + grow, high_y = high_y + grow)
     ranges.each_range(count, 4096, (void*)&work, footprint_range)
-    if visible_only: try keep_visible(&work)
+    if visible_only: try keep_visible(&work, occluding)
 
 struct FootprintWork:
     let cloud: const FootprintCloud*
@@ -136,23 +139,41 @@ func footprint_range(context: void*, first: usize, end: usize, worker: usize):
 
 ## Point `index`'s footprint, or none behind the near plane.
 func footprint_of(work: const FootprintWork*, index: usize) -> Footprint?:
-    let view = work.view
     let cloud = work.cloud
-    let d = cloud.points[index].vector().add(cloud.origin).subtract(view.eye)
-    let tz = d.dot(view.forward)
-    if not (tz > view.near): return none
-    let tx = d.dot(view.right)
-    let ty = d.dot(view.up)
-    var result = Footprint(x = view.width * 0.5 + view.fx * tx / tz, y = view.height * 0.5 - view.fy * ty / tz, cos = 1.0, sin = 0.0, a = 0.0, b = 0.0, depth = tz)
+    let center = cloud.points[index].vector().add(cloud.origin)
+    var result = center_footprint(work.view, center) else return none
     if not work.splats: return result
-    let opacity = cloud.opacity.at(index, 0)
-    result.opacity = opacity
-    if not (opacity > work.cut): return result
-    let k = math.min(math.sqrt(2.0 * math.log(opacity / work.cut)), 3.0)
-    result.k = k
+    if not weigh(&result, cloud.opacity.at(index, 0), work.cut): return result
     let q = Quat(cloud.orient.at(index, 0), cloud.orient.at(index, 1), cloud.orient.at(index, 2), cloud.orient.at(index, 3))
+    # A zero orient has no shape: its center alone, as the viewport skips it.
     if q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w < 1.0e-30: return result
     let sigma = compose_covariance(q.normalized(), Vector3(math.abs(cloud.scale.at(index, 0)), math.abs(cloud.scale.at(index, 1)), math.abs(cloud.scale.at(index, 2))))
+    shape_footprint(&result, work.view, center, sigma)
+    return result
+
+## The footprint of a point at world `center` alone (no axes), or none behind the near plane.
+func center_footprint(view: const ScreenView*, center: Vector3) -> Footprint?:
+    let d = center.subtract(view.eye)
+    let tz = d.dot(view.forward)
+    if not (tz > view.near): return none
+    return Footprint(x = view.width * 0.5 + view.fx * d.dot(view.right) / tz, y = view.height * 0.5 - view.fy * d.dot(view.up) / tz,
+                     cos = 1.0, sin = 0.0, a = 0.0, b = 0.0, depth = tz)
+
+## Give a splat's footprint its `opacity` and how many standard deviations its
+## axes reach; false (no axes) when it is no stronger than `cut`.
+func weigh(result: Footprint*, opacity: f64, cut: f64) -> bool:
+    result.opacity = opacity
+    if not (opacity > cut): return false
+    result.k = math.min(math.sqrt(2.0 * math.log(opacity / cut)), 3.0)
+    return true
+
+## Give a weighed footprint (at world `center`) the EWA ellipse of world
+## covariance `sigma`, out to its k standard deviations.
+func shape_footprint(result: Footprint*, view: const ScreenView*, center: Vector3, sigma: Mat3):
+    let d = center.subtract(view.eye)
+    let tz = result.depth
+    let tx = d.dot(view.right)
+    let ty = d.dot(view.up)
     # T = J W: rows in world terms, as splat_project.comp builds them; y
     # grows down the screen, which flips the second row (it changes no size).
     let txc = math.clamp(tx / tz, -1.3 * view.width * 0.5 / view.fx, 1.3 * view.width * 0.5 / view.fx) * tz
@@ -173,9 +194,8 @@ func footprint_of(work: const FootprintWork*, index: usize) -> Footprint?:
     if math.abs(b) > 1.0e-12 * math.max(a, c): angle = math.atan2(l1 - a, b)
     result.cos = math.cos(angle)
     result.sin = math.sin(angle)
-    result.a = math.min(k * math.sqrt(l1), widest_footprint)
-    result.b = math.min(k * math.sqrt(l2), widest_footprint)
-    return result
+    result.a = math.min(result.k * math.sqrt(l1), widest_footprint)
+    result.b = math.min(result.k * math.sqrt(l2), widest_footprint)
 
 ## Screen point (x, y) in the footprint's frame scaled to its half axes
 ## grown by `grow` (the unit disc is the ellipse): [u, v].

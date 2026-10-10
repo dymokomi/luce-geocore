@@ -177,6 +177,11 @@ pub let set_splats = geometry_set.set_splats
 ## A set with its splat cloud in the raw 3DGS PLY names, for writers (the
 ## inverse of Bake GSplats; GeometrySet.unbaked_splats in Luce).
 pub let unbaked_set = geometry_set.unbaked_set
+## A splat cloud as Edit GSplats' Visible only reads it when it hides another
+## (a renderer keeps one per drawn cloud), and its addition to a
+## SplatOccluders, sharing its columns.
+pub type OccludingCloud = set_verbs.OccludingCloud
+pub let add_occluding_cloud = set_verbs.add_occluding_cloud
 ## Placed copies of prototype sets.
 pub type Instances = geometry_set.Instances
 ## A new, empty instances component.

@@ -77,6 +77,10 @@ pub type GeometryFile = geometry_files.GeometryFile
 pub type Fields = fields.Fields
 ## Edit GSplats: a set's splat cloud edited by selection, picked on its points.
 pub type SplatEdits = set_verbs.SplatEdits
+## What else hides an edited cloud's splats under Visible only: other clouds
+## (luce-3d's GaussianSplats.occlude adds one) and meshes (`add_mesh`).
+pub type SplatOccluders = set_verbs.SplatOccluders
+pub let splat_occluders_type = set_verbs.splat_occluders_type
 ## Edit SDF: a set's SDF edited primitive by primitive, picked on proxies.
 pub type SdfEdits = fields.SdfEdits
 ## Edit Sketch: planar sketches as curves, picked on point clouds.

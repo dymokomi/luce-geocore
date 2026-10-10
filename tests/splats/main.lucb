@@ -92,5 +92,8 @@ pub func main(arguments: str[]) -> i32!:
     inject(&tracker, conversion_checks.run)
     print("PASS splat conversions: GSplats from Polygons makes coplanar discs, GSplats to Volume integrates to the mass and surfaces, Normals from GSplats point outward")
     inject(&tracker, edit_checks.run)
-    print("PASS splat edits: box, lasso and brush selections on grids, footprints at their edges and along needles, add and remove, exact moves, recolor, opacity, delete")
+    # Without injected failures (edit_checks.visible_across says why).
+    try edit_checks.visible_across()
+    settle(&tracker)
+    print("PASS splat edits: box, lasso and brush selections on grids, footprints at their edges and along needles, add and remove, exact moves, recolor, opacity, delete, visible only behind other clouds and meshes")
     return 0

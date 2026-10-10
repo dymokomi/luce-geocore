@@ -1,0 +1,102 @@
+## What else is on screen when Edit GSplats selects with Visible only: the
+## other displayed splat clouds and the displayed meshes, which hide the
+## edited cloud's splats behind them (splats/occluding.lucb). A viewport
+## gathers them for one selection: luce-3d's GaussianSplats adds the cloud it
+## draws (`GaussianSplats.occlude`, through `add_occluding_cloud`), and the
+## viewport adds its meshes in world space (`add_mesh`). Clouds share their
+## columns, nothing is copied; a mesh keeps its spatial index (built on its
+## first ray, then reused by every later selection and pick).
+
+pub struct SplatOccluders:
+    var clouds: Growing[OccludingCloud]
+    var meshes: Growing[interop.Reference[Mesh]]
+
+    pub func init():
+        self.clouds = Growing[OccludingCloud]()
+        self.meshes = Growing[interop.Reference[Mesh]]()
+
+    ## Add `mesh` (in world space) as an opaque surface.
+    pub func add_mesh(mesh: interop.Reference[Mesh]) -> !:
+        _ = try mesh.get()
+        try self.meshes.push(mesh.clone())
+
+    ## How many splat clouds it holds.
+    pub func cloud_count() -> i64:
+        return (i64)self.clouds.count
+
+    ## How many meshes it holds.
+    pub func mesh_count() -> i64:
+        return (i64)self.meshes.count
+
+    pub func close():
+        for at in 0..<self.clouds.count: self.clouds.items[at].close()
+        for at in 0..<self.meshes.count: self.meshes.items[at].release()
+        self.clouds.close()
+        self.meshes.close()
+
+pub let splat_occluders_type: interop.Type[SplatOccluders] = interop.Type[SplatOccluders]("SplatOccluders", SplatOccluders.close, closeable = true)
+
+## A splat cloud as it may hide another: a mesh without faces sharing its
+## points and point attributes (none for plain points, which hide nothing),
+## and its placement. luce-3d keeps one with each cloud it draws.
+pub struct OccludingCloud:
+    var points: Mesh*?
+    var placement: Matrix4
+
+    ## `set`'s cloud placed by `placement`.
+    pub static func of(set: const GeometrySet*, placement: Matrix4) -> OccludingCloud!:
+        let cloud = set_cloud(set) else return OccludingCloud(points = none, placement = placement)
+        if not is_splat_store(cloud_store(cloud)): return OccludingCloud(points = none, placement = placement)
+        return OccludingCloud(points = try cloud_mesh(cloud), placement = placement)
+
+    pub func close():
+        if let points = self.points: mesh_dispose(points)
+        self.points = none
+
+## Add `cloud` to `occluders`, sharing its columns.
+pub func add_occluding_cloud(occluders: SplatOccluders*, cloud: const OccludingCloud*) -> !:
+    let points = cloud.points else return
+    let shared = try mesh_share(points)
+    occluders.clouds.push(OccludingCloud(points = shared, placement = cloud.placement)) catch failure:
+        mesh_dispose(shared)
+        error(failure.code, failure.message)
+
+## `occluders` as splats/occluding.lucb reads them, for one selection: the
+## clouds' footprint inputs and the meshes' spatial indexes (built here,
+## before the rays go out on the pool).
+struct OccluderInputs:
+    var clouds: Growing[OccluderCloud]
+    var indexes: Growing[MeshRays]
+
+    func close():
+        self.clouds.close()
+        self.indexes.close()
+
+## A mesh's spatial index and the origin its positions are measured from.
+struct MeshRays:
+    let index: const TriangleIndex*
+    let origin: Vector3
+
+func occluder_inputs(occluders: const SplatOccluders*) -> OccluderInputs!:
+    var inputs = OccluderInputs(clouds = Growing[OccluderCloud](), indexes = Growing[MeshRays]())
+    errdefer inputs.close()
+    for at in 0..<occluders.clouds.count:
+        let held = &occluders.clouds.items[at]
+        let mesh = held.points else continue
+        try inputs.clouds.push(OccluderCloud(cloud = try footprint_cloud(mesh), placement = held.placement))
+    for at in 0..<occluders.meshes.count:
+        let mesh = try occluders.meshes.items[at].get()
+        if mesh.face_count() == 0: continue
+        try inputs.indexes.push(MeshRays(index = try mesh.query_index(), origin = mesh.position_origin()))
+    return inputs
+
+## The nearest hit along a ray among the meshes (`context`: an OccluderInputs),
+## negative for none.
+func nearest_surface(context: void*, origin: Vector3, direction: Vector3) -> f64:
+    let inputs = (const OccluderInputs*)context
+    var nearest = -1.0
+    for at in 0..<inputs.indexes.count:
+        let rays = &inputs.indexes.items[at]
+        let distance = rays.index.ray(origin.subtract(rays.origin), direction).distance
+        if distance >= 0.0 and (nearest < 0.0 or distance < nearest): nearest = distance
+    return nearest

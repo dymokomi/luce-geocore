@@ -28,9 +28,12 @@ pub struct SplatEdits:
     ## 0 is a polygon (a box's corners, a lasso), 1 a brush stroke of circles
     ## of `radius`; `points` are x, y pairs. `cut` is the footprint alpha.
     ## `visible_only` takes only the splats seen there, not those hidden
-    ## behind others (splats/visible.lucb); else selection goes through.
+    ## behind others (splats/visible.lucb): behind the cloud's own and, given
+    ## `occluders`, behind other displayed clouds and meshes; else selection
+    ## goes through.
     pub static func select(pick: interop.Reference[Mesh], current: interop.Reference[Selection], view: const f64[], shape: i64, points: const f64[],
-                           radius: f64, cut: f64, operation: i64, visible_only: bool = false) -> interop.Reference[Selection]!:
+                           radius: f64, cut: f64, operation: i64, visible_only: bool = false,
+                           occluders: interop.Reference[SplatOccluders]? = none) -> interop.Reference[Selection]!:
         let mesh = try pick.get()
         let chosen = try current.get()
         if view.length != 17: error(errors.invalid, "a screen view is 17 numbers")
@@ -40,11 +43,17 @@ pub struct SplatEdits:
         let screen = ScreenView(eye = Vector3(view[0], view[1], view[2]), right = Vector3(view[3], view[4], view[5]), up = Vector3(view[6], view[7], view[8]),
                                 forward = Vector3(view[9], view[10], view[11]), fx = view[12], fy = view[13], width = view[14], height = view[15], near = view[16])
         let region = ScreenRegion(shape = RegionShape((u8)shape), points = points, radius = radius)
-        let cloud = FootprintCloud(points = mesh.point_span(), origin = mesh.position_origin(), orient = try mesh_floats(mesh, orient_name, 4),
-                                   scale = try mesh_floats(mesh, scale_name, 3), opacity = try mesh_floats(mesh, opacity_name, 1))
+        let cloud = try footprint_cloud(mesh)
         let hits = try new u8[count + 1] --- in memory.heap
         defer free(hits) in memory.heap
-        try select_footprints(&cloud, &screen, &region, cut, hits[..<count], visible_only)
+        if let given = occluders if visible_only else none:
+            var inputs = try occluder_inputs(try given.get())
+            defer inputs.close()
+            let occluding = Occluding(clouds = inputs.clouds.items[..<inputs.clouds.count], surfaces = inputs.indexes.count > 0,
+                                      context = (void*)&inputs, ray = nearest_surface)
+            try select_footprints(&cloud, &screen, &region, cut, hits[..<count], true, &occluding)
+        else:
+            try select_footprints(&cloud, &screen, &region, cut, hits[..<count], visible_only)
         var bits = (try BitsBuilder.copy_of(selection_bits(chosen))) if operation != 0 else (try BitsBuilder.zeros(count))
         for at in 0..<count:
             if hits[at] == 0: continue
@@ -128,6 +137,11 @@ func with_cloud(set: const GeometrySet*, cloud: PointCloud*) -> interop.Referenc
         dispose_set(storage)
         error(failure.code, failure.message)
     return try adopt_set(storage)
+
+## A pick mesh's points as footprint selection reads them.
+func footprint_cloud(mesh: const Mesh*) -> FootprintCloud!:
+    return FootprintCloud(points = mesh.point_span(), origin = mesh.position_origin(), orient = try mesh_floats(mesh, orient_name, 4),
+                          scale = try mesh_floats(mesh, scale_name, 3), opacity = try mesh_floats(mesh, opacity_name, 1))
 
 ## The Floats of a mesh's point attribute `name` of `width`, or none.
 func mesh_floats(mesh: const Mesh*, name: str, width: usize) -> Floats!:

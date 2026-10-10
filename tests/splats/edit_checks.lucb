@@ -7,8 +7,8 @@
 import interop
 import memory
 from luce_std import math
-from luce_geocore.geocore import Vector3, GeometrySet, SplatEdits, Selection, Mesh
-from luce_geocore.kernel import Domain
+from luce_geocore.geocore import Vector3, Matrix4, GeometrySet, SplatEdits, SplatOccluders, splat_occluders_type, Selection, Mesh
+from luce_geocore.kernel import Domain, OccludingCloud, add_occluding_cloud
 from luce_geocore.splats import Quat, Mat3, compose_covariance
 import clouds
 from clouds import CloudBuilder
@@ -143,6 +143,76 @@ func visible_only() -> !:
     let clicked = try selected(set, 1, dab, 0.0, visible = true)
     defer clicked.release()
     assert(clicked.value().count() == 1 and clicked.value().contains(100), "a click on the wall takes the wall, not what it hides")
+
+## Visible only across clouds and meshes: the grid alone, with an opaque
+## wall that is another cloud's one splat (σ 2.5, opacity 0.99, made at the
+## origin and placed by a translation to x = -3.5, z = 2) and an opaque quad
+## mesh over x 1..4, y -2..2 at z = 1. The box over x -4..4, y -1..1 sees
+## only the grid splats at x = ±0.5 (four), where the wall's core and the
+## quad do not reach; through the depth it takes all 16, and Visible only
+## without occluders all 16 too. A click on a splat behind the quad takes
+## nothing; one in the open takes its splat. (Run without injected failures:
+## the quad, released while the occluders still hold it, becomes a cycle
+## candidate, and the collector's candidate list traps when it cannot grow.)
+pub func visible_across() -> !:
+    let set = try plain_grid()
+    defer set.release()
+    let wall = try single(Vector3(0.0, 0.0, 0.0), Vector3(2.5, 2.5, 0.01), 0.99)
+    defer wall.release()
+    var held = try OccludingCloud.of(try wall.get(), Matrix4(Vector3(1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0), Vector3(-3.5, 0.0, 2.0)))
+    defer held.close()
+    let quad_points: Vector3[4] = [Vector3(1.0, -2.0, 1.0), Vector3(4.0, -2.0, 1.0), Vector3(4.0, 2.0, 1.0), Vector3(1.0, 2.0, 1.0)]
+    let quad_sizes: i64[1] = [4]
+    let quad_corners: i64[4] = [0, 1, 2, 3]
+    var no_numbers: f64[]
+    let quad = try Mesh.from_corner_data(quad_points, quad_sizes, quad_corners, no_numbers, no_numbers)
+    defer quad.release()
+    let given = try interop.Reference[SplatOccluders].adopt(try new SplatOccluders() in memory.heap, splat_occluders_type, memory.heap)
+    defer given.release()
+    try add_occluding_cloud(given.value(), &held)
+    try given.value().add_mesh(quad)
+    assert(given.value().cloud_count() == 1 and given.value().mesh_count() == 1)
+    let corners = box(-4.0, -1.0, 4.0, 1.0)
+    let alone = try selected(set, 0, corners, visible = true)
+    defer alone.release()
+    assert(alone.value().count() == 16, "visible only, the grid alone: everything in the box")
+    let seen = try selected_behind(set, 0, corners, 0.0, given)
+    defer seen.release()
+    for i in [(i64)4, 5]:
+        for j in [(i64)4, 5]: assert(has(seen, i, j), "the splats in the open are seen")
+    assert(seen.value().count() == 4, "the other cloud's wall and the quad hide the rest")
+    let behind: f64[2] = [sx(2.5), sy(0.5)]
+    let hidden = try selected_behind(set, 1, behind, 0.0, given)
+    defer hidden.release()
+    assert(hidden.value().count() == 0, "a click behind the quad takes nothing")
+    let open: f64[2] = [sx(0.5), sy(0.5)]
+    let clicked = try selected_behind(set, 1, open, 0.0, given)
+    defer clicked.release()
+    assert(clicked.value().count() == 1 and has(clicked, 5, 5), "a click in the open takes its splat")
+
+## `selected` visible only, behind `occluders` too.
+func selected_behind(set: interop.Reference[GeometrySet], shape: i64, points: const f64[], radius: f64, occluders: interop.Reference[SplatOccluders]) -> interop.Reference[Selection]!:
+    let pick = try SplatEdits.pick_mesh(set)
+    defer pick.release()
+    let nothing = try Selection.empty(pick, 0)
+    defer nothing.release()
+    let v = view()
+    return try SplatEdits.select(pick, nothing, v, shape, points, radius, 0.00392156862745098, 0, true, occluders)
+
+## A cloud of one splat at `position` with `scale`, flat orient and `opacity`.
+func single(position: Vector3, scale: Vector3, opacity: f64) -> interop.Reference[GeometrySet]!:
+    let positions: Vector3[1] = [position]
+    let orient: f64[4] = [0.0, 0.0, 0.0, 1.0]
+    let scales: f64[3] = [scale.x, scale.y, scale.z]
+    let alphas: f64[1] = [opacity]
+    let color: f64[3] = [0.5, 0.5, 0.5]
+    var builder = CloudBuilder(1)
+    defer builder.close()
+    try builder.floats("orient", 4, orient)
+    try builder.floats("scale", 3, scales)
+    try builder.floats("opacity", 1, alphas)
+    try builder.floats("Cd", 3, color)
+    return try builder.finish(positions)
 
 ## An L-shaped lasso (concave) takes the splats inside the L and none in its
 ## notch; a brush stroke along y = 0.5 from x = -2.8 to 2.8 (radius 3 px,
