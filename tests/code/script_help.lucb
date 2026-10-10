@@ -84,6 +84,13 @@ pub func run_all() -> !:
     let local = try ScriptHelp.hover(file, script, 4, 9)
     if local.value != "g: Geometry": print(f"  got [{local.value}]")
     expect(local.value == "g: Geometry", "hovering a local")
+    # Hover and completion timed, the packages loaded.
+    let hover_start = time.now()
+    for _ in 0..<20: _ = try ScriptHelp.hover(file, script, 6, 25)
+    let hovered_ms = (f64)(time.now() - hover_start) / 20.0e6
+    let complete_start = time.now()
+    for _ in 0..<20: _ = try complete(file, "    g.", 7)
+    print(f"ok    script hover {hovered_ms} ms, completion {(f64)(time.now() - complete_start) / 20.0e6} ms")
     print("ok    script help: Cook, Geometry, VoxelGrid and Verb members, hover, a diagnostic")
 
 ## The script with `extra` on line 10, completed there at `column`.
