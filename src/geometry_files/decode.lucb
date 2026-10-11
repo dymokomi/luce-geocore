@@ -161,7 +161,7 @@ pub func load_geometry(path: str) -> GeometrySet*!:
     defer reader.close()
     let root = (try reader.next_element()) else error(errors.invalid, "an empty geometry file")
     if root.0 != "/geometry" or root.1 != "geometry": error(errors.invalid, "not a geometry file")
-    return try decode_set(&reader, "/geometry")
+    return try decode_set(&reader, "/geometry", true)
 
 ## The key a geometry file was saved with, or 0 when it is missing or not a
 ## geometry file. Only running out of memory is an error.
@@ -182,12 +182,17 @@ func read_key(path: str) -> i64!:
             return memory.read[i64]((void*)&bytes[0])
     return 0
 
-## The set under the current element `path` (its properties unread).
-func decode_set(reader: GeometryReader*, path: str) -> GeometrySet*!:
+## The set under the current element `path` (its properties unread). The
+## root, and only the root, records the format version, which must be 1.
+func decode_set(reader: GeometryReader*, path: str, root: bool = false) -> GeometrySet*!:
     let storage = try empty_storage()
     errdefer dispose_set(storage)
+    var versioned = false
     while let header = try reader.next_property():
-        if header.name == "version" and (try reader.integer(header)) != 1: error(errors.invalid, "this geometry file is from another format version")
+        if root and header.name == "version":
+            if (try reader.integer(header)) != 1: error(errors.invalid, "this geometry file is from another format version")
+            versioned = true
+    if root and not versioned: error(errors.invalid, "this geometry file records no format version")
     while let found = try reader.next_child(path):
         let child = found.0
         if found.1 == "attribute":
