@@ -52,6 +52,14 @@ pub struct DragFrame:
         self.axis = Vector3()
         self.rails = Rails()
 
+    ## A frame of a center and an axis alone, no rails: a drag of a tool
+    ## that is no verb (a CAD tool, measured on its own geometry).
+    pub static func of(center: Vector3, axis: Vector3) -> DragFrame:
+        var made = DragFrame()
+        made.center = center
+        made.axis = axis
+        return made
+
     ## The center of the group's points (world).
     pub func center_point() -> Vector3:
         return self.center

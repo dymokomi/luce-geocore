@@ -234,6 +234,13 @@ pub struct Verbs:
         storage[0] = made
         return try interop.Reference[DragFrame].adopt(storage.data, drag_frame_type, memory.heap)
 
+    ## A drag frame of `center` and `axis` alone (no rails), for a tool that
+    ## is no verb: a CAD tool's drag measured on its pick geometry.
+    pub static func frame_at(center: Vector3, axis: Vector3) -> interop.Reference[DragFrame]!:
+        let storage = try new DragFrame[1] --- in memory.heap
+        storage[0] = DragFrame.of(center, axis)
+        return try interop.Reference[DragFrame].adopt(storage.data, drag_frame_type, memory.heap)
+
     ## Its viewport gesture: "", "stroke", "place" or "hover".
     pub static func gesture(index: i64) -> str:
         return verb_at(checked(index)).gesture

@@ -219,6 +219,12 @@ func frame_checks(grid: interop.Reference[Mesh]) -> !:
     let whole = try Verbs.frame("PolyExtrude", cube, "", 3, up[..<1])
     defer whole.release()
     near(whole.value().normal().length(), 0.0)
+    # A frame of its own (a CAD tool's): its center and axis, no rails.
+    let own = try Verbs.frame_at(Vector3(1.0, 2.0, 3.0), Vector3(0.0, 0.0, 1.0))
+    defer own.release()
+    near_point(own.value().center_point(), Vector3(1.0, 2.0, 3.0))
+    near_point(own.value().normal(), Vector3(0.0, 0.0, 1.0))
+    assert(own.value().rail_count() == 0)
     # Edge Slide's rails: both sides of the middle row's five points; the
     # one under a ray from above point 12 is point 12.
     let none_set: f64[1] = [0.0]

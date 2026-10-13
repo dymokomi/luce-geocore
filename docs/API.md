@@ -272,7 +272,11 @@ and `whole` (with nothing selected it runs on everything). A parameter with
 `bar` off stays off the tool's bar (numbers a gesture records). `Verbs.label`,
 `section`, `family`, `icon`, `pick_*`, `drag`, `gesture`, `whole` and
 `parm_bar` read them. A `native` verb keeps the group on its own domain,
-whichever it is (the Select verbs).
+whichever it is (the Select verbs). `Verbs.frame(name, mesh, group,
+group_type, numbers)` measures where a drag of the verb stands: the group's
+center, its average normal and a slide's rails; `Verbs.frame_at(center,
+axis)` is a frame of a center and an axis alone, for a tool that is no verb
+(luced-3d's CAD tools, measured on their own geometry).
 
 `Verbs.run(name, mesh, group, group_type, numbers, symmetry=0, keep=false)`
 also carries the Edit engine's options: `symmetry` (1..3) adds the mirror of
