@@ -22,7 +22,7 @@ let polydraw_parms: ParmSpec[2] = [
 let polydraw_picks: PickSpec[1] = [PickSpec("Points", "points", "Select three or more points, or click to place corners")]
 
 func polydraw_verb() -> Verb:
-    return Verb("PolyDraw", "Modeling", "Add a polygon through drawn positions, or through the group's points", Domain.point, true, polydraw_parms, true, cook_polydraw, trailing = true, section = "Create", family = "Draw", icon = "polygon-select-tool", picks = polydraw_picks, gesture = "place")
+    return Verb("PolyDraw", "Modeling", "Add a polygon through drawn positions, or through the group's points", Domain.point, true, polydraw_parms, true, cook_polydraw, trailing = true, section = "Create", family = "Draw", icon = "poly-draw", picks = polydraw_picks, gesture = "place")
 
 func cook_polydraw(input: const VerbInput*, output: VerbOutput*) -> !:
     let snap = input.parms.at(0)

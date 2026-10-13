@@ -15,7 +15,7 @@ let path_parms: ParmSpec[3] = [
 let path_picks: PickSpec[1] = [PickSpec("Components", "points edges faces", "Select two components to join")]
 
 func path_rule() -> SelectRule:
-    return SelectRule("Select Shortest Path", "Shortest Path", "path", "The shortest path between the selected elements, taken in order; with Fill region every element on a shortest path", "Region", "path-tool",
+    return SelectRule("Select Shortest Path", "Shortest Path", "path", "The shortest path between the selected elements, taken in order; with Fill region every element on a shortest path", "Region", "select-path",
                       "points edges faces", path_picks, path_parms, select_path)
 
 ## The element graph a path walks: its neighbors and positions.

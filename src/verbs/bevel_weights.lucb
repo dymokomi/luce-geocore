@@ -12,7 +12,7 @@ let bevel_weight_also: Domain[1] = [Domain.point]
 
 func bevel_weight_verb() -> Verb:
     return Verb("Bevel Weight", "Modeling", "Set the bevel_weight of the group's edges or points for Bevel's Limit Weight", Domain.edge, true, bevel_weight_parms, false, cook_bevel_weight, false, bevel_weight_also,
-                section = "Modify", family = "Bevel", icon = "edge-select", picks = bevel_picks, drag = 0, drag_mode = "amount")
+                section = "Modify", family = "Bevel", icon = "bevel-weight", picks = bevel_picks, drag = 0, drag_mode = "amount")
 
 func cook_bevel_weight(input: const VerbInput*, output: VerbOutput*) -> !:
     let weight = input.parms.at(0)

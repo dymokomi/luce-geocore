@@ -7,7 +7,7 @@ let loop_parms: ParmSpec[1] = [
 let loop_picks: PickSpec[1] = [PickSpec("Components", "edges faces points", "Select edges, two faces side by side, or two points on a loop")]
 
 func loop_rule() -> SelectRule:
-    return SelectRule("Select Loop", "Loop", "loop", "Edge loops through the selected edges, face loops through faces side by side, point loops through points along an edge", "Loops", "loop-cut",
+    return SelectRule("Select Loop", "Loop", "loop", "Edge loops through the selected edges, face loops through faces side by side, point loops through points along an edge", "Loops", "select-loop",
                       "edges faces points", loop_picks, loop_parms, select_loops)
 
 func select_loops(input: const RuleInput*) -> RuleOutput!:
@@ -51,7 +51,7 @@ pub func first_member(bits: Bits, least: usize) -> i64:
 let ring_picks: PickSpec[1] = [PickSpec("Edges", "edges", "Select edges for Ring")]
 
 func ring_rule() -> SelectRule:
-    return SelectRule("Select Ring", "Ring", "ring", "Edge rings through the selected edges: across each quad to its opposite edge", "Loops", "edge-select",
+    return SelectRule("Select Ring", "Ring", "ring", "Edge rings through the selected edges: across each quad to its opposite edge", "Loops", "select-ring",
                       "edges", ring_picks, no_parms[..<0], select_rings)
 
 func select_rings(input: const RuleInput*) -> RuleOutput!:
@@ -63,7 +63,7 @@ func select_rings(input: const RuleInput*) -> RuleOutput!:
 let boundary_picks: PickSpec[1] = [PickSpec("Components", "edges faces", "Select boundary edges, or faces for their outline")]
 
 func boundary_rule() -> SelectRule:
-    return SelectRule("Select Boundary Loop", "Boundary Loop", "boundary", "Each selected boundary edge's whole boundary; selected faces' outline as edges", "Loops", "fill-hole",
+    return SelectRule("Select Boundary Loop", "Boundary Loop", "boundary", "Each selected boundary edge's whole boundary; selected faces' outline as edges", "Loops", "select-boundary",
                       "edges faces", boundary_picks, no_parms[..<0], select_boundaries)
 
 func select_boundaries(input: const RuleInput*) -> RuleOutput!:
@@ -86,7 +86,7 @@ let region_parms: ParmSpec[1] = [
 let region_picks: PickSpec[1] = [PickSpec("Edges", "edges", "Select a closed edge loop")]
 
 func region_rule() -> SelectRule:
-    return SelectRule("Select Loop to Region", "Loop to Region", "region", "The faces a closed loop of selected edges encloses (its smaller side, or bigger)", "Loops", "face-select",
+    return SelectRule("Select Loop to Region", "Loop to Region", "region", "The faces a closed loop of selected edges encloses (its smaller side, or bigger)", "Loops", "select-region",
                       "edges", region_picks, region_parms, select_region)
 
 func select_region(input: const RuleInput*) -> RuleOutput!:

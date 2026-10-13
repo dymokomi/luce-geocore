@@ -17,7 +17,7 @@ let offset_loops_parms: ParmSpec[3] = [
 
 func offset_loops_verb() -> Verb:
     return Verb("Offset Edge Loops", "Modeling", "Add two edge loops either side of the group's loops", Domain.edge, true, offset_loops_parms, true, cook_offset_loops,
-                section = "Modify", family = "Cut", icon = "distribute-vertical", picks = pick_edges, drag = 0, drag_mode = "slide", follows = true, rails = offset_rails)
+                section = "Modify", family = "Cut", icon = "offset-edge-loops", picks = pick_edges, drag = 0, drag_mode = "slide", follows = true, rails = offset_rails)
 
 ## The new points: per point-edge slot (point_edges' order), the new point
 ## on that edge near that point, or -1.

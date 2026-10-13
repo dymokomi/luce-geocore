@@ -11,7 +11,7 @@ let checker_parms: ParmSpec[3] = [
 let checker_picks: PickSpec[1] = [PickSpec("Components", "points edges faces", "Select the region to thin out")]
 
 func checker_rule() -> SelectRule:
-    return SelectRule("Select Checker", "Checker", "checker", "Keep a checker pattern of the group: runs of selected and deselected elements across each island", "Pattern", "grid",
+    return SelectRule("Select Checker", "Checker", "checker", "Keep a checker pattern of the group: runs of selected and deselected elements across each island", "Pattern", "select-checker",
                       "points edges faces", checker_picks, checker_parms, select_checker)
 
 ## Each group element's step count from where its island starts (its lowest
@@ -93,7 +93,7 @@ let random_parms: ParmSpec[2] = [
     ParmSpec("Seed", ParmKind.integer, 0.0, 0.0, 100000.0, 1, "", "Another seed, another pattern.", soft = 100.0)]
 
 func random_rule() -> SelectRule:
-    return SelectRule("Select Random", "Random", "random", "A random share of the group: each element kept with the Ratio's chance, the same for the same seed", "Pattern", "noise",
+    return SelectRule("Select Random", "Random", "random", "A random share of the group: each element kept with the Ratio's chance, the same for the same seed", "Pattern", "select-random",
                       "points edges faces", checker_picks, random_parms, select_random)
 
 func select_random(input: const RuleInput*) -> RuleOutput!:

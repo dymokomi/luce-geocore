@@ -8,7 +8,7 @@ let sharp_parms: ParmSpec[1] = [
 let edge_picks: PickSpec[1] = [PickSpec("Edges", "edges")]
 
 func sharp_rule() -> SelectRule:
-    return SelectRule("Select Sharp Edges", "Sharp Edges", "sharp", "Edges whose faces meet at more than an angle", "Find", "bevel",
+    return SelectRule("Select Sharp Edges", "Sharp Edges", "sharp", "Edges whose faces meet at more than an angle", "Find", "select-sharp",
                       "edges", edge_picks, sharp_parms, select_sharp, whole = true)
 
 func select_sharp(input: const RuleInput*) -> RuleOutput!:
@@ -24,7 +24,7 @@ let sides_parms: ParmSpec[2] = [
     ParmSpec("Compare", ParmKind.menu, 0.0, 0.0, 3.0, 1, "Equal|Not equal|Less|Greater", "How a face's sides compare with Sides.")]
 
 func sides_rule() -> SelectRule:
-    return SelectRule("Select By Sides", "By Sides", "sides", "Faces by their number of sides: triangles, quads, n-gons", "Find", "polygon-select-tool",
+    return SelectRule("Select By Sides", "By Sides", "sides", "Faces by their number of sides: triangles, quads, n-gons", "Find", "select-by-sides",
                       "faces", face_picks, sides_parms, select_sides, whole = true)
 
 func select_sides(input: const RuleInput*) -> RuleOutput!:
@@ -44,7 +44,7 @@ let area_parms: ParmSpec[2] = [
     ParmSpec("Compare", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Less|Greater", "Faces smaller than Area, or larger.")]
 
 func area_rule() -> SelectRule:
-    return SelectRule("Select By Area", "By Area", "area", "Faces smaller or larger than an area", "Find", "rectangle-tool",
+    return SelectRule("Select By Area", "By Area", "area", "Faces smaller or larger than an area", "Find", "select-by-area",
                       "faces", face_picks, area_parms, select_area, whole = true)
 
 func select_area(input: const RuleInput*) -> RuleOutput!:
@@ -63,7 +63,7 @@ let normal_parms: ParmSpec[2] = [
     ParmSpec("Spread", ParmKind.number, 30.0, 0.0, 180.0, 1, "", "How far a face's normal may lean from Direction, in degrees.")]
 
 func normal_rule() -> SelectRule:
-    return SelectRule("Select By Normal", "By Normal", "facing", "Faces facing a direction within a spread", "Find", "surface-normal",
+    return SelectRule("Select By Normal", "By Normal", "facing", "Faces facing a direction within a spread", "Find", "select-by-normal",
                       "faces", face_picks, normal_parms, select_facing, whole = true)
 
 func select_facing(input: const RuleInput*) -> RuleOutput!:
@@ -85,7 +85,7 @@ let manifold_parms: ParmSpec[4] = [
 let manifold_picks: PickSpec[1] = [PickSpec("Components", "edges points")]
 
 func manifold_rule() -> SelectRule:
-    return SelectRule("Select Non-manifold", "Non-manifold", "nonmanifold", "Boundary edges, edges of three faces or more, flipped neighbors and pinched points", "Find", "bug",
+    return SelectRule("Select Non-manifold", "Non-manifold", "nonmanifold", "Boundary edges, edges of three faces or more, flipped neighbors and pinched points", "Find", "select-non-manifold",
                       "edges points", manifold_picks, manifold_parms, select_nonmanifold, whole = true)
 
 func select_nonmanifold(input: const RuleInput*) -> RuleOutput!:
@@ -146,7 +146,7 @@ func pinched(mesh: const Mesh*, topology: const Topology*, points: BitsBuilder*)
 let loose_picks: PickSpec[1] = [PickSpec("Points", "points")]
 
 func loose_rule() -> SelectRule:
-    return SelectRule("Select Loose", "Loose", "loose", "Points no face uses", "Find", "vertex-select",
+    return SelectRule("Select Loose", "Loose", "loose", "Points no face uses", "Find", "select-loose",
                       "points", loose_picks, no_parms[..<0], select_loose, whole = true)
 
 func select_loose(input: const RuleInput*) -> RuleOutput!:
@@ -158,7 +158,7 @@ func select_loose(input: const RuleInput*) -> RuleOutput!:
     return same_domain(input, out)
 
 func interior_rule() -> SelectRule:
-    return SelectRule("Select Interior Faces", "Interior Faces", "interior", "Faces all of whose edges have more than two faces (walls inside a solid)", "Find", "cube",
+    return SelectRule("Select Interior Faces", "Interior Faces", "interior", "Faces all of whose edges have more than two faces (walls inside a solid)", "Find", "select-interior",
                       "faces", face_picks, no_parms[..<0], select_interior, whole = true)
 
 func select_interior(input: const RuleInput*) -> RuleOutput!:

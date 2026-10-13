@@ -9,11 +9,11 @@ let step_parms: ParmSpec[2] = [
 let any_picks: PickSpec[1] = [PickSpec("Components", "points edges faces")]
 
 func grow_rule() -> SelectRule:
-    return SelectRule("Select Grow", "Grow Selection", "grow", "The selection and its neighbors, a ring at a time", "Region", "add-to-selection",
+    return SelectRule("Select Grow", "Grow Selection", "grow", "The selection and its neighbors, a ring at a time", "Region", "select-grow",
                       "points edges faces", any_picks, step_parms, select_grow)
 
 func shrink_rule() -> SelectRule:
-    return SelectRule("Select Shrink", "Shrink Selection", "shrink", "The selection without its outer ring, a ring at a time", "Region", "subtract-from-selection",
+    return SelectRule("Select Shrink", "Shrink Selection", "shrink", "The selection without its outer ring, a ring at a time", "Region", "select-shrink",
                       "points edges faces", any_picks, step_parms, select_shrink)
 
 ## The link Grow and Shrink step through.
@@ -27,7 +27,7 @@ func select_shrink(input: const RuleInput*) -> RuleOutput!:
     return same_domain(input, try shrunk_through(input.topology, input.group, input.domain, step_link(input), (usize)input.parms.at(0)))
 
 func border_rule() -> SelectRule:
-    return SelectRule("Select Border", "Border", "border", "The selected elements next to an unselected one", "Region", "selection-tool",
+    return SelectRule("Select Border", "Border", "border", "The selected elements next to an unselected one", "Region", "select-border",
                       "points edges faces", any_picks, no_parms[..<0], select_border)
 
 func select_border(input: const RuleInput*) -> RuleOutput!:
@@ -42,7 +42,7 @@ let connected_parms: ParmSpec[6] = [
     ParmSpec("Angle", ParmKind.number, 30.0, 0.0, 180.0, 1, "", "The face angle Normals stops at, in degrees.")]
 
 func connected_rule() -> SelectRule:
-    return SelectRule("Select Connected", "Connected", "connected", "Whole islands touching the selection, optionally kept inside seams, sharp edges, materials, UV islands or face angles", "Region", "magic-wand-tool",
+    return SelectRule("Select Connected", "Connected", "connected", "Whole islands touching the selection, optionally kept inside seams, sharp edges, materials, UV islands or face angles", "Region", "select-linked",
                       "points edges faces", any_picks, connected_parms, select_connected)
 
 ## Which edges a flood may not cross.
@@ -142,7 +142,7 @@ let flat_parms: ParmSpec[1] = [
 let face_picks: PickSpec[1] = [PickSpec("Faces", "faces")]
 
 func flat_rule() -> SelectRule:
-    return SelectRule("Select Linked Flat", "Linked Flat", "flat", "Faces reached from the selection across edges flatter than an angle", "Region", "plane",
+    return SelectRule("Select Linked Flat", "Linked Flat", "flat", "Faces reached from the selection across edges flatter than an angle", "Region", "select-linked-flat",
                       "faces", face_picks, flat_parms, select_flat)
 
 func select_flat(input: const RuleInput*) -> RuleOutput!:

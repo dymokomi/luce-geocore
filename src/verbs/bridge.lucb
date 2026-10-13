@@ -14,7 +14,7 @@ let bridge_parms: ParmSpec[2] = [
 let bridge_picks: PickSpec[1] = [PickSpec("Boundary edges", "edges", "Select two boundary loops or runs of edges")]
 
 func bridge_verb() -> Verb:
-    return Verb("Bridge", "Modeling", "Join pairs of boundary loops or runs among the group's edges with faces", Domain.edge, true, bridge_parms, true, cook_bridge, section = "Modify", family = "Fill", icon = "fill-hole", picks = bridge_picks)
+    return Verb("Bridge", "Modeling", "Join pairs of boundary loops or runs among the group's edges with faces", Domain.edge, true, bridge_parms, true, cook_bridge, section = "Modify", family = "Fill", icon = "bridge", picks = bridge_picks)
 
 ## The group's boundary chains: corners (each the one face corner of a
 ## boundary edge, in chain order) and where each chain starts.

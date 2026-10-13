@@ -20,7 +20,7 @@ let edge_slide_parms: ParmSpec[4] = [
 
 func edge_slide_verb() -> Verb:
     return Verb("Edge Slide", "Deform", "Slide the group's edges along the faces beside them", Domain.edge, true, edge_slide_parms, false, cook_edge_slide,
-                section = "Modify", family = "Cut", icon = "distribute-horizontal", picks = pick_edges, drag = 0, drag_mode = "slide", follows = true, rails = edge_slide_rails)
+                section = "Modify", family = "Cut", icon = "edge-slide", picks = pick_edges, drag = 0, drag_mode = "slide", follows = true, rails = edge_slide_rails)
 
 let vertex_slide_parms: ParmSpec[5] = [
     ParmSpec("Amount", ParmKind.number, 0.0, -10.0, 10.0, 1, "", "How far along each point's edge, as a share of it (of the edges' mean length with Even).", 1.0),
@@ -33,7 +33,7 @@ let vertex_slide_picks: PickSpec[1] = [PickSpec("Points", "points")]
 
 func vertex_slide_verb() -> Verb:
     return Verb("Vertex Slide", "Deform", "Slide the group's points along their edges", Domain.point, true, vertex_slide_parms, false, cook_vertex_slide,
-                section = "Modify", family = "Cut", icon = "vertex-select", picks = vertex_slide_picks, drag = 0, drag_mode = "slide", follows = true, axis = 1,
+                section = "Modify", family = "Cut", icon = "vertex-slide", picks = vertex_slide_picks, drag = 0, drag_mode = "slide", follows = true, axis = 1,
                 rails = vertex_slide_rails)
 
 ## How a slide moves points: the amount and its options.

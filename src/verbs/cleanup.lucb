@@ -10,7 +10,7 @@ let fuse_parms: ParmSpec[1] = [ParmSpec("Distance", ParmKind.number, 0.001, 0.00
 let fuse_picks: PickSpec[1] = [PickSpec("Points", "objects points")]
 
 func fuse_verb() -> Verb:
-    return Verb("Fuse", "Modeling", "Merge nearby points of the group", Domain.point, true, fuse_parms, true, cook_fuse, section = "Modify", family = "Merge", icon = "merge-vertices", picks = fuse_picks, drag = 0)
+    return Verb("Fuse", "Modeling", "Merge nearby points of the group", Domain.point, true, fuse_parms, true, cook_fuse, section = "Modify", family = "Merge", icon = "fuse", picks = fuse_picks, drag = 0)
 
 let merge_parms: ParmSpec[2] = [
     ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 4.0, 1, "At center|At first|At last|Collapse islands|By distance", "Where the group's points merge: all at their center, the first or the last point; each connected island at its center; or those within the distance."),
@@ -20,7 +20,7 @@ func merge_verb() -> Verb:
     return Verb("Merge Points", "Modeling", "Merge the group's points: at their center, first, last, per island or by distance", Domain.point, true, merge_parms, true, cook_merge, section = "Modify", family = "Merge", icon = "merge-vertices", picks = pick_components)
 
 func clean_verb() -> Verb:
-    return Verb("Clean", "Modeling", "Remove points no face uses", Domain.point, true, placeholder_parms[..<0], true, cook_clean, section = "Modify", family = "Delete", icon = "healing-brush", whole = true)
+    return Verb("Clean", "Modeling", "Remove points no face uses", Domain.point, true, placeholder_parms[..<0], true, cook_clean, section = "Modify", family = "Delete", icon = "clean-mesh", whole = true)
 
 ## Spatial hash of cells `distance` wide: each group point joins the lowest
 ## numbered earlier point within `distance` in its cell or a neighbor.

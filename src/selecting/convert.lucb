@@ -172,7 +172,7 @@ let convert_parms: ParmSpec[2] = [
     ParmSpec("Rule", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Touching|Contained", "Touching: every element the selection touches. Contained: only those all of whose points, edges or faces are selected.")]
 
 func convert_rule() -> SelectRule:
-    return SelectRule("Select Convert", "Convert", "", "The selection as points, edges or faces: those it touches, or only those it contains (Maya's Convert Selection)", "Convert", "pivot",
+    return SelectRule("Select Convert", "Convert", "", "The selection as points, edges or faces: those it touches, or only those it contains (Maya's Convert Selection)", "Convert", "select-convert",
                       "points edges faces", any_picks, convert_parms, select_convert)
 
 func select_convert(input: const RuleInput*) -> RuleOutput!:

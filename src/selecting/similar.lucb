@@ -13,7 +13,7 @@ let similar_parms: ParmSpec[3] = [
     ParmSpec("Threshold", ParmKind.number, 0.01, 0.0, 1000.0, 1, "", "How far apart values still count as equal: in the value's units, degrees for Normal, Direction and Face angle.", soft = 1.0)]
 
 func similar_rule() -> SelectRule:
-    return SelectRule("Select Similar", "Similar", "similar", "Every element like a selected one by normal, area, perimeter, sides, plane, material, group, length, direction, face angle, crease, seam, sharpness or valence", "Similar", "filter",
+    return SelectRule("Select Similar", "Similar", "similar", "Every element like a selected one by normal, area, perimeter, sides, plane, material, group, length, direction, face angle, crease, seam, sharpness or valence", "Similar", "select-similar",
                       "points edges faces", any_picks, similar_parms, select_similar)
 
 ## Which measures each domain has (Select Similar's By).

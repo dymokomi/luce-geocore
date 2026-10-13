@@ -59,7 +59,7 @@ func mountain_verb() -> Verb:
 let peak_parms: ParmSpec[1] = [ParmSpec("Distance", ParmKind.number, 0.2, -100000.0, 100000.0, 1, "", "Distance along the averaged normals.", 2.0)]
 
 func peak_verb() -> Verb:
-    return Verb("Peak", "Deform", "Move points along their normals", Domain.point, true, peak_parms, false, cook_peak, section = "Modify", family = "Shape", icon = "surface-normal", drag = 0, drag_mode = "normal")
+    return Verb("Peak", "Deform", "Move points along their normals", Domain.point, true, peak_parms, false, cook_peak, section = "Modify", family = "Shape", icon = "peak", drag = 0, drag_mode = "normal")
 
 let flatten_parms: ParmSpec[1] = [ParmSpec("Axis", ParmKind.menu, 1.0, 0.0, 2.0, 1, "X|Y|Z", "The axis flattened to the group's centroid.")]
 
