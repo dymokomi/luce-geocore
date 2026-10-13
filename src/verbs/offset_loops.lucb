@@ -1,0 +1,312 @@
+## Offset Edge Loops, after Blender's Offset Edge Slide: two new loops
+## either side of the group's edge loops (and runs), the group kept between
+## them. Each edge leaving a group point outside the group gets a new point
+## `amount` along it (a share of the edge, or with Even a share of the mean
+## of those edges as a distance, the same for all; never past half an edge
+## between two group points), and each face beside the group splits along
+## the line joining them: a strip along the group and the rest. A face that
+## touches a group point at a corner only loses that corner as a triangle.
+## At a run's end the new loops meet at the end point; with Cap ends they go
+## round it instead. The new loops' edges are the output selection; a slide
+## drag runs along the edges the new points sit on (`offset_rails`).
+
+let offset_loops_parms: ParmSpec[3] = [
+    ParmSpec("Amount", ParmKind.number, 0.25, 0.0, 1.0, 1, "", "How far along the edges beside the loops the new loops sit, as a share of each (of their mean length with Even)."),
+    ParmSpec("Even", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Put every new point the same distance from its loop."),
+    ParmSpec("Cap ends", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Take the new loops round the ends of open runs instead of meeting there.")]
+
+func offset_loops_verb() -> Verb:
+    return Verb("Offset Edge Loops", "Modeling", "Add two edge loops either side of the group's loops", Domain.edge, true, offset_loops_parms, true, cook_offset_loops,
+                section = "Modify", family = "Cut", icon = "distribute-vertical", picks = pick_edges, drag = 0, drag_mode = "slide", follows = true, rails = offset_rails)
+
+## The new points: per point-edge slot (point_edges' order), the new point
+## on that edge near that point, or -1.
+struct Offsets:
+    var slot_points: Growing[i32]
+    ## Per slot: the new point's share of the edge from its group point.
+    var shares: Growing[f32]
+    ## Per point: how many group edges meet there.
+    var degree: Growing[u32]
+
+    func init():
+        self.slot_points = Growing[i32]()
+        self.shares = Growing[f32]()
+        self.degree = Growing[u32]()
+
+    func close():
+        self.slot_points.close()
+        self.shares.close()
+        self.degree.close()
+
+    ## The slot of `edge` among `point`'s edges.
+    func slot_of(topology: const Topology*, point: usize, edge: usize) -> usize:
+        for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+            if (usize)topology.point_edges[slot] == edge: return slot
+        trap("an edge is not at its point")
+
+    ## The new point near `point` on `edge` (-1 none).
+    func at(topology: const Topology*, point: usize, edge: usize) -> i32:
+        return self.slot_points.items[self.slot_of(topology, point, edge)]
+
+    ## How far along `edge` from `point` its new point sits.
+    func share(topology: const Topology*, point: usize, edge: usize) -> f32:
+        return self.shares.items[self.slot_of(topology, point, edge)]
+
+func cook_offset_loops(input: const VerbInput*, output: VerbOutput*) -> !:
+    let amount = input.parms.at(0)
+    if not math.is_finite(amount) or amount < 0.0: error(errors.invalid, "Offset Edge Loops amount must be finite and not negative")
+    let mesh = input.mesh
+    if not input.group.any() or amount == 0.0:
+        output.warning = "No edges in the group to offset (or a zero amount); the input passes through"
+        return
+    let topology = try Topology.of(mesh)
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    var offsets = Offsets()
+    defer offsets.close()
+    try place_offsets(mesh, &topology, input.group, amount, input.parms.at(1) != 0.0, input.parms.at(2) != 0.0, builder, &offsets)
+    var items = FaceItems()
+    defer items.close()
+    var run: usize = 0
+    for face in 0..<topology.faces():
+        if not try strip_face(&topology, input.group, &offsets, &items, face): continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        try emit_split(builder, &items, face)
+    try builder.copy_faces(mesh, run, topology.faces())
+
+## A new point on every edge leaving a group point outside the group (none
+## round a run's end without Cap ends).
+func place_offsets(mesh: const Mesh*, topology: const Topology*, group: Bits, amount: f64, even: bool, cap: bool, builder: TopologyBuilder*, offsets: Offsets*) -> !:
+    try offsets.slot_points.fill(topology.point_edges.length, -1)
+    try offsets.shares.fill(topology.point_edges.length, 0.0)
+    try offsets.degree.fill(topology.points, 0)
+    for edge in 0..<topology.edges():
+        if not group.get(edge): continue
+        offsets.degree.items[(usize)topology.edge_points[edge * 2]] += 1
+        offsets.degree.items[(usize)topology.edge_points[edge * 2 + 1]] += 1
+    var total = 0.0
+    var count = 0.0
+    for point in 0..<topology.points:
+        if not offsets_from(offsets, point, cap): continue
+        for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+            let edge = (usize)topology.point_edges[slot]
+            if group.get(edge): continue
+            total += point_of(mesh, other_end(topology, edge, point)).subtract(point_of(mesh, (i32)point)).length()
+            count += 1.0
+    let mean = total / count if count > 0.0 else 0.0
+    for point in 0..<topology.points:
+        if not offsets_from(offsets, point, cap): continue
+        let here = point_of(mesh, (i32)point)
+        for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+            let edge = (usize)topology.point_edges[slot]
+            if group.get(edge): continue
+            let other = other_end(topology, edge, point)
+            let there = point_of(mesh, other)
+            let length = there.subtract(here).length()
+            if length == 0.0: continue
+            # Between two group points the new points must not cross.
+            let most = 0.49 if offsets.degree.items[(usize)other] > 0 else 0.98
+            let share = math.min(most, amount * mean / length if even else amount)
+            let parents: i32[2] = [(i32)point, other]
+            let weights: f32[2] = [(f32)(1.0 - share), (f32)share]
+            offsets.shares.items[slot] = (f32)share
+            offsets.slot_points.items[slot] = try builder.mixed_point(here.add(there.subtract(here).multiply_scalar(share)), parents[..<2], weights[..<2])
+
+## Whether new points grow from `point`: a group point, and not a run's end
+## when the ends are not capped.
+func offsets_from(offsets: const Offsets*, point: usize, cap: bool) -> bool:
+    let degree = offsets.degree.items[point]
+    return degree > 1 or (degree == 1 and cap)
+
+## One face's outline after the split: per item its point and how its
+## corner blends (its own corner, toward the corner `toward` by `share`).
+## `rest` lists the remaining face's items, `pieces` each strip's (piece p
+## holds piece_items starts[p]..<starts[p + 1]).
+struct FaceItems:
+    var points: Growing[i32]
+    var corners: Growing[i32]
+    var towards: Growing[i32]
+    var shares: Growing[f32]
+    var rest: Growing[u32]
+    var piece_items: Growing[u32]
+    var starts: Growing[u32]
+    ## The new edges: point pairs.
+    var cuts: Growing[i32]
+
+    func init():
+        self.points = Growing[i32]()
+        self.corners = Growing[i32]()
+        self.towards = Growing[i32]()
+        self.shares = Growing[f32]()
+        self.rest = Growing[u32]()
+        self.piece_items = Growing[u32]()
+        self.starts = Growing[u32]()
+        self.cuts = Growing[i32]()
+
+    func clear():
+        self.points.clear()
+        self.corners.clear()
+        self.towards.clear()
+        self.shares.clear()
+        self.rest.clear()
+        self.piece_items.clear()
+        self.starts.clear()
+        self.cuts.clear()
+
+    func add(point: i32, corner: usize, toward: usize, share: f32) -> u32!:
+        try self.points.push(point)
+        try self.corners.push((i32)corner)
+        try self.towards.push((i32)toward)
+        try self.shares.push(share)
+        return (u32)(self.points.count - 1)
+
+    func close():
+        self.points.close()
+        self.corners.close()
+        self.towards.close()
+        self.shares.close()
+        self.rest.close()
+        self.piece_items.close()
+        self.starts.close()
+        self.cuts.close()
+
+## Cut face `face` into its strips and the rest (`items`); false when
+## nothing changes (no new point on its edges).
+##
+## Its corners on group points fall into runs joined by group edges; a run
+## starts where its edge in is outside the group and ends where its edge out
+## is. A run's strip goes from the new point on the edge in (or the run's
+## first point, at an uncapped end) through the run's points to the new
+## point on the edge out (or its last point); the rest keeps only the
+## strip's two ends.
+func strip_face(topology: const Topology*, group: Bits, offsets: const Offsets*, items: FaceItems*, face: usize) -> bool!:
+    let first = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    var any = false
+    for corner in first..<end:
+        let edge = (usize)topology.corner_edges[corner]
+        let a = (usize)topology.corners[corner]
+        let b = (usize)topology.corners[topology.next(corner)]
+        if offsets.at(topology, a, edge) >= 0 or offsets.at(topology, b, edge) >= 0: any = true
+    if not any: return false
+    items.clear()
+    # A run starts at a corner whose edge in is not a group edge; find one so
+    # the walk starts outside every run.
+    var origin = first
+    for corner in first..<end:
+        if not grouped_corner(topology, offsets, corner) or not group.get((usize)topology.corner_edges[topology.previous(corner)]):
+            origin = corner
+            break
+    var corner = origin
+    var visited: usize = 0
+    while visited < end - first:
+        if not grouped_corner(topology, offsets, corner):
+            try items.rest.push(try items.add(topology.corners[corner], corner, corner, 0.0))
+            corner = topology.next(corner)
+            visited += 1
+            continue
+        # A run from here: its corners joined by group edges.
+        var last = corner
+        var length: usize = 1
+        while group.get((usize)topology.corner_edges[last]) and length < end - first:
+            last = topology.next(last)
+            length += 1
+        try run_strip(topology, offsets, items, corner, last, length)
+        corner = topology.next(last)
+        visited += length
+    try items.starts.push((u32)items.piece_items.count)
+    return true
+
+## Whether corner `corner`'s point is a group point.
+func grouped_corner(topology: const Topology*, offsets: const Offsets*, corner: usize) -> bool:
+    return offsets.degree.items[(usize)topology.corners[corner]] > 0
+
+## The strip of the run from corner `start` to corner `last` (`length`
+## corners): its items, and its two ends into the rest.
+func run_strip(topology: const Topology*, offsets: const Offsets*, items: FaceItems*, start: usize, last: usize, length: usize) -> !:
+    let before = topology.previous(start)
+    let after = topology.next(last)
+    let point_in = (usize)topology.corners[start]
+    let point_out = (usize)topology.corners[last]
+    let opening = offsets.at(topology, point_in, (usize)topology.corner_edges[before])
+    let closing = offsets.at(topology, point_out, (usize)topology.corner_edges[last])
+    # No new point either side: nothing is cut here.
+    if opening < 0 and closing < 0 and length == 1:
+        try items.rest.push(try items.add((i32)point_in, start, start, 0.0))
+        return
+    let begin = items.piece_items.count
+    var head: u32 = 0
+    if opening >= 0:
+        head = try items.add(opening, start, before, offsets.share(topology, point_in, (usize)topology.corner_edges[before]))
+        try items.piece_items.push(head)
+    var corner = start
+    for at in 0..<length:
+        let item = try items.add(topology.corners[corner], corner, corner, 0.0)
+        try items.piece_items.push(item)
+        if at == 0 and opening < 0: head = item
+        corner = topology.next(corner)
+    var tail = items.piece_items.items[items.piece_items.count - 1]
+    if closing >= 0:
+        tail = try items.add(closing, last, after, offsets.share(topology, point_out, (usize)topology.corner_edges[last]))
+        try items.piece_items.push(tail)
+    if items.piece_items.count - begin < 3 or (opening < 0 and closing < 0):
+        # Too small to be a face, or uncut: the run stays in the rest whole.
+        for at in begin..<items.piece_items.count: try items.rest.push(items.piece_items.items[at])
+        items.piece_items.count = begin
+        return
+    try items.starts.push((u32)begin)
+    try items.rest.push(head)
+    try items.rest.push(tail)
+    try items.cuts.push(items.points.items[(usize)head])
+    try items.cuts.push(items.points.items[(usize)tail])
+
+## The rest of face `face`, then its strips, and the new edges selected.
+func emit_split(builder: TopologyBuilder*, items: const FaceItems*, face: usize) -> !:
+    try emit_items(builder, items, items.rest.view(), face)
+    let pieces = items.starts.count - 1
+    for piece in 0..<pieces:
+        let low = (usize)items.starts.items[piece]
+        let high = (usize)items.starts.items[piece + 1]
+        try emit_items(builder, items, items.piece_items.items[low..<high], face)
+    for at in 0..<items.cuts.count // 2:
+        try builder.select_edge(items.cuts.items[at * 2], items.cuts.items[at * 2 + 1])
+
+func emit_items(builder: TopologyBuilder*, items: const FaceItems*, chosen: const u32[], face: usize) -> !:
+    try builder.face((i32)face)
+    for item in chosen:
+        let at = (usize)item
+        let corner = items.corners.items[at]
+        let toward = items.towards.items[at]
+        if toward == corner:
+            try builder.corner(items.points.items[at], corner)
+            continue
+        # A new point blends its corner toward its neighbor by where it sits.
+        let share = items.shares.items[at]
+        let parents: i32[2] = [corner, toward]
+        let weights: f32[2] = [1.0 - share, share]
+        try builder.mixed_corner(items.points.items[at], parents[..<2], weights[..<2])
+    try builder.end_face()
+
+## A slide drag's rails: each group point along the edges its new points
+## sit on (the drag's amount is a share of them).
+func offset_rails(input: const VerbInput*, rails: Rails*) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let cap = input.parms.at(2) != 0.0
+    var offsets = Offsets()
+    defer offsets.close()
+    try offsets.degree.fill(topology.points, 0)
+    for edge in 0..<topology.edges():
+        if not input.group.get(edge): continue
+        offsets.degree.items[(usize)topology.edge_points[edge * 2]] += 1
+        offsets.degree.items[(usize)topology.edge_points[edge * 2 + 1]] += 1
+    for point in 0..<topology.points:
+        if not offsets_from(&offsets, point, cap): continue
+        let here = point_of(mesh, (i32)point)
+        for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+            let edge = (usize)topology.point_edges[slot]
+            if input.group.get(edge): continue
+            try rails.push((i64)point, here, point_of(mesh, other_end(&topology, edge, point)), 1.0)

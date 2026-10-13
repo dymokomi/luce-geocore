@@ -1,0 +1,253 @@
+## Extrude's faces (extrude.lucb): the input's points, the fronts and the
+## wall rows between, then each face in its place (a group face on its
+## fronts, keeping its id; the others as they were, or with merged walls),
+## then the walls. With Manifold, a wall that would lie in the plane of the
+## face beside it is left out and that face takes the wall's points into its
+## boundary instead; a boundary point every remaining face of which is such a
+## face (one or two of them, the line through it straight) then goes, so a
+## face pushed into a box shortens its sides rather than doubling them.
+
+## Manifold's merges: per corner of a face beside the group, the group
+## corner whose wall it takes (-1 none); per corner of a group face, whether
+## its wall merged; per input point, whether it goes; per face, whether it
+## takes a wall.
+struct Merges:
+    var taken: Growing[i32]
+    var merged: Growing[u8]
+    var dropped: Growing[u8]
+    var faces: Growing[u8]
+
+    func init():
+        self.taken = Growing[i32]()
+        self.merged = Growing[u8]()
+        self.dropped = Growing[u8]()
+        self.faces = Growing[u8]()
+
+    func close():
+        self.taken.close()
+        self.merged.close()
+        self.dropped.close()
+        self.faces.close()
+
+## The extrusion's mesh: points, fronts, wall rows, faces in place, walls.
+func build_faces(input: const VerbInput*, output: VerbOutput*, topology: const Topology*, fronts: const Fronts*, regions: const Regions*, settings: Extrusion) -> !:
+    let mesh = input.mesh
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    let first_front = builder.point_count()
+    for front in 0..<fronts.count():
+        _ = try builder.point(front_place(mesh, fronts, regions, settings, front, 1.0), fronts.points.items[front])
+    # Wall rows between each boundary point and its front: rows 1..<divisions.
+    let rows = settings.divisions
+    let first_row = builder.point_count()
+    for row in 1..<rows:
+        let t = (f64)row / (f64)rows
+        for front in 0..<fronts.count():
+            _ = try builder.point(front_place(mesh, fronts, regions, settings, front, t), fronts.points.items[front])
+    let layout = WallLayout(first_front, first_row, rows, fronts.count())
+    var merges = Merges()
+    defer merges.close()
+    try find_merges(mesh, topology, input.group, fronts, regions, settings, &merges)
+    let faces = topology.faces()
+    var walls_made: usize = 0
+    for face in 0..<faces:
+        if not input.group.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if walls(topology, input.group, corner, settings) and merges.merged.items[corner] == 0: walls_made += rows
+    output.selection = try BitsBuilder.zeros(faces + walls_made)
+    output.selection_domain = Domain.face
+    var run: usize = 0
+    for face in 0..<faces:
+        let grouped = input.group.get(face)
+        if not grouped and merges.faces.items[face] == 0: continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        if not grouped:
+            try merged_face(topology, fronts, builder, &merges, layout, face)
+            continue
+        output.selection.set(face)
+        try builder.face((i32)face, settings.inset == 0.0)
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let front = fronts.of_corner.items[corner]
+            try front_corner(topology, builder, (i32)(first_front + (usize)front), corner, fronts.shifts.items[(usize)front], mesh)
+        try builder.end_face()
+    try builder.copy_faces(mesh, run, faces)
+    # Walls: along each boundary edge a→b, rows from the input points to the
+    # fronts, facing the way the face beside them did.
+    for face in 0..<faces:
+        if not input.group.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if not walls(topology, input.group, corner, settings) or merges.merged.items[corner] != 0: continue
+            let next = topology.next(corner)
+            let front_a = (usize)fronts.of_corner.items[corner]
+            let front_b = (usize)fronts.of_corner.items[next]
+            let a = WallSide(corner, front_a, fronts.shifts.items[front_a])
+            let b = WallSide(next, front_b, fronts.shifts.items[front_b])
+            for row in 0..<rows:
+                try builder.face((i32)face)
+                try wall_corner(topology, builder, mesh, a, row, layout)
+                try wall_corner(topology, builder, mesh, b, row, layout)
+                try wall_corner(topology, builder, mesh, b, row + 1, layout)
+                try wall_corner(topology, builder, mesh, a, row + 1, layout)
+                try builder.end_face()
+    try builder.drop_unused_points()
+
+## Where the fronts and the wall rows' points are in the builder.
+struct WallLayout:
+    let first_front: usize
+    let first_row: usize
+    let rows: usize
+    let fronts: usize
+
+    ## Front `front`'s point on row `row` (1..rows; rows is the front).
+    func at(front: usize, row: usize) -> i32:
+        if row == self.rows: return (i32)(self.first_front + front)
+        return (i32)(self.first_row + (row - 1) * self.fronts + front)
+
+## Manifold's merges (see Merges); nothing without Manifold.
+func find_merges(mesh: const Mesh*, topology: const Topology*, group: Bits, fronts: const Fronts*, regions: const Regions*, settings: Extrusion, merges: Merges*) -> !:
+    try merges.taken.fill(topology.corners.length, -1)
+    try merges.merged.fill(topology.corners.length, 0)
+    try merges.dropped.fill(topology.points, 0)
+    try merges.faces.fill(topology.faces(), 0)
+    if not settings.manifold: return
+    let normals = mesh.face_normal_span()
+    let faces = topology.faces()
+    let walled = try new u8[topology.points] --- in memory.heap
+    defer free(walled) in memory.heap
+    # A front each merged wall's points move to (for a lone face's line).
+    let front_at = try new i32[topology.points] --- in memory.heap
+    defer free(front_at) in memory.heap
+    for at in 0..<topology.points:
+        walled[at] = 0
+        front_at[at] = -1
+    for face in 0..<faces:
+        if not group.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if not walls(topology, group, corner, settings): continue
+            let next = topology.next(corner)
+            let twin = topology.twin(corner)
+            if twin >= 0 and in_plane(mesh, fronts, regions, settings, normals[(usize)topology.corner_faces[(usize)twin]].vector(), corner, next):
+                merges.merged.items[corner] = 1
+                merges.taken.items[(usize)twin] = (i32)corner
+                merges.faces.items[(usize)topology.corner_faces[(usize)twin]] = 1
+                front_at[(usize)topology.corners[corner]] = fronts.of_corner.items[corner]
+                front_at[(usize)topology.corners[next]] = fronts.of_corner.items[next]
+            else:
+                walled[(usize)topology.corners[corner]] = 1
+                walled[(usize)topology.corners[next]] = 1
+    # Around each point: the faces beside the group that took a wall at it,
+    # and those that did not.
+    let taking = try new u32[topology.points] --- in memory.heap
+    defer free(taking) in memory.heap
+    let plain = try new u32[topology.points] --- in memory.heap
+    defer free(plain) in memory.heap
+    let line_to = try new i32[topology.points] --- in memory.heap
+    defer free(line_to) in memory.heap
+    for at in 0..<topology.points:
+        taking[at] = 0
+        plain[at] = 0
+        line_to[at] = -1
+    for face in 0..<faces:
+        if group.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let point = (usize)topology.corners[corner]
+            let before = topology.previous(corner)
+            let out_taken = merges.taken.items[corner] >= 0
+            let in_taken = merges.taken.items[before] >= 0
+            if not out_taken and not in_taken:
+                plain[point] += 1
+                continue
+            taking[point] += 1
+            # The face's other edge at the point, for a lone face's line.
+            if out_taken != in_taken: line_to[point] = topology.corners[topology.next(corner)] if in_taken else topology.corners[before]
+    for point in 0..<topology.points:
+        if walled[point] != 0 or plain[point] != 0 or taking[point] == 0 or taking[point] > 2: continue
+        if taking[point] == 1 and not straight(mesh, fronts, regions, settings, point, line_to[point], front_at[point]): continue
+        merges.dropped.items[point] = 1
+
+## Whether the wall on group corner `corner`'s edge (to `next`) would lie in
+## the plane facing `normal`: both its fronts move within it.
+func in_plane(mesh: const Mesh*, fronts: const Fronts*, regions: const Regions*, settings: Extrusion, normal: Vector3, corner: usize, next: usize) -> bool:
+    let ends: usize[2] = [corner, next]
+    for end in ends:
+        let front = (usize)fronts.of_corner.items[end]
+        let move = front_place(mesh, fronts, regions, settings, front, 1.0).subtract(point_of(mesh, fronts.points.items[front]))
+        let length = move.length()
+        if length == 0.0 or math.abs(normal.dot(move)) > 0.00001 * length: return false
+    return true
+
+## Whether a lone face's edge at `point` (to `other`) runs along the point's
+## move to its front `front`, so the point can go from the face's straight
+## side.
+func straight(mesh: const Mesh*, fronts: const Fronts*, regions: const Regions*, settings: Extrusion, point: usize, other: i32, front: i32) -> bool:
+    if other < 0 or front < 0: return false
+    let here = point_of(mesh, (i32)point)
+    let side = point_of(mesh, other).subtract(here)
+    let move = front_place(mesh, fronts, regions, settings, (usize)front, 1.0).subtract(here)
+    return side.cross(move).length() <= 0.000001 * side.length() * move.length()
+
+## Face `face` beside the group with the walls it takes: at its corner on a
+## merged edge (b to a here, a to b in the group face) the path from b
+## through b's rows and front to a's front and rows; the points that go are
+## left out.
+func merged_face(topology: const Topology*, fronts: const Fronts*, builder: TopologyBuilder*, merges: const Merges*, layout: WallLayout, face: usize) -> !:
+    try builder.face((i32)face)
+    for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+        let point = topology.corners[corner]
+        if merges.dropped.items[(usize)point] == 0: try builder.corner(point, (i32)corner)
+        let wall = merges.taken.items[corner]
+        if wall < 0: continue
+        let a = (usize)wall
+        let b = topology.next(a)
+        let front_a = (usize)fronts.of_corner.items[a]
+        let front_b = (usize)fronts.of_corner.items[b]
+        let next = (i32)topology.next(corner)
+        let b_kept = merges.dropped.items[(usize)topology.corners[b]] == 0
+        let a_kept = merges.dropped.items[(usize)topology.corners[a]] == 0
+        for row in 1..<layout.rows:
+            if b_kept: try builder.corner(layout.at(front_b, row), (i32)corner)
+        try builder.corner(layout.at(front_b, layout.rows), (i32)corner)
+        try builder.corner(layout.at(front_a, layout.rows), next)
+        for back in 1..<layout.rows:
+            if a_kept: try builder.corner(layout.at(front_a, layout.rows - back), next)
+    try builder.end_face()
+
+## One end of a wall: the face corner it starts from, its front and that
+## front's rim shift.
+struct WallSide:
+    let corner: usize
+    let front: usize
+    let shift: Vector3
+
+## A wall corner on row `row` (0 the input point, `rows` the front): its
+## values blend like the front's, by the share of the inset it has made.
+func wall_corner(topology: const Topology*, builder: TopologyBuilder*, mesh: const Mesh*, side: WallSide, row: usize, layout: WallLayout) -> !:
+    if row == 0: return try builder.corner(topology.corners[side.corner], (i32)side.corner)
+    let t = (f64)row / (f64)layout.rows
+    try front_corner(topology, builder, layout.at(side.front, row), side.corner, side.shift.multiply_scalar(t), mesh)
+
+## A front corner: the face's own corner, blended with its neighbors by how
+## far the inset moved the point along the face's two edges (exact for
+## values linear across a flat face, like projected UVs).
+func front_corner(topology: const Topology*, builder: TopologyBuilder*, point: i32, corner: usize, shift: Vector3, mesh: const Mesh*) -> !:
+    if shift.length() == 0.0: return try builder.corner(point, (i32)corner)
+    let before = topology.previous(corner)
+    let after = topology.next(corner)
+    let here = point_of(mesh, topology.corners[corner])
+    let e1 = point_of(mesh, topology.corners[before]).subtract(here)
+    let e2 = point_of(mesh, topology.corners[after]).subtract(here)
+    let a11 = e1.dot(e1)
+    let a12 = e1.dot(e2)
+    let a22 = e2.dot(e2)
+    let determinant = a11 * a22 - a12 * a12
+    if math.abs(determinant) < 0.000000000001 * math.max(a11 * a22, 0.000000000001): return try builder.corner(point, (i32)corner)
+    let r1 = e1.dot(shift)
+    let r2 = e2.dot(shift)
+    let alpha = (r1 * a22 - r2 * a12) / determinant
+    let beta = (r2 * a11 - r1 * a12) / determinant
+    let parents: i32[3] = [(i32)corner, (i32)before, (i32)after]
+    let weights: f32[3] = [(f32)(1.0 - alpha - beta), (f32)alpha, (f32)beta]
+    try builder.mixed_corner(point, parents[..<3], weights[..<3])

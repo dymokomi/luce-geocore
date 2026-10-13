@@ -38,6 +38,8 @@ import select_checks
 import select_rule_checks
 import instance_checks
 import g6_checks
+import extrude_inset_checks
+import cut_slide_checks
 import large_face_checks
 import contract_checks
 import unit_checks
@@ -178,6 +180,12 @@ func checks(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 300, g6_checks.exercise)
     try g6_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, extrude_inset_checks.exercise)
+    try extrude_inset_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, cut_slide_checks.exercise)
+    try cut_slide_checks.exercise()
     settle(&tracker)
     inject(&tracker, 300, subdivision_checks.exercise)
     try subdivision_checks.exercise()

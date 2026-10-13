@@ -1,0 +1,101 @@
+## Shared helpers of the interactive tool checks (extrude_inset_checks,
+## cut_slide_checks): running a verb, counts, closed forms (volume, area,
+## distances) and surfaces staying closed.
+import interop
+from luce_std import math
+import memory
+from luce_geocore.geocore import Mesh, MeshBuilder, Verbs, Vector3
+
+## Run verb `name`; its mesh, checking how many elements it selected.
+pub func made(mesh: interop.Reference[Mesh], name: str, group: str, group_type: i64, numbers: const f64[], selected: i64) -> interop.Reference[Mesh]!:
+    let result = try Verbs.run(name, mesh, group, group_type, numbers)
+    defer result.release()
+    if result.value().warning().length > 0: print(f"{name} {group}: {result.value().warning()}")
+    let selection = try result.value().selection()
+    defer selection.release()
+    if selection.value().count() != selected:
+        print(f"{name} {group}: selected {selection.value().count()}, expected {selected}")
+        assert(false)
+    return try result.value().mesh()
+
+pub func counts(mesh: interop.Reference[Mesh], points: i64, faces: i64) -> !:
+    if mesh.value().point_count() != points or mesh.value().face_count() != faces:
+        print(f"expected {points} points and {faces} faces, made {mesh.value().point_count()} and {mesh.value().face_count()}")
+        assert(false)
+
+pub func near(value: f64, expected: f64, tolerance: f64 = 0.000001) -> unit:
+    if math.abs(value - expected) > tolerance:
+        print(f"expected {expected}, got {value}")
+        assert(false)
+
+pub func near_point(value: Vector3, expected: Vector3, tolerance: f64 = 0.000001) -> unit:
+    near(value.x, expected.x, tolerance)
+    near(value.y, expected.y, tolerance)
+    near(value.z, expected.z, tolerance)
+
+## The enclosed volume (the divergence theorem over each face's fan).
+pub func volume(mesh: interop.Reference[Mesh]) -> f64!:
+    let geometry = mesh.value()
+    var total = 0.0
+    for face in 0..<geometry.face_count():
+        let size = try geometry.face_size(face)
+        let first = try geometry.point(try geometry.face_point(face, 0))
+        for at in 1..<size - 1:
+            let b = try geometry.point(try geometry.face_point(face, at))
+            let c = try geometry.point(try geometry.face_point(face, at + 1))
+            total += first.dot(b.cross(c)) / 6.0
+    return total
+
+## Face `face`'s area (Newell's).
+pub func area(mesh: interop.Reference[Mesh], face: i64) -> f64!:
+    let geometry = mesh.value()
+    let size = try geometry.face_size(face)
+    let first = try geometry.point(try geometry.face_point(face, 0))
+    var sum = Vector3()
+    for at in 1..<size - 1:
+        let b = (try geometry.point(try geometry.face_point(face, at))).subtract(first)
+        let c = (try geometry.point(try geometry.face_point(face, at + 1))).subtract(first)
+        sum = sum.add(b.cross(c))
+    return sum.length() * 0.5
+
+## How far `p` is from the line through `a` and `b`.
+pub func line_distance(p: Vector3, a: Vector3, b: Vector3) -> f64:
+    let way = b.subtract(a)
+    return way.cross(p.subtract(a)).length() / way.length()
+
+## Every edge used by at most two faces (exactly two with `closed`), in
+## opposite directions when two.
+pub func surface(mesh: interop.Reference[Mesh], closed: bool) -> !:
+    let geometry = mesh.value()
+    let edges = (usize)(try geometry.edge_count())
+    let uses = try new i32[edges * 2] --- in memory.heap
+    defer free(uses) in memory.heap
+    for at in 0..<uses.length: uses[at] = 0
+    for face in 0..<geometry.face_count():
+        let size = try geometry.face_size(face)
+        for at in 0..<size:
+            let edge = (usize)(try geometry.face_edge(face, at))
+            let forward = (try geometry.face_point(face, at)) == (try geometry.edge_point((i64)edge, 0))
+            uses[edge * 2] += 1
+            uses[edge * 2 + 1] += 1 if forward else -1
+    for edge in 0..<edges:
+        let count = uses[edge * 2]
+        assert(count >= 1 and count <= 2)
+        if closed: assert(count == 2)
+        if count == 2: assert(uses[edge * 2 + 1] == 0)
+
+## A mesh of quads from rows of points: `rows` rows of `columns` points,
+## point (row, column) at `places[row * columns + column]`.
+pub func quads(places: const Vector3[], rows: i64, columns: i64) -> interop.Reference[Mesh]!:
+    var builder = try MeshBuilder()
+    defer builder.close()
+    for place in places: _ = try builder.point(place)
+    for row in 0..<rows - 1:
+        for column in 0..<columns - 1:
+            let p = row * columns + column
+            try builder.face(4)
+            try builder.corner(p)
+            try builder.corner(p + columns)
+            try builder.corner(p + columns + 1)
+            try builder.corner(p + 1)
+    return try builder.finish()

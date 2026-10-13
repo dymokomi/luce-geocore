@@ -31,6 +31,9 @@ pub struct ParmSpec:
     ## Whether a tool's bar shows it after the tool runs (off for numbers a
     ## gesture records: the knife's plane, PolyDraw's corners).
     pub let bar: bool = true
+    ## Whether it sits behind More options (a folder closed at first) on the
+    ## bar and in the node's pane: the rows a modeler sets less often.
+    pub let more: bool = false
 
 ## One selection a tool works on (its first is the group the verb runs on):
 ## what it is called, the selection levels it is picked at and what the

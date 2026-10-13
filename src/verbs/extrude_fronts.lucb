@@ -1,0 +1,168 @@
+## Extrude's and Inset's front points (extrude.lucb): one per sector around
+## a region's boundary point (the run of region faces between two stopping
+## edges), one per inner point of a region. Each front records the input
+## point it leaves, its region, the rim's move at it (the inset: across both
+## boundary edges, or along an edge it slides on) and the way it moves, so
+## the front and each wall row can be placed at any share of the extrusion
+## (`front_place`), turned and scaled about the region's center.
+
+struct Fronts:
+    ## Per corner of a group face: its front (an index into the rest).
+    var of_corner: Growing[i32]
+    ## Per front: the input point, its region, the rim's move and the unit
+    ## way it moves.
+    var points: Growing[i32]
+    var regions: Growing[i32]
+    var shifts: Growing[Vector3]
+    var ways: Growing[Vector3]
+
+    func init():
+        self.of_corner = Growing[i32]()
+        self.points = Growing[i32]()
+        self.regions = Growing[i32]()
+        self.shifts = Growing[Vector3]()
+        self.ways = Growing[Vector3]()
+
+    func count() -> usize:
+        return self.points.count
+
+    func push(point: i32, region: i32, shift: Vector3, way: Vector3) -> !:
+        try self.points.push(point)
+        try self.regions.push(region)
+        try self.shifts.push(shift)
+        try self.ways.push(way)
+
+    func close():
+        self.of_corner.close()
+        self.points.close()
+        self.regions.close()
+        self.shifts.close()
+        self.ways.close()
+
+## Every front: the sectors from each stopping edge's far end, then the
+## regions' inner points along their faces' summed normals (or their
+## region's way).
+func place_fronts(mesh: const Mesh*, topology: const Topology*, group: Bits, settings: Extrusion, regions: const Regions*, fronts: Fronts*) -> !:
+    try fronts.of_corner.fill(topology.corners.length, -1)
+    let normals = mesh.face_normal_span()
+    let faces = topology.faces()
+    for face in 0..<faces:
+        if not group.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if not stops(topology, group, corner, settings.individual): continue
+            try sector(mesh, topology, group, normals, settings, regions, corner, fronts)
+    let inner = try new i32[topology.points] --- in memory.heap
+    defer free(inner) in memory.heap
+    for at in 0..<topology.points: inner[at] = -1
+    let sums = try new Vector3[topology.points] --- in memory.heap
+    defer free(sums) in memory.heap
+    for face in 0..<faces:
+        if not group.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if fronts.of_corner.items[corner] >= 0: continue
+            let point = (usize)topology.corners[corner]
+            if inner[point] < 0:
+                inner[point] = (i32)fronts.count()
+                sums[point] = Vector3()
+                try fronts.push((i32)point, regions.of_face.items[face], Vector3(), Vector3())
+            sums[point] = sums[point].add(normals[face].vector())
+            fronts.of_corner.items[corner] = inner[point]
+    for front in 0..<fronts.count():
+        let point = (usize)fronts.points.items[front]
+        if inner[point] != (i32)front: continue
+        fronts.ways.items[front] = way_of(regions, fronts.regions.items[front], sums[point])
+
+## The way a front of region `region` moves: the region's, else `normal`
+## (its faces' summed normals) at unit length.
+func way_of(regions: const Regions*, region: i32, normal: Vector3) -> Vector3:
+    let own = regions.directions.items[(usize)region]
+    if own.length() > 0.0: return own
+    let length = normal.length()
+    return normal.multiply_scalar(1.0 / length) if length > 0.0 else Vector3()
+
+## The sector starting at stopping corner `arriving`'s far end: its corners
+## get one front, moved by the rim's shift there and along its way.
+func sector(mesh: const Mesh*, topology: const Topology*, group: Bits, normals: const Float3[], settings: Extrusion, regions: const Regions*, arriving: usize, fronts: Fronts*) -> !:
+    let front = (i32)fronts.count()
+    let point = topology.corners[topology.next(arriving)]
+    var normal = Vector3()
+    var corner = topology.next(arriving)
+    var leaving = corner
+    var faces: usize = 0
+    # The edge between a two-face sector's faces (an edge rail), or -1.
+    let rail = corner
+    for _ in 0..<topology.corners.length:
+        fronts.of_corner.items[corner] = front
+        normal = normal.add(normals[(usize)topology.corner_faces[corner]].vector())
+        faces += 1
+        if stops(topology, group, corner, settings.individual):
+            leaving = corner
+            break
+        corner = topology.next((usize)topology.twin(corner))
+    let shift = rim_shift(mesh, topology, group, normals, settings, arriving, leaving, (i64)rail if faces == 2 else -1)
+    let region = regions.of_face.items[(usize)topology.corner_faces[arriving]]
+    try fronts.push(point, region, shift, way_of(regions, region, normal))
+
+## The rim's move at the point between stopping edges `arriving` (into it)
+## and `leaving` (out of it): inward across both (by the even miter, or
+## along their bisector), or along the one edge it slides on: the mesh's
+## open edge when Boundary is off, or the sector's inner edge (`rail`, the
+## corner whose edge it is; -1: none) with Edge rail.
+func rim_shift(mesh: const Mesh*, topology: const Topology*, group: Bits, normals: const Float3[], settings: Extrusion, arriving: usize, leaving: usize, rail: i64) -> Vector3:
+    if settings.inset == 0.0: return Vector3()
+    let here = point_of(mesh, topology.corners[topology.next(arriving)])
+    let before = point_of(mesh, topology.corners[arriving])
+    let after = point_of(mesh, topology.corners[topology.next(leaving)])
+    let d_in = inward(normals[(usize)topology.corner_faces[arriving]].vector(), before, here)
+    let d_out = inward(normals[(usize)topology.corner_faces[leaving]].vector(), here, after)
+    let length_in = here.subtract(before).length()
+    let length_out = after.subtract(here).length()
+    let inset = settings.inset * ((length_in + length_out) * 0.5 if settings.relative else 1.0)
+    let wall_in = walls(topology, group, arriving, settings)
+    let wall_out = walls(topology, group, leaving, settings)
+    var shift = Vector3()
+    var limit = 0.5 * math.min(length_in, length_out)
+    if not wall_in and not wall_out: return Vector3()
+    if not wall_in or not wall_out:
+        # Along the open edge the rim slides on, keeping its width from the
+        # other.
+        let toward = before if not wall_in else after
+        let across = d_out if not wall_in else d_in
+        let length = toward.subtract(here).length()
+        if length == 0.0: return Vector3()
+        let way = toward.subtract(here).multiply_scalar(1.0 / length)
+        shift = way.multiply_scalar(inset / math.max(way.dot(across), 0.05) if settings.even else inset)
+        limit = 0.5 * length
+    elif rail >= 0 and settings.rail:
+        let other = point_of(mesh, topology.corners[topology.next((usize)rail)])
+        let length = other.subtract(here).length()
+        if length == 0.0: return Vector3()
+        let way = other.subtract(here).multiply_scalar(1.0 / length)
+        shift = way.multiply_scalar(inset / math.max((way.dot(d_in) + way.dot(d_out)) * 0.5, 0.05) if settings.even else inset)
+        limit = 0.5 * length
+    elif settings.even:
+        # The miter: inset along both boundary edges' inward directions.
+        shift = d_in.add(d_out).multiply_scalar(inset / math.max(1.0 + d_in.dot(d_out), 0.05))
+    else:
+        let bisector = d_in.add(d_out)
+        let length = bisector.length()
+        shift = bisector.multiply_scalar(inset / length) if length > 0.000001 else d_in.multiply_scalar(inset)
+    if settings.clamp and shift.length() > limit: shift = shift.multiply_scalar(limit / shift.length())
+    return shift
+
+## Front `front` at share `t` of the extrusion (0 the input point, 1 the
+## front; a wall row between): moved by the rim's shift and along its way,
+## then turned by the twist and scaled by the taper about the region's
+## center moved as far, both growing with `t`.
+func front_place(mesh: const Mesh*, fronts: const Fronts*, regions: const Regions*, settings: Extrusion, front: usize, t: f64) -> Vector3:
+    let here = point_of(mesh, fronts.points.items[front])
+    let moved = here.add(fronts.shifts.items[front].multiply_scalar(t)).add(fronts.ways.items[front].multiply_scalar(settings.distance * t))
+    let region = (usize)fronts.regions.items[front]
+    let axis = regions.axes.items[region]
+    if axis.length() == 0.0 or (settings.twist == 0.0 and settings.taper == 1.0): return moved
+    let way = regions.directions.items[region] if regions.directions.items[region].length() > 0.0 else axis
+    let center = regions.centers.items[region].add(way.multiply_scalar(settings.distance * t))
+    let offset = moved.subtract(center)
+    let along = axis.multiply_scalar(offset.dot(axis))
+    let across = offset.subtract(along).rotated_about(axis, settings.twist * t * math.pi / 180.0).multiply_scalar(1.0 + (settings.taper - 1.0) * t)
+    return center.add(along).add(across)

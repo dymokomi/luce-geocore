@@ -20,7 +20,7 @@ func triangulate_verb() -> Verb:
 let duplicate_parms: ParmSpec[1] = [ParmSpec("Offset", ParmKind.number, 0.2, -100000.0, 100000.0, 1, "", "Distance of the copies along their face normals.", 2.0)]
 
 func duplicate_verb() -> Verb:
-    return Verb("Duplicate", "Modeling", "Copy the group's faces, offset along their normals", Domain.face, true, duplicate_parms, true, cook_duplicate, section = "Modify", family = "Extrude", icon = "duplicate", picks = pick_pieces, drag = 0)
+    return Verb("Duplicate", "Modeling", "Copy the group's faces, offset along their normals", Domain.face, true, duplicate_parms, true, cook_duplicate, section = "Modify", family = "Extrude", icon = "duplicate", picks = pick_pieces, drag = 0, drag_mode = "normal")
 
 func split_verb() -> Verb:
     return Verb("Split", "Modeling", "Detach the group's faces: they get their own points", Domain.face, true, placeholder_parms[..<0], true, cook_split, section = "Modify", family = "Split", icon = "split-mesh", picks = pick_faces)

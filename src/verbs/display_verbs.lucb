@@ -17,7 +17,7 @@ let crease_parms: ParmSpec[2] = [
     ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Set|Clear", "Give the group's edges this sharpness, or make them smooth.")]
 
 func crease_verb() -> Verb:
-    return Verb("Crease", "Subdivide", "Set the crease sharpness of the group's edges for subdivision", Domain.edge, true, crease_parms, false, cook_crease, section = "Modify", family = "Subdivide", icon = "sharpen-tool", picks = pick_edges, drag = 0)
+    return Verb("Crease", "Subdivide", "Set the crease sharpness of the group's edges for subdivision", Domain.edge, true, crease_parms, false, cook_crease, section = "Modify", family = "Subdivide", icon = "sharpen-tool", picks = pick_edges, drag = 0, drag_mode = "amount")
 
 func cook_subdivision(input: const VerbInput*, output: VerbOutput*) -> !:
     let names: str[4] = ["subd.scheme", "subd.level", "subd.render_level", "subd.boundary"]

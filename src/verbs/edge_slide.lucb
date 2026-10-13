@@ -1,30 +1,134 @@
-## Edge Slide: slide the group's edges along the faces beside them, after
-## Blender's Edge Slide. Each point of the group's chains moves along its
-## rail, the edge at it outside the group leaning most to one side of the
-## chain (the side `Amount`'s sign picks: the chain's tangent crossed with
-## the surface normal), by that fraction of the rail's length. The topology
-## stays; the group's edges are the output selection.
+## Edge Slide and Vertex Slide, after Blender's. Edge Slide moves each point
+## of the group's chains along its rail: the edge at it outside the group
+## that leans most to the side the amount's sign picks (the chain's tangent
+## crossed with the surface normal). Vertex Slide moves each group point
+## along its edge that runs most along Direction. Either moves a point by
+## the amount's share of its rail; Even moves every point the same distance
+## (the amount times the rails' mean length), so a loop keeps its shape,
+## and Even with Flip keeps every point that far short of its rail's end, so
+## the loop takes the shape of the loop it slides toward. Clamp keeps the
+## amount within -1..1 (Edge Slide) or 0..1 (Vertex Slide) and each point on
+## its rail; off, points go past their rails' ends along them. The topology
+## stays; the group is the output selection. A slide drag runs along the
+## rails (`edge_slide_rails`, `vertex_slide_rails`).
 
-let edge_slide_parms: ParmSpec[1] = [
-    ParmSpec("Amount", ParmKind.number, 0.5, -1.0, 1.0, 1, "", "How far along the rails, as a fraction of each rail; the sign picks the side.")]
+let edge_slide_parms: ParmSpec[4] = [
+    ParmSpec("Amount", ParmKind.number, 0.0, -10.0, 10.0, 1, "", "How far along the rails, as a share of each rail (of their mean length with Even); the sign picks the side.", 1.0),
+    ParmSpec("Even", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Move every point the same distance, so the loop keeps its shape."),
+    ParmSpec("Flip", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "With Even: keep every point the same distance from its rail's end, so the loop takes the shape of the loop beyond."),
+    ParmSpec("Clamp", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep the amount within -1..1 and every point on its rail.")]
 
 func edge_slide_verb() -> Verb:
-    return Verb("Edge Slide", "Deform", "Slide the group's edges along the faces beside them", Domain.edge, true, edge_slide_parms, false, cook_edge_slide, section = "Modify", family = "Cut", icon = "distribute-horizontal", picks = pick_edges, drag = 0)
+    return Verb("Edge Slide", "Deform", "Slide the group's edges along the faces beside them", Domain.edge, true, edge_slide_parms, false, cook_edge_slide,
+                section = "Modify", family = "Cut", icon = "distribute-horizontal", picks = pick_edges, drag = 0, drag_mode = "slide", follows = true, rails = edge_slide_rails)
+
+let vertex_slide_parms: ParmSpec[5] = [
+    ParmSpec("Amount", ParmKind.number, 0.0, -10.0, 10.0, 1, "", "How far along each point's edge, as a share of it (of the edges' mean length with Even).", 1.0),
+    ParmSpec("Direction", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "Each point slides along its edge that runs most this way (a drag picks it)."),
+    ParmSpec("Even", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Move every point the same distance."),
+    ParmSpec("Flip", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "With Even: keep every point the same distance from its edge's far end."),
+    ParmSpec("Clamp", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep the amount within 0..1 and every point on its edge.")]
+
+let vertex_slide_picks: PickSpec[1] = [PickSpec("Points", "points")]
+
+func vertex_slide_verb() -> Verb:
+    return Verb("Vertex Slide", "Deform", "Slide the group's points along their edges", Domain.point, true, vertex_slide_parms, false, cook_vertex_slide,
+                section = "Modify", family = "Cut", icon = "vertex-select", picks = vertex_slide_picks, drag = 0, drag_mode = "slide", follows = true, axis = 1,
+                rails = vertex_slide_rails)
+
+## How a slide moves points: the amount and its options.
+struct Slide:
+    let amount: f64
+    let even: bool
+    let flip: bool
+    let clamp: bool
+
+## Each moving point's rail ends (-1: none): Edge Slide's two sides, or
+## Vertex Slide's one edge (`plus`).
+struct SlideRails:
+    var points: Growing[i32]
+    var plus: Growing[i32]
+    var minus: Growing[i32]
+
+    func init():
+        self.points = Growing[i32]()
+        self.plus = Growing[i32]()
+        self.minus = Growing[i32]()
+
+    func close():
+        self.points.close()
+        self.plus.close()
+        self.minus.close()
 
 func cook_edge_slide(input: const VerbInput*, output: VerbOutput*) -> !:
-    let amount = input.parms.at(0)
-    if not math.is_finite(amount) or amount < -1.0 or amount > 1.0: error(errors.invalid, "Edge Slide amount must lie in -1..1")
-    let mesh = input.mesh
-    let topology = try Topology.of(mesh)
-    output.positions = mesh_positions(mesh)
-    let positions = try output.positions.writable()
+    let slide = Slide(input.parms.at(0), input.parms.at(1) != 0.0, input.parms.at(2) != 0.0, input.parms.at(3) != 0.0)
+    if not math.is_finite(slide.amount): error(errors.invalid, "Edge Slide amount must be finite")
+    output.positions = mesh_positions(input.mesh)
     output.selection = try BitsBuilder.copy_of(input.group)
     output.selection_domain = Domain.edge
-    if amount == 0.0: return
+    if slide.amount == 0.0 and not (slide.even and slide.flip): return
+    var rails = SlideRails()
+    defer rails.close()
+    try edge_rails(input, &rails)
+    try slide_points(input.mesh, &rails, slide, -1.0 if slide.amount < 0.0 else 1.0, output)
+
+func cook_vertex_slide(input: const VerbInput*, output: VerbOutput*) -> !:
+    let slide = Slide(input.parms.at(0), input.parms.at(4) != 0.0, input.parms.at(5) != 0.0, input.parms.at(6) != 0.0)
+    let direction = Vector3(input.parms.at(1), input.parms.at(2), input.parms.at(3))
+    if not math.is_finite(slide.amount) or not direction.is_finite(): error(errors.invalid, "Vertex Slide amount and direction must be finite")
+    output.positions = mesh_positions(input.mesh)
+    output.selection = try BitsBuilder.copy_of(input.group)
+    output.selection_domain = Domain.point
+    if direction.length() == 0.0:
+        output.warning = "Vertex Slide needs a Direction (a drag sets it); the input passes through"
+        return
+    var rails = SlideRails()
+    defer rails.close()
+    try vertex_rails(input, direction, &rails)
+    # A negative amount without Clamp backs away along the same edge.
+    try slide_points(input.mesh, &rails, slide, 1.0, output)
+
+## Move every railed point by `slide`, along its rail on side `side` (+1
+## plus, -1 minus: the amount's sign); with Clamp the amount and each
+## point's share of its rail stay within 0..1.
+func slide_points(mesh: const Mesh*, rails: const SlideRails*, slide: Slide, side: f64, output: VerbOutput*) -> !:
+    let positions = try output.positions.writable()
+    let original = mesh.point_span()
+    var amount = slide.amount * side
+    if slide.clamp: amount = math.max(0.0, math.min(1.0, amount))
+    # The rails' mean length on that side, for Even.
+    var total = 0.0
+    var count = 0.0
+    for at in 0..<rails.points.count:
+        let end = rails.plus.items[at] if side > 0.0 else rails.minus.items[at]
+        if end < 0: continue
+        total += original[(usize)end].vector().subtract(original[(usize)rails.points.items[at]].vector()).length()
+        count += 1.0
+    let mean = total / count if count > 0.0 else 0.0
+    for at in 0..<rails.points.count:
+        let point = (usize)rails.points.items[at]
+        let end = rails.plus.items[at] if side > 0.0 else rails.minus.items[at]
+        if end < 0: continue
+        let here = original[point].vector()
+        let rail = original[(usize)end].vector().subtract(here)
+        let length = rail.length()
+        if length == 0.0: continue
+        var share = amount
+        if slide.even:
+            let distance = length - (1.0 - amount) * mean if slide.flip else amount * mean
+            share = distance / length
+        if slide.clamp: share = math.max(0.0, math.min(1.0, share))
+        positions[point] = Float3.of(here.add(rail.multiply_scalar(share)))
+        try output.moved.push((u32)point)
+
+## Edge Slide's rails: per point of the group's chains, its edge outside the
+## group leaning most to either side of the chain.
+func edge_rails(input: const VerbInput*, rails: SlideRails*) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
     var chains = EdgeChains()
     defer chains.close()
     try edge_chains(&topology, input.group, &chains)
-    # Reads see the input's positions; writes go to the output's.
     let original = mesh.point_span()
     let normals = mesh.face_normal_span()
     for index in 0..<chains.count():
@@ -37,11 +141,61 @@ func cook_edge_slide(input: const VerbInput*, output: VerbOutput*) -> !:
             let after = chain[at + 1] if at + 1 < chain.length else (chain[0] if closed else chain[at])
             let tangent = original[(usize)after].vector().subtract(original[(usize)before].vector())
             let side = point_normal(&topology, normals, point).cross(tangent)
-            let rail = rail_end(&topology, input.group, original, point, side, amount > 0.0) else continue
-            let here = original[point].vector()
-            let target = original[(usize)rail].vector()
-            positions[point] = Float3.of(here.add(target.subtract(here).multiply_scalar(math.abs(amount))))
-            try output.moved.push((u32)point)
+            try rails.points.push((i32)point)
+            try rails.plus.push(rail_end(&topology, input.group, original, point, side, true) else -1)
+            try rails.minus.push(rail_end(&topology, input.group, original, point, side, false) else -1)
+
+## Vertex Slide's rails: per group point, its edge running most along
+## `direction`.
+func vertex_rails(input: const VerbInput*, direction: Vector3, rails: SlideRails*) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let original = mesh.point_span()
+    let way = direction.multiply_scalar(1.0 / direction.length())
+    for point in 0..<topology.points:
+        if not input.group.get(point): continue
+        var best: i32 = -1
+        var lean = -2.0
+        for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+            let other = other_end(&topology, (usize)topology.point_edges[slot], point)
+            let span = original[(usize)other].vector().subtract(original[point].vector())
+            if span.length() == 0.0: continue
+            let along = span.dot(way) / span.length()
+            if along > lean:
+                lean = along
+                best = other
+        try rails.points.push((i32)point)
+        try rails.plus.push(best)
+        try rails.minus.push(-1)
+
+func other_end(topology: const Topology*, edge: usize, point: usize) -> i32:
+    let a = topology.edge_points[edge * 2]
+    return topology.edge_points[edge * 2 + 1] if (usize)a == point else a
+
+## A slide drag's rails for Edge Slide: each chain point toward either side.
+func edge_slide_rails(input: const VerbInput*, out: Rails*) -> !:
+    var rails = SlideRails()
+    defer rails.close()
+    try edge_rails(input, &rails)
+    try rails_out(input.mesh, &rails, out)
+
+## A slide drag's rails for Vertex Slide: each group point along every one
+## of its edges (the drag's first move picks the edge, and so Direction).
+func vertex_slide_rails(input: const VerbInput*, out: Rails*) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    for point in 0..<topology.points:
+        if not input.group.get(point): continue
+        let here = point_of(mesh, (i32)point)
+        for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+            try out.push((i64)point, here, point_of(mesh, other_end(&topology, (usize)topology.point_edges[slot], point)), 1.0)
+
+func rails_out(mesh: const Mesh*, rails: const SlideRails*, out: Rails*) -> !:
+    for at in 0..<rails.points.count:
+        let point = rails.points.items[at]
+        let here = point_of(mesh, point)
+        if rails.plus.items[at] >= 0: try out.push((i64)point, here, point_of(mesh, rails.plus.items[at]), 1.0)
+        if rails.minus.items[at] >= 0: try out.push((i64)point, here, point_of(mesh, rails.minus.items[at]), -1.0)
 
 ## The mean normal of the faces around `point`.
 func point_normal(topology: const Topology*, normals: const Float3[], point: usize) -> Vector3:
@@ -61,8 +215,7 @@ func rail_end(topology: const Topology*, group: Bits, positions: const Float3[],
     for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
         let edge = (usize)topology.point_edges[slot]
         if group.get(edge): continue
-        let a = topology.edge_points[edge * 2]
-        let other = topology.edge_points[edge * 2 + 1] if (usize)a == point else a
+        let other = other_end(topology, edge, point)
         let direction = positions[(usize)other].vector().subtract(here)
         let length = direction.length()
         if length == 0.0: continue

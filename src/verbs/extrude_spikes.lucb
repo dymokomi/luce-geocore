@@ -1,0 +1,137 @@
+## Extrude on points (extrude.lucb), Maya's vertex extrude: each group point
+## opens into a ring, one point on each of its edges `inset` from it (a
+## quarter of the edge for an inset of 0; never past half of it), and a tip
+## `distance` out along its faces' summed normals (or the Vector). Each face
+## around the point takes the two ring points on its edges in the point's
+## place, and the ring and the tip make a cone of triangles, `divisions`
+## rows of quads below the tip's triangles. The tips are the output
+## selection.
+
+func extrude_points(input: const VerbInput*, output: VerbOutput*, settings: Extrusion) -> !:
+    let mesh = input.mesh
+    if not input.group.any():
+        output.warning = "No points in the group to extrude; the input passes through"
+        return
+    let topology = try Topology.of(mesh)
+    let normals = mesh.face_normal_span()
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    let rows = settings.divisions
+    # Per point-edge slot (point_edges' order): the ring point and its first
+    # row point; per point: its tip.
+    let slots = topology.point_edges.length
+    let ring = try new i32[slots] --- in memory.heap
+    defer free(ring) in memory.heap
+    let tips = try new i32[topology.points] --- in memory.heap
+    defer free(tips) in memory.heap
+    for at in 0..<slots: ring[at] = -1
+    for at in 0..<topology.points: tips[at] = -1
+    let along_vector = settings.direction == 2 and settings.vector.length() > 0.0
+    for point in 0..<topology.points:
+        if not input.group.get(point): continue
+        let first = (usize)topology.point_edge_offsets[point]
+        let end = (usize)topology.point_edge_offsets[point + 1]
+        if first == end: continue
+        let here = point_of(mesh, (i32)point)
+        var way = settings.vector if along_vector else point_normal(&topology, normals, point)
+        let length = way.length()
+        way = way.multiply_scalar(1.0 / length) if length > 0.0 else Vector3()
+        tips[point] = try builder.point(here.add(way.multiply_scalar(settings.distance)), (i32)point)
+        for slot in first..<end:
+            let edge = (usize)topology.point_edges[slot]
+            let a = topology.edge_points[edge * 2]
+            let other = topology.edge_points[edge * 2 + 1] if (usize)a == point else a
+            let there = point_of(mesh, other)
+            let span = there.subtract(here).length()
+            if span == 0.0: continue
+            let reach = settings.inset if settings.inset > 0.0 else 0.25 * span
+            let s = math.min(reach, 0.49 * span) / span
+            let parents: i32[2] = [(i32)point, other]
+            let weights: f32[2] = [(f32)(1.0 - s), (f32)s]
+            ring[slot] = try builder.mixed_point(here.add(there.subtract(here).multiply_scalar(s)), parents[..<2], weights[..<2])
+            # Rows 1..<rows between the ring point and the tip.
+            for row in 1..<rows:
+                let t = (f64)row / (f64)rows
+                _ = try builder.point(builder.position(ring[slot]).add(builder.position(tips[point]).subtract(builder.position(ring[slot])).multiply_scalar(t)), (i32)point)
+    let spike = Spike(ring, tips, rows)
+    # The faces, each grouped point's corner opened into its two ring points.
+    let faces = topology.faces()
+    var run: usize = 0
+    for face in 0..<faces:
+        if not opens(&topology, &spike, face): continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        try builder.face((i32)face)
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let point = (usize)topology.corners[corner]
+            let before = spike.ring_at(&topology, point, (usize)topology.corner_edges[topology.previous(corner)])
+            let after = spike.ring_at(&topology, point, (usize)topology.corner_edges[corner])
+            if tips[point] < 0 or before < 0 or after < 0:
+                try builder.corner((i32)point, (i32)corner)
+                continue
+            try ring_corner(&topology, builder, before, corner, topology.previous(corner), mesh)
+            try ring_corner(&topology, builder, after, corner, topology.next(corner), mesh)
+        try builder.end_face()
+    try builder.copy_faces(mesh, run, faces)
+    # The cones: per face around a tip, a strip from its two ring points up.
+    for face in 0..<faces:
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let point = (usize)topology.corners[corner]
+            if tips[point] < 0: continue
+            let before = spike.ring_at(&topology, point, (usize)topology.corner_edges[topology.previous(corner)])
+            let after = spike.ring_at(&topology, point, (usize)topology.corner_edges[corner])
+            if before < 0 or after < 0: continue
+            for row in 0..<rows:
+                try builder.face((i32)face)
+                try builder.corner(spike.row_point(after, row), (i32)corner)
+                try builder.corner(spike.row_point(before, row), (i32)corner)
+                if row + 1 < rows:
+                    try builder.corner(spike.row_point(before, row + 1), (i32)corner)
+                    try builder.corner(spike.row_point(after, row + 1), (i32)corner)
+                else:
+                    try builder.corner(tips[point], (i32)corner)
+                try builder.end_face()
+    var selected = try BitsBuilder.zeros(builder.point_count())
+    errdefer selected.close()
+    for point in 0..<topology.points:
+        if tips[point] >= 0: selected.set((usize)tips[point])
+    var kept: BitsBuilder*? = &selected
+    try builder.drop_unused_points(kept)
+    output.selection.close()
+    output.selection = selected
+    output.selection_domain = Domain.point
+
+## Where a spike's points are: per point-edge slot its ring point (rows
+## follow it consecutively), per point its tip.
+struct Spike:
+    let ring: const i32[]
+    let tips: const i32[]
+    let rows: usize
+
+    ## The ring point of `point` on `edge`, or -1.
+    func ring_at(topology: const Topology*, point: usize, edge: usize) -> i32:
+        for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+            if (usize)topology.point_edges[slot] == edge: return self.ring[slot]
+        return -1
+
+    ## Ring point `base` on row `row` (0 the ring itself).
+    func row_point(base: i32, row: usize) -> i32:
+        return base if row == 0 else base + (i32)row
+
+## Whether face `face` has a corner on a spike.
+func opens(topology: const Topology*, spike: const Spike*, face: usize) -> bool:
+    for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+        if spike.tips[(usize)topology.corners[corner]] >= 0: return true
+    return false
+
+## A ring point's corner in its face: blended from the point's corner toward
+## the neighbor corner `toward` by how far along the edge it sits.
+func ring_corner(topology: const Topology*, builder: TopologyBuilder*, ring: i32, corner: usize, toward: usize, mesh: const Mesh*) -> !:
+    let here = point_of(mesh, topology.corners[corner])
+    let span = point_of(mesh, topology.corners[toward]).subtract(here).length()
+    let s = builder.position(ring).subtract(here).length() / span if span > 0.0 else 0.0
+    let parents: i32[2] = [(i32)corner, (i32)toward]
+    let weights: f32[2] = [(f32)(1.0 - s), (f32)s]
+    try builder.mixed_corner(ring, parents[..<2], weights[..<2])

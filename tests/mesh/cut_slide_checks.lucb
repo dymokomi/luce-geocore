@@ -1,0 +1,235 @@
+## Loop Cut, Edge Slide, Vertex Slide and Offset Edge Loops (POLY-MODELING.md
+## Stage 3), and the drag frames a viewport drag reads. Loop Cut's counts on
+## a grid, a cylinder (round its side, and across one side between its
+## n-gon caps), a torus and a sphere (whose pole triangles fan to the new
+## points); where cuts sit as they slide, Even and Flip on rings of uneven
+## edges. Edge Slide keeps every point on its rail, Even exactly; Vertex
+## Slide along the edge nearest its direction; Offset Edge Loops' counts with
+## and without capped ends, open and closed. The grid is 4 by 4 over -1..1
+## in XZ (point z*5+x, face z*4+x).
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, line_distance, surface, quads
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    try loop_cut_checks(grid)
+    try uneven_cut_checks()
+    try edge_slide_checks()
+    try vertex_slide_checks(grid)
+    try offset_checks(grid)
+    try frame_checks(grid)
+    print("PASS cuts and slides: Loop Cut on a grid, cylinder, torus and sphere, slide and Even/Flip; Edge Slide on its rails, Even exact; Vertex Slide; Offset Edge Loops open, capped and closed; drag frames and rails")
+
+## Loop Cut's numbers: cuts, slide, whole ring, even, flip.
+func cut_numbers(cuts: f64, slide: f64 = 0.0, even: bool = false, flip: bool = false) -> f64[5]:
+    return [cuts, slide, 1.0, 1.0 if even else 0.0, 1.0 if flip else 0.0]
+
+func loop_cut_checks(grid: interop.Reference[Mesh]) -> !:
+    let three = cut_numbers(3.0)
+    let cut = try made(grid, "Loop Cut", "p0-1", 2, three[..<5], 12)
+    defer cut.release()
+    try counts(cut, 40, 28)
+    try surface(cut, false)
+    # Slid halfway to one side: half a spacing, less the 2% kept.
+    let slid_numbers = cut_numbers(1.0, 0.5)
+    let slid = try made(grid, "Loop Cut", "p0-1", 2, slid_numbers[..<5], 4)
+    defer slid.release()
+    near(math.abs((try slid.value().point(25)).x + 0.75), 0.5 * 0.5 * 0.98 * 0.5)
+    # Round a cylinder's side, and across one side between its caps (the
+    # caps take the new points).
+    let cylinder = try MeshPrimitives.cylinder(1.0, 2.0, 8)
+    defer cylinder.release()
+    let round = try made(cylinder, "Loop Cut", "p0-8", 2, three[..<5], 24)
+    defer round.release()
+    try counts(round, 40, 34)
+    try surface(round, true)
+    let two = cut_numbers(2.0)
+    let across = try made(cylinder, "Loop Cut", "p0-1", 2, two[..<5], 2)
+    defer across.release()
+    try counts(across, 20, 12)
+    try surface(across, true)
+    # A torus: every ring closes.
+    let torus = try MeshPrimitives.torus(1.0, 0.3, 8)
+    defer torus.release()
+    let tube = try made(torus, "Loop Cut", "p0-1", 2, two[..<5], 16)
+    defer tube.release()
+    try counts(tube, 80, 80)
+    try surface(tube, true)
+    # A sphere's meridian band ends in the poles' triangles: each fans from
+    # its pole to the new point.
+    let sphere = try MeshPrimitives.sphere(1.0, 8)
+    defer sphere.release()
+    let one = cut_numbers(1.0)
+    let band = try made(sphere, "Loop Cut", "p1-2", 2, one[..<5], 4)
+    defer band.release()
+    try counts(band, 29, 36)
+    try surface(band, true)
+    for face in 0..<band.value().face_count(): assert((try band.value().face_size(face)) <= 4)
+
+## A strip of two quads whose ring edges are 1, 2 and 3 long.
+func uneven_cut_checks() -> !:
+    let places: Vector3[6] = [Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0), Vector3(2.0, 0.0, 0.0),
+                              Vector3(0.0, 0.0, 1.0), Vector3(1.0, 0.0, 2.0), Vector3(2.0, 0.0, 3.0)]
+    let strip = try quads(places[..<6], 2, 3)
+    defer strip.release()
+    # Even: every cut 0.49 from its edge's middle (half the slide's 0.98 of
+    # half a spacing, times the mean length 2).
+    let even_numbers = cut_numbers(1.0, 0.5, even = true)
+    let even = try made(strip, "Loop Cut", "p0-3", 2, even_numbers[..<5], 2)
+    defer even.release()
+    try each_cut(even, places[..<6], 0.49, false)
+    # Flip: every cut 0.49 short of its rail's end.
+    let flip_numbers = cut_numbers(1.0, 0.5, even = true, flip = true)
+    let flipped = try made(strip, "Loop Cut", "p0-3", 2, flip_numbers[..<5], 2)
+    defer flipped.release()
+    try each_cut(flipped, places[..<6], 0.49, true)
+
+## Each ring edge's cut (the new point on it) lies `gap` from the edge's
+## middle, or with `ends` from its nearer rail end (the middle ± 0.49 of
+## the edge).
+func each_cut(mesh: interop.Reference[Mesh], places: const Vector3[], gap: f64, ends: bool) -> !:
+    for column in 0..<(usize)3:
+        let a = places[column]
+        let b = places[column + 3]
+        var found = 0
+        for point in 6..<mesh.value().point_count():
+            let at = try mesh.value().point(point)
+            if line_distance(at, a, b) > 0.000001: continue
+            found += 1
+            let middle = a.add(b).multiply_scalar(0.5)
+            let rail = b.subtract(a).multiply_scalar(0.49)
+            let measured = math.min(at.subtract(middle.add(rail)).length(), at.subtract(middle.subtract(rail)).length()) if ends else at.subtract(middle).length()
+            near(measured, gap)
+        assert(found == 1)
+
+## Edge Slide on rails of uneven length: up from the middle row the rails
+## are 1, 1.5, 2 and 2.5 long, down they are 1.
+func edge_slide_checks() -> !:
+    let places: Vector3[12] = [Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0), Vector3(2.0, 0.0, 0.0), Vector3(3.0, 0.0, 0.0),
+                               Vector3(0.0, 0.0, 1.0), Vector3(1.0, 0.0, 1.0), Vector3(2.0, 0.0, 1.0), Vector3(3.0, 0.0, 1.0),
+                               Vector3(0.0, 0.0, 2.0), Vector3(1.0, 0.0, 2.5), Vector3(2.0, 0.0, 3.0), Vector3(3.0, 0.0, 3.5)]
+    let mesh = try quads(places[..<12], 3, 4)
+    defer mesh.release()
+    for sign in [-1.0, 1.0]:
+        # Not even: each point a half of its rail, on its rail.
+        let half: f64[4] = [0.5 * sign, 0.0, 0.0, 1.0]
+        let plain = try made(mesh, "Edge Slide", "p4-5-6-7", 2, half[..<4], 3)
+        defer plain.release()
+        let up = (try plain.value().point(4)).z > 1.0
+        for column in 0..<(usize)4:
+            let at = try plain.value().point(4 + (i64)column)
+            near(at.x, (f64)column)
+            let length = 1.0 + 0.5 * (f64)column if up else 1.0
+            near(math.abs(at.z - 1.0), 0.5 * length)
+        # Even: every point the same distance, half the rails' mean.
+        let level: f64[4] = [0.5 * sign, 1.0, 0.0, 1.0]
+        let even = try made(mesh, "Edge Slide", "p4-5-6-7", 2, level[..<4], 3)
+        defer even.release()
+        let mean = 1.75 if up else 1.0
+        for column in 0..<(usize)4:
+            let at = try even.value().point(4 + (i64)column)
+            near(at.x, (f64)column)
+            near(math.abs(at.z - 1.0), 0.5 * mean)
+        # Even and Flip: every point half the mean short of its rail's end.
+        let kept: f64[4] = [0.5 * sign, 1.0, 1.0, 1.0]
+        let flipped = try made(mesh, "Edge Slide", "p4-5-6-7", 2, kept[..<4], 3)
+        defer flipped.release()
+        for column in 0..<(usize)4:
+            let at = try flipped.value().point(4 + (i64)column)
+            let end = places[8 + column] if up else places[column]
+            near(at.subtract(end).length(), 0.5 * mean)
+        # Clamp off: past the rail's end along it.
+        let far: f64[4] = [1.5 * sign, 0.0, 0.0, 0.0]
+        let past = try made(mesh, "Edge Slide", "p4-5-6-7", 2, far[..<4], 3)
+        defer past.release()
+        near(math.abs((try past.value().point(4)).z - 1.0), 1.5)
+
+func vertex_slide_checks(grid: interop.Reference[Mesh]) -> !:
+    # Amount, direction (3), even, flip, clamp.
+    let right: f64[7] = [0.5, 1.0, 0.1, 0.0, 0.0, 0.0, 1.0]
+    let slid = try made(grid, "Vertex Slide", "12", 1, right[..<7], 1)
+    defer slid.release()
+    near_point(try slid.value().point(12), Vector3(0.25, 0.0, 0.0))
+    let back: f64[7] = [0.5, 0.0, 0.0, -1.0, 0.0, 0.0, 1.0]
+    let behind = try made(grid, "Vertex Slide", "12", 1, back[..<7], 1)
+    defer behind.release()
+    near_point(try behind.value().point(12), Vector3(0.0, 0.0, -0.25))
+    # Clamped, a negative amount stays put; unclamped it backs away along
+    # the same edge.
+    let clamped: f64[7] = [-0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    let kept = try made(grid, "Vertex Slide", "12", 1, clamped[..<7], 1)
+    defer kept.release()
+    near_point(try kept.value().point(12), Vector3(0.0, 0.0, 0.0))
+    let unclamped: f64[7] = [-0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let away = try made(grid, "Vertex Slide", "12", 1, unclamped[..<7], 1)
+    defer away.release()
+    near_point(try away.value().point(12), Vector3(-0.25, 0.0, 0.0))
+    # Even: every point the same distance, a share of the edges' mean.
+    let level: f64[7] = [0.5, 1.0, 0.0, 0.0, 1.0, 0.0, 1.0]
+    let even = try made(grid, "Vertex Slide", "11 12", 1, level[..<7], 2)
+    defer even.release()
+    near_point(try even.value().point(11), Vector3(-0.25, 0.0, 0.0))
+    # No direction: nothing moves, with a warning.
+    let none_given: f64[7] = [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+    let still = try Verbs.run("Vertex Slide", grid, "12", 1, none_given[..<7])
+    defer still.release()
+    assert(still.value().warning().length > 0)
+
+func offset_checks(grid: interop.Reference[Mesh]) -> !:
+    # The grid's middle row, an open run: its ends meet the new loops.
+    let half: f64[3] = [0.5, 0.0, 0.0]
+    let open = try made(grid, "Offset Edge Loops", "p10-11-12-13-14", 2, half[..<3], 8)
+    defer open.release()
+    try counts(open, 31, 24)
+    try surface(open, false)
+    var above = 0
+    for point in 25..<open.value().point_count():
+        let at = try open.value().point(point)
+        if math.abs(at.z - 0.25) < 0.000001: above += 1
+    assert(above == 3)
+    # Capped: the loops go round the ends too.
+    let capped_numbers: f64[3] = [0.5, 0.0, 1.0]
+    let capped = try made(grid, "Offset Edge Loops", "p10-11-12-13-14", 2, capped_numbers[..<3], 8)
+    defer capped.release()
+    try counts(capped, 35, 24)
+    try surface(capped, false)
+    # A loop round a torus's tube: both sides, the surface stays closed.
+    let torus = try MeshPrimitives.torus(1.0, 0.3, 8)
+    defer torus.release()
+    let loop = try made(torus, "Offset Edge Loops", "p0-1-2-3-4-5-6-7-0", 2, half[..<3], 16)
+    defer loop.release()
+    try counts(loop, 80, 80)
+    try surface(loop, true)
+
+func frame_checks(grid: interop.Reference[Mesh]) -> !:
+    let cube = try Mesh.cube()
+    defer cube.release()
+    let up: f64[1] = [0.5]
+    let top = try Verbs.frame("PolyExtrude", cube, "2", 3, up[..<1])
+    defer top.release()
+    near_point(top.value().center_point(), Vector3(0.0, 2.0, 0.0))
+    near_point(top.value().normal(), Vector3(0.0, 1.0, 0.0))
+    assert(top.value().rail_count() == 0)
+    # A closed shell faces no way.
+    let whole = try Verbs.frame("PolyExtrude", cube, "", 3, up[..<1])
+    defer whole.release()
+    near(whole.value().normal().length(), 0.0)
+    # Edge Slide's rails: both sides of the middle row's five points; the
+    # one under a ray from above point 12 is point 12.
+    let none_set: f64[1] = [0.0]
+    let rails = try Verbs.frame("Edge Slide", grid, "p10-11-12-13-14", 2, none_set[..<1])
+    defer rails.release()
+    assert(rails.value().rail_count() == 10)
+    let nearest = rails.value().nearest(Vector3(0.1, 5.0, 0.0), Vector3(0.0, -1.0, 0.0), false)
+    assert(nearest >= 0 and rails.value().rail_owner(nearest) == 12)
+    # Loop Cut's: each ring edge's cut toward both ends.
+    let one: f64[1] = [1.0]
+    let ring = try Verbs.frame("Loop Cut", grid, "p0-1", 2, one[..<1])
+    defer ring.release()
+    assert(ring.value().rail_count() == 10)
+    near((ring.value().rail_end(0)).subtract(ring.value().rail_origin(0)).length(), 0.5 * 0.5 * 0.98)

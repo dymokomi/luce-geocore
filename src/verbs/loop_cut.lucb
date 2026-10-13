@@ -1,18 +1,29 @@
 ## Loop Cut: new edge loops across the quads of the group's edge rings,
-## after Blender's Loop Cut and Slide. Each ring edge gets `cuts` new points
-## (slid together toward one side of the ring by `slide`); each quad crossed
-## by the ring splits into `cuts + 1` quads, and any other face on a ring
-## edge takes the new points into its boundary so the surface stays closed.
-## Edges keep a direction along the ring, so the cuts line up. The new
-## loops are the output selection.
+## after Blender's Loop Cut and Slide. A ring runs through quads only (a
+## triangle or an n-gon ends it, as Blender's does); each ring edge gets
+## `cuts` new points, slid together toward one side of the ring by `slide`.
+## Each quad crossed by the ring splits into `cuts + 1` quads, a triangle on
+## a ring edge fans from its far corner to the new points, and any other face
+## on a ring edge takes the new points into its boundary, so the surface
+## stays closed. Edges keep a direction along the ring, so the cuts line up.
+##
+## Even slides every cut the same distance (the slide times the ring edges'
+## mean spacing), so a loop keeps its shape; with Flip it ends the same
+## distance short of the next loop instead, taking that loop's shape. The
+## new loops are the output selection; a slide drag runs along the ring
+## edges (`loop_cut_rails`).
 
-let loop_cut_parms: ParmSpec[3] = [
+let loop_cut_parms: ParmSpec[5] = [
     ParmSpec("Cuts", ParmKind.integer, 1.0, 1.0, 64.0, 1, "", "New loops across each ring."),
     ParmSpec("Slide", ParmKind.number, 0.0, -1.0, 1.0, 1, "", "Move the loops toward one side of the ring (-1..1)."),
-    ParmSpec("Whole ring", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Cut the whole ring through each of the group's edges; off: only across the group's edges.")]
+    ParmSpec("Whole ring", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Cut the whole ring through each of the group's edges; off: only across the group's edges.", more = true),
+    ParmSpec("Even", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Slide every cut the same distance, so each loop keeps its shape."),
+    ParmSpec("Flip", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "With Even: keep each loop the same distance from the next loop on the slide's side, taking its shape.")]
 
 func loop_cut_verb() -> Verb:
-    return Verb("Loop Cut", "Modeling", "Cut edge loops across the rings of the group's edges", Domain.edge, true, loop_cut_parms, true, cook_loop_cut, section = "Modify", family = "Cut", icon = "loop-cut", picks = pick_edges, drag = 1)
+    return Verb("Loop Cut", "Modeling", "Cut edge loops across the rings of the group's edges", Domain.edge, true, loop_cut_parms, true, cook_loop_cut,
+                section = "Modify", family = "Cut", icon = "loop-cut", picks = pick_edges, drag = 1, drag_mode = "slide", follows = true, wheel = 0,
+                rails = loop_cut_rails, gesture = "hover")
 
 struct Rings:
     ## Per edge: the point its ring direction starts from, or -1 off the
@@ -22,40 +33,64 @@ struct Rings:
     ## Per face: the corner whose edge the split enters by, or -1.
     var split: Growing[i32]
     var queue: Growing[i32]
+    ## Per ring edge and cut (edge * cuts + k - 1): how far along the edge
+    ## from its ring start cut k sits.
+    var fractions: Growing[f64]
+    var cuts: usize
 
     func init():
         self.start = Growing[i32]()
         self.first_new = Growing[i32]()
         self.split = Growing[i32]()
         self.queue = Growing[i32]()
+        self.fractions = Growing[f64]()
+        self.cuts = 1
 
     func close():
         self.start.close()
         self.first_new.close()
         self.split.close()
         self.queue.close()
+        self.fractions.close()
+
+## One cut's settings.
+struct LoopCut:
+    let cuts: usize
+    let slide: f64
+    let whole: bool
+    let even: bool
+    let flip: bool
+
+func loop_cut_settings(input: const VerbInput*) -> LoopCut!:
+    if not math.is_finite(input.parms.at(1)): error(errors.invalid, "Loop Cut slide must be finite")
+    let cuts = (usize)math.max(1.0, math.min(64.0, input.parms.at(0)))
+    return LoopCut(cuts, math.max(-1.0, math.min(1.0, input.parms.at(1))), input.parms.at(2) != 0.0, input.parms.at(3) != 0.0, input.parms.at(4) != 0.0)
 
 func cook_loop_cut(input: const VerbInput*, output: VerbOutput*) -> !:
-    let cuts = (usize)math.max(1.0, math.min(64.0, input.parms.at(0)))
-    let slide = math.max(-1.0, math.min(1.0, input.parms.at(1)))
-    if not math.is_finite(input.parms.at(1)): error(errors.invalid, "Loop Cut slide must be finite")
-    let whole = input.parms.at(2) != 0.0
+    let settings = try loop_cut_settings(input)
     let mesh = input.mesh
     let topology = try Topology.of(mesh)
     var rings = Rings()
     defer rings.close()
+    let splits = try find_rings(mesh, &topology, input.group, settings, &rings)
+    if splits == 0:
+        output.warning = "No quad crossed by the group's edge rings to cut; the input passes through"
+        return
+    try build_cuts(mesh, &topology, &rings, settings, output)
+
+## The rings through the group's edges and where each cut sits on them;
+## returns the quads they split.
+func find_rings(mesh: const Mesh*, topology: const Topology*, group: Bits, settings: LoopCut, rings: Rings*) -> usize!:
     try rings.start.fill(topology.edges(), -1)
     try rings.first_new.fill(topology.edges(), -1)
     try rings.split.fill(topology.faces(), -1)
     var splits: usize = 0
     for edge in 0..<topology.edges():
-        if not input.group.get(edge) or rings.start.items[edge] >= 0: continue
+        if not group.get(edge) or rings.start.items[edge] >= 0: continue
         rings.start.items[edge] = topology.edge_points[edge * 2]
-        splits += try walk_ring_edges(&topology, input.group, whole, &rings, (i32)edge)
-    if splits == 0:
-        output.warning = "No quad crossed by the group's edge rings to cut; the input passes through"
-        return
-    try build_cuts(mesh, &topology, &rings, cuts, slide, output)
+        splits += try walk_ring_edges(topology, group, settings.whole, rings, (i32)edge)
+    try place_cuts(mesh, topology, settings, rings)
+    return splits
 
 ## Spread the ring from `seed`: across each quad beside a ring edge to the
 ## opposite edge (in the group, unless the whole ring is cut), carrying the
@@ -90,12 +125,49 @@ func walk_ring_edges(topology: const Topology*, group: Bits, whole: bool, rings:
             try rings.queue.push((i32)other)
     return splits
 
-func build_cuts(mesh: const Mesh*, topology: const Topology*, rings: Rings*, cuts: usize, slide: f64, output: VerbOutput*) -> !:
+## Where each cut sits on each ring edge, from its ring start: evenly
+## spaced and slid by a share of the spacing, or (Even) slid by a distance
+## the same on every edge.
+func place_cuts(mesh: const Mesh*, topology: const Topology*, settings: LoopCut, rings: Rings*) -> !:
+    let cuts = settings.cuts
+    rings.cuts = cuts
+    try rings.fractions.fill(topology.edges() * cuts, 0.0)
+    let step = 1.0 / (f64)(cuts + 1)
+    let reach = settings.slide * step * 0.98
+    var total = 0.0
+    var count = 0.0
+    for edge in 0..<topology.edges():
+        if rings.start.items[edge] < 0: continue
+        total += edge_length(mesh, topology, edge)
+        count += 1.0
+    let mean = total / count if count > 0.0 else 0.0
+    for edge in 0..<topology.edges():
+        if rings.start.items[edge] < 0: continue
+        let length = edge_length(mesh, topology, edge)
+        for k in 1..<cuts + 1:
+            let base = (f64)k * step
+            var t = base + reach
+            if settings.even and length > 0.0:
+                # On the mean edge's scale: the rail spans `span`, the slide
+                # moves `slid`. Even moves every cut by `slid`; Flip keeps it
+                # `span - slid` short of its rail's end.
+                let side = -1.0 if settings.slide < 0.0 else 1.0
+                let rail = step * 0.98
+                let span = rail * mean
+                let slid = math.abs(reach) * mean
+                let distance = rail * length - (span - slid) if settings.flip else slid
+                t = base + side * math.max(0.0, math.min(rail, distance / length))
+            rings.fractions.items[edge * cuts + k - 1] = t
+
+func edge_length(mesh: const Mesh*, topology: const Topology*, edge: usize) -> f64:
+    return point_of(mesh, topology.edge_points[edge * 2 + 1]).subtract(point_of(mesh, topology.edge_points[edge * 2])).length()
+
+func build_cuts(mesh: const Mesh*, topology: const Topology*, rings: Rings*, settings: LoopCut, output: VerbOutput*) -> !:
+    let cuts = settings.cuts
     var builder = &output.builder
     try builder.begin(mesh)
     try builder.copy_points(mesh)
     output.built = true
-    let step = 1.0 / (f64)(cuts + 1)
     for edge in 0..<topology.edges():
         let start = rings.start.items[edge]
         if start < 0: continue
@@ -105,27 +177,33 @@ func build_cuts(mesh: const Mesh*, topology: const Topology*, rings: Rings*, cut
         let head = builder.position(start)
         let tail = builder.position(end)
         for k in 1..<cuts + 1:
-            let t = (f64)k * step + slide * step * 0.98
+            let t = rings.fractions.items[edge * cuts + k - 1]
             let parents: i32[2] = [start, end]
             let weights: f32[2] = [(f32)(1.0 - t), (f32)t]
             _ = try builder.mixed_point(head.add(tail.subtract(head).multiply_scalar(t)), parents[..<2], weights[..<2])
     let faces = topology.faces()
     var run: usize = 0
     for face in 0..<faces:
-        var touched = false
+        var touched: usize = 0
+        var ring_edge_corner: usize = 0
         for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
-            if rings.start.items[(usize)topology.corner_edges[corner]] >= 0: touched = true
-        if not touched: continue
+            if rings.start.items[(usize)topology.corner_edges[corner]] >= 0:
+                touched += 1
+                ring_edge_corner = corner
+        if touched == 0: continue
         try builder.copy_faces(mesh, run, face)
         run = face + 1
         let entered = rings.split.items[face]
-        if entered < 0:
-            try builder.face((i32)face)
-            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
-                try corner_and_cuts(topology, rings, builder, corner, cuts, slide)
-            try builder.end_face()
+        if entered >= 0:
+            try split_quad(topology, rings, builder, (usize)entered, cuts)
             continue
-        try split_quad(topology, rings, builder, (usize)entered, cuts, slide)
+        if touched == 1 and topology.offsets[face + 1] - topology.offsets[face] == 3:
+            try fan_triangle(topology, rings, builder, ring_edge_corner, cuts)
+            continue
+        try builder.face((i32)face)
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            try corner_and_cuts(topology, rings, builder, corner, cuts)
+        try builder.end_face()
     try builder.copy_faces(mesh, run, faces)
 
 ## New point `k` (1..cuts, from the corner's point) on corner `corner`'s edge.
@@ -136,24 +214,23 @@ func cut_point(topology: const Topology*, rings: const Rings*, corner: usize, k:
 
 ## The fraction of the way from corner `corner`'s point to the next that its
 ## edge's new point `k` (counted from the corner) lies.
-func cut_fraction(topology: const Topology*, rings: const Rings*, corner: usize, k: usize, cuts: usize, slide: f64) -> f64:
+func cut_fraction(topology: const Topology*, rings: const Rings*, corner: usize, k: usize, cuts: usize) -> f64:
     let edge = (usize)topology.corner_edges[corner]
-    let step = 1.0 / (f64)(cuts + 1)
     let forward = rings.start.items[edge] == topology.corners[corner]
     let index = k if forward else cuts + 1 - k
-    let t = (f64)index * step + slide * step * 0.98
+    let t = rings.fractions.items[edge * cuts + index - 1]
     return t if forward else 1.0 - t
 
 ## Corner `corner` of its face, then the new points on its edge (when it is
 ## on a ring) in the face's order, their values blended along the edge.
-func corner_and_cuts(topology: const Topology*, rings: const Rings*, builder: TopologyBuilder*, corner: usize, cuts: usize, slide: f64) -> !:
+func corner_and_cuts(topology: const Topology*, rings: const Rings*, builder: TopologyBuilder*, corner: usize, cuts: usize) -> !:
     try builder.corner(topology.corners[corner], (i32)corner)
     if rings.start.items[(usize)topology.corner_edges[corner]] < 0: return
     for k in 1..<cuts + 1:
-        try edge_corner(topology, rings, builder, corner, k, cuts, slide)
+        try edge_corner(topology, rings, builder, corner, k, cuts)
 
-func edge_corner(topology: const Topology*, rings: const Rings*, builder: TopologyBuilder*, corner: usize, k: usize, cuts: usize, slide: f64) -> !:
-    let t = (f32)cut_fraction(topology, rings, corner, k, cuts, slide)
+func edge_corner(topology: const Topology*, rings: const Rings*, builder: TopologyBuilder*, corner: usize, k: usize, cuts: usize) -> !:
+    let t = (f32)cut_fraction(topology, rings, corner, k, cuts)
     let parents: i32[2] = [(i32)corner, (i32)topology.next(corner)]
     let weights: f32[2] = [1.0 - t, t]
     try builder.mixed_corner(cut_point(topology, rings, corner, k, cuts), parents[..<2], weights[..<2])
@@ -161,7 +238,7 @@ func edge_corner(topology: const Topology*, rings: const Rings*, builder: Topolo
 ## A quad crossed at corner `c0`'s edge and the opposite one: `cuts + 1`
 ## quads between the cut lines, the side edges keeping any points of
 ## another ring. Each cut line is selected.
-func split_quad(topology: const Topology*, rings: const Rings*, builder: TopologyBuilder*, c0: usize, cuts: usize, slide: f64) -> !:
+func split_quad(topology: const Topology*, rings: const Rings*, builder: TopologyBuilder*, c0: usize, cuts: usize) -> !:
     let c1 = topology.next(c0)
     let c2 = topology.next(c1)
     let c3 = topology.next(c2)
@@ -170,12 +247,49 @@ func split_quad(topology: const Topology*, rings: const Rings*, builder: Topolog
         try builder.face(face)
         # A_j, A_{j+1} along c0→c1; B_{j+1}, B_j back along c3→c2.
         if j == 0: try builder.corner(topology.corners[c0], (i32)c0)
-        else: try edge_corner(topology, rings, builder, c0, j, cuts, slide)
-        if j == cuts: try corner_and_cuts(topology, rings, builder, c1, cuts, slide)
-        else: try edge_corner(topology, rings, builder, c0, j + 1, cuts, slide)
+        else: try edge_corner(topology, rings, builder, c0, j, cuts)
+        if j == cuts: try corner_and_cuts(topology, rings, builder, c1, cuts)
+        else: try edge_corner(topology, rings, builder, c0, j + 1, cuts)
         if j == cuts: try builder.corner(topology.corners[c2], (i32)c2)
-        else: try edge_corner(topology, rings, builder, c2, cuts - j, cuts, slide)
-        if j == 0: try corner_and_cuts(topology, rings, builder, c3, cuts, slide)
-        else: try edge_corner(topology, rings, builder, c2, cuts + 1 - j, cuts, slide)
+        else: try edge_corner(topology, rings, builder, c2, cuts - j, cuts)
+        if j == 0: try corner_and_cuts(topology, rings, builder, c3, cuts)
+        else: try edge_corner(topology, rings, builder, c2, cuts + 1 - j, cuts)
         try builder.end_face()
         if j > 0: try builder.select_edge(cut_point(topology, rings, c0, j, cuts), cut_point(topology, rings, c2, cuts + 1 - j, cuts))
+
+## A triangle with one ring edge (corner `c0`'s): a fan from its far corner
+## to the new points, the loops running on to that corner (selected).
+func fan_triangle(topology: const Topology*, rings: const Rings*, builder: TopologyBuilder*, c0: usize, cuts: usize) -> !:
+    let c1 = topology.next(c0)
+    let c2 = topology.next(c1)
+    let face = (i32)topology.corner_faces[c0]
+    for j in 0..<cuts + 1:
+        try builder.face(face)
+        if j == 0: try builder.corner(topology.corners[c0], (i32)c0)
+        else: try edge_corner(topology, rings, builder, c0, j, cuts)
+        if j == cuts: try builder.corner(topology.corners[c1], (i32)c1)
+        else: try edge_corner(topology, rings, builder, c0, j + 1, cuts)
+        try builder.corner(topology.corners[c2], (i32)c2)
+        try builder.end_face()
+        if j > 0: try builder.select_edge(cut_point(topology, rings, c0, j, cuts), topology.corners[c2])
+
+## A slide drag's rails: each ring edge's first cut, from where it sits
+## toward either end of its slide (the slide at -1 and at +1).
+func loop_cut_rails(input: const VerbInput*, rails: Rails*) -> !:
+    let settings = try loop_cut_settings(input)
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var rings = Rings()
+    defer rings.close()
+    _ = try find_rings(mesh, &topology, input.group, LoopCut(settings.cuts, 0.0, settings.whole, false, false), &rings)
+    let step = 1.0 / (f64)(settings.cuts + 1)
+    for edge in 0..<topology.edges():
+        let start = rings.start.items[edge]
+        if start < 0: continue
+        let a = topology.edge_points[edge * 2]
+        let head = point_of(mesh, start)
+        let tail = point_of(mesh, topology.edge_points[edge * 2 + 1] if a == start else a)
+        let t = rings.fractions.items[edge * settings.cuts]
+        let at = head.add(tail.subtract(head).multiply_scalar(t))
+        try rails.push((i64)edge, at, head.add(tail.subtract(head).multiply_scalar(t + step * 0.98)), 1.0)
+        try rails.push((i64)edge, at, head.add(tail.subtract(head).multiply_scalar(t - step * 0.98)), -1.0)

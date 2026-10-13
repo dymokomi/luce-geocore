@@ -32,6 +32,9 @@ from core.verb_specs import ParmKind, ParmSpec, PickSpec, Parms, filled_parms
 ## A verb with no pick declared takes one, at every level.
 let no_picks: PickSpec[1] = [PickSpec("")]
 
+## A verb that takes no other domain as it is.
+let no_domains: Domain[1] = [Domain.detail]
+
 ## The picks many tools share: faces, edges, whole pieces or their faces,
 ## and points, edges or faces.
 let pick_faces: PickSpec[1] = [PickSpec("Faces", "faces")]
@@ -122,9 +125,9 @@ pub struct Verb:
     ## Groups of other domains convert with "any" related element (Blast:
     ## a point deletes every face using it) instead of the default rules.
     pub let loose: bool = false
-    ## A second domain the kernel takes as it is (PolyExtrude: edges);
-    ## detail when none.
-    pub let also: Domain = Domain.detail
+    ## Other domains the kernel takes as they are (PolyExtrude: edges and
+    ## points); none for a verb that converts every group to its domain.
+    pub let also: const Domain[] = no_domains[..<0]
     ## Groups of other domains convert with "all" related elements (Dissolve:
     ## a face group dissolves only the edges between its faces).
     pub let strict: bool = false
@@ -149,16 +152,41 @@ pub struct Verb:
     pub let icon: str = ""
     ## What it works on; none declared is one pick at every level.
     pub let picks: const PickSpec[] = no_picks[..<0]
-    ## The parameter a drag in the viewport sets after it runs (-1: none).
+    ## The parameter a drag in the viewport sets after it runs (-1: none),
+    ## and how the pointer sets it (verbs/drag.lucb): "length" a world
+    ## distance hauled away from the selection's center, "normal" along the
+    ## selection's average normal, "amount" a share of the parameter's
+    ## range, "angle" turned about the center, "slide" along the rails
+    ## `rails` gives.
     pub let drag: i64 = -1
+    pub let drag_mode: str = "length"
+    ## Whether the value follows the pointer as soon as the tool runs, no
+    ## button held (Blender's Extrude and Edge Slide); else a drag sets it.
+    pub let follows: bool = false
+    ## The count parameter the wheel steps while the drag lasts (-1: none).
+    pub let wheel: i64 = -1
+    ## The vector parameter X, Y and Z set while the drag lasts (an axis
+    ## lock), and the menu parameter set to its last choice with it (-1:
+    ## none).
+    pub let axis: i64 = -1
+    pub let axis_choice: i64 = -1
+    ## The rails a "slide" drag runs along, from the input and parameters.
+    pub let rails: (func(const VerbInput*, Rails*) -> unit!)? = none
     ## Viewport input it takes besides the selection: "" none, "stroke"
-    ## (the knife), "place" (PolyDraw's clicked corners).
+    ## (the knife), "place" (PolyDraw's clicked corners), "hover" (Loop
+    ## Cut's ring under the pointer, placed by a click).
     pub let gesture: str = ""
     ## Whether, with nothing selected, it runs on everything.
     pub let whole: bool = false
     ## The select rule it runs instead of `cook` (selecting/registry.lucb's
     ## index; -1: none).
     pub let rule: i64 = -1
+
+    ## Whether the kernel takes groups on `domain` as they are (`also`).
+    pub func takes(domain: Domain) -> bool:
+        for other in self.also:
+            if other == domain: return true
+        return false
 
 ## A run's product: the output mesh, its selection and the warning.
 pub struct VerbRun:
@@ -179,45 +207,28 @@ pub struct VerbRun:
 ## selection is the group carried through the verb (a new element is
 ## selected when all its parents were) instead of what the verb made.
 pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false) -> VerbRun!:
-    let expression = group if not is_blank(group) else "*"
-    let named = try GroupType.of(group_type)
-    var domain = named.domain(verb.domain)
-    if named == GroupType.guess: domain = try guess_domain(mesh, expression, verb.domain)
-    let target = domain if verb.native or (domain == verb.also and verb.also != Domain.detail) else verb.domain
-    if not verb.converts and domain != target: error(errors.invalid, "this operation works on another component type")
-    if symmetry < 0 or symmetry > 3: error(errors.invalid, "symmetry is 0 (none), 1 (X), 2 (Y) or 3 (Z)")
-    var result = try group_bits(mesh, expression, domain)
-    defer result.bits.release()
-    var chosen = try BitsBuilder.copy_of(Bits(result.bits.view(), try mesh.domain_size(domain)))
-    defer chosen.close()
-    if symmetry > 0:
-        var mirrored = try symmetric(mesh, chosen.view(), domain, symmetry)
-        chosen.close()
-        chosen = mirrored
+    var resolved = try resolve_group(verb, mesh, group, group_type, symmetry)
+    defer resolved.close()
+    let domain = resolved.domain
+    let target = resolved.target
     # The group rides through the verb as `.carried` when it is kept.
     var carrier: interop.Reference[Mesh]? = none
     defer:
         if let owner = carrier: owner.release()
     var source = mesh
     if keep:
-        let owner = try with_group_bits(mesh, ".carried", domain, chosen.view())
+        let owner = try with_group_bits(mesh, ".carried", domain, resolved.chosen.view())
         carrier = owner
         source = owner.value()
-    var bits = try BitsBuilder.copy_of(chosen.view())
-    defer bits.close()
-    if domain != target:
-        let topology = try Topology.of(mesh)
-        var moved = try converted(&topology, bits.view(), domain, target, (strict_conversion(domain, target) or verb.strict) and not verb.loose)
-        bits.close()
-        bits = moved
+    let bits = resolved.bits.view()
     var values = try filled_parms(verb.parms, numbers, verb.trailing)
     defer values.close()
     var output = VerbOutput()
     defer output.close()
-    let input = VerbInput(source, bits.view(), Parms(values.view()), symmetry, target)
+    let input = VerbInput(source, bits, Parms(values.view()), symmetry, target)
     if verb.rule >= 0:
         let rule = rule_at((usize)verb.rule)
-        let made = try run_rule(&rule, source, bits.view(), target, values.view())
+        let made = try run_rule(&rule, source, bits, target, values.view())
         output.selection.close()
         output.selection = made.bits
         output.selection_domain = made.domain
@@ -255,7 +266,48 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
         mesh_dispose(product)
         selection.release()
         error(failure.code, failure.message)
-    return VerbRun(product, selection, count, selection_domain, output.warning, result.report.misses)
+    return VerbRun(product, selection, count, selection_domain, output.warning, resolved.misses)
+
+## A group as a verb reads it: `chosen` on the domain it names (made
+## symmetric), and `bits` on the domain the kernel works on.
+struct Resolved:
+    var chosen: BitsBuilder
+    var domain: Domain
+    var bits: BitsBuilder
+    var target: Domain
+    var misses: usize
+
+    func close():
+        self.chosen.close()
+        self.bits.close()
+
+## Verb `verb`'s group on `mesh`: the expression (empty is every element)
+## on `group_type`'s domain, made symmetric across `symmetry` (0 none,
+## 1 X, 2 Y, 3 Z), converted to the domain the kernel works on.
+func resolve_group(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, symmetry: i64) -> Resolved!:
+    let expression = group if not is_blank(group) else "*"
+    let named = try GroupType.of(group_type)
+    var domain = named.domain(verb.domain)
+    if named == GroupType.guess: domain = try guess_domain(mesh, expression, verb.domain)
+    let target = domain if verb.native or verb.takes(domain) else verb.domain
+    if not verb.converts and domain != target: error(errors.invalid, "this operation works on another component type")
+    if symmetry < 0 or symmetry > 3: error(errors.invalid, "symmetry is 0 (none), 1 (X), 2 (Y) or 3 (Z)")
+    var result = try group_bits(mesh, expression, domain)
+    defer result.bits.release()
+    var chosen = try BitsBuilder.copy_of(Bits(result.bits.view(), try mesh.domain_size(domain)))
+    errdefer chosen.close()
+    if symmetry > 0:
+        var mirrored = try symmetric(mesh, chosen.view(), domain, symmetry)
+        chosen.close()
+        chosen = mirrored
+    var bits = try BitsBuilder.copy_of(chosen.view())
+    errdefer bits.close()
+    if domain != target:
+        let topology = try Topology.of(mesh)
+        var moved = try converted(&topology, bits.view(), domain, target, (strict_conversion(domain, target) or verb.strict) and not verb.loose)
+        bits.close()
+        bits = moved
+    return Resolved(chosen, domain, bits, target, result.report.misses)
 
 ## The kernel's output as a mesh: moved positions share everything else, a
 ## built topology carries every attribute through its provenance.

@@ -1,0 +1,166 @@
+## What a viewport drag reads to set a tool's value (Verb.drag): where the
+## tool's group sits (the center a haul measures from), the way it faces
+## (the average normal a "normal" drag runs along) and, for a "slide" drag,
+## its rails. luced-3d asks once, on the step's input, when the tool runs;
+## each pointer move then only projects a few points.
+##
+## A rail is one way a moving element can go: from where it is (`origin`)
+## to where the drag's value 1 puts it (`end`), on the side `sign` names
+## (Edge Slide's two sides of a loop are +1 and -1). Rails of one element
+## share its `owner` number, so the drag can take the element nearest the
+## pointer and slide along its rails.
+
+pub struct Rails:
+    var owners: Growing[i64]
+    var origins: Growing[Vector3]
+    var ends: Growing[Vector3]
+    var signs: Growing[f64]
+
+    pub func init():
+        self.owners = Growing[i64]()
+        self.origins = Growing[Vector3]()
+        self.ends = Growing[Vector3]()
+        self.signs = Growing[f64]()
+
+    pub func close():
+        self.owners.close()
+        self.origins.close()
+        self.ends.close()
+        self.signs.close()
+
+    ## Add the rail of element `owner` from `origin` to `end` (world) on side
+    ## `sign` (+1 or -1). Rails of no length are left out.
+    pub func push(owner: i64, origin: Vector3, end: Vector3, sign: f64) -> !:
+        if end.subtract(origin).length() == 0.0: return
+        try self.owners.push(owner)
+        try self.origins.push(origin)
+        try self.ends.push(end)
+        try self.signs.push(sign)
+
+    pub func count() -> usize:
+        return self.owners.count
+
+## A drag's frame: the group's center and average normal (zero when its
+## faces cancel out, as a closed shell's do) and the verb's rails.
+pub struct DragFrame:
+    var center: Vector3
+    var axis: Vector3
+    var rails: Rails
+
+    pub func init():
+        self.center = Vector3()
+        self.axis = Vector3()
+        self.rails = Rails()
+
+    ## The center of the group's points (world).
+    pub func center_point() -> Vector3:
+        return self.center
+
+    ## The group's faces' summed area normals, unit length (zero: none).
+    pub func normal() -> Vector3:
+        return self.axis
+
+    ## How many rails there are.
+    pub func rail_count() -> i64:
+        return (i64)self.rails.count()
+
+    ## Rail `index`'s element, origin, end and side.
+    pub func rail_owner(index: i64) -> i64:
+        return self.rails.owners.items[rail_index(&self.rails, index)]
+
+    pub func rail_origin(index: i64) -> Vector3:
+        return self.rails.origins.items[rail_index(&self.rails, index)]
+
+    pub func rail_end(index: i64) -> Vector3:
+        return self.rails.ends.items[rail_index(&self.rails, index)]
+
+    pub func rail_sign(index: i64) -> f64:
+        return self.rails.signs.items[rail_index(&self.rails, index)]
+
+    ## The first rail of the element whose origin is nearest the view ray
+    ## from `eye` along `direction` (by angle in a perspective view, by
+    ## distance in an orthographic one); -1 without rails.
+    pub func nearest(eye: Vector3, direction: Vector3, orthographic: bool) -> i64:
+        let length = direction.length()
+        if length == 0.0: return -1
+        let way = direction.multiply_scalar(1.0 / length)
+        var best: i64 = -1
+        var closest = 0.0
+        for at in 0..<self.rails.count():
+            let offset = self.rails.origins.items[at].subtract(eye)
+            let along = offset.dot(way)
+            if not orthographic and along <= 0.0: continue
+            let across = offset.subtract(way.multiply_scalar(along)).length()
+            let measure = across if orthographic else across / along
+            if best < 0 or measure < closest:
+                best = (i64)at
+                closest = measure
+        if best < 0: return -1
+        # The element's first rail.
+        let owner = self.rails.owners.items[(usize)best]
+        for at in 0..<self.rails.count():
+            if self.rails.owners.items[at] == owner: return (i64)at
+        return best
+
+    pub func close():
+        self.rails.close()
+
+func rail_index(rails: const Rails*, index: i64) -> usize:
+    if index < 0 or (usize)index >= rails.count(): trap("rail index out of range")
+    return (usize)index
+
+## Verb `verb`'s drag frame on `mesh` for `group` (as run_verb reads it)
+## and its parameters `numbers`.
+func drag_frame(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[], symmetry: i64) -> DragFrame!:
+    var resolved = try resolve_group(verb, mesh, group, group_type, symmetry)
+    defer resolved.close()
+    var frame = DragFrame()
+    errdefer frame.close()
+    let topology = try Topology.of(mesh)
+    let origin = mesh.position_origin()
+    # The center: the mean of the group's points.
+    var points = try converted(&topology, resolved.bits.view(), resolved.target, Domain.point, false)
+    defer points.close()
+    var sum = Vector3()
+    var count = 0.0
+    let positions = mesh.point_span()
+    for point in 0..<topology.points:
+        if not points.view().get(point): continue
+        sum = sum.add(positions[point].vector())
+        count += 1.0
+    frame.center = sum.multiply_scalar(1.0 / count).add(origin) if count > 0.0 else origin
+    # The normal: the faces of the group (or touching it), area weighted.
+    var faces = try converted(&topology, resolved.bits.view(), resolved.target, Domain.face, false)
+    defer faces.close()
+    var normal = Vector3()
+    var area = 0.0
+    for face in 0..<topology.faces():
+        if not faces.view().get(face): continue
+        let vector = face_area_vector(mesh, &topology, face)
+        normal = normal.add(vector)
+        area += vector.length()
+    # Faces that cancel out (a closed shell) face no way.
+    frame.axis = normal.multiply_scalar(1.0 / normal.length()) if normal.length() > area * 0.000001 and normal.length() > 0.0 else Vector3()
+    if let rails = verb.rails:
+        var values = try filled_parms(verb.parms, numbers, verb.trailing)
+        defer values.close()
+        let input = VerbInput(mesh, resolved.bits.view(), Parms(values.view()), symmetry, resolved.target)
+        try rails(&input, &frame.rails)
+    return frame
+
+## Face `face`'s area vector (Newell's sum over a fan): twice its area
+## long, along its normal.
+func face_area_vector(mesh: const Mesh*, topology: const Topology*, face: usize) -> Vector3:
+    let start = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    let positions = mesh.point_span()
+    let first = positions[(usize)topology.corners[start]].vector()
+    var sum = Vector3()
+    for corner in start + 1..<end - 1:
+        let a = positions[(usize)topology.corners[corner]].vector().subtract(first)
+        let b = positions[(usize)topology.corners[corner + 1]].vector().subtract(first)
+        sum = sum.add(a.cross(b))
+    return sum
+
+## DragFrame's interop type.
+pub let drag_frame_type: interop.Type[DragFrame] = interop.Type[DragFrame]("DragFrame", DragFrame.close, closeable = true)

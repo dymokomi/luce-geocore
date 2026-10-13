@@ -13,7 +13,7 @@ let spin_parms: ParmSpec[4] = [
     ParmSpec("Steps", ParmKind.integer, 12.0, 1.0, 512.0, 1, "", "Copies of the profile along the turn.")]
 
 func spin_verb() -> Verb:
-    return Verb("Spin", "Modeling", "Sweep the group's edges around an axis into a surface of revolution", Domain.edge, true, spin_parms, true, cook_spin, section = "Modify", family = "Sweep", icon = "orbit-tool", picks = pick_edges, drag = 2)
+    return Verb("Spin", "Modeling", "Sweep the group's edges around an axis into a surface of revolution", Domain.edge, true, spin_parms, true, cook_spin, section = "Modify", family = "Sweep", icon = "orbit-tool", picks = pick_edges, drag = 2, drag_mode = "angle", wheel = 3)
 
 func cook_spin(input: const VerbInput*, output: VerbOutput*) -> !:
     let axis = (usize)math.max(0.0, math.min(2.0, input.parms.at(0)))

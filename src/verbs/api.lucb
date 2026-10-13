@@ -5,7 +5,7 @@
 ## Every modeling verb's constructor, in menu order: the array's length is
 ## the registry's size, so a verb added here is counted. The select rules
 ## (selecting/registry.lucb) follow them as the Select verbs.
-let makers: (func() -> Verb)[30] = [
+let makers: (func() -> Verb)[32] = [
     transform_verb,
     smooth_verb,
     mountain_verb,
@@ -26,6 +26,7 @@ let makers: (func() -> Verb)[30] = [
     fill_verb,
     dissolve_verb,
     loop_cut_verb,
+    offset_loops_verb,
     bridge_verb,
     merge_verb,
     subdivision_verb,
@@ -33,6 +34,7 @@ let makers: (func() -> Verb)[30] = [
     clip_verb,
     connect_verb,
     edge_slide_verb,
+    vertex_slide_verb,
     mirror_verb,
     spin_verb,
     polydraw_verb]
@@ -135,6 +137,10 @@ pub struct Verbs:
     pub static func parm_bar(index: i64, parm: i64) -> bool:
         return parm_of(index, parm).bar
 
+    ## Whether parameter `parm` sits behind More options.
+    pub static func parm_more(index: i64, parm: i64) -> bool:
+        return parm_of(index, parm).more
+
     # How verb `index` is offered as a tool (Verb's tool fields).
 
     ## Its tool label: `label`, else its name.
@@ -170,7 +176,40 @@ pub struct Verbs:
     pub static func drag(index: i64) -> i64:
         return verb_at(checked(index)).drag
 
-    ## Its viewport gesture: "", "stroke" or "place".
+    ## How the drag sets it: "length", "normal", "amount", "angle" or
+    ## "slide" (Verb.drag_mode).
+    pub static func drag_mode(index: i64) -> str:
+        return verb_at(checked(index)).drag_mode
+
+    ## Whether the value follows the pointer as soon as the tool runs.
+    pub static func follows(index: i64) -> bool:
+        return verb_at(checked(index)).follows
+
+    ## The count parameter the wheel steps during the drag (-1: none).
+    pub static func wheel(index: i64) -> i64:
+        return verb_at(checked(index)).wheel
+
+    ## The vector parameter an axis lock (X, Y, Z) sets, and the menu
+    ## parameter it switches to its last choice (-1: none).
+    pub static func axis(index: i64) -> i64:
+        return verb_at(checked(index)).axis
+
+    pub static func axis_choice(index: i64) -> i64:
+        return verb_at(checked(index)).axis_choice
+
+    ## Verb `name`'s drag frame on `mesh` for `group` (as `run` reads
+    ## it) and its parameters: the group's center and average normal, and
+    ## its rails for a "slide" drag.
+    pub static func frame(name: str, mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0) -> interop.Reference[DragFrame]!:
+        let verb = find_verb(name) else error(errors.invalid, "unknown operation")
+        var made = try drag_frame(&verb, try mesh.get(), group, group_type, numbers, symmetry)
+        let storage = new DragFrame[1] --- in memory.heap catch failure:
+            made.close()
+            error(failure.code, failure.message)
+        storage[0] = made
+        return try interop.Reference[DragFrame].adopt(storage.data, drag_frame_type, memory.heap)
+
+    ## Its viewport gesture: "", "stroke", "place" or "hover".
     pub static func gesture(index: i64) -> str:
         return verb_at(checked(index)).gesture
 

@@ -9,10 +9,13 @@
 let connect_parms: ParmSpec[1] = [
     ParmSpec("Position", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "Where along each of the group's edges the new point sits.")]
 
+## Points connect as they are; other groups become edges.
+let connect_also: Domain[1] = [Domain.point]
+
 let connect_picks: PickSpec[1] = [PickSpec("Points or edges", "points edges", "Select points (or edges) across faces")]
 
 func connect_verb() -> Verb:
-    return Verb("Connect", "Modeling", "Connect the group's points or edge middles across their faces", Domain.edge, true, connect_parms, true, cook_connect, false, Domain.point, section = "Modify", family = "Cut", icon = "path-tool", picks = connect_picks, drag = 0)
+    return Verb("Connect", "Modeling", "Connect the group's points or edge middles across their faces", Domain.edge, true, connect_parms, true, cook_connect, false, connect_also, section = "Modify", family = "Cut", icon = "path-tool", picks = connect_picks, drag = 0, drag_mode = "amount")
 
 func cook_connect(input: const VerbInput*, output: VerbOutput*) -> !:
     let fraction = input.parms.at(0)

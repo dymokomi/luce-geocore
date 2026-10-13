@@ -1,0 +1,224 @@
+## Extrude and Inset against closed forms (POLY-MODELING.md Stage 3): a
+## cube's top extruded, tapered and twisted (volumes, the front's normal and
+## corners), along a vector and a region's average normal, pushed in and out
+## with Manifold (no doubled walls: face counts and volumes), spikes on
+## points, edges along a vector; Inset's areas and its options (Even at a
+## 30° corner, Outset, Relative, Edge rail, Boundary off). The cube spans
+## -1..1 in X and Z and 0..2 in Y (face 2 its top); the grid is 4 by 4 over
+## -1..1 in XZ (point z*5+x, face z*4+x).
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, line_distance, surface, quads
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let cube = try Mesh.cube()
+    defer cube.release()
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    try extrude_checks(cube, grid)
+    try manifold_checks(cube)
+    try spike_checks(grid)
+    try inset_checks(cube, grid)
+    print("PASS Extrude and Inset closed forms: volumes, taper, twist, vector and region normal, Manifold in and out, spikes, edges along a vector, inset areas, Even, Outset, Relative, Edge rail, Boundary")
+
+## Extrude's numbers: distance, inset, divisions, individual, clamp,
+## direction, vector, twist, taper, manifold.
+func extrusion(distance: f64, direction: f64 = 0.0, vector: Vector3 = Vector3(), twist: f64 = 0.0, taper: f64 = 1.0, manifold: bool = false, divisions: f64 = 1.0) -> f64[12]:
+    return [distance, 0.0, divisions, 0.0, 1.0, direction, vector.x, vector.y, vector.z, twist, taper, 1.0 if manifold else 0.0]
+
+func extrude_checks(cube: interop.Reference[Mesh], grid: interop.Reference[Mesh]) -> !:
+    # Straight up: a box 2 by 2 by 0.5 more; the front faces up.
+    let up = extrusion(0.5)
+    let raised = try made(cube, "PolyExtrude", "2", 3, up[..<12], 1)
+    defer raised.release()
+    try counts(raised, 12, 10)
+    try surface(raised, true)
+    near(try volume(raised), 10.0)
+    near_point(try raised.value().face_normal(2), Vector3(0.0, 1.0, 0.0))
+    near((try raised.value().face_center(2)).y, 2.5)
+    # Tapered to half: a frustum on top, h/3 (A1 + A2 + sqrt(A1 A2)).
+    let half = extrusion(0.5, taper = 0.5)
+    let frustum = try made(cube, "PolyExtrude", "2", 3, half[..<12], 1)
+    defer frustum.release()
+    near(try volume(frustum), 8.0 + 0.5 / 3.0 * (4.0 + 1.0 + 2.0))
+    near(try area(frustum, 2), 1.0)
+    # Twisted 45°: the front's corners land on the axes, as far out.
+    let turn = extrusion(0.5, twist = 45.0)
+    let twisted = try made(cube, "PolyExtrude", "2", 3, turn[..<12], 1)
+    defer twisted.release()
+    for at in 0..<(try twisted.value().face_size(2)):
+        let corner = try twisted.value().point(try twisted.value().face_point(2, at))
+        near(corner.y, 2.5)
+        near(math.hypot(corner.x, corner.z), math.sqrt(2.0))
+        near(math.abs(corner.x) * math.abs(corner.z), 0.0)
+    # Two divisions twisted: the middle row turned half as far.
+    let rows = extrusion(1.0, twist = 90.0, divisions = 2.0)
+    let spiral = try made(cube, "PolyExtrude", "2", 3, rows[..<12], 1)
+    defer spiral.release()
+    try counts(spiral, 16, 14)
+    # Along a vector (its length does not count): a slanted box on top, its
+    # volume the base times the height gained.
+    let along = extrusion(0.5, direction = 2.0, vector = Vector3(0.0, 3.0, 3.0))
+    let slid = try made(cube, "PolyExtrude", "2", 3, along[..<12], 1)
+    defer slid.release()
+    let rise = 0.5 / math.sqrt(2.0)
+    near_point(try slid.value().face_center(2), Vector3(0.0, 2.0 + rise, rise))
+    near(try volume(slid), 8.0 + 4.0 * rise)
+    # The top and front as one region: every front moves along their
+    # average normal.
+    let region = try Verbs.run("PolyExtrude", cube, "2 4", 3, up[..<12])
+    defer region.release()
+    let bent = try region.value().mesh()
+    defer bent.release()
+    let way = Vector3(0.0, 1.0, 1.0).multiply_scalar(0.5 / math.sqrt(2.0))
+    near_point(try bent.value().face_center(2), Vector3(0.0, 2.0, 0.0).add(way))
+    near_point(try bent.value().face_center(4), Vector3(0.0, 1.0, 1.0).add(way))
+    try surface(bent, true)
+    # Each face on its own along its own normal.
+    let apart: f64[12] = [0.5, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    let each = try made(cube, "PolyExtrude", "2 4", 3, apart[..<12], 2)
+    defer each.release()
+    near_point(try each.value().face_center(4), Vector3(0.0, 1.0, 1.5))
+    try surface(each, true)
+    # Edges along a vector: the grid's first two edges stand up.
+    let lift = extrusion(0.5, direction = 2.0, vector = Vector3(0.0, 1.0, 0.0))
+    let flap = try made(grid, "PolyExtrude", "p0-1-2", 2, lift[..<12], 2)
+    defer flap.release()
+    try counts(flap, 28, 18)
+    near((try flap.value().point(26)).y, 0.5)
+    near((try flap.value().point(26)).z, -1.0)
+
+func manifold_checks(cube: interop.Reference[Mesh]) -> !:
+    # Pushed into the box: the sides shorten, no walls double them.
+    let inward = extrusion(-0.5, manifold = true)
+    let pocket = try made(cube, "PolyExtrude", "2", 3, inward[..<12], 1)
+    defer pocket.release()
+    try counts(pocket, 8, 6)
+    try surface(pocket, true)
+    near(try volume(pocket), 6.0)
+    # Pulled out: the sides lengthen.
+    let outward = extrusion(0.5, manifold = true)
+    let taller = try made(cube, "PolyExtrude", "2", 3, outward[..<12], 1)
+    defer taller.release()
+    try counts(taller, 8, 6)
+    near(try volume(taller), 10.0)
+    # Without Manifold the walls run back down the sides: four faces more.
+    let plain = extrusion(-0.5)
+    let doubled = try made(cube, "PolyExtrude", "2", 3, plain[..<12], 1)
+    defer doubled.release()
+    try counts(doubled, 12, 10)
+    # Tapered fronts lean out of the sides' planes: walls stay.
+    let leaning = extrusion(-0.5, taper = 0.5, manifold = true)
+    let kept = try made(cube, "PolyExtrude", "2", 3, leaning[..<12], 1)
+    defer kept.release()
+    try counts(kept, 12, 10)
+    # Two divisions merge their rows into the sides as well.
+    let deep = extrusion(-1.0, manifold = true, divisions = 2.0)
+    let shorter = try made(cube, "PolyExtrude", "2", 3, deep[..<12], 1)
+    defer shorter.release()
+    try counts(shorter, 8, 6)
+    near(try volume(shorter), 4.0)
+
+func spike_checks(grid: interop.Reference[Mesh]) -> !:
+    # The grid's middle point opens a ring a quarter along its edges and
+    # rises to a tip.
+    let rise = extrusion(0.5)
+    let spike = try made(grid, "PolyExtrude", "12", 1, rise[..<12], 1)
+    defer spike.release()
+    try counts(spike, 29, 20)
+    try surface(spike, false)
+    var tips = 0
+    var ring = 0
+    for point in 0..<spike.value().point_count():
+        let at = try spike.value().point(point)
+        if math.abs(at.y - 0.5) < 0.000001 and math.hypot(at.x, at.z) < 0.000001: tips += 1
+        if math.abs(at.y) < 0.000001 and math.abs(math.hypot(at.x, at.z) - 0.125) < 0.000001: ring += 1
+    assert(tips == 1 and ring == 4)
+    # Two rows up the cone.
+    let stepped = extrusion(0.5, divisions = 2.0)
+    let rows = try made(grid, "PolyExtrude", "12", 1, stepped[..<12], 1)
+    defer rows.release()
+    try counts(rows, 33, 24)
+
+## Inset's numbers: thickness, depth, individual, clamp, outset, even,
+## relative, edge rail, boundary.
+func inset_numbers(thickness: f64, outset: bool = false, even: bool = true, relative: bool = false, rail: bool = false, boundary: bool = true) -> f64[9]:
+    return [thickness, 0.0, 0.0, 1.0, 1.0 if outset else 0.0, 1.0 if even else 0.0, 1.0 if relative else 0.0, 1.0 if rail else 0.0, 1.0 if boundary else 0.0]
+
+func inset_checks(cube: interop.Reference[Mesh], grid: interop.Reference[Mesh]) -> !:
+    # The top's inner face: 2 - 2t on a side; the volume stays.
+    let quarter = inset_numbers(0.25)
+    let inset = try made(cube, "Inset", "2", 3, quarter[..<9], 1)
+    defer inset.release()
+    try counts(inset, 12, 10)
+    near(try area(inset, 2), 2.25)
+    near(try volume(inset), 8.0)
+    try surface(inset, true)
+    # Even at a 30° corner of a parallelogram: each inner edge 0.1 from its
+    # outer edge; without Even the corner falls short.
+    let skew = math.pi / 6.0
+    let places: Vector3[4] = [Vector3(0.0, 0.0, 0.0), Vector3(2.0, 0.0, 0.0), Vector3(2.0 * math.cos(skew), 0.0, 2.0 * math.sin(skew)), Vector3(2.0 + 2.0 * math.cos(skew), 0.0, 2.0 * math.sin(skew))]
+    let rhomb = try quads(places[..<4], 2, 2)
+    defer rhomb.release()
+    let tenth = inset_numbers(0.1)
+    let even = try made(rhomb, "Inset", "0", 3, tenth[..<9], 1)
+    defer even.release()
+    let outer = [places[0], places[2], places[3], places[1]]
+    for at in 0..<(try even.value().face_size(0)):
+        let corner = try even.value().point(try even.value().face_point(0, at))
+        var nearest = 100.0
+        for side in 0..<4:
+            nearest = math.min(nearest, line_distance(corner, outer[side], outer[(side + 1) % 4]))
+        near(nearest, 0.1)
+    let plain = inset_numbers(0.1, even = false)
+    let uneven = try made(rhomb, "Inset", "0", 3, plain[..<9], 1)
+    defer uneven.release()
+    var shortest = 100.0
+    for at in 0..<(try uneven.value().face_size(0)):
+        let corner = try uneven.value().point(try uneven.value().face_point(0, at))
+        for side in 0..<4:
+            shortest = math.min(shortest, line_distance(corner, outer[side], outer[(side + 1) % 4]))
+    assert(shortest < 0.05)
+    # Outset: the rim goes into the faces around; face 5 keeps its size and
+    # stays selected.
+    let out = inset_numbers(0.1, outset = true)
+    let grown = try made(grid, "Inset", "5", 3, out[..<9], 1)
+    defer grown.release()
+    near(try area(grown, 5), 0.25)
+    near(try volume(grown), 0.0)
+    # Relative: 0.1 of the 0.5 edges is 0.05.
+    let scaled = inset_numbers(0.1, relative = true)
+    let relative = try made(grid, "Inset", "5", 3, scaled[..<9], 1)
+    defer relative.release()
+    near(try area(relative, 5), 0.4 * 0.4)
+    # Edge rail on a sheared strip: the point between the two faces slides
+    # along their shared, slanted edge.
+    let sheared: Vector3[9] = [Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0), Vector3(2.0, 0.0, 0.0),
+                               Vector3(0.5, 0.0, 1.0), Vector3(1.5, 0.0, 1.0), Vector3(2.5, 0.0, 1.0),
+                               Vector3(1.0, 0.0, 2.0), Vector3(2.0, 0.0, 2.0), Vector3(3.0, 0.0, 2.0)]
+    let strip = try quads(sheared[..<9], 3, 3)
+    defer strip.release()
+    let railed = inset_numbers(0.1, rail = true)
+    let rail = try made(strip, "Inset", "0 1", 3, railed[..<9], 2)
+    defer rail.release()
+    var on_rail = 0
+    for point in 0..<rail.value().point_count():
+        let at = try rail.value().point(point)
+        if math.abs(at.z - 0.9) < 0.000001 and line_distance(at, sheared[1], sheared[4]) < 0.000001: on_rail += 1
+    assert(on_rail == 1)
+    # Boundary off along the grid's first row: walls only inside the mesh,
+    # the row's open edges keep their points.
+    let open = inset_numbers(0.1, boundary = false)
+    let band = try made(grid, "Inset", "0-3", 3, open[..<9], 4)
+    defer band.release()
+    try counts(band, 30, 20)
+    for point in 0..<band.value().point_count():
+        let at = try band.value().point(point)
+        assert(at.z <= -1.0 + 0.000001 or at.z >= -0.9 - 0.000001)
+    let closed = inset_numbers(0.1)
+    let walled = try made(grid, "Inset", "0-3", 3, closed[..<9], 4)
+    defer walled.release()
+    try counts(walled, 35, 26)
