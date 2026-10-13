@@ -1,342 +1,204 @@
-## PolyBevel: the group's edges replaced by strips of `segments` faces whose
-## sides lie `offset` into the faces beside them, after Houdini's PolyBevel
-## and Blender's bevel. Around each vertex of a beveled edge, each face's
-## corner there becomes:
+## PolyBevel: edges (or points) cut away and replaced by strips and corner
+## patches, after Blender's bevel (its bmesh bevel tool, read for the
+## algorithm and described here in our own words) and Houdini's PolyBevel.
 ##
-## - between two beveled edges: one point where their offset lines meet;
-## - beside one beveled edge: a point slid along its other edge, as far as
-##   puts it `offset` from the beveled edge (edges slide once, shared by the
-##   faces on both sides);
-## - between two edges that are not beveled: the slides of its edges, with
-##   the vertex between them while some edge at the vertex does not slide
-##   (else the vertex goes).
+## Each beveled edge becomes a strip of `segments` faces whose sides lie
+## Width into the faces beside it; each point at the end of a beveled edge
+## (a bevel vertex) becomes a ring of boundary points, one between each pair
+## of beveled edges around it (more at miters), filled by a patch. The faces
+## around a bevel vertex are rebuilt with the ring's points in place of the
+## vertex. With Affect Vertices, each point is cut off instead: a boundary
+## point slid along each of its edges, the ring filled the same way.
 ##
-## Each strip runs from one face's offset line to the other's along a profile
-## (a quadratic curve whose control point is the vertex for the round 0.5).
-## A hole the strips leave at a vertex (the triangle where three beveled
-## edges meet, the corner beside an edge ending at a vertex that stays)
-## becomes a patch face: the loop of edges among the vertex's new points
-## that no face answers. Faces keep their attributes: new corners mix the
-## face's corners along the edge they slid on, so UV seams survive; strips
-## mix across. The strips and patches are the output selection.
+## The pieces, in the order a run builds them:
+##
+## - bevel_setup.lucb: which edges or points bevel (the group, the Angle or
+##   Weight limit, the `bevel_weight` attributes), refusing non-manifold
+##   ones; each bevel vertex's edges in turn around it (its halves) and how
+##   far each half's strip side sits into the faces (the Width Type).
+## - bevel_meet.lucb: where two offset lines meet, or meet on an edge
+##   between them (Loop slide), and slides along edges.
+## - bevel_boundary.lucb: each vertex's ring of boundary points, its miters,
+##   and the kind of patch that fills it.
+## - bevel_widths.lucb: Clamp overlap (the widest bevel before strips
+##   cross) and the even-width pass along chains of loop-slid points.
+## - bevel_profile.lucb: the profile between two boundary points: a
+##   superellipse sampled by equal chords, or the Custom profile ramp.
+## - bevel_grid.lucb and bevel_corners.lucb: the Grid Fill patch (a coarse
+##   grid refined by Catmull-Clark, Sabin's rule at its center), the cube
+##   corner as an octant of a superellipsoid, pipes, square profiles.
+## - bevel_patches.lucb: the vertex meshes: a polygon, a fan, Cutoff's
+##   faces, two strips welded, the grid's rings.
+## - bevel_emit.lucb: the output: rebuilt faces, strips and patches, each
+##   corner's values interpolated inside the face it lies in.
+## - bevel_marks.lucb: edge values carried to the strip sides, Mark seams
+##   and sharp, Harden normals, Face strength and Material.
 
-let bevel_parms: ParmSpec[4] = [
-    ParmSpec("Offset", ParmKind.number, 0.1, 0.0, 100000.0, 1, "", "Distance from each beveled edge to the sides of its strip, measured in the faces beside it.", 1.0),
+let bevel_parms: ParmSpec[20] = [
+    ParmSpec("Width", ParmKind.number, 0.1, 0.0, 100000.0, 1, "", "How far the bevel reaches; Width Type says how it is measured (Percent reads it as a percentage).", 1.0),
     ParmSpec("Segments", ParmKind.integer, 1.0, 1.0, 64.0, 1, "", "Faces across each strip."),
-    ParmSpec("Profile", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "Shape across the strip: 0.5 round, toward 1 the original corner, 0 flat."),
-    ParmSpec("Clamp overlap", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep each offset within half of the edges it slides along, so strips cannot cross.")]
+    ParmSpec("Shape", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "The profile across a strip: 0.5 round, 0.25 a straight chamfer, 1 the square corner, 0 hollowed in to the opposite corner."),
+    ParmSpec("Width Type", ParmKind.menu, 0.0, 0.0, 4.0, 1, "Offset|Width|Depth|Percent|Absolute",
+             "Offset: from the edge to the strip's sides across the faces. Width: the strip's own width. Depth: from the edge straight in to the strip. Percent: a share of the edges beside. Absolute: along the edges beside."),
+    ParmSpec("Affect", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Auto|Edges|Vertices", "Bevel edges, or cut off points; Auto cuts off points for a group of points and bevels edges otherwise."),
+    ParmSpec("Clamp overlap", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep the width below where strips and patches would cross.", more = true),
+    ParmSpec("Loop slide", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Slide the strip's sides along an unbeveled edge between two beveled ones, keeping edge loops straight.", more = true),
+    ParmSpec("Profile Type", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Superellipse|Custom", "The profile's shape: the superellipse Shape sets, or the Custom profile ramp.", more = true),
+    ParmSpec("Miter Outer", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Sharp|Patch|Arc", "Where three or more beveled edges meet round an outside corner over 180°: a sharp miter, a patch, or an arc.", more = true),
+    ParmSpec("Miter Inner", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Sharp|Arc", "Where beveled edges meet inside a corner under 180°: a sharp miter or an arc, spread apart by Spread.", more = true),
+    ParmSpec("Spread", ParmKind.number, 0.1, 0.0, 100000.0, 1, "", "How far an inner arc miter's points spread along their edges.", 1.0, more = true),
+    ParmSpec("Intersection", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Grid Fill|Cutoff", "How a corner where three or more beveled edges meet fills: a grid of faces following the profiles, or a face cutting off each strip's end.", more = true),
+    ParmSpec("Harden normals", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Give the bevel's corners normals that blend into the faces beside it (writes N on corners).", more = true),
+    ParmSpec("Mark seams", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Carry a beveled edge's seam across the corner patches to the next beveled seam.", more = true),
+    ParmSpec("Mark sharp", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Carry a beveled edge's sharp mark across the corner patches to the next sharp one.", more = true),
+    ParmSpec("Face strength", ParmKind.menu, 0.0, 0.0, 3.0, 1, "None|New|Affected|All",
+             "Write face_strength for weighted normals: 1 weak on corner patches, 2 medium on strips, 3 strong on the faces kept; New the bevel's faces, Affected also the rebuilt faces, All every face.", more = true),
+    ParmSpec("Material", ParmKind.integer, -1.0, -1.0, 1000.0, 1, "", "The new faces' material: -1 keeps the material of the faces beside them, 0 and up the mesh's material of that number (in order of first use).", more = true),
+    ParmSpec("Limit", ParmKind.menu, 0.0, 0.0, 2.0, 1, "None|Angle|Weight", "Bevel only the group's edges whose faces meet at more than Angle, or whose bevel_weight is above 0 (the weight also scales the width).", more = true),
+    ParmSpec("Angle", ParmKind.number, 30.0, 0.0, 180.0, 1, "", "With Limit Angle: the least angle between an edge's face normals, in degrees.", more = true),
+    ParmSpec("Custom profile", ParmKind.ramp, 0.0, 0.0, 1.0, 27, "",
+             "With Profile Type Custom: the profile across a strip, its depth from the straight chamfer (0) to the square corner (1) at each place across (0 to 1).", more = true, initials = default_custom_profile)]
+
+## The Custom profile's default: a round profile (the circle's depth at its
+## middle is sqrt(2) - 1), smooth.
+let default_custom_profile: f64[12] = [1.0, 1.0, 3.0, 0.0, 0.0, 2.0, 0.5, 0.41421356237309515, 2.0, 1.0, 0.0, 2.0]
+
+## Blender's modal keys while Bevel's drag lasts: A, P and S choose what the
+## pointer sets (the width, the shape, the segments), M, V, O, I, Z and N
+## cycle the menus, C, H, U, K and L flip the toggles.
+let bevel_keys: KeySpec[14] = [
+    KeySpec("A", 0, "drag", "length"),
+    KeySpec("P", 2, "drag", "amount"),
+    KeySpec("S", 1, "drag", "amount"),
+    KeySpec("M", 3, "cycle"),
+    KeySpec("V", 4, "cycle"),
+    KeySpec("O", 8, "cycle"),
+    KeySpec("I", 9, "cycle"),
+    KeySpec("Z", 7, "cycle"),
+    KeySpec("N", 11, "cycle"),
+    KeySpec("C", 5, "toggle"),
+    KeySpec("H", 12, "toggle"),
+    KeySpec("U", 13, "toggle"),
+    KeySpec("K", 14, "toggle"),
+    KeySpec("L", 6, "toggle")]
+
+let bevel_picks: PickSpec[1] = [PickSpec("Edges or points", "edges points")]
+
+## Points cut off as they are; other groups become edges.
+let bevel_also: Domain[1] = [Domain.point]
 
 func bevel_verb() -> Verb:
-    return Verb("PolyBevel", "Modeling", "Bevel the group's edges into strips of faces", Domain.edge, true, bevel_parms, true, cook_bevel, label = "Bevel", section = "Modify", family = "Bevel", icon = "bevel", picks = pick_edges, drag = 0, wheel = 1)
+    return Verb("PolyBevel", "Modeling", "Bevel the group's edges into strips with corner patches, or cut off its points", Domain.edge, true, bevel_parms, true, cook_bevel, false, bevel_also,
+                label = "Bevel", section = "Modify", family = "Bevel", icon = "bevel", picks = bevel_picks, drag = 0, wheel = 1, keys = bevel_keys)
 
-## A new corner of a face: its point, and (for a slide) the face's corner at
-## the far end of the edge it slid on, mixed in at `weight`.
-struct NewCorner:
-    let point: i32
-    let other: i32
-    let weight: f32
+## Where the Custom profile's numbers start among the run's numbers.
+let custom_profile_number: usize = 19
 
-## A new point: position, parents (`a`, or `a` and `b` at `t`) and the bevel
-## vertex it belongs to.
-struct NewPoint:
-    let position: Vector3
-    let a: i32
-    let b: i32
-    let t: f32
-    let slot: i32
+## Width types.
+let width_offset: i64 = 0
+let width_width: i64 = 1
+let width_depth: i64 = 2
+let width_percent: i64 = 3
+let width_absolute: i64 = 4
 
-struct Bevel:
-    var topology: Topology
-    var beveled: Bits
-    var offset: f64
-    var segments: usize
-    var profile: f64
-    var clamp: bool
-    var origin: Vector3
-    var points: const Float3[]
-    var exact: const Vector3[]
-    ## Per input point: its bevel vertex slot, or -1.
-    var slot_of: Growing[i32]
-    ## Per slot: the point, its fan (corners in `fans`), whether the fan
-    ## closes, whether the point stays (0 goes, 1 stays, 2 stays at the end
-    ## of its one beveled edge).
-    var vertex_points: Growing[i32]
-    var fan_starts: Growing[u32]
-    var fans: Growing[i32]
-    var cyclic: Growing[u8]
-    var fan_valid: Growing[u8]
-    var retained: Growing[u8]
-    ## Per slot: where its new points and corner entries start (sizes while
-    ## counting; see bevel_corners.lucb).
-    var slot_points: Growing[u32]
-    var slot_entries: Growing[u32]
-    ## Per corner at a bevel vertex: its new corners (a run of `sequence`).
-    var corner_first: Growing[u32]
-    var corner_count: Growing[u8]
-    var sequence: Growing[NewCorner]
-    ## New points; their ids follow the input's points.
-    var created: Growing[NewPoint]
-    ## Profiles (bevel_profiles.lucb): their points, and per edge end (edge * 2,
-    ## + 1 at its end) where its profile starts and whether it runs reversed.
-    var profile_points: Growing[i32]
-    var end_profile: Growing[u32]
-    var end_reversed: Growing[u8]
-    ## Per new point: the first face corner that uses it (corner << 32 |
-    ## its entry in `sequence`), or -1; patches take its corner values.
-    var point_source: Growing[i64]
-    ## Patches (bevel_patches.lucb): each loop's size, their points, and the
-    ## loops each vertex could not close.
-    var patch_sizes: Growing[u32]
-    var patch_points: Growing[i32]
-    var patch_skipped: Growing[u8]
-    var skipped: usize
+## Miter kinds (Miter Inner's Arc is `miter_arc` too).
+let miter_sharp: i64 = 0
+let miter_patch: i64 = 1
+let miter_arc: i64 = 2
 
-    func init(mesh: const Mesh*, topology: Topology, offset: f64, segments: usize, profile: f64, clamp: bool):
-        self.topology = topology
-        self.beveled = Bits()
-        self.offset = offset
-        self.segments = segments
-        self.profile = profile
-        self.clamp = clamp
-        self.origin = mesh.position_origin()
-        self.points = mesh.point_span()
-        self.exact = precise_span(mesh)
-        self.slot_of = Growing[i32]()
-        self.vertex_points = Growing[i32]()
-        self.fan_starts = Growing[u32]()
-        self.fans = Growing[i32]()
-        self.cyclic = Growing[u8]()
-        self.fan_valid = Growing[u8]()
-        self.slot_points = Growing[u32]()
-        self.slot_entries = Growing[u32]()
-        self.retained = Growing[u8]()
-        self.corner_first = Growing[u32]()
-        self.corner_count = Growing[u8]()
-        self.sequence = Growing[NewCorner]()
-        self.created = Growing[NewPoint]()
-        self.profile_points = Growing[i32]()
-        self.end_profile = Growing[u32]()
-        self.end_reversed = Growing[u8]()
-        self.point_source = Growing[i64]()
-        self.patch_sizes = Growing[u32]()
-        self.patch_points = Growing[i32]()
-        self.patch_skipped = Growing[u8]()
-        self.skipped = 0
+## Limits.
+let limit_angle: i64 = 1
+let limit_weight: i64 = 2
 
-    func close():
-        self.slot_of.close()
-        self.vertex_points.close()
-        self.fan_starts.close()
-        self.fans.close()
-        self.cyclic.close()
-        self.fan_valid.close()
-        self.slot_points.close()
-        self.slot_entries.close()
-        self.retained.close()
-        self.corner_first.close()
-        self.corner_count.close()
-        self.sequence.close()
-        self.created.close()
-        self.profile_points.close()
-        self.end_profile.close()
-        self.end_reversed.close()
-        self.point_source.close()
-        self.patch_sizes.close()
-        self.patch_points.close()
-        self.patch_skipped.close()
+## One run's settings, read from its numbers.
+struct BevelSettings:
+    let width: f64
+    let segments: usize
+    let shape: f64
+    ## The superellipse exponent the shape gives (see bevel_profile.lucb).
+    let exponent: f64
+    let width_type: i64
+    let vertices: bool
+    let clamp: bool
+    let loop_slide: bool
+    let custom: bool
+    let miter_outer: i64
+    let miter_inner: i64
+    let spread: f64
+    let cutoff: bool
+    let harden: bool
+    let mark_seam: bool
+    let mark_sharp: bool
+    let strength: i64
+    let material: i64
+    let limit: i64
+    ## Angle in radians.
+    let angle: f64
+    ## The Custom profile's ramp numbers, its size exactly.
+    let curve: const f64[]
+    ## Whether widths are evened along loop-slid chains afterwards.
+    let even_widths: bool
 
-## Where point `point` is (input or new), in world space.
-func point_at(work: const Bevel*, point: i32) -> Vector3:
-    let at = (usize)point
-    if at >= work.topology.points: return work.created.items[at - work.topology.points].position
-    if work.exact.length > 0: return work.exact[at]
-    return work.points[at].vector().add(work.origin)
+func bevel_settings(input: const VerbInput*) -> BevelSettings!:
+    let width = input.parms.at(0)
+    if not math.is_finite(width) or width < 0.0: error(errors.invalid, "Bevel width must be finite and not negative")
+    let segments = (usize)math.max(1.0, math.min(64.0, math.round(input.parms.at(1))))
+    let shape = math.max(0.0, math.min(1.0, input.parms.at(2)))
+    let width_type = (i64)math.max(0.0, math.min(4.0, math.round(input.parms.at(3))))
+    let affect = (i64)math.round(input.parms.at(4))
+    let vertices = affect == 2 or (affect == 0 and input.domain == Domain.point)
+    let custom = input.parms.at(7) == 1.0
+    let cutoff = input.parms.at(11) == 1.0
+    var outer = (i64)math.max(0.0, math.min(2.0, math.round(input.parms.at(8))))
+    var inner = miter_arc if input.parms.at(9) == 1.0 else miter_sharp
+    # A cut-off corner has no use for special miters.
+    if cutoff:
+        outer = miter_sharp
+        inner = miter_sharp
+    let spread = input.parms.at(10)
+    if not math.is_finite(spread) or spread < 0.0: error(errors.invalid, "Bevel spread must be finite and not negative")
+    let angle = input.parms.at(18)
+    if not math.is_finite(angle): error(errors.invalid, "Bevel angle must be finite")
+    let curve = try custom_curve(input.parms.numbers, custom)
+    let limit = (i64)math.max(0.0, math.min(2.0, math.round(input.parms.at(17))))
+    let strength = (i64)math.max(0.0, math.min(3.0, math.round(input.parms.at(15))))
+    return BevelSettings(width, segments, shape, superellipse_exponent(shape), width_type, vertices, input.parms.at(5) != 0.0, input.parms.at(6) != 0.0, custom, outer, inner, spread,
+                         cutoff, input.parms.at(12) != 0.0, input.parms.at(13) != 0.0, input.parms.at(14) != 0.0, strength,
+                         (i64)math.round(input.parms.at(16)), limit, angle * math.pi / 180.0, curve,
+                         not vertices and width_type != width_percent and width_type != width_absolute)
 
-func far_end(work: const Bevel*, edge: i32, point: i32) -> i32:
-    let a = work.topology.edge_points[(usize)edge * 2]
-    return work.topology.edge_points[(usize)edge * 2 + 1] if a == point else a
-
-func first_point(work: const Bevel*, corner: usize) -> i32:
-    return work.sequence.items[(usize)work.corner_first.items[corner]].point
-
-func last_point(work: const Bevel*, corner: usize) -> i32:
-    return work.sequence.items[(usize)work.corner_first.items[corner] + (usize)work.corner_count.items[corner] - 1].point
+## The Custom profile's ramp among `numbers`, cut to its size; checked when
+## it is used.
+func custom_curve(numbers: const f64[], custom: bool) -> const f64[]!:
+    let first = custom_profile_number
+    if numbers.length < first + 3:
+        if custom: error(errors.invalid, "Bevel's custom profile is missing")
+        return numbers[..<0]
+    let points = numbers[first + 2]
+    if points < 1.0 or points > 8.0 or points != math.floor(points) or first + 3 + (usize)points * 3 > numbers.length:
+        if custom: error(errors.invalid, "Bevel's custom profile needs 1 to 8 points")
+        return numbers[..<0]
+    let curve = numbers[first..<first + 3 + (usize)points * 3]
+    if custom:
+        ramp.check(curve) catch failure:
+            error(errors.invalid, "Bevel's custom profile is not a valid ramp")
+        if ramp.channels(curve) != 1: error(errors.invalid, "Bevel's custom profile is a float ramp")
+    return curve
 
 func cook_bevel(input: const VerbInput*, output: VerbOutput*) -> !:
-    let offset = input.parms.at(0)
-    if not math.is_finite(offset) or offset < 0.0: error(errors.invalid, "Bevel offset must be finite and not negative")
-    let segments = (usize)math.max(1.0, math.min(64.0, input.parms.at(1)))
-    let mesh = input.mesh
-    let topology = try Topology.of(mesh)
-    # Interior manifold edges only: two corners in different faces.
-    var beveled = try BitsBuilder.zeros(topology.edges())
-    defer beveled.close()
-    for edge in 0..<topology.edges():
-        if not input.group.get(edge): continue
-        let first = (usize)topology.edge_corner_offsets[edge]
-        if (usize)topology.edge_corner_offsets[edge + 1] - first != 2: continue
-        if topology.corner_faces[(usize)topology.edge_corners[first]] == topology.corner_faces[(usize)topology.edge_corners[first + 1]]: continue
-        beveled.set(edge)
-    if offset == 0.0 or not beveled.view().any():
-        output.warning = "No interior edges in the group to bevel (or a zero offset); the input passes through"
-        return
-    var work = Bevel(mesh, topology, offset, segments, math.max(0.0, math.min(1.0, input.parms.at(2))), input.parms.at(3) != 0.0)
+    let settings = try bevel_settings(input)
+    var work = try Bevel.start(input.mesh, settings)
     defer work.close()
-    try find_fans(&work, mesh, &beveled)
-    if not beveled.view().any():
-        output.warning = "The group's edges meet at points without a single fan of faces; the input passes through"
+    try choose_beveled(&work, input)
+    if work.vertices.count == 0 or settings.width == 0.0:
+        output.warning = "Nothing in the group bevels (or the width is 0); the input passes through"
+        if work.skipped_boundary > 0: output.warning = "The group's edges are all on the boundary (one face) and do not bevel; the input passes through"
         return
-    work.beveled = beveled.view()
-    try place_corners(&work)
-    try build(&work, mesh, output)
-    if work.skipped > 0: output.warning = "Some bevel corners could not be closed or edges beveled and were left as they were"
-
-## Emit the mesh: the input's points and the new ones, the faces (untouched
-## runs copied whole), strips, patches; then drop the vertices that went.
-func build(work: Bevel*, mesh: const Mesh*, output: VerbOutput*) -> !:
-    let topology = &work.topology
-    let n = work.segments
-    # Profiles first, so every new point exists before any is emitted.
-    try place_profiles(work)
-    var builder = &output.builder
-    try builder.begin(mesh)
-    try builder.copy_points(mesh)
-    output.built = true
-    for made in work.created.view():
-        if made.b >= 0:
-            let parents: i32[2] = [made.a, made.b]
-            let weights: f32[2] = [1.0 - made.t, made.t]
-            _ = try builder.mixed_point(made.position, parents[..<2], weights[..<2])
-        else:
-            _ = try builder.point(made.position, made.a)
-    let faces = topology.faces()
-    var run: usize = 0
-    for face in 0..<faces:
-        var touched = false
-        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
-            if work.slot_of.items[(usize)topology.corners[corner]] >= 0: touched = true
-        if not touched: continue
-        try builder.copy_faces(mesh, run, face)
-        run = face + 1
-        try builder.face((i32)face)
-        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
-            if work.slot_of.items[(usize)topology.corners[corner]] < 0:
-                try builder.corner(topology.corners[corner], (i32)corner)
-                continue
-            let start = (usize)work.corner_first.items[corner]
-            for at in start..<start + (usize)work.corner_count.items[corner]:
-                let made = work.sequence.items[at]
-                if made.other < 0:
-                    try builder.corner(made.point, (i32)corner)
-                else:
-                    let parents: i32[2] = [(i32)corner, made.other]
-                    let weights: f32[2] = [1.0 - made.weight, made.weight]
-                    try builder.mixed_corner(made.point, parents[..<2], weights[..<2])
-        try builder.end_face()
-    try builder.copy_faces(mesh, run, faces)
-    let bevel_first = builder.face_count()
-    # Strips: quads between the profiles at the edge's two ends, facing the
-    # way face 1 does.
-    for edge in 0..<topology.edges():
-        if not work.beveled.get(edge): continue
-        let first = (usize)topology.edge_corner_offsets[edge]
-        let c1 = (usize)topology.edge_corners[first]
-        let c2 = (usize)topology.edge_corners[first + 1]
-        let c1_end = topology.next(c1)
-        let c2_end = topology.next(c2)
-        let face = topology.corner_faces[c1]
-        # Each side blends the corner values its faces gave its end points.
-        let start_mix = CornerPair(c1, last_entry(work, c1), c2_end, first_entry(work, c2_end))
-        let end_mix = CornerPair(c1_end, first_entry(work, c1_end), c2, last_entry(work, c2))
-        # A lone edge's end vertex joins a one-segment strip between its
-        # side points (with more segments it is the profile's inner points).
-        let start_vertex = terminal(work, topology.corners[c1])
-        let end_vertex = terminal(work, topology.corners[c2])
-        for step in 0..<n:
-            let t0 = (f32)step / (f32)n
-            let t1 = (f32)(step + 1) / (f32)n
-            var ring = Ring()
-            ring.add(profile_point(work, edge, 1, step), 1, t0)
-            ring.add(profile_point(work, edge, 0, step), 0, t0)
-            if n == 1 and start_vertex >= 0: ring.add(start_vertex, 0, 0.5)
-            ring.add(profile_point(work, edge, 0, step + 1), 0, t1)
-            ring.add(profile_point(work, edge, 1, step + 1), 1, t1)
-            if n == 1 and end_vertex >= 0: ring.add(end_vertex, 1, 0.5)
-            if ring.count > 1 and ring.points[ring.count - 1] == ring.points[0]: ring.count -= 1
-            # Both ends' inner points are the vertices: that segment is the
-            # edge between them, and the segments beside it share it.
-            if ring.count < 3: continue
-            try builder.face(face)
-            for index in 0..<ring.count:
-                let pair = start_mix if ring.sides[index] == 0 else end_mix
-                let vertex = start_vertex if ring.sides[index] == 0 else end_vertex
-                if ring.points[index] == vertex:
-                    let parents: i32[2] = [(i32)pair.first_corner, (i32)pair.second_corner]
-                    let weights: f32[2] = [0.5, 0.5]
-                    try builder.mixed_corner(vertex, parents[..<2], weights[..<2])
-                else:
-                    try strip_corner(work, builder, ring.points[index], pair, ring.t[index])
-            try builder.end_face()
-    try patches(work, builder)
-    output.selection = try BitsBuilder.zeros(builder.face_count())
-    output.selection.set_range(bevel_first, builder.face_count())
-    output.selection_domain = Domain.face
-    try builder.drop_unused_points()
-
-## The vertex `point` when it stays at the end of its one beveled edge,
-## else -1.
-func terminal(work: const Bevel*, point: i32) -> i32:
-    let slot = work.slot_of.items[(usize)point]
-    return point if slot >= 0 and work.retained.items[(usize)slot] == 2 else -1
-
-## The corners of one strip segment, without repeats: each point, its side
-## (0 the edge's start, 1 its end) and where across the strip it is.
-struct Ring:
-    var points: i32[6]
-    var sides: u8[6]
-    var t: f32[6]
-    var count: usize = 0
-
-    func add(point: i32, side: u8, t: f32):
-        if self.count > 0 and self.points[self.count - 1] == point: return
-        self.points[self.count] = point
-        self.sides[self.count] = side
-        self.t[self.count] = t
-        self.count += 1
-
-## One side of a strip: face 1's corner and new-corner entry at its end
-## point, and face 2's.
-struct CornerPair:
-    let first_corner: usize
-    let first_entry: usize
-    let second_corner: usize
-    let second_entry: usize
-
-func first_entry(work: const Bevel*, corner: usize) -> usize:
-    return (usize)work.corner_first.items[corner]
-
-func last_entry(work: const Bevel*, corner: usize) -> usize:
-    return (usize)work.corner_first.items[corner] + (usize)work.corner_count.items[corner] - 1
-
-## A strip corner at `t` across: the two faces' corner values blended.
-func strip_corner(work: const Bevel*, builder: TopologyBuilder*, point: i32, pair: CornerPair, t: f32) -> !:
-    var parents: i32[4]
-    var weights: f32[4]
-    var count: usize = 0
-    for side in 0..<(usize)2:
-        let share = 1.0 - t if side == 0 else t
-        if share <= 0.0: continue
-        let corner = pair.first_corner if side == 0 else pair.second_corner
-        let made = work.sequence.items[pair.first_entry if side == 0 else pair.second_entry]
-        parents[count] = (i32)corner
-        weights[count] = share * (1.0 - made.weight if made.other >= 0 else 1.0)
-        count += 1
-        if made.other >= 0:
-            parents[count] = made.other
-            weights[count] = share * made.weight
-            count += 1
-    try mixed_or_single(builder, point, parents[..<count], weights[..<count])
-
-func mixed_or_single(builder: TopologyBuilder*, point: i32, parents: const i32[], weights: const f32[]) -> !:
-    if parents.length == 1: return try builder.corner(point, parents[0])
-    try builder.mixed_corner(point, parents, weights)
+    try build_spacing(&work)
+    if settings.clamp: try limit_widths(&work)
+    try reserve_rings(&work)
+    try build_rings(&work)
+    if settings.even_widths: try even_widths(&work)
+    if settings.custom: orient_profiles(&work)
+    try build_vertex_meshes(&work)
+    try emit(&work, output)

@@ -1,0 +1,309 @@
+## PolyBevel's finishing passes on the built mesh.
+##
+## - Edge values: each strip's two sides take every edge value of the edge
+##   it replaced (seam, sharp, crease, bevel_weight…), and the pieces of the
+##   unbeveled edges from their boundary points on take their edge's.
+## - Mark seams and sharp: at a bevel vertex the mark of a marked beveled
+##   edge runs on round the patch's boundary, across the beveled edges
+##   without it, to the next marked one, so seams and sharp lines stay
+##   continuous through the corner.
+## - Harden normals: the strips and patches get corner normals (N) that
+##   blend into the faces beside them, as smooth bevels on flat faces want;
+##   the other corners keep the smooth shading normals.
+## - Face strength: face_strength for weighted normals (1 weak on patches, 2
+##   medium on strips, 3 strong on the faces kept or rebuilt).
+## - Material: the new faces take the mesh's Material-th material.
+
+## Mark seams and sharp: the pairs along the patch boundary from each
+## marked beveled edge on to the next.
+func mark_runs(work: const Bevel*, emitted: Emitted*) -> !:
+    if work.settings.vertices: return
+    if work.settings.mark_seam: try mark_run(work, emitted, "seam", 1)
+    if work.settings.mark_sharp: try mark_run(work, emitted, "sharp", 2)
+
+func mark_run(work: const Bevel*, emitted: Emitted*, name: str, what: u8) -> !:
+    let index = work.mesh.attribute_on(name, Domain.edge)
+    if index < 0: return
+    let entry = try work.mesh.attribute_entry(index)
+    let segments = work.settings.segments
+    for slot in 0..<work.vertices.count:
+        let vertex = work.vertices.items[slot]
+        if vertex.kind == mesh_fan or vertex.selected < 2: continue
+        # The first marked half.
+        var start: i32 = -1
+        for at in vertex.first_half..<vertex.first_half + vertex.halves:
+            if entry.number((usize)work.halves.items[at].edge, 0) != 0.0:
+                start = (i32)at
+                break
+        if start < 0: continue
+        var half = start
+        var guard: u32 = 0
+        while guard <= vertex.halves:
+            guard += 1
+            # Count the beveled halves up to the next marked one.
+            var run = 0
+            var following = next_half(work, half)
+            while following != half and entry.number((usize)work.halves.items[(usize)following].edge, 0) == 0.0:
+                if work.halves.items[(usize)following].beveled: run += 1
+                following = next_half(work, following)
+            if following == half: break
+            let right = work.halves.items[(usize)half].right
+            if run > 0 and right >= 0:
+                var i = (usize)work.bounds.items[(usize)right].index
+                for _ in 0..<run:
+                    let count = (usize)vertex.bounds
+                    for k in 0..<segments:
+                        let a = vm_point(work, (i32)slot, i % count, 0, k)
+                        let b = vm_point(work, (i32)slot, i % count, 0, k + 1) if k + 1 < segments else vm_point(work, (i32)slot, (i + 1) % count, 0, 0)
+                        try emitted.pair(a, b, work.halves.items[(usize)half].edge, what)
+                    i += 1
+            half = following
+            if half == start: break
+
+## Build the mesh and run the finishing passes; a mesh with new degenerate
+## faces passes the input through, as other verbs do.
+func finish_bevel(work: Bevel*, output: VerbOutput*, emitted: const Emitted*) -> !:
+    let source = work.mesh
+    let built: Mesh*? = output.builder.finish(source) catch failure:
+        if failure.code != errors.invalid: error(failure.code, failure.message)
+        recover none
+    if built == none:
+        try pass_through(output, source, "The bevel would make degenerate faces; the input passes through")
+        return
+    let made = built else return
+    if degenerate_faces(made) > degenerate_faces(source):
+        mesh_dispose(made)
+        try pass_through(output, source, "The bevel would make degenerate faces; the input passes through")
+        return
+    edge_values(work, made, emitted) catch failure:
+        mesh_dispose(made)
+        error(failure.code, failure.message)
+    if work.settings.harden:
+        harden_normals(made, emitted) catch failure:
+            mesh_dispose(made)
+            error(failure.code, failure.message)
+    if work.settings.strength > 0:
+        face_strength(work, made, emitted) catch failure:
+            mesh_dispose(made)
+            error(failure.code, failure.message)
+    if work.settings.material >= 0:
+        let found = new_face_material(work, made, emitted) catch failure:
+            mesh_dispose(made)
+            error(failure.code, failure.message)
+        if not found: output.warning = "The mesh has no material of that number; the new faces keep their neighbours'"
+    output.mesh = made
+
+func pass_through(output: VerbOutput*, source: const Mesh*, warning: str) -> !:
+    output.warning = warning
+    output.selection.close()
+    output.selection = try BitsBuilder.zeros(0)
+    output.mesh = try mesh_share(source)
+
+## The output edge between points `a` and `b`, or -1.
+func edge_between(topology: const Topology*, a: i32, b: i32) -> i64:
+    if a < 0 or b < 0: return -1
+    for at in (usize)topology.point_edge_offsets[(usize)a]..<(usize)topology.point_edge_offsets[(usize)a + 1]:
+        let edge = (usize)topology.point_edges[at]
+        let p = topology.edge_points[edge * 2]
+        let q = topology.edge_points[edge * 2 + 1]
+        if (p == a and q == b) or (p == b and q == a): return (i64)edge
+    return -1
+
+## Write the recorded edge values: every input edge value onto the pairs
+## that continue that edge, and the seam and sharp marks onto the runs.
+func edge_values(work: const Bevel*, made: Mesh*, emitted: const Emitted*) -> !:
+    if emitted.sources.count == 0: return
+    let topology = try Topology.of(made)
+    let edges = topology.edges()
+    var targets = Growing[i64]()
+    defer targets.close()
+    for at in 0..<emitted.sources.count:
+        try targets.push(edge_between(&topology, emitted.pairs.items[at * 2], emitted.pairs.items[at * 2 + 1]))
+    let source = work.mesh
+    for index in 0..<(usize)source.attribute_count():
+        let entry = try source.attribute_entry((i64)index)
+        if entry.domain != Domain.edge or entry.storage != Storage.array or entry.kind == DataType.text or hidden_name(entry.name()): continue
+        let mark = 1 if entry.name() == "seam" else (2 if entry.name() == "sharp" else 0)
+        let output_index = made.attribute_on(entry.name(), Domain.edge)
+        if output_index < 0: continue
+        let current = try made.attribute_entry(output_index)
+        var identity = try new i32[edges] --- in memory.heap
+        defer free(identity) in memory.heap
+        for at in 0..<edges: identity[at] = (i32)at
+        var updated = try attribute_ops.remapped(current, identity, edges)
+        let bytes = updated.data.span()
+        for at in 0..<emitted.sources.count:
+            let target = targets.items[at]
+            if target < 0: continue
+            let what = emitted.what.items[at]
+            if what != 0 and what != (u8)mark: continue
+            for component in 0..<entry.width:
+                let value = 1.0 if what != 0 else entry.number((usize)emitted.sources.items[at], component)
+                attribute_ops.write_number(bytes, entry.kind, (usize)target * entry.width + component, value)
+        put_attribute(made, updated) catch failure:
+            updated.release()
+            error(failure.code, failure.message)
+
+## Names starting with a dot are the verbs' own (`.carried`, `.selection`).
+func hidden_name(name: str) -> bool:
+    return name.length > 0 and name.bytes[0] == 46
+
+## Harden normals: corner normals for the strips and patches that blend
+## into the faces beside them, the smooth shading normals elsewhere.
+func harden_normals(made: Mesh*, emitted: const Emitted*) -> !:
+    let topology = try Topology.of(made)
+    let corners = topology.corners.length
+    var normals = try new f64[corners * 3] --- in memory.heap
+    defer free(normals) in memory.heap
+    let faces = topology.faces()
+    var face_normals = try new Vector3[faces] --- in memory.heap
+    defer free(face_normals) in memory.heap
+    for face in 0..<faces: face_normals[face] = (try made.face_normal((i64)face))
+    var point_sums = try new Vector3[topology.points] --- in memory.heap
+    defer free(point_sums) in memory.heap
+    for at in 0..<topology.points: point_sums[at] = Vector3()
+    for corner in 0..<corners:
+        let point = (usize)topology.corners[corner]
+        point_sums[point] = point_sums[point].add(face_normals[(usize)topology.corner_faces[corner]])
+    for corner in 0..<corners:
+        let face = (usize)topology.corner_faces[corner]
+        var normal = smooth_corner(&topology, face_normals, corner)
+        let kind = emitted.kinds.items[face]
+        if kind == face_strip or kind == face_patch:
+            if let hard = hardened(&topology, emitted, face_normals, point_sums, corner): normal = hard
+        normals[corner * 3] = normal.x
+        normals[corner * 3 + 1] = normal.y
+        normals[corner * 3 + 2] = normal.z
+    var attribute = try Attribute.from_numbers("N", Domain.corner, 3, normals, false, float32 = true)
+    put_attribute(made, attribute) catch failure:
+        attribute.release()
+        error(failure.code, failure.message)
+
+## The corner at the same point in the face across `corner`'s own edge
+## (the edge leaving the point), or -1: one step round the point.
+func corner_before(topology: const Topology*, corner: usize) -> i64:
+    let across = topology.twin(corner)
+    if across < 0: return -1
+    return (i64)topology.next((usize)across)
+
+## The corner at the same point in the face across the edge arriving at
+## it, or -1: a step the other way round.
+func corner_after(topology: const Topology*, corner: usize) -> i64:
+    return topology.twin(topology.previous(corner))
+
+func kind_at(topology: const Topology*, emitted: const Emitted*, corner: i64) -> i64:
+    if corner < 0: return -1
+    return (i64)emitted.kinds.items[(usize)topology.corner_faces[(usize)corner]]
+
+func is_long(emitted: const Emitted*, corner: i64) -> bool:
+    return corner >= 0 and emitted.long.items[(usize)corner] != 0
+
+## The smooth shading normal of `corner`: the faces around its point within
+## 60° of its face, averaged.
+func smooth_corner(topology: const Topology*, face_normals: const Vector3[], corner: usize) -> Vector3:
+    let own = face_normals[(usize)topology.corner_faces[corner]]
+    var sum = Vector3()
+    var current = (i64)corner
+    # Clockwise then counterclockwise round the point.
+    for direction in 0..<2:
+        current = (i64)corner
+        var steps = 0
+        while steps < 64:
+            current = corner_before(topology, (usize)current) if direction == 0 else corner_after(topology, (usize)current)
+            if current < 0 or current == (i64)corner: break
+            let normal = face_normals[(usize)topology.corner_faces[(usize)current]]
+            if normal.dot(own) >= 0.5: sum = sum.add(normal)
+            steps += 1
+        if current == (i64)corner:
+            # Closed fan: the first pass saw every face.
+            break
+    sum = sum.add(own)
+    return unit_of(sum)
+
+## Blender's harden rules for a strip or patch corner: strips match the
+## face beside their long sides (or blend with the next strip); patch
+## corners take the normal of the rebuilt face beside them, or blend the
+## strips they meet.
+func hardened(topology: const Topology*, emitted: const Emitted*, face_normals: const Vector3[], point_sums: const Vector3[], corner: usize) -> Vector3?:
+    let face = (usize)topology.corner_faces[corner]
+    let own = face_normals[face]
+    let before = corner_before(topology, corner)
+    let after = corner_after(topology, corner)
+    let before_kind = kind_at(topology, emitted, before)
+    let after_kind = kind_at(topology, emitted, after)
+    let kind = emitted.kinds.items[face]
+    if kind == face_strip:
+        if before_kind == (i64)face_strip and is_long(emitted, (i64)corner): return unit_of(own.add(face_normals[(usize)topology.corner_faces[(usize)before]]))
+        if after_kind == (i64)face_strip and is_long(emitted, after): return unit_of(own.add(face_normals[(usize)topology.corner_faces[(usize)after]]))
+        if before_kind == (i64)face_rebuilt and is_long(emitted, (i64)corner): return face_normals[(usize)topology.corner_faces[(usize)before]]
+        if after_kind == (i64)face_rebuilt and is_long(emitted, (i64)topology.previous(corner)): return face_normals[(usize)topology.corner_faces[(usize)after]]
+        return none
+    if before_kind == (i64)face_patch and after_kind == (i64)face_patch: return unit_of(point_sums[(usize)topology.corners[corner]])
+    if before_kind == (i64)face_rebuilt: return face_normals[(usize)topology.corner_faces[(usize)before]]
+    if after_kind == (i64)face_rebuilt: return face_normals[(usize)topology.corner_faces[(usize)after]]
+    let before_before = corner_before(topology, (usize)before) if before >= 0 else -1
+    let after_after = corner_after(topology, (usize)after) if after >= 0 else -1
+    let before_before_kind = kind_at(topology, emitted, before_before)
+    let after_after_kind = kind_at(topology, emitted, after_after)
+    if before_kind == (i64)face_strip and before_before_kind == (i64)face_rebuilt: return face_normals[(usize)topology.corner_faces[(usize)before_before]]
+    if before_kind == (i64)face_strip and after_kind == (i64)face_patch and before_before_kind == (i64)face_strip:
+        return unit_of(face_normals[(usize)topology.corner_faces[(usize)before]].add(face_normals[(usize)topology.corner_faces[(usize)before_before]]))
+    if after_kind == (i64)face_strip and before_kind == (i64)face_patch and after_after_kind == (i64)face_strip:
+        return unit_of(face_normals[(usize)topology.corner_faces[(usize)after]].add(face_normals[(usize)topology.corner_faces[(usize)after_after]]))
+    return none
+
+## face_strength for weighted normals, by Face strength's mode: New marks
+## the bevel's faces, Affected also the rebuilt faces, All every face.
+func face_strength(work: const Bevel*, made: Mesh*, emitted: const Emitted*) -> !:
+    let faces = (usize)made.face_count()
+    let mode = work.settings.strength
+    var values = try new f64[faces] --- in memory.heap
+    defer free(values) in memory.heap
+    let existing = made.attribute_on("face_strength", Domain.face)
+    for face in 0..<faces:
+        var value = 0.0
+        if existing >= 0: value = (try made.attribute_entry(existing)).number(face, 0)
+        let kind = emitted.kinds.items[face]
+        if kind == face_patch: value = 1.0
+        elif kind == face_strip: value = 2.0
+        elif kind == face_rebuilt and mode >= 2: value = 3.0
+        elif kind == face_kept and mode == 3: value = 3.0
+        values[face] = value
+    var attribute = try Attribute.from_numbers("face_strength", Domain.face, 1, values, true)
+    put_attribute(made, attribute) catch failure:
+        attribute.release()
+        error(failure.code, failure.message)
+
+## The new faces take the Material-th distinct material of the mesh (in
+## order of first use); false when it has no such material.
+func new_face_material(work: const Bevel*, made: Mesh*, emitted: const Emitted*) -> bool!:
+    let index = made.attribute_on("material", Domain.face)
+    if index < 0: return false
+    let entry = try made.attribute_entry(index)
+    if entry.storage != Storage.array: return false
+    let faces = (usize)made.face_count()
+    # The table value of the wanted material: the n-th new value met.
+    var seen = Growing[f64]()
+    defer seen.close()
+    var wanted = -1.0
+    for face in 0..<emitted.first_new_face:
+        let value = entry.number(face, 0)
+        var known = false
+        for other in seen.view():
+            if other == value: known = true
+        if known: continue
+        if (i64)seen.count == work.settings.material:
+            wanted = value
+            break
+        try seen.push(value)
+    if wanted < 0.0: return false
+    var identity = try new i32[faces] --- in memory.heap
+    defer free(identity) in memory.heap
+    for at in 0..<faces: identity[at] = (i32)at
+    var updated = try attribute_ops.remapped(entry, identity, faces)
+    let bytes = updated.data.span()
+    for face in emitted.first_new_face..<faces: attribute_ops.write_number(bytes, entry.kind, face, wanted)
+    put_attribute(made, updated) catch failure:
+        updated.release()
+        error(failure.code, failure.message)
+    return true

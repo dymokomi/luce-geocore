@@ -1,0 +1,334 @@
+## The Grid Fill patch over a bevel vertex's ring of n boundary points.
+##
+## A vertex mesh is n sectors, one per boundary point, each a quarter grid
+## over the point's profile: point (i, j, k) is in sector i, ring j inward
+## from the boundary (0 the profile itself, up to segments // 2) and k along
+## the profile (0 to segments). Sectors overlap where they meet: (i, j, k)
+## past the middle of the profile is the next or previous sector's point,
+## so only the canonical points are computed and the rest copied.
+##
+## The patch starts as a coarse grid of 2 segments (each profile's middle,
+## a center point) and is refined by Catmull-Clark subdivision until it has
+## at least the segments: the boundary follows the profiles, interior
+## points take the usual averages, and the center, where n quarter grids
+## meet, takes Sabin's rule for a smooth n-sided point. A grid with more
+## segments than asked is resampled down along its rings. The center starts
+## where the refined grid's center lands on the profile's fullness: the
+## refinement is affine in the starting center, so two refinements fix it.
+
+## A vertex mesh under construction: `count` sectors of `segments`, with
+## the profile of each sector's boundary.
+struct Grid:
+    var count: usize
+    var segments: usize
+    var points: Growing[Vector3]
+    var profiles: Growing[Profile]
+
+    func init(count: usize, segments: usize):
+        self.count = count
+        self.segments = segments
+        self.points = Growing[Vector3]()
+        self.profiles = Growing[Profile]()
+
+    func close():
+        self.points.close()
+        self.profiles.close()
+
+    func index(i: usize, j: usize, k: usize) -> usize:
+        return (i * (self.segments // 2 + 1) + j) * (self.segments + 1) + k
+
+    func at(i: usize, j: usize, k: usize) -> Vector3:
+        return self.points.items[self.index(i, j, k)]
+
+    func put(i: usize, j: usize, k: usize, position: Vector3):
+        self.points.items[self.index(i, j, k)] = position
+
+## A grid of `count` sectors and `segments` with every point at the origin.
+func new_grid(count: usize, segments: usize) -> Grid!:
+    var grid = Grid(count, segments)
+    errdefer grid.close()
+    try grid.points.fill(count * (segments // 2 + 1) * (segments + 1), Vector3())
+    try grid.profiles.fill(count, blank_profile())
+    return grid
+
+## The stored point that (i, j, k) is, for any j and k up to the segments.
+func canonical(count: usize, segments: usize, i: usize, j: usize, k: usize) -> (usize, usize, usize):
+    let half = segments // 2
+    let odd: usize = segments % 2
+    if odd == 0 and j == half and k == half: return (0, j, k)
+    if j + 1 <= half + odd and k <= half: return (i, j, k)
+    if k <= half: return ((i + count - 1) % count, k, segments - j)
+    return ((i + 1) % count, segments - k, j)
+
+## Whether (i, j, k) is computed rather than copied.
+func is_canonical(segments: usize, i: usize, j: usize, k: usize) -> bool:
+    let half = segments // 2
+    if segments % 2 == 1: return j <= half and k <= half
+    return (j < half and k <= half) or (j == half and k == half and i == 0)
+
+func canonical_at(grid: const Grid*, i: usize, j: usize, k: usize) -> Vector3:
+    let (a, b, c) = canonical(grid.count, grid.segments, i, j, k)
+    return grid.at(a, b, c)
+
+func put_canonical(grid: Grid*, i: usize, j: usize, k: usize, position: Vector3):
+    let (a, b, c) = canonical(grid.count, grid.segments, i, j, k)
+    grid.put(a, b, c, position)
+
+## Copy every stored point that is another's from it.
+func copy_equivalents(grid: Grid*):
+    let half = grid.segments // 2
+    for i in 0..<grid.count:
+        for j in 0..<half + 1:
+            for k in 0..<grid.segments + 1:
+                if is_canonical(grid.segments, i, j, k): continue
+                grid.put(i, j, k, canonical_at(grid, i, j, k))
+
+## The center of the grid: its center point (even) or the average of the
+## center polygon's corners (odd).
+func grid_center(grid: const Grid*) -> Vector3:
+    let half = grid.segments // 2
+    if grid.segments % 2 == 0: return grid.at(0, half, half)
+    var sum = Vector3()
+    for i in 0..<grid.count: sum = sum.add(grid.at(i, half, half))
+    return sum.multiply_scalar(1.0 / (f64)grid.count)
+
+func average4(a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> Vector3:
+    return a.add(b).add(c).add(d).multiply_scalar(0.25)
+
+## Sabin's weight of the old center point in the refined center of an
+## n-sided Catmull-Clark patch (1/4 for n = 4): with k = cos(pi / n) and x
+## the real root of x^3 + (4k^2 - 3)x - 2k, (kx + 2k^2 - 1) / (x^2 (kx + 1)).
+func sabin_gamma(n: usize) -> f64:
+    if n < 3: return 0.0
+    let k = math.cos(math.pi / (f64)n)
+    let linear = 4.0 * k * k - 3.0
+    var low = 0.0
+    var high = 2.0
+    for _ in 0..<80:
+        let x = 0.5 * (low + high)
+        if x * x * x + linear * x - 2.0 * k < 0.0: low = x
+        else: high = x
+    let x = 0.5 * (low + high)
+    return (k * x + 2.0 * k * k - 1.0) / (x * x * (k * x + 1.0))
+
+## Fractions of the way along sector i's boundary ring at each k.
+func ring_fractions(grid: const Grid*, i: usize, into: Growing[f64]*) -> !:
+    let segments = grid.segments
+    try into.fill(segments + 1, 0.0)
+    var total = 0.0
+    for k in 0..<segments:
+        total += grid.at(i, 0, k + 1).subtract(grid.at(i, 0, k)).length()
+        into.items[k + 1] = total
+    if total > 0.0:
+        for k in 1..<segments + 1: into.items[k] /= total
+    else:
+        into.items[segments] = 1.0
+
+## The same fractions along `profile` with `segments` points.
+func profile_fractions(work: const Bevel*, profile: const Profile*, segments: usize, into: Growing[f64]*) -> !:
+    try into.fill(segments + 1, 0.0)
+    var total = 0.0
+    var previous = profile.start
+    for k in 0..<segments:
+        let next_point = profile_point(work, profile, k + 1, segments)
+        total += next_point.subtract(previous).length()
+        into.items[k + 1] = total
+        previous = next_point
+    if total > 0.0:
+        for k in 1..<segments + 1: into.items[k] /= total
+    else:
+        into.items[segments] = 1.0
+
+## The interval of `fractions` holding `f`: (index, how far into it).
+func fraction_range(fractions: const f64[], f: f64) -> (usize, f64):
+    let n = fractions.length - 1
+    for i in 0..<n:
+        if f <= fractions[i + 1]:
+            let rest = f - fractions[i]
+            var part = 0.0 if rest == 0.0 else rest / (fractions[i + 1] - fractions[i])
+            if i == n - 1 and part == 1.0: return (n, 0.0)
+            return (i, part)
+    return (n, 0.0)
+
+## `source` resampled to `segments`: each sector's points found in the
+## source's quads by where along their rings the new profile points fall.
+func resample_grid(work: const Bevel*, source: const Grid*, segments: usize) -> Grid!:
+    let count = source.count
+    let source_segments = source.segments
+    let half = segments // 2
+    let odd: usize = segments % 2
+    var grid = try new_grid(count, segments)
+    errdefer grid.close()
+    for i in 0..<count: grid.profiles.items[i] = source.profiles.items[i]
+    var previous_fractions = Growing[f64]()
+    defer previous_fractions.close()
+    var fractions = Growing[f64]()
+    defer fractions.close()
+    var new_fractions = Growing[f64]()
+    defer new_fractions.close()
+    var previous_new = Growing[f64]()
+    defer previous_new.close()
+    try ring_fractions(source, count - 1, &previous_fractions)
+    try profile_fractions(work, &source.profiles.items[count - 1], segments, &previous_new)
+    for i in 0..<count:
+        try ring_fractions(source, i, &fractions)
+        try profile_fractions(work, &source.profiles.items[i], segments, &new_fractions)
+        for j in 0..<half + odd:
+            for k in 0..<half + 1:
+                let (k_in, rest_k) = fraction_range(fractions.view(), new_fractions.items[k])
+                let (k_previous, rest_previous) = fraction_range(previous_fractions.view(), previous_new.items[segments - j])
+                var j_in = source_segments - k_previous
+                var rest_j = -rest_previous
+                if rest_j > -tiny:
+                    rest_j = 0.0
+                else:
+                    j_in -= 1
+                    rest_j = 1.0 + rest_j
+                var position = Vector3()
+                if rest_j < tiny and rest_k < tiny:
+                    position = canonical_at(source, i, j_in, k_in)
+                else:
+                    let j_step: usize = 0 if rest_j < tiny or j_in == source_segments else 1
+                    let k_step: usize = 0 if rest_k < tiny or k_in == source_segments else 1
+                    let q0 = canonical_at(source, i, j_in, k_in)
+                    let q1 = canonical_at(source, i, j_in, k_in + k_step)
+                    let q2 = canonical_at(source, i, j_in + j_step, k_in + k_step)
+                    let q3 = canonical_at(source, i, j_in + j_step, k_in)
+                    position = lerp(lerp(q0, q1, rest_k), lerp(q3, q2, rest_k), rest_j)
+                grid.put(i, j, k, position)
+        try previous_fractions.assign(fractions.view())
+        try previous_new.assign(new_fractions.view())
+    if odd == 0: grid.put(0, half, half, grid_center(source))
+    copy_equivalents(&grid)
+    return grid
+
+## One Catmull-Clark step (segments doubled; `source` even). The boundary
+## takes the profiles (smoothed for superellipses), the interior the usual
+## face, edge and point averages, the center Sabin's rule.
+func subdivide_grid(work: const Bevel*, source: Grid*) -> Grid!:
+    let count = source.count
+    let segments_in = source.segments
+    let half_in = segments_in // 2
+    let segments_out = 2 * segments_in
+    var grid = try new_grid(count, segments_out)
+    errdefer grid.close()
+    for i in 0..<count: grid.profiles.items[i] = source.profiles.items[i]
+    let smooth = not work.settings.custom
+    # The boundary: the old points smoothed, then the new ones from the
+    # profiles, smoothed against them.
+    for i in 0..<count:
+        grid.put(i, 0, 0, source.at(i, 0, 0))
+        for k in 1..<segments_in:
+            var position = source.at(i, 0, k)
+            if smooth:
+                let around = source.at(i, 0, k - 1).add(source.at(i, 0, k + 1)).subtract(position.multiply_scalar(2.0))
+                position = position.subtract(around.multiply_scalar(1.0 / 6.0))
+            put_canonical(&grid, i, 0, 2 * k, position)
+    for i in 0..<count:
+        var k: usize = 1
+        while k < segments_out:
+            var position = profile_point(work, &grid.profiles.items[i], k, segments_out)
+            if smooth:
+                let around = canonical_at(&grid, i, 0, k - 1).add(canonical_at(&grid, i, 0, k + 1)).subtract(position.multiply_scalar(2.0))
+                position = position.subtract(around.multiply_scalar(1.0 / 6.0))
+            put_canonical(&grid, i, 0, k, position)
+            k += 2
+    copy_equivalents(&grid)
+    for i in 0..<count:
+        for k in 0..<segments_in: source.put(i, 0, k, grid.at(i, 0, 2 * k))
+    copy_equivalents(source)
+    # Face points.
+    for i in 0..<count:
+        for j in 0..<half_in:
+            for k in 0..<half_in:
+                grid.put(i, 2 * j + 1, 2 * k + 1, average4(source.at(i, j, k), source.at(i, j, k + 1), source.at(i, j + 1, k), source.at(i, j + 1, k + 1)))
+    # Edge points, across the rings and along them.
+    for i in 0..<count:
+        for j in 0..<half_in:
+            for k in 1..<half_in + 1:
+                grid.put(i, 2 * j + 1, 2 * k, average4(source.at(i, j, k), source.at(i, j + 1, k), canonical_at(&grid, i, 2 * j + 1, 2 * k - 1), canonical_at(&grid, i, 2 * j + 1, 2 * k + 1)))
+    for i in 0..<count:
+        for j in 1..<half_in:
+            for k in 0..<half_in:
+                grid.put(i, 2 * j, 2 * k + 1, average4(source.at(i, j, k), source.at(i, j, k + 1), canonical_at(&grid, i, 2 * j - 1, 2 * k + 1), canonical_at(&grid, i, 2 * j + 1, 2 * k + 1)))
+    # Old interior points: the edge points' average, less a quarter of the
+    # face points', plus a quarter of the old point.
+    for i in 0..<count:
+        for j in 1..<half_in:
+            for k in 1..<half_in + 1:
+                let edges = average4(canonical_at(&grid, i, 2 * j, 2 * k - 1), canonical_at(&grid, i, 2 * j, 2 * k + 1), canonical_at(&grid, i, 2 * j - 1, 2 * k), canonical_at(&grid, i, 2 * j + 1, 2 * k))
+                let faces = average4(canonical_at(&grid, i, 2 * j - 1, 2 * k - 1), canonical_at(&grid, i, 2 * j + 1, 2 * k - 1), canonical_at(&grid, i, 2 * j - 1, 2 * k + 1), canonical_at(&grid, i, 2 * j + 1, 2 * k + 1))
+                grid.put(i, 2 * j, 2 * k, edges.subtract(faces.multiply_scalar(0.25)).add(source.at(i, j, k).multiply_scalar(0.25)))
+    copy_equivalents(&grid)
+    # The center, by Sabin's rule.
+    let gamma = sabin_gamma(count)
+    var edge_sum = Vector3()
+    var face_sum = Vector3()
+    for i in 0..<count:
+        edge_sum = edge_sum.add(grid.at(i, segments_in, segments_in - 1))
+        face_sum = face_sum.add(grid.at(i, segments_in - 1, segments_in - 1)).add(canonical_at(&grid, i, segments_in - 1, segments_in + 1))
+    let n = (f64)count
+    let center = edge_sum.multiply_scalar(1.0 / n).subtract(face_sum.multiply_scalar(gamma / (2.0 * n))).add(source.at(0, half_in, half_in).multiply_scalar(gamma))
+    for i in 0..<count: grid.put(i, segments_in, segments_in, center)
+    # The boundary exactly on the profiles.
+    for i in 0..<count:
+        let following = (i + 1) % count
+        for k in 0..<segments_out + 1:
+            let position = profile_point(work, &grid.profiles.items[i], k, segments_out)
+            grid.put(i, 0, k, position)
+            if k >= segments_in and k < segments_out: grid.put(following, segments_out - k, 0, position)
+    return grid
+
+## Refine `grid` (2 segments) up to the run's segments.
+func refined(work: const Bevel*, grid: Grid) -> Grid!:
+    var current = grid
+    errdefer current.close()
+    let segments = work.settings.segments
+    while true:
+        let next_grid = try subdivide_grid(work, &current)
+        current.close()
+        current = next_grid
+        if current.segments >= segments: break
+    if current.segments != segments:
+        let resampled = try resample_grid(work, &current, segments)
+        current.close()
+        current = resampled
+    return current
+
+## The Grid Fill patch of vertex `slot` (no special shape): a coarse grid
+## with the center at `center`, refined.
+func coarse_refined(work: const Bevel*, slot: i32, center: Vector3) -> Grid!:
+    let vertex = work.vertices.items[(usize)slot]
+    let count = (usize)vertex.bounds
+    var coarse = try new_grid(count, 2)
+    for i in 0..<count:
+        let bound = work.bounds.items[(usize)vertex.first_bound + i]
+        coarse.profiles.items[i] = bound.profile
+        coarse.put(i, 0, 0, bound.position)
+        coarse.put(i, 0, 1, profile_point(work, &bound.profile, 1, 2))
+    coarse.put(0, 1, 1, center)
+    copy_equivalents(&coarse)
+    return try refined(work, coarse)
+
+## The Grid Fill patch of vertex `slot`. The center starts on the line from
+## the boundary's centroid to the vertex, placed so that after refining it
+## lies the profile's fullness of the way out (or in, for a hollow shape).
+func grid_patch(work: const Bevel*, slot: i32) -> Grid!:
+    let vertex = work.vertices.items[(usize)slot]
+    if vertex.bounds == 3 and corner_test(work, slot) != -1 and work.settings.exponent != exponent_hollow: return try corner_grid(work, slot)
+    var ring_center = Vector3()
+    for at in vertex.first_bound..<vertex.first_bound + vertex.bounds: ring_center = ring_center.add(work.bounds.items[at].position)
+    ring_center = ring_center.multiply_scalar(1.0 / (f64)vertex.bounds)
+    let direction = vertex_at(work, slot).subtract(ring_center)
+    if direction.dot(direction) < 0.000000000001: return try coarse_refined(work, slot, ring_center)
+    var near = try coarse_refined(work, slot, ring_center)
+    errdefer near.close()
+    var far = try coarse_refined(work, slot, ring_center.add(direction))
+    defer far.close()
+    let near_center = grid_center(&near)
+    let moved = grid_center(&far).subtract(near_center).dot(direction)
+    if math.abs(moved) < 0.000000000001: return near
+    let target = ring_center.add(direction.multiply_scalar(profile_fullness(work)))
+    let t = target.subtract(near_center).dot(direction) / moved
+    for at in 0..<near.points.count: near.points.items[at] = lerp(near.points.items[at], far.points.items[at], t)
+    return near

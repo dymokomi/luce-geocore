@@ -195,13 +195,18 @@ pub struct VerbCatalog:
     pub static func parm_label(index: i64, parm: i64) -> str:
         return parm_of(index, parm).label
 
-    ## 0 number, 1 integer, 2 toggle, 3 vector, 4 menu.
+    ## 0 number, 1 integer, 2 toggle, 3 vector, 4 menu, 5 ramp.
     pub static func parm_kind(index: i64, parm: i64) -> i64:
         return (i64)(u8)parm_of(index, parm).kind
 
     ## Parameter `parm`'s initial value (each component's, for a vector).
     pub static func parm_initial(index: i64, parm: i64) -> f64:
         return parm_of(index, parm).initial
+
+    ## Parameter `parm`'s initial value for component `component` (a ramp's
+    ## default points).
+    pub static func parm_initial_at(index: i64, parm: i64, component: i64) -> f64:
+        return parm_of(index, parm).initial_at((usize)component)
 
     ## Parameter `parm`'s lower bound.
     pub static func parm_minimum(index: i64, parm: i64) -> f64:

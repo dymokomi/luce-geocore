@@ -1,0 +1,427 @@
+## The profile across a strip, from one boundary point to the next.
+##
+## In its own unit square the profile runs from (0, 1) to (1, 0); (1, 1) is
+## the corner being cut (the middle), (0, 0) the opposite corner. A
+## superellipse x^r + y^r = 1 gives the shapes: r = 2 a quarter circle, 1 a
+## straight chamfer, large r the square corner itself, r near 0 hollowed in
+## to (0, 0). Shape s maps to r = -2 ln 2 / ln s, so 0.5 is the circle and
+## 0.25 the chamfer. The points are spaced by equal chords: exact angles for
+## the circle, legs for the square shapes, otherwise found numerically.
+##
+## The Custom profile is a ramp of depth over position: at t across (0 to
+## 1) the profile lies `depth` of the way from the chamfer (the chord from
+## (0, 1) to (1, 0)) out to the square corner's legs. Its points are its
+## ramp points where there are segments enough (so a step stays a step),
+## the rest spread by length.
+##
+## The unit square maps onto the parallelogram of start, middle and end
+## (start + end - middle the image of (0, 0)); the point then projects along
+## the profile's projection direction onto its plane.
+
+let exponent_square: f64 = 10000.0
+let exponent_circle: f64 = 2.0
+let exponent_line: f64 = 1.0
+let exponent_hollow: f64 = 0.0
+
+## The superellipse exponent of Shape `shape`.
+func superellipse_exponent(shape: f64) -> f64:
+    if shape >= 0.95: return exponent_square
+    if shape <= 0.0: return exponent_hollow
+    let r = -2.0 * math.log(2.0) / math.log(shape)
+    if math.abs(r - exponent_circle) < 0.0001: return exponent_circle
+    if math.abs(r - exponent_line) < 0.0001: return exponent_line
+    if r < 0.0001: return exponent_hollow
+    return r
+
+## The run's profile spacing: the segments' and the power of two's.
+func build_spacing(work: Bevel*) -> !:
+    let segments = work.settings.segments
+    if segments <= 1: return
+    var power: usize = 4
+    while power < segments: power *= 2
+    work.spacing.power = power
+    work.miter_spacing.power = power
+    let exponent = work.settings.exponent
+    if work.settings.custom:
+        try custom_chords(work.settings.curve, segments, &work.spacing.xs, &work.spacing.ys)
+        try custom_chords(work.settings.curve, power, &work.spacing.xs2, &work.spacing.ys2)
+    else:
+        try even_chords(segments, exponent, &work.spacing.xs, &work.spacing.ys)
+        try even_chords(power, exponent, &work.spacing.xs2, &work.spacing.ys2)
+    # Miter arcs keep the superellipse under a Custom profile.
+    try even_chords(segments, exponent, &work.miter_spacing.xs, &work.miter_spacing.ys)
+    try even_chords(power, exponent, &work.miter_spacing.xs2, &work.miter_spacing.ys2)
+
+## `count` equal chords along the superellipse of exponent `r`, from (0, 1)
+## to (1, 0).
+func even_chords(count: usize, r: f64, xs: Growing[f64]*, ys: Growing[f64]*) -> !:
+    try xs.fill(count + 1, 0.0)
+    try ys.fill(count + 1, 0.0)
+    let half = count // 2
+    let odd = count % 2 == 1
+    if r == exponent_line:
+        for i in 0..<count + 1:
+            xs.items[i] = (f64)i / (f64)count
+            ys.items[i] = 1.0 - (f64)i / (f64)count
+        return
+    if r == exponent_circle:
+        for i in 0..<count + 1:
+            let angle = (f64)i * math.pi * 0.5 / (f64)count
+            xs.items[i] = math.sin(angle)
+            ys.items[i] = math.cos(angle)
+        return
+    if r == exponent_square or r == exponent_hollow:
+        # Along the two legs through the corner (or the opposite corner);
+        # an odd count cuts across the corner with one chord.
+        let step = 1.0 / ((f64)half + math.sqrt(0.5)) if odd else 1.0 / (f64)half
+        for i in 0..<half + 1:
+            if r == exponent_square:
+                xs.items[i] = (f64)i * step
+                ys.items[i] = 1.0
+            else:
+                xs.items[i] = 0.0
+                ys.items[i] = 1.0 - (f64)i * step
+            xs.items[count - i] = ys.items[i]
+            ys.items[count - i] = xs.items[i]
+        return
+    # The chord length whose `count` steps from (0, 1) end exactly at (1, 0).
+    var low = 0.0
+    var high = 2.0
+    for _ in 0..<64:
+        let length = 0.5 * (low + high)
+        let (_, x, y) = walk_chords(r, length, count - 1, xs, ys)
+        let left = math.hypot(1.0 - x, y)
+        if left > length: low = length
+        else: high = length
+    let chord = 0.5 * (low + high)
+    _ = walk_chords(r, chord, count - 1, xs, ys)
+    xs.items[count] = 1.0
+    ys.items[count] = 0.0
+    # Exactly symmetric about the diagonal.
+    for i in 0..<half + 1:
+        let x = 0.5 * (xs.items[i] + ys.items[count - i])
+        let y = 0.5 * (ys.items[i] + xs.items[count - i])
+        xs.items[i] = x
+        ys.items[i] = y
+        xs.items[count - i] = y
+        ys.items[count - i] = x
+
+## The superellipse point at angle-like parameter `theta` (0 to pi/2).
+func superellipse_at(r: f64, theta: f64) -> (f64, f64):
+    let s = math.max(0.0, math.sin(theta))
+    let c = math.max(0.0, math.cos(theta))
+    return (math.pow(s, 2.0 / r), math.pow(c, 2.0 / r))
+
+## Take `steps` chords of `length` along the superellipse from (0, 1),
+## writing the points from index 0: (the parameter, x, y) reached. Each
+## step finds the next point by bisection: the distance from a point grows
+## along the curve, which only moves right and down.
+func walk_chords(r: f64, length: f64, steps: usize, xs: Growing[f64]*, ys: Growing[f64]*) -> (f64, f64, f64):
+    var theta = 0.0
+    var x = 0.0
+    var y = 1.0
+    xs.items[0] = x
+    ys.items[0] = y
+    for step in 1..<steps + 1:
+        var low = theta
+        var high = math.pi * 0.5
+        let (end_x, end_y) = superellipse_at(r, high)
+        if math.hypot(end_x - x, end_y - y) <= length:
+            theta = high
+        else:
+            for _ in 0..<60:
+                let middle = 0.5 * (low + high)
+                let (mx, my) = superellipse_at(r, middle)
+                if math.hypot(mx - x, my - y) < length: low = middle
+                else: high = middle
+            theta = 0.5 * (low + high)
+        let (nx, ny) = superellipse_at(r, theta)
+        x = nx
+        y = ny
+        xs.items[step] = x
+        ys.items[step] = y
+    return (theta, x, y)
+
+## The Custom profile's unit-square point at `t` across with `depth`.
+func custom_point(t: f64, depth: f64) -> (f64, f64):
+    let leg_x = 2.0 * t if t <= 0.5 else 1.0
+    let leg_y = 1.0 if t <= 0.5 else 2.0 - 2.0 * t
+    return (t + depth * (leg_x - t), 1.0 - t + depth * (leg_y - 1.0 + t))
+
+## The Custom profile as a fine polyline (its ramp's interpolation sampled
+## between its points, steps as straight jumps), with the indices of its
+## ramp points (both sides of a step) among the polyline's points.
+func custom_polyline(curve: const f64[], xs: Growing[f64]*, ys: Growing[f64]*, keys: Growing[usize]*) -> !:
+    let count = (usize)ramp.count(curve)
+    let fine: usize = 48
+    try push_custom(xs, ys, keys, 0.0, ramp.lookup(curve, 0.0), true)
+    var previous = 0.0
+    for at in 0..<count + 1:
+        let position = curve[3 + at * 3] if at < count else 1.0
+        let value = curve[3 + at * 3 + 1] if at < count else ramp.lookup(curve, 1.0)
+        if position > previous:
+            let span = position - previous
+            for k in 1..<fine:
+                let t = previous + span * (f64)k / (f64)fine
+                try push_custom(xs, ys, keys, t, ramp.lookup(curve, t), false)
+            # The value just before the point, where a step jumps from.
+            try push_custom(xs, ys, keys, position, ramp.lookup(curve, position - span * 0.000000001), at < count)
+        if at < count: try push_custom(xs, ys, keys, position, value, true)
+        previous = math.max(previous, position)
+    try push_custom(xs, ys, keys, 1.0, ramp.lookup(curve, 1.0), true)
+
+func push_custom(xs: Growing[f64]*, ys: Growing[f64]*, keys: Growing[usize]*, t: f64, depth: f64, key: bool) -> !:
+    let (x, y) = custom_point(t, math.max(-1.0, math.min(2.0, depth)))
+    let last = xs.count
+    if last > 0 and math.abs(xs.items[last - 1] - x) < 0.000000001 and math.abs(ys.items[last - 1] - y) < 0.000000001:
+        if key and (keys.count == 0 or keys.items[keys.count - 1] != last - 1): try keys.push(last - 1)
+        return
+    try xs.push(x)
+    try ys.push(y)
+    if key: try keys.push(last)
+
+## `count` points of the Custom profile (from (0, 1) to (1, 0)): its ramp
+## points first, when there are segments for them, the rest spread over the
+## pieces between by their lengths; else all by length.
+func custom_chords(curve: const f64[], count: usize, out_x: Growing[f64]*, out_y: Growing[f64]*) -> !:
+    var xs = Growing[f64]()
+    defer xs.close()
+    var ys = Growing[f64]()
+    defer ys.close()
+    var keys = Growing[usize]()
+    defer keys.close()
+    try custom_polyline(curve, &xs, &ys, &keys)
+    try out_x.fill(count + 1, 0.0)
+    try out_y.fill(count + 1, 0.0)
+    # Cumulative length along the polyline.
+    var lengths = Growing[f64]()
+    defer lengths.close()
+    try lengths.fill(xs.count, 0.0)
+    for at in 1..<xs.count:
+        lengths.items[at] = lengths.items[at - 1] + math.hypot(xs.items[at] - xs.items[at - 1], ys.items[at] - ys.items[at - 1])
+    let pieces = keys.count - 1
+    if pieces < 1 or count < pieces:
+        for k in 0..<count + 1:
+            place_along(&xs, &ys, &lengths, lengths.items[lengths.count - 1] * (f64)k / (f64)count, out_x, out_y, k)
+        return
+    # One segment per piece, then the rest by largest share of length.
+    var shares = Growing[usize]()
+    defer shares.close()
+    try shares.fill(pieces, 1)
+    let total = lengths.items[lengths.count - 1]
+    var given = pieces
+    while given < count:
+        var best: usize = 0
+        var best_room = -1.0
+        for piece in 0..<pieces:
+            let length = lengths.items[keys.items[piece + 1]] - lengths.items[keys.items[piece]]
+            let room = length / (f64)shares.items[piece] if total > 0.0 else 0.0
+            if room > best_room:
+                best_room = room
+                best = piece
+        shares.items[best] += 1
+        given += 1
+    var k: usize = 0
+    for piece in 0..<pieces:
+        let begin_length = lengths.items[keys.items[piece]]
+        let end_length = lengths.items[keys.items[piece + 1]]
+        for step in 0..<shares.items[piece]:
+            place_along(&xs, &ys, &lengths, begin_length + (end_length - begin_length) * (f64)step / (f64)shares.items[piece], out_x, out_y, k)
+            k += 1
+    out_x.items[count] = xs.items[xs.count - 1]
+    out_y.items[count] = ys.items[ys.count - 1]
+
+## The polyline's point at length `distance` along it, written at `index`.
+func place_along(xs: const Growing[f64]*, ys: const Growing[f64]*, lengths: const Growing[f64]*, distance: f64, out_x: Growing[f64]*, out_y: Growing[f64]*, index: usize):
+    var at: usize = 1
+    while at < lengths.count - 1 and lengths.items[at] < distance: at += 1
+    let span = lengths.items[at] - lengths.items[at - 1]
+    let t = 0.0 if span <= 0.0 else math.max(0.0, math.min(1.0, (distance - lengths.items[at - 1]) / span))
+    out_x.items[index] = xs.items[at - 1] + (xs.items[at] - xs.items[at - 1]) * t
+    out_y.items[index] = ys.items[at - 1] + (ys.items[at] - ys.items[at - 1]) * t
+
+## How full the profile is along its diagonal: 0 for the chamfer, 1 the
+## square corner, -1 hollowed to the opposite corner (the Grid Fill's
+## center aims at this fraction of the way out).
+func profile_fullness(work: const Bevel*) -> f64:
+    if work.settings.custom:
+        return ramp.lookup(work.settings.curve, 0.5)
+    let r = work.settings.exponent
+    if r == exponent_hollow: return -1.0
+    if r == exponent_square: return 1.0
+    return 2.0 * math.pow(0.5, 1.0 / r) - 1.0
+
+## Set boundary point `bound`'s profile to the next point: a beveled edge's
+## profile bulges toward the edge (its middle the edge's point nearest the
+## chord), projected along the edge onto the plane of start, middle and
+## end; an arc miter's is a circle about its preset middle; a cut-off
+## point's bulges toward the vertex; anything else is straight.
+func set_profile(work: Bevel*, slot: i32, bound: i32):
+    let item = work.bounds.items[(usize)bound]
+    var profile = item.profile
+    let start = item.position
+    let end = work.bounds.items[(usize)next_bound(work, bound)].position
+    let here = vertex_at(work, slot)
+    profile.start = start
+    profile.end = end
+    var linear = true
+    if item.bevel >= 0:
+        linear = false
+        profile.exponent = work.settings.exponent
+        let half = work.halves.items[(usize)item.bevel]
+        let far = input_point(work, half.other)
+        profile.projection = unit_of(here.subtract(far))
+        let (kind, on_edge, _) = line_meet(here, far, start, end)
+        profile.middle = on_edge if kind != 0 else here
+        var d1 = unit_of(profile.middle.subtract(start))
+        var d2 = unit_of(profile.middle.subtract(end))
+        profile.plane_normal = unit_of(d1.cross(d2))
+        if nearly_parallel(d1, d2):
+            # Start, middle and end in line: the profile moves into the plane
+            # of the beveled edge and its two boundary points, curving about
+            # the vertex (or where the neighbouring offset lines meet).
+            profile.middle = here
+            let before = previous_half(work, item.bevel)
+            let after = next_half(work, item.bevel)
+            let vertex = work.vertices.items[(usize)slot]
+            if work.halves.items[(usize)before].beveled and work.halves.items[(usize)after].beveled and vertex.selected >= 3:
+                let d3 = half_direction(work, before)
+                let d4 = half_direction(work, after)
+                if nearly_parallel(d3, d4):
+                    profile.middle = midpoint(start, end)
+                    linear = true
+                else:
+                    let (meets, meet, _) = line_meet(start, start.add(d3), end, end.add(d4))
+                    if meets != 0:
+                        profile.middle = meet
+                    else:
+                        profile.middle = midpoint(start, end)
+                        linear = true
+            d1 = unit_of(profile.middle.subtract(start))
+            d2 = unit_of(profile.middle.subtract(end))
+            profile.plane_normal = unit_of(d1.cross(d2))
+            if nearly_parallel(d1, d2): linear = true
+            else: profile.projection = profile.plane_normal
+        profile.plane_point = start
+    elif item.arc_start:
+        profile.exponent = exponent_circle
+        profile.plane_point = Vector3()
+        profile.plane_normal = Vector3()
+        profile.projection = Vector3()
+        linear = false
+    elif work.settings.vertices:
+        profile.middle = here
+        profile.exponent = work.settings.exponent
+        profile.plane_point = Vector3()
+        profile.plane_normal = Vector3()
+        profile.projection = Vector3()
+        linear = false
+    if linear:
+        profile.exponent = exponent_line
+        profile.middle = midpoint(start, end)
+        profile.plane_point = Vector3()
+        profile.plane_normal = Vector3()
+        profile.projection = Vector3()
+    work.bounds.items[(usize)bound].profile = profile
+
+## A terminal edge's profile moves into the plane of its two ends and the
+## vertex (the plane of the edges beside it), where that plane is not along
+## the projection.
+func move_profile_plane(work: Bevel*, bound: i32, vertex: Vector3):
+    var profile = work.bounds.items[(usize)bound].profile
+    if profile.projection.length() == 0.0: return
+    let d1 = unit_of(vertex.subtract(profile.start))
+    let d2 = unit_of(vertex.subtract(profile.end))
+    let normal = d1.cross(d2)
+    let normal2 = d1.cross(profile.projection)
+    let normal3 = d2.cross(profile.projection)
+    if normal.length() > tiny_big and normal2.length() > tiny_big and normal3.length() > tiny_big:
+        let n = unit_of(normal)
+        let dot2 = n.dot(unit_of(normal2))
+        let dot3 = n.dot(unit_of(normal3))
+        if math.abs(dot2) < 1.0 - tiny_big and math.abs(dot3) < 1.0 - tiny_big: profile.plane_normal = n
+    profile.special = true
+    work.bounds.items[(usize)bound].profile = profile
+
+## Two beveled edges welded at a vertex: both profiles move to the plane of
+## their outer points and the vertex, where their projections allow.
+func move_weld_planes(work: Bevel*, slot: i32, first: i32, second: i32):
+    var one = work.bounds.items[(usize)first].profile
+    var two = work.bounds.items[(usize)second].profile
+    if one.projection.length() == 0.0 or two.projection.length() == 0.0: return
+    let here = vertex_at(work, slot)
+    let d1 = here.subtract(work.bounds.items[(usize)first].position)
+    let d2 = here.subtract(work.bounds.items[(usize)second].position)
+    let normal = d1.cross(d2)
+    let normal2 = d1.cross(one.projection)
+    let normal3 = d2.cross(two.projection)
+    if normal.length() != 0.0 and (normal2.length() != 0.0 or normal3.length() != 0.0):
+        let n = unit_of(normal)
+        let dot1 = math.abs(n.dot(unit_of(normal2)))
+        let dot2 = math.abs(n.dot(unit_of(normal3)))
+        if math.abs(dot1 - 1.0) > tiny: one.plane_normal = n
+        if math.abs(dot2 - 1.0) > tiny: two.plane_normal = n
+    one.special = true
+    two.special = true
+    work.bounds.items[(usize)first].profile = one
+    work.bounds.items[(usize)second].profile = two
+
+## Set every profile of vertex `slot`'s ring (those a special case did not
+## set already), with which side a Custom profile starts from.
+func set_ring_profiles(work: Bevel*, slot: i32):
+    let vertex = work.vertices.items[(usize)slot]
+    for at in vertex.first_bound..<vertex.first_bound + vertex.bounds:
+        let bound = (i32)at
+        if not work.bounds.items[at].profile.special: set_profile(work, slot, bound)
+        var reversed = false
+        var miter = false
+        if work.settings.custom:
+            miter = work.bounds.items[at].arc_start or work.bounds.items[at].patch_start
+            reversed = not work.bounds.items[at].profile_start and not miter
+        work.bounds.items[at].profile.reversed = reversed
+        work.bounds.items[at].profile.miter = miter
+
+## Where `profile` maps the unit square: (the image of (0, 0), the step for
+## x, the step for y), or none when start, middle and end are degenerate.
+func square_map(profile: const Profile*) -> (Vector3, Vector3, Vector3)?:
+    let from_start = profile.middle.subtract(profile.start)
+    let from_end = profile.middle.subtract(profile.end)
+    if from_start.length() == 0.0 or from_end.length() == 0.0: return none
+    if math.abs(angle_between(from_start, from_end) - math.pi) <= tiny_angle: return none
+    return (profile.start.add(profile.end).subtract(profile.middle), from_start, from_end)
+
+## Point `k` of `count` (the run's segments, or a power of two up to the
+## spacing's) along `profile`.
+func profile_point(work: const Bevel*, profile: const Profile*, k: usize, count: usize) -> Vector3:
+    if work.settings.segments == 1 or count == 0: return profile.start if k == 0 else profile.end
+    if k == 0: return profile.start
+    if k >= count: return profile.end
+    var point = lerp(profile.start, profile.end, (f64)k / (f64)count)
+    let plain_line = not work.settings.custom and profile.exponent == exponent_line
+    if not plain_line:
+        if let map = square_map(profile):
+            let spacing = &work.miter_spacing if profile.miter else &work.spacing
+            var x = 0.0
+            var y = 0.0
+            if count == work.settings.segments:
+                x = spacing.ys.items[count - k] if profile.reversed else spacing.xs.items[k]
+                y = spacing.xs.items[count - k] if profile.reversed else spacing.ys.items[k]
+            else:
+                let step = spacing.power // count
+                let at = k * step
+                x = spacing.ys2.items[spacing.power - at] if profile.reversed else spacing.xs2.items[at]
+                y = spacing.xs2.items[spacing.power - at] if profile.reversed else spacing.ys2.items[at]
+            point = profile_map(profile, map, x, y)
+    if profile.projection.length() > 0.0:
+        if let projected = line_plane(point, point.add(profile.projection), profile.plane_point, profile.plane_normal): point = projected
+    return point
+
+## Unit-square point (x, y) through `map` (exponent circle, line and the
+## rest alike).
+func profile_map(profile: const Profile*, map: (Vector3, Vector3, Vector3), x: f64, y: f64) -> Vector3:
+    return map.0.add(map.1.multiply_scalar(x)).add(map.2.multiply_scalar(y))
+
+## Cutoff: how tall a profile stands (its opposite corner to its middle).
+func profile_height(profile: const Profile*) -> f64:
+    let map = square_map(profile) else return 0.0
+    return profile_map(profile, map, 1.0, 1.0).subtract(map.0).length()

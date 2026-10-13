@@ -1,0 +1,216 @@
+## Which edges or points a PolyBevel run cuts away, and each bevel vertex's
+## halves with their widths.
+##
+## An edge bevels when it is in the group, has exactly two faces and passes
+## the Limit (its faces' normals at least Angle apart, or a bevel_weight
+## above 0). An edge of one face is skipped with a warning; an edge of three
+## or more faces, or a bevel vertex whose faces are not one fan, refuses the
+## run: there is no sensible ring of boundary points around it.
+
+func choose_beveled(work: Bevel*, input: const VerbInput*) -> !:
+    let topology = &work.topology
+    try work.slot_of.fill(topology.points, -1)
+    work.beveled = try BitsBuilder.zeros(topology.edges())
+    if work.settings.vertices: return try choose_points(work, input)
+    for edge in 0..<topology.edges():
+        if not edge_chosen(input, topology, edge): continue
+        let first = (usize)topology.edge_corner_offsets[edge]
+        let uses = (usize)topology.edge_corner_offsets[edge + 1] - first
+        if uses == 1:
+            work.skipped_boundary += 1
+            continue
+        if uses > 2:
+            var buffer: u8[120]
+            error(errors.invalid, strings.format(buffer, f"Bevel needs manifold edges: edge {edge} has {uses} faces") else "Bevel needs manifold edges")
+        if uses == 0: continue
+        let face_a = topology.corner_faces[(usize)topology.edge_corners[first]]
+        let face_b = topology.corner_faces[(usize)topology.edge_corners[first + 1]]
+        if face_a == face_b: continue
+        if work.settings.limit == limit_angle and angle_between(normal_of(work, face_a), normal_of(work, face_b)) < work.settings.angle - 0.0000001: continue
+        if work.settings.limit == limit_weight and edge_weight(work, edge) <= 0.0: continue
+        work.beveled.set(edge)
+    for edge in 0..<topology.edges():
+        if not work.beveled.view().get(edge): continue
+        try add_vertex(work, topology.edge_points[edge * 2])
+        try add_vertex(work, topology.edge_points[edge * 2 + 1])
+
+## Whether the group names edge `edge`: a point group names the edges
+## whose two points it holds.
+func edge_chosen(input: const VerbInput*, topology: const Topology*, edge: usize) -> bool:
+    if input.domain == Domain.point:
+        return input.group.get((usize)topology.edge_points[edge * 2]) and input.group.get((usize)topology.edge_points[edge * 2 + 1])
+    return input.group.get(edge)
+
+## Affect Vertices: the group's points (an edge group's points) that have
+## faces and pass the Limit.
+func choose_points(work: Bevel*, input: const VerbInput*) -> !:
+    let topology = &work.topology
+    for point in 0..<topology.points:
+        let first = (usize)topology.point_edge_offsets[point]
+        let end = (usize)topology.point_edge_offsets[point + 1]
+        if end - first < 2: continue
+        var chosen = false
+        if input.domain == Domain.point:
+            chosen = input.group.get(point)
+        else:
+            for at in first..<end:
+                if input.group.get((usize)topology.point_edges[at]): chosen = true
+        if not chosen: continue
+        if work.settings.limit == limit_weight and point_weight(work, point) <= 0.0: continue
+        if work.settings.limit == limit_angle and not sharp_point(work, point): continue
+        try add_vertex(work, (i32)point)
+
+## Whether some edge at `point` has faces at least Angle apart.
+func sharp_point(work: const Bevel*, point: usize) -> bool:
+    let topology = &work.topology
+    for at in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+        let edge = (usize)topology.point_edges[at]
+        let first = (usize)topology.edge_corner_offsets[edge]
+        if (usize)topology.edge_corner_offsets[edge + 1] - first != 2: continue
+        let face_a = topology.corner_faces[(usize)topology.edge_corners[first]]
+        let face_b = topology.corner_faces[(usize)topology.edge_corners[first + 1]]
+        if angle_between(normal_of(work, face_a), normal_of(work, face_b)) >= work.settings.angle - 0.0000001: return true
+    return false
+
+## Edge `edge`'s bevel_weight with Limit Weight (1 otherwise).
+func edge_weight(work: const Bevel*, edge: usize) -> f64:
+    if work.settings.limit != limit_weight: return 1.0
+    let entry = work.edge_weights else return 0.0
+    return entry.number(edge, 0)
+
+func point_weight(work: const Bevel*, point: usize) -> f64:
+    if work.settings.limit != limit_weight: return 1.0
+    let entry = work.point_weights else return 0.0
+    return entry.number(point, 0)
+
+## Make `point` a bevel vertex (once): its halves counterclockwise from
+## outside, from the boundary edge when its fan is open.
+func add_vertex(work: Bevel*, point: i32) -> !:
+    if work.slot_of.items[(usize)point] >= 0: return
+    let topology = &work.topology
+    let edge_first = (usize)topology.point_edge_offsets[(usize)point]
+    let edge_end = (usize)topology.point_edge_offsets[(usize)point + 1]
+    var start: i64 = -1
+    for at in edge_first..<edge_end:
+        let edge = (usize)topology.point_edges[at]
+        let first = (usize)topology.edge_corner_offsets[edge]
+        let end = (usize)topology.edge_corner_offsets[edge + 1]
+        if end - first > 2:
+            var buffer: u8[120]
+            error(errors.invalid, strings.format(buffer, f"Bevel needs manifold edges: edge {edge} at point {point} has {end - first} faces") else "Bevel needs manifold edges")
+        for corner_at in first..<end:
+            let corner = (usize)topology.edge_corners[corner_at]
+            if start < 0 and topology.corners[corner] == point: start = (i64)corner
+    if start < 0: return
+    let limit = (edge_end - edge_first) * 2 + 2
+    # Clockwise (across the edge each corner leaves along) to an open fan's
+    # first corner, whose leaving edge is on the boundary.
+    var first = (usize)start
+    for _ in 0..<limit:
+        let across = topology.twin(first)
+        if across < 0: break
+        let back = topology.next((usize)across)
+        if topology.corners[back] != point: try not_a_fan(point)
+        if back == (usize)start: break
+        first = back
+    let slot = (i32)work.vertices.count
+    let half_first = work.halves.count
+    var corner = first
+    var closed = false
+    var steps: usize = 0
+    while true:
+        try work.halves.push(new_half(work, slot, topology.corner_edges[corner], point, -1, topology.corner_faces[corner]))
+        steps += 1
+        if steps > limit: try not_a_fan(point)
+        let previous = topology.previous(corner)
+        let across = topology.twin(previous)
+        if across < 0:
+            # Open: the last half is the edge arriving in the last face.
+            try work.halves.push(new_half(work, slot, topology.corner_edges[previous], point, topology.corner_faces[corner], -1))
+            break
+        if topology.corners[(usize)across] != point: try not_a_fan(point)
+        if (usize)across == first:
+            closed = true
+            break
+        corner = (usize)across
+    let count = work.halves.count - half_first
+    if count != edge_end - edge_first: try not_a_fan(point)
+    # Each half's face before is the face after the one before it.
+    for at in 0..<count:
+        let previous_at = half_first + (at + count - 1) % count
+        if at > 0 or closed: work.halves.items[half_first + at].before = work.halves.items[previous_at].after
+    var selected: u32 = 0
+    var normal = Vector3()
+    for at in half_first..<work.halves.count:
+        if work.halves.items[at].beveled: selected += 1
+        normal = normal.add(normal_of(work, work.halves.items[at].after))
+    var width = work.width
+    if work.settings.vertices: width *= point_weight(work, (usize)point)
+    work.slot_of.items[(usize)point] = slot
+    try work.vertices.push(BevelVertex(point, (u32)half_first, (u32)count, selected, closed, width, unit_of(normal), 0, 0, mesh_none, -1, false, -1, true, false))
+    for at in half_first..<work.halves.count: set_offsets(work, (i32)at)
+
+func not_a_fan(point: i32) -> !:
+    var buffer: u8[120]
+    error(errors.invalid, strings.format(buffer, f"Bevel needs one fan of faces around each bevel vertex; point {point} is not manifold") else "Bevel needs one fan of faces around each bevel vertex")
+
+## A half of edge `edge` at `point` (bevel vertex `slot`) between the faces
+## `before` and `after`.
+func new_half(work: const Bevel*, slot: i32, edge: i32, point: i32, before: i32, after: i32) -> Half:
+    let a = work.topology.edge_points[(usize)edge * 2]
+    let other = work.topology.edge_points[(usize)edge * 2 + 1] if a == point else a
+    let beveled = not work.settings.vertices and work.beveled.view().get((usize)edge)
+    return Half(edge, slot, other, before, after, beveled, -1, -1, 0, 0.0, 0.0, 0.0, 0.0, false)
+
+## The angle between the faces either side of `half` (pi when flat), or 0
+## on a boundary.
+func face_angle(work: const Bevel*, half: i32) -> f64:
+    let item = work.halves.items[(usize)half]
+    if item.before < 0 or item.after < 0: return 0.0
+    return math.pi - angle_between(normal_of(work, item.before), normal_of(work, item.after))
+
+## The width a half asks for on each side, by the Width Type: Offset across
+## the faces; Width the strip's own width (Offset / (2 sin(a/2)) for faces
+## an angle a apart); Depth straight in from the edge (Offset / cos(a/2));
+## Percent and Absolute along the edges beside (left and right apart). With
+## Affect Vertices every edge of the point slides by its width.
+func set_offsets(work: Bevel*, half: i32):
+    let item = work.halves.items[(usize)half]
+    let vertex = work.vertices.items[(usize)item.slot]
+    let kind = work.settings.width_type
+    var left = 0.0
+    var right = 0.0
+    if item.beveled:
+        let width = work.width
+        if kind == width_width or kind == width_depth:
+            let half_angle = face_angle(work, half) * 0.5
+            let z = math.abs(2.0 * math.sin(half_angle)) if kind == width_width else math.abs(math.cos(half_angle))
+            left = 0.01 * width if z < tiny else width / z
+            right = left
+        elif kind == width_percent:
+            left = half_length(work, previous_half(work, half)) * width / 100.0
+            right = half_length(work, next_half(work, half)) * width / 100.0
+        else:
+            left = width
+            right = width
+        let weight = edge_weight(work, (usize)item.edge)
+        left *= weight
+        right *= weight
+    elif work.settings.vertices:
+        let width = vertex.width
+        if kind == width_width or kind == width_depth:
+            var axis = Vector3()
+            for at in vertex.first_half..<vertex.first_half + vertex.halves:
+                axis = axis.add(half_direction(work, (i32)at).multiply_scalar(-1.0))
+            let angle = angle_between(axis, half_direction(work, half).multiply_scalar(-1.0))
+            let z = math.abs(2.0 * math.sin(angle)) if kind == width_width else math.abs(math.cos(angle))
+            left = 0.01 * width if z < tiny else width / z
+        elif kind == width_percent:
+            left = half_length(work, half) * width / 100.0
+        else:
+            left = width
+        right = left
+    work.halves.items[(usize)half].spec_left = left
+    work.halves.items[(usize)half].spec_right = right
+    work.halves.items[(usize)half].offset_left = left
+    work.halves.items[(usize)half].offset_right = right

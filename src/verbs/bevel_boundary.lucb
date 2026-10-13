@@ -1,0 +1,400 @@
+## Each bevel vertex's ring of boundary points, counterclockwise from
+## outside, and the kind of mesh that fills it.
+##
+## Between each beveled half and the next beveled half around the vertex
+## goes one boundary point: where their offset lines meet (on the face
+## between them, or dropped onto a face when unbeveled edges lie between;
+## with Loop slide and one unbeveled edge between, on that edge). Every
+## unbeveled half in between attaches to it. A miter adds points: an outer
+## miter (round a reflex corner, three or more beveled edges) makes an arc
+## or a patch, an inner miter an arc whose ends spread apart along their
+## edges. A vertex with one beveled edge (a terminal edge) gets a point on
+## each neighbouring edge and slides the rest along their edges; a vertex
+## cut off (Affect Vertices) gets a point on each edge.
+##
+## With `construct` false the ring exists and only its positions change
+## (after Clamp overlap or the even-widths pass changed the widths).
+##
+## Every ring's size is known before it is built (`ring_size`), so each
+## vertex fills its own room and the rings and vertex meshes are built in
+## parallel.
+
+## Room for every vertex's ring and mesh.
+func reserve_rings(work: Bevel*) -> !:
+    let segments = work.settings.segments
+    let per_bound = (segments // 2 + 1) * (segments + 1)
+    var bounds: usize = 0
+    var grid: usize = 0
+    for slot in 0..<work.vertices.count:
+        let count = (usize)ring_size(work, (i32)slot)
+        work.vertices.items[slot].first_bound = (u32)bounds
+        work.vertices.items[slot].bounds = 0
+        work.vertices.items[slot].grid = (i64)grid
+        bounds += count
+        grid += count * per_bound
+    try work.bounds.fill(bounds, Bound(Vector3(), -1, 0, -1, -1, -1, -1, 1.0, -1, false, false, false, false, 0, 0, blank_profile()))
+    try work.grid.fill(grid, Vector3())
+    try work.grid_links.fill(grid, -1)
+
+## How many boundary points vertex `slot`'s ring takes: one per edge cut
+## off (Affect Vertices); three, or one fewer than its edges, at a terminal
+## edge; else one per beveled edge and a miter's extra one or two.
+func ring_size(work: const Bevel*, slot: i32) -> u32:
+    let vertex = &work.vertices.items[(usize)slot]
+    if vertex.halves <= 1: return 0
+    if work.settings.vertices: return vertex.halves
+    if vertex.selected == 1: return 3 if vertex.halves == 2 else vertex.halves - 1
+    let outer = work.settings.miter_outer if vertex.selected >= 3 else miter_sharp
+    let inner = work.settings.miter_inner
+    var first = (i32)vertex.first_half
+    while not work.halves.items[(usize)first].beveled: first = next_half(work, first)
+    var count: u32 = 0
+    var mitered = false
+    var half = first
+    while true:
+        var following = next_half(work, half)
+        while not work.halves.items[(usize)following].beveled: following = next_half(work, following)
+        count += 1
+        let kind = angle_kind(work, half, following)
+        if (outer != miter_sharp and not mitered and kind == 1) or (inner != miter_sharp and kind == -1):
+            if kind == 1: mitered = true
+            count += 2 if kind == 1 and outer == miter_patch else 1
+        half = following
+        if half == first: break
+    return count
+
+## Build every ring, vertices in parallel.
+func build_rings(work: Bevel*) -> !:
+    try parallel.for_each_range(work.vertices.count, 256, (void*)work, ring_range)
+
+func ring_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (Bevel*)context
+    for slot in first..<end: try build_boundary(work, slot, true)
+
+## A new boundary point of vertex `slot` at `position`, next in its ring's
+## room.
+func add_bound(work: Bevel*, slot: i32, position: Vector3) -> i32!:
+    let count = work.vertices.items[(usize)slot].bounds
+    let room_end = work.vertices.items[(usize)slot + 1].first_bound if (usize)slot + 1 < work.vertices.count else (u32)work.bounds.count
+    if work.vertices.items[(usize)slot].first_bound + count >= room_end: error(errors.invalid, "a bevel ring outgrew its room")
+    let index = (i32)(work.vertices.items[(usize)slot].first_bound + count)
+    work.bounds.items[(usize)index] = Bound(position, slot, (i32)count, -1, -1, -1, -1, 1.0, -1, false, false, false, false, 0, 0, blank_profile())
+    work.vertices.items[(usize)slot].bounds = count + 1
+    return index
+
+func move_bound(work: Bevel*, bound: i32, position: Vector3):
+    work.bounds.items[(usize)bound].position = position
+
+## Place (or, with `construct`, make) bevel vertex `slot`'s ring.
+func build_boundary(work: Bevel*, slot: usize, construct: bool) -> !:
+    let vertex = work.vertices.items[slot]
+    if vertex.halves <= 1: return
+    if work.settings.vertices: return try vertex_only(work, (i32)slot, construct)
+    var first = (i32)vertex.first_half
+    while not work.halves.items[(usize)first].beveled: first = next_half(work, first)
+    if vertex.selected == 1: return try terminal_edge(work, (i32)slot, first, construct)
+    let outer = work.settings.miter_outer if vertex.selected >= 3 else miter_sharp
+    let inner = work.settings.miter_inner
+    var mitered: i32 = -1
+    var half = first
+    while true:
+        # The halves up to the next beveled one: in the plane of the faces
+        # either side (an edge across a flat region) or not.
+        var flat_count = 0
+        var out_of_plane = 0
+        var plane_half: i32 = -1
+        var bent_half: i32 = -1
+        var following = next_half(work, half)
+        while not work.halves.items[(usize)following].beveled:
+            if flat_half(work, following):
+                flat_count += 1
+                plane_half = following
+            else:
+                out_of_plane += 1
+                bent_half = following
+            following = next_half(work, following)
+        var position = Vector3()
+        var on: i32 = -1
+        var ratio = 1.0
+        let after = work.halves.items[(usize)half].after
+        if flat_count == 0 and out_of_plane == 0:
+            position = offset_meet(work, half, following, after, false, -1)
+        elif out_of_plane > 0:
+            if work.settings.loop_slide and out_of_plane == 1 and good_on_edge(work, half, following, bent_half):
+                let (placed, point, sines) = offset_on_edge(work, half, following, bent_half)
+                position = point
+                if placed:
+                    on = bent_half
+                    ratio = sines
+            else:
+                position = offset_meet(work, half, following, -1, true, plane_half)
+        elif work.settings.loop_slide and flat_count == 1 and good_on_edge(work, half, following, plane_half):
+            let (placed, point, sines) = offset_on_edge(work, half, following, plane_half)
+            position = point
+            if placed:
+                on = plane_half
+                ratio = sines
+        else:
+            # Every edge between lies in one plane: as if there were none.
+            position = offset_meet(work, half, following, after, false, -1)
+        let kind = angle_kind(work, half, following)
+        let miter = (outer != miter_sharp and mitered < 0 and kind == 1) or (inner != miter_sharp and kind == -1)
+        if construct:
+            let bound = try add_bound(work, (i32)slot, position)
+            set_bound_halves(work, bound, half, following, following)
+            work.bounds.items[(usize)bound].on = on
+            work.bounds.items[(usize)bound].sine_ratio = ratio
+            work.halves.items[(usize)half].right = bound
+            work.halves.items[(usize)following].left = bound
+            var between = next_half(work, half)
+            while between != following:
+                work.halves.items[(usize)between].left = bound
+                work.halves.items[(usize)between].right = bound
+                between = next_half(work, between)
+            if miter:
+                if kind == 1: mitered = half
+                try make_miter(work, (i32)slot, bound, half, following, kind == 1 and outer == miter_patch, flat_count + out_of_plane, position)
+        else:
+            if miter:
+                if kind == 1: mitered = half
+                let first_bound = work.halves.items[(usize)half].right
+                var last_bound = next_bound(work, first_bound)
+                if kind == 1 and outer == miter_patch:
+                    move_bound(work, last_bound, position)
+                    last_bound = next_bound(work, last_bound)
+                move_bound(work, first_bound, position)
+                move_bound(work, last_bound, position)
+            else:
+                move_bound(work, work.halves.items[(usize)half].right, position)
+        half = following
+        if half == first: break
+    if inner != miter_sharp: spread_inner_miters(work, (i32)slot, mitered)
+    if mitered >= 0: adjust_outer_miter(work, (i32)slot, mitered)
+    if construct:
+        let count = work.vertices.items[slot].bounds
+        var kind = mesh_grid
+        if count == 2: kind = mesh_none
+        elif work.settings.segments == 1: kind = mesh_polygon
+        elif work.settings.cutoff: kind = mesh_cutoff
+        work.vertices.items[slot].kind = kind
+
+func set_bound_halves(work: Bevel*, bound: i32, first: i32, last: i32, bevel: i32):
+    work.bounds.items[(usize)bound].first = first
+    work.bounds.items[(usize)bound].last = last
+    work.bounds.items[(usize)bound].bevel = bevel
+
+## Whether the faces either side of `half` lie in one plane (facing the same
+## way or opposite).
+func flat_half(work: const Bevel*, half: i32) -> bool:
+    let item = work.halves.items[(usize)half]
+    if item.before < 0 or item.after < 0: return false
+    let dot = normal_of(work, item.before).dot(normal_of(work, item.after))
+    return math.abs(dot + 1.0) <= tiny_big or math.abs(dot - 1.0) <= tiny_big
+
+## A miter's points after `bound` (the point between `half` and the next
+## beveled `following`): for a patch, a middle point and an end point; for
+## an arc, an end point, the arc's profile from `bound`, and the unbeveled
+## edges between attached along the arc.
+func make_miter(work: Bevel*, slot: i32, bound: i32, half: i32, following: i32, patch: bool, between: i64, position: Vector3) -> !:
+    work.bounds.items[(usize)bound].bevel = -1
+    var middle: i32 = -1
+    if patch: middle = try add_bound(work, slot, position)
+    let end = try add_bound(work, slot, position)
+    set_bound_halves(work, end, following, following, following)
+    work.halves.items[(usize)following].left = end
+    if patch:
+        work.bounds.items[(usize)bound].patch_start = true
+        work.bounds.items[(usize)middle].on = work.bounds.items[(usize)bound].on
+        work.bounds.items[(usize)middle].sine_ratio = work.bounds.items[(usize)bound].sine_ratio
+        work.bounds.items[(usize)bound].on = -1
+        work.bounds.items[(usize)bound].sine_ratio = 1.0
+        work.bounds.items[(usize)bound].last = half
+        if next_half(work, half) == following:
+            work.bounds.items[(usize)middle].first = -1
+            work.bounds.items[(usize)middle].last = -1
+        else:
+            work.bounds.items[(usize)middle].first = next_half(work, half)
+            var other = next_half(work, half)
+            while other != following:
+                work.halves.items[(usize)other].left = middle
+                work.halves.items[(usize)other].right = middle
+                work.bounds.items[(usize)middle].last = other
+                other = next_half(work, other)
+        return
+    work.bounds.items[(usize)bound].arc_start = true
+    work.bounds.items[(usize)bound].profile.middle = position
+    if next_half(work, half) == following:
+        work.bounds.items[(usize)bound].last = work.bounds.items[(usize)bound].first
+        return
+    # The unbeveled edges between attach to the arc: the first half of them
+    # at its start, the second half at its end, an odd middle one halfway.
+    let segments = (i32)work.settings.segments
+    let pairs = between // 2
+    let odd = between % 2 == 1
+    var at: i64 = 0
+    var other = next_half(work, half)
+    while other != following:
+        work.bounds.items[(usize)bound].last = other
+        var index = segments
+        if at < pairs: index = 0
+        elif odd and at == pairs: index = segments // 2
+        work.halves.items[(usize)other].profile_index = index
+        at += 1
+        other = next_half(work, other)
+
+## An outer miter's end points moved out along their edges to where the
+## planes across the edges through the neighbouring boundary points cross
+## the line from the miter's corner.
+func adjust_outer_miter(work: Bevel*, slot: i32, mitered: i32):
+    let start = work.halves.items[(usize)mitered].right
+    var end = next_bound(work, start)
+    if work.settings.miter_outer == miter_patch: end = next_bound(work, end)
+    let before = previous_bound(work, start)
+    let after = next_bound(work, end)
+    let corner = work.bounds.items[(usize)start].position
+    if work.bounds.items[(usize)start].arc_start: work.bounds.items[(usize)start].profile.middle = corner
+    let fallback = work.width / ((f64)work.settings.segments / 2.0)
+    let way1 = half_direction(work, mitered).multiply_scalar(-1.0)
+    let reach1 = corner.add(way1.multiply_scalar(fallback))
+    var moved1 = reach1
+    if let crossing = line_plane(corner, reach1, work.bounds.items[(usize)before].position, way1): moved1 = crossing
+    move_bound(work, start, moved1)
+    let other_half = work.bounds.items[(usize)end].last
+    let way3 = half_direction(work, other_half).multiply_scalar(-1.0)
+    let reach3 = corner.add(way3.multiply_scalar(fallback))
+    var moved3 = reach3
+    if let crossing = line_plane(corner, reach3, work.bounds.items[(usize)after].position, way3): moved3 = crossing
+    move_bound(work, end, moved3)
+
+## Inner arc miters: each arc's two end points spread apart along their own
+## edges by Spread (the outer miter's arc keeps its place).
+func spread_inner_miters(work: Bevel*, slot: i32, mitered: i32):
+    let vertex = work.vertices.items[(usize)slot]
+    let start = (i32)vertex.first_bound
+    var bound = start
+    var steps: u32 = 0
+    while steps < vertex.bounds:
+        if work.bounds.items[(usize)bound].arc_start:
+            let end = next_bound(work, bound)
+            let half = work.bounds.items[(usize)bound].first
+            if half != mitered:
+                let corner = work.bounds.items[(usize)bound].position
+                move_bound(work, bound, corner.add(half_direction(work, half).multiply_scalar(work.settings.spread)))
+                let other = work.bounds.items[(usize)end].last
+                move_bound(work, end, corner.add(half_direction(work, other).multiply_scalar(work.settings.spread)))
+            bound = next_bound(work, end)
+            steps += 2
+        else:
+            bound = next_bound(work, bound)
+            steps += 1
+
+## A vertex with one beveled edge `first`. With only two edges at the
+## vertex the strip ends in a point slid along the other edge (a triangle);
+## otherwise its sides meet the neighbouring edges and the rest of the
+## edges slide back far enough to leave room for the profile.
+func terminal_edge(work: Bevel*, slot: i32, first: i32, construct: bool) -> !:
+    let vertex = work.vertices.items[(usize)slot]
+    let item = work.halves.items[(usize)first]
+    let following = next_half(work, first)
+    let previous = previous_half(work, first)
+    if vertex.halves == 2:
+        var before_normal: Vector3? = none
+        if item.before >= 0: before_normal = normal_of(work, item.before)
+        elif item.after >= 0: before_normal = normal_of(work, item.after)
+        var after_normal: Vector3? = none
+        if item.after >= 0: after_normal = normal_of(work, item.after)
+        elif item.before >= 0: after_normal = normal_of(work, item.before)
+        let left = offset_in_plane(work, first, before_normal, true)
+        let right = offset_in_plane(work, first, after_normal, false)
+        let tip = slide_half(work, following, item.offset_left)
+        if construct:
+            let a = try add_bound(work, slot, left)
+            set_bound_halves(work, a, first, first, first)
+            work.halves.items[(usize)first].left = a
+            let b = try add_bound(work, slot, right)
+            set_bound_halves(work, b, first, first, -1)
+            work.halves.items[(usize)first].right = b
+            let c = try add_bound(work, slot, tip)
+            set_bound_halves(work, c, following, following, -1)
+            work.halves.items[(usize)following].left = c
+            work.halves.items[(usize)following].right = c
+        else:
+            move_bound(work, item.left, left)
+            move_bound(work, item.right, right)
+            move_bound(work, work.halves.items[(usize)following].left, tip)
+    else:
+        let leg_slide = work.settings.width_type == width_percent or work.settings.width_type == width_absolute
+        let left = slide_half(work, previous, item.offset_left) if leg_slide else offset_meet(work, previous, first, item.before, false, -1)
+        let right = slide_half(work, following, item.offset_right) if leg_slide else offset_meet(work, first, following, work.halves.items[(usize)following].before, false, -1)
+        if construct:
+            let a = try add_bound(work, slot, left)
+            set_bound_halves(work, a, previous, first, first)
+            work.halves.items[(usize)first].left = a
+            work.halves.items[(usize)previous].left = a
+            work.halves.items[(usize)previous].right = a
+            let b = try add_bound(work, slot, right)
+            set_bound_halves(work, b, first, following, -1)
+            work.halves.items[(usize)following].left = b
+            work.halves.items[(usize)following].right = b
+            work.halves.items[(usize)first].right = b
+        else:
+            move_bound(work, item.left, left)
+            move_bound(work, work.halves.items[(usize)following].left, right)
+        # The edges not beside the beveled one slide back by its width (more
+        # for profiles fuller than a chamfer's, which need the room).
+        var distance = item.spec_left
+        if work.settings.custom or work.settings.shape < 0.25: distance *= math.sqrt(2.0)
+        var other = next_half(work, following)
+        while next_half(work, other) != first:
+            let position = slide_half(work, other, distance)
+            if construct:
+                let c = try add_bound(work, slot, position)
+                set_bound_halves(work, c, other, other, -1)
+                work.halves.items[(usize)other].left = c
+                work.halves.items[(usize)other].right = c
+            else:
+                move_bound(work, work.halves.items[(usize)other].left, position)
+            other = next_half(work, other)
+    if vertex.halves >= 3:
+        # The strip's end profile snaps to the plane of the two edges beside.
+        let start = (i32)work.vertices.items[(usize)slot].first_bound
+        set_profile(work, slot, start)
+        move_profile_plane(work, start, vertex_at(work, slot))
+    if construct:
+        let count = work.vertices.items[(usize)slot].bounds
+        var kind = mesh_polygon
+        if count == 2 and vertex.halves == 3: kind = mesh_none
+        elif count == 3:
+            kind = mesh_fan
+            if work.settings.custom and profile_holds_tip(work, slot, first): kind = mesh_polygon
+        work.vertices.items[(usize)slot].kind = kind
+
+## Custom profile at a terminal edge: whether the extra point (on the edge
+## past the strip) lies in the strip's profile plane, where a fan would
+## fold over.
+func profile_holds_tip(work: const Bevel*, slot: i32, first: i32) -> bool:
+    let start = work.halves.items[(usize)first].left
+    let profile = work.bounds.items[(usize)start].profile
+    let tip = next_bound(work, work.halves.items[(usize)first].right)
+    let offset = work.bounds.items[(usize)tip].position.subtract(profile.plane_point).dot(unit_of(profile.plane_normal))
+    return offset * offset < tiny_big
+
+## Affect Vertices: a boundary point slid along each edge by its width.
+func vertex_only(work: Bevel*, slot: i32, construct: bool) -> !:
+    let vertex = work.vertices.items[(usize)slot]
+    for at in vertex.first_half..<vertex.first_half + vertex.halves:
+        let half = (i32)at
+        let position = slide_half(work, half, work.halves.items[at].offset_left)
+        if construct:
+            let bound = try add_bound(work, slot, position)
+            set_bound_halves(work, bound, half, half, -1)
+            work.halves.items[at].left = bound
+            work.halves.items[at].right = bound
+        else:
+            move_bound(work, work.halves.items[at].left, position)
+    if construct:
+        let count = work.vertices.items[(usize)slot].bounds
+        var kind = mesh_grid
+        if count == 2: kind = mesh_none
+        elif work.settings.segments == 1: kind = mesh_polygon
+        work.vertices.items[(usize)slot].kind = kind

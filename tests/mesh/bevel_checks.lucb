@@ -1,0 +1,560 @@
+## PolyBevel against closed forms (POLY-MODELING.md Stage 4). The cube spans
+## -1..1 in X and Z and 0..2 in Y: point 6 is (1, 2, 1) with neighbours 2,
+## 5 and 7; edges p0-1 and p6-7 are opposite and share no point.
+##
+## - A cube edge at N segments, shape 0.5: the profile is a polygon with N
+##   equal chords on the quarter circle of radius w, so the volume is
+##   8 - 2 (w^2 - N/2 w^2 sin(pi / 2N)) and the area follows the same way;
+##   both tend to the round edge's as N grows.
+## - Shapes: 1 keeps the corner (the volume stays 8), 0.25 is the chamfer
+##   (8 - w^2), 0 hollows to the opposite corner (8 - 2w^2).
+## - Width types on a 90° edge: Width w is an offset of w / sqrt 2, Depth w
+##   one of w sqrt 2, Percent and Absolute slide along the edges beside.
+## - The corner where three edges meet: a grid patch whose points lie on the
+##   sphere of radius w about the inner corner.
+## - Vertex bevel cuts off a tetrahedron (8 - w^3 / 6, one triangle).
+## - bevel_weight with Limit Weight scales each edge's width.
+## - Clamp overlap stops where the strips meet: every edge beveled, the
+##   octahedron of the face centers (4/3).
+## - Miters on an L-shaped block, a custom stepped profile, Cutoff.
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshBuilder, MeshPrimitives, MaterialAssignment, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let cube = try Mesh.cube()
+    defer cube.release()
+    try segment_checks(cube)
+    try shape_checks(cube)
+    try width_type_checks(cube)
+    try corner_checks(cube)
+    try vertex_checks(cube)
+    try weight_checks(cube)
+    try clamp_checks(cube)
+    try custom_checks(cube)
+    try cutoff_checks(cube)
+    try miter_checks()
+    try slide_checks()
+    try finishing_checks(cube)
+    try refusal_checks(cube)
+    try sweep(cube)
+    print("PASS PolyBevel closed forms: cube edge by segments (volume, area, the round limit), shapes 0 / 0.25 / 0.5 / 1, width types, the three-edge corner on its sphere, vertex bevel, weights, clamp overlap, a stepped custom profile, cutoff, miters")
+
+## A run's numbers: Width, Segments, Shape, Width Type, Affect, Clamp, Loop
+## slide, Profile Type, Miter Outer, Miter Inner, Spread, Intersection,
+## Harden, Mark seams, Mark sharp, Face strength, Material, Limit, Angle,
+## then the custom profile ramp.
+struct Bevel:
+    var width: f64 = 0.2
+    var segments: f64 = 1.0
+    var shape: f64 = 0.5
+    var width_type: f64 = 0.0
+    var affect: f64 = 0.0
+    var clamp: f64 = 1.0
+    var loop_slide: f64 = 1.0
+    var custom: f64 = 0.0
+    var outer: f64 = 0.0
+    var inner: f64 = 0.0
+    var spread: f64 = 0.1
+    var cutoff: f64 = 0.0
+    var harden: f64 = 0.0
+    var seams: f64 = 0.0
+    var sharp: f64 = 0.0
+    var strength: f64 = 0.0
+    var material: f64 = -1.0
+    var limit: f64 = 0.0
+    var angle: f64 = 30.0
+
+func numbers(b: Bevel) -> f64[19]:
+    return [b.width, b.segments, b.shape, b.width_type, b.affect, b.clamp, b.loop_slide, b.custom, b.outer, b.inner, b.spread, b.cutoff, b.harden, b.seams, b.sharp, b.strength, b.material, b.limit, b.angle]
+
+func run(mesh: interop.Reference[Mesh], group: str, group_type: i64, b: Bevel, selected: i64) -> interop.Reference[Mesh]!:
+    let values = numbers(b)
+    return try made(mesh, "PolyBevel", group, group_type, values[..<19], selected)
+
+## A run whose selection is not checked.
+func loose(mesh: interop.Reference[Mesh], group: str, group_type: i64, b: Bevel) -> interop.Reference[Mesh]!:
+    let values = numbers(b)
+    let result = try Verbs.run("PolyBevel", mesh, group, group_type, values[..<19])
+    defer result.release()
+    if result.value().warning().length > 0: print(f"PolyBevel {group}: {result.value().warning()}")
+    return try result.value().mesh()
+
+## The total area of every face.
+func total_area(mesh: interop.Reference[Mesh]) -> f64!:
+    var sum = 0.0
+    for face in 0..<mesh.value().face_count(): sum += try area(mesh, face)
+    return sum
+
+## A cube edge of N segments against the polygon's closed forms, and the
+## round edge they tend to.
+func segment_checks(cube: interop.Reference[Mesh]) -> !:
+    let w = 0.2
+    let round_volume = 8.0 - 2.0 * (w * w - math.pi * w * w / 4.0)
+    let round_area = 24.0 - 4.0 * w + math.pi * w - 2.0 * (w * w - math.pi * w * w / 4.0)
+    var previous_error = 1.0
+    let counts_of: f64[6] = [1.0, 2.0, 3.0, 4.0, 8.0, 16.0]
+    for n in counts_of:
+        let mesh = try run(cube, "p0-1", 2, Bevel(segments = n), (i64)n)
+        defer mesh.release()
+        try counts(mesh, 8 - 2 + 2 * ((i64)n + 1), 6 + (i64)n)
+        try surface(mesh, true)
+        let removed = w * w - n / 2.0 * w * w * math.sin(math.pi / (2.0 * n))
+        near(try volume(mesh), 8.0 - 2.0 * removed, 0.00001)
+        near(try total_area(mesh), 24.0 - 4.0 * w + 4.0 * n * w * math.sin(math.pi / (4.0 * n)) - 2.0 * removed, 0.00001)
+        let deviation = math.abs((try volume(mesh)) - round_volume) + math.abs((try total_area(mesh)) - round_area)
+        assert(deviation < previous_error)
+        previous_error = deviation
+    assert(previous_error < 0.001)
+
+## Shapes at 4 segments (and the square's corner-cut chord at 3).
+func shape_checks(cube: interop.Reference[Mesh]) -> !:
+    let w = 0.2
+    let square = try run(cube, "p0-1", 2, Bevel(segments = 4.0, shape = 1.0), 4)
+    defer square.release()
+    near(try volume(square), 8.0, 0.00001)
+    let chamfer = try run(cube, "p0-1", 2, Bevel(segments = 4.0, shape = 0.25), 4)
+    defer chamfer.release()
+    near(try volume(chamfer), 8.0 - w * w, 0.00001)
+    let hollow = try run(cube, "p0-1", 2, Bevel(segments = 4.0, shape = 0.0), 4)
+    defer hollow.release()
+    near(try volume(hollow), 8.0 - 2.0 * w * w, 0.00001)
+    # Three segments of the square: the middle chord cuts the corner where
+    # the legs' points stop, 1 / (1 + sqrt(1/2)) of the way.
+    let step = 1.0 / (1.0 + math.sqrt(0.5))
+    let cut = try run(cube, "p0-1", 2, Bevel(segments = 3.0, shape = 1.0), 3)
+    defer cut.release()
+    near(try volume(cut), 8.0 - 2.0 * (1.0 - step) * (1.0 - step) * w * w / 2.0, 0.00001)
+
+## Width types on a 90° edge with one segment: the chamfer's triangle has
+## legs of the offset.
+func width_type_checks(cube: interop.Reference[Mesh]) -> !:
+    let w = 0.2
+    let offsets: f64[5] = [w, w / math.sqrt(2.0), w * math.sqrt(2.0), 0.2, 0.3]
+    let widths: f64[5] = [w, w, w, 10.0, 0.3]
+    for kind in 0..<(usize)5:
+        let mesh = try run(cube, "p0-1", 2, Bevel(width = widths[kind], width_type = (f64)kind), 1)
+        defer mesh.release()
+        near(try volume(mesh), 8.0 - offsets[kind] * offsets[kind], 0.00001)
+
+## The corner where three beveled edges meet: Blender's grid patch (all
+## quads, a center triangle for odd segments) on the sphere of radius w
+## about the inner corner.
+func corner_checks(cube: interop.Reference[Mesh]) -> !:
+    let w = 0.2
+    let center = Vector3(1.0 - w, 2.0 - w, 1.0 - w)
+    let counts_of: f64[4] = [2.0, 3.0, 4.0, 5.0]
+    for n in counts_of:
+        let half = (i64)n // 2
+        let odd = (i64)n % 2
+        let patch = 3 * half * (half + odd) + odd
+        let mesh = try run(cube, "p6-2 p6-5 p6-7", 2, Bevel(segments = n), 3 * (i64)n + patch)
+        defer mesh.release()
+        try surface(mesh, true)
+        var on_sphere = 0
+        for point in 0..<mesh.value().point_count():
+            let p = try mesh.value().point(point)
+            if p.x > 1.0 - w + 0.000001 and p.y > 2.0 - w + 0.000001 and p.z > 1.0 - w + 0.000001:
+                near(p.subtract(center).length(), w, 0.000001)
+                on_sphere += 1
+        assert(on_sphere > 0)
+    # Every edge at 3 segments: the rounded cube, all quads but the corner
+    # triangles.
+    let all = try run(cube, "", 0, Bevel(segments = 3.0), 12 * 3 + 8 * 7)
+    defer all.release()
+    try surface(all, true)
+    var triangles = 0
+    for face in 0..<all.value().face_count():
+        let size = try all.value().face_size(face)
+        if size == 3: triangles += 1
+        else: assert(size == 4)
+    assert(triangles == 8)
+
+## Affect Vertices: a corner cut off.
+func vertex_checks(cube: interop.Reference[Mesh]) -> !:
+    let w = 0.2
+    let cut = try run(cube, "6", 1, Bevel(), 1)
+    defer cut.release()
+    try counts(cut, 10, 7)
+    try surface(cut, true)
+    near(try volume(cut), 8.0 - w * w * w / 6.0, 0.00001)
+    # Affect Vertices names its points by an edge group too.
+    let named = try run(cube, "p6-2", 2, Bevel(affect = 2.0), 2)
+    defer named.release()
+    try counts(named, 12, 8)
+    near(try volume(named), 8.0 - 2.0 * w * w * w / 6.0, 0.00001)
+    # Two segments: each cut a small grid patch, still closed.
+    let rounded = try loose(cube, "", 1, Bevel(segments = 2.0, affect = 2.0))
+    defer rounded.release()
+    try surface(rounded, true)
+
+## bevel_weight with Limit Weight: each edge's width scaled by its weight,
+## edges of weight 0 left.
+func weight_checks(cube: interop.Reference[Mesh]) -> !:
+    let w = 0.2
+    let edges = (usize)(try cube.value().edge_count())
+    var weights: f64[12]
+    for edge in 0..<edges:
+        let a = try cube.value().edge_point((i64)edge, 0)
+        let b = try cube.value().edge_point((i64)edge, 1)
+        weights[edge] = 0.0
+        if (a == 0 and b == 1) or (a == 1 and b == 0): weights[edge] = 1.0
+        if (a == 6 and b == 7) or (a == 7 and b == 6): weights[edge] = 0.5
+    let weighted = try cube.value().with_attribute("bevel_weight", 4, 1, weights[..<edges], false, true)
+    defer weighted.release()
+    let mesh = try run(weighted, "", 0, Bevel(limit = 2.0), 2)
+    defer mesh.release()
+    near(try volume(mesh), 8.0 - w * w - 0.25 * w * w, 0.00001)
+    # The same weights from the Bevel Weight verb.
+    let full: f64[2] = [1.0, 0.0]
+    let half: f64[2] = [0.5, 0.0]
+    let first = try made(cube, "Bevel Weight", "p0-1", 2, full[..<2], 1)
+    defer first.release()
+    let second = try made(first, "Bevel Weight", "p6-7", 2, half[..<2], 1)
+    defer second.release()
+    let again = try run(second, "", 0, Bevel(limit = 2.0), 2)
+    defer again.release()
+    near(try volume(again), 8.0 - w * w - 0.25 * w * w, 0.00001)
+    # Limit Angle: a cube's edges are 90° apart.
+    let sharp = try run(cube, "", 0, Bevel(limit = 1.0, angle = 89.0), 12 + 8)
+    defer sharp.release()
+    let values = numbers(Bevel(limit = 1.0, angle = 91.0))
+    let none_result = try Verbs.run("PolyBevel", cube, "", 0, values[..<19])
+    defer none_result.release()
+    assert(none_result.value().warning().length > 0)
+
+## Clamp overlap on every edge: past half the face, strips would cross;
+## clamped, they stop just short of where they meet, the faces shrunk to
+## their centers (the octahedron of the face centers, 4/3).
+func clamp_checks(cube: interop.Reference[Mesh]) -> !:
+    let clamped = try run(cube, "", 0, Bevel(width = 5.0), 12 + 8)
+    defer clamped.release()
+    try surface(clamped, true)
+    near(try volume(clamped), 4.0 / 3.0, 0.002)
+    # Every face faces out.
+    for face in 0..<clamped.value().face_count():
+        let normal = try clamped.value().face_normal(face)
+        let first = try clamped.value().point(try clamped.value().face_point(face, 0))
+        assert(normal.dot(first.subtract(Vector3(0.0, 1.0, 0.0))) > 0.0)
+    # Without the clamp the strips cross: faces turn inside out.
+    let crossed = try loose(cube, "", 0, Bevel(width = 5.0, clamp = 0.0))
+    defer crossed.release()
+    var inward = 0
+    for face in 0..<crossed.value().face_count():
+        let normal = try crossed.value().face_normal(face)
+        let first = try crossed.value().point(try crossed.value().face_point(face, 0))
+        if normal.dot(first.subtract(Vector3(0.0, 1.0, 0.0))) < 0.0: inward += 1
+    assert(inward > 0 and math.abs((try volume(crossed)) - 4.0 / 3.0) > 1.0)
+
+## A custom profile of a step: the strip's points stay on the step's
+## corners, and the chamfer's triangle half is cut away.
+func custom_checks(cube: interop.Reference[Mesh]) -> !:
+    let w = 0.2
+    var values: f64[31]
+    let base = numbers(Bevel(segments = 4.0, custom = 1.0))
+    for at in 0..<(usize)19: values[at] = base[at]
+    # Depth 0 to the middle, then 1: the chord to the middle, up to the
+    # corner, down the far leg.
+    let step: f64[12] = [1.0, 1.0, 3.0, 0.0, 0.0, 0.0, 0.5, 1.0, 0.0, 1.0, 1.0, 0.0]
+    for at in 0..<(usize)12: values[19 + at] = step[at]
+    let mesh = try made(cube, "PolyBevel", "p0-1", 2, values[..<31], 4)
+    defer mesh.release()
+    try surface(mesh, true)
+    near(try volume(mesh), 8.0 - 2.0 * 0.25 * w * w, 0.00001)
+
+## Cutoff at the three-edge corner: one face across each strip's end. On a
+## cube their bottoms meet at the inner corner, so there is no bottom face;
+## a corner whose edges are not square keeps one.
+func cutoff_checks(cube: interop.Reference[Mesh]) -> !:
+    let w = 0.2
+    let mesh = try run(cube, "p6-2 p6-5 p6-7", 2, Bevel(segments = 3.0, cutoff = 1.0), 3 * 3 + 3)
+    defer mesh.release()
+    try surface(mesh, true)
+    var at_corner = 0
+    for point in 0..<mesh.value().point_count():
+        if (try mesh.value().point(point)).subtract(Vector3(1.0 - w, 2.0 - w, 1.0 - w)).length() < 0.000001: at_corner += 1
+    assert(at_corner == 1)
+
+## An L-shaped block (the L in XZ, 0..1 in Y) with every edge beveled. At
+## the top of the inner corner, (1, 1, 1), the two top edges meet round
+## 270°: a sharp miter puts their sides' meeting point at (1 - w, 1, 1 - w);
+## the arc miter ends both strips square, the strip along +X at x = 1 + w
+## and the one along +Z at z = 1 + w, both keeping their full round width
+## there, with a circle of radius 2w about (1 + w, 1, 1 + w) between.
+func miter_checks() -> !:
+    let w = 0.2
+    let block = try l_block()
+    defer block.release()
+    let sharp = try loose(block, "", 0, Bevel(segments = 2.0))
+    defer sharp.release()
+    try surface(sharp, true)
+    assert(try has_point(sharp, Vector3(1.0 - w, 1.0, 1.0 - w)))
+    assert(not (try has_point(sharp, Vector3(1.0 + w, 1.0, 1.0 - w))))
+    let arc = try loose(block, "", 0, Bevel(segments = 2.0, outer = 2.0))
+    defer arc.release()
+    try surface(arc, true)
+    # The strips end square, top and wall side points in one plane across.
+    assert(try has_point(arc, Vector3(1.0 + w, 1.0, 1.0 - w)))
+    assert(try has_point(arc, Vector3(1.0 + w, 1.0 - w, 1.0)))
+    assert(try has_point(arc, Vector3(1.0 - w, 1.0, 1.0 + w)))
+    assert(try has_point(arc, Vector3(1.0, 1.0 - w, 1.0 + w)))
+    # The arc: its ends and its middle on the circle of radius 2w.
+    let middle = Vector3(1.0 + w - 2.0 * w * math.sqrt(0.5), 1.0, 1.0 + w - 2.0 * w * math.sqrt(0.5))
+    assert(try has_point(arc, middle))
+    # The end of the strip along +X is its round profile, a quarter circle
+    # of radius w about the strip's axis.
+    let axis = Vector3(1.0 + w, 1.0 - w, 1.0 - w)
+    var on_end = 0
+    for point in 0..<arc.value().point_count():
+        let p = try arc.value().point(point)
+        if math.abs(p.x - (1.0 + w)) < 0.000001 and p.y > 1.0 - w - 0.000001 and p.z > 1.0 - w - 0.000001:
+            near(p.subtract(axis).length(), w, 0.000001)
+            on_end += 1
+    assert(on_end == 3)
+    # Inner arcs too: the ring grows, still closed.
+    let inner = try loose(block, "", 0, Bevel(segments = 2.0, outer = 2.0, inner = 1.0))
+    defer inner.release()
+    try surface(inner, true)
+    assert(inner.value().point_count() > arc.value().point_count())
+
+## Whether `mesh` has a point at `p`.
+func has_point(mesh: interop.Reference[Mesh], p: Vector3) -> bool!:
+    for point in 0..<mesh.value().point_count():
+        if (try mesh.value().point(point)).subtract(p).length() < 0.000001: return true
+    return false
+
+## Loop slide on a sheared grid: the row's boundary points stay on the
+## slanted edges across it (the edge loops stay straight), each w from the
+## row's line; without it they sit straight across. A crossing column makes
+## a pipe of four strips, which stays flat.
+func slide_checks() -> !:
+    let w = 0.1
+    var places: f64[75]
+    for z in 0..<(usize)5:
+        for x in 0..<(usize)5:
+            let at = (z * 5 + x) * 3
+            places[at] = (f64)x + 0.5 * (f64)z
+            places[at + 1] = 0.0
+            places[at + 2] = (f64)z
+    let sheared = try grid_of(places[..<75])
+    defer sheared.release()
+    let slid = try loose(sheared, "p10-11-12-13-14", 2, Bevel(width = w))
+    defer slid.release()
+    # Interior points 11, 12, 13 at z = 2 go; on each slanted edge through
+    # them (direction (0.5, 0, 1)) a point at z = 2 +- w.
+    for column in 1..<4:
+        let base = Vector3((f64)column + 1.0, 0.0, 2.0)
+        let way = Vector3(0.5, 0.0, 1.0)
+        assert(try has_point(slid, base.add(way.multiply_scalar(w))))
+        assert(try has_point(slid, base.subtract(way.multiply_scalar(w))))
+    let straight_across = try loose(sheared, "p10-11-12-13-14", 2, Bevel(width = w, loop_slide = 0.0))
+    defer straight_across.release()
+    assert(not (try has_point(straight_across, Vector3(3.0, 0.0, 2.0).add(Vector3(0.5, 0.0, 1.0).multiply_scalar(w)))))
+    # The pipe: a row and a column crossing at point 12, two segments.
+    let grid = try MeshPrimitives.grid(4.0, 4)
+    defer grid.release()
+    let cross = try loose(grid, "p10-11-12-13-14 p2-7-12-17-22", 2, Bevel(width = 0.2, segments = 2.0))
+    defer cross.release()
+    try surface(cross, false)
+    for point in 0..<cross.value().point_count(): near((try cross.value().point(point)).y, 0.0, 0.000001)
+
+## A grid of quads through 25 points (5 by 5, row-major in z).
+func grid_of(places: const f64[]) -> interop.Reference[Mesh]!:
+    var builder = try MeshBuilder()
+    defer builder.close()
+    for at in 0..<(usize)25: _ = try builder.point(Vector3(places[at * 3], places[at * 3 + 1], places[at * 3 + 2]))
+    for z in 0..<(i64)4:
+        for x in 0..<(i64)4:
+            let p = z * 5 + x
+            try builder.face(4)
+            try builder.corner(p)
+            try builder.corner(p + 5)
+            try builder.corner(p + 6)
+            try builder.corner(p + 1)
+    return try builder.finish()
+
+## Harden normals, Mark sharp, Face strength and Material.
+func finishing_checks(cube: interop.Reference[Mesh]) -> !:
+    let w = 0.2
+    # Harden: the strip's corners at its side on the top face (y = 2) take
+    # the top's normal; on the side face (z = 1), that face's.
+    let hard = try run(cube, "p6-7", 2, Bevel(segments = 3.0, harden = 1.0), 3)
+    defer hard.release()
+    let normals = hard.value().find_attribute("N", 1)
+    assert(normals >= 0)
+    var checked = 0
+    for face in 6..<hard.value().face_count():
+        for at in 0..<(try hard.value().face_size(face)):
+            let corner = (try hard.value().face_offset(face)) + at
+            let p = try hard.value().point(try hard.value().face_point(face, at))
+            let n = Vector3(try hard.value().attribute_value(normals, corner, 0), try hard.value().attribute_value(normals, corner, 1), try hard.value().attribute_value(normals, corner, 2))
+            if math.abs(p.y - 2.0) < 0.000001:
+                near_point(n, Vector3(0.0, 1.0, 0.0), 0.0001)
+                checked += 1
+            if math.abs(p.z - 1.0) < 0.000001:
+                near_point(n, Vector3(0.0, 0.0, 1.0), 0.0001)
+                checked += 1
+    assert(checked == 4)
+    # Mark sharp: edges 6-2 and 6-7 sharp, 6-5 not; beveled together the
+    # sharp line runs on round the corner patch, so no sharp line ends
+    # near the corner.
+    let edges = (usize)(try cube.value().edge_count())
+    var marks: f64[12]
+    for edge in 0..<edges:
+        let a = try cube.value().edge_point((i64)edge, 0)
+        let b = try cube.value().edge_point((i64)edge, 1)
+        marks[edge] = 1.0 if (a == 6 or b == 6) and (a == 2 or b == 2 or a == 7 or b == 7) else 0.0
+    let marked = try cube.value().with_attribute("sharp", 4, 1, marks[..<edges], true)
+    defer marked.release()
+    let unmarked_run = try run(marked, "p6-2 p6-5 p6-7", 2, Bevel(segments = 2.0), 6 + 3)
+    defer unmarked_run.release()
+    assert(try sharp_ends_near(unmarked_run, Vector3(1.0, 2.0, 1.0), 3.0 * w) > 0)
+    let continued = try run(marked, "p6-2 p6-5 p6-7", 2, Bevel(segments = 2.0, sharp = 1.0), 6 + 3)
+    defer continued.release()
+    assert(try sharp_ends_near(continued, Vector3(1.0, 2.0, 1.0), 3.0 * w) == 0)
+    # Face strength New: patches 1, strips 2, the rest untouched.
+    let strong = try run(cube, "p6-2 p6-5 p6-7", 2, Bevel(segments = 2.0, strength = 1.0), 6 + 3)
+    defer strong.release()
+    let strength = strong.value().find_attribute("face_strength", 2)
+    assert(strength >= 0)
+    var tally: i64[4] = [0, 0, 0, 0]
+    for face in 0..<strong.value().face_count(): tally[(usize)(try strong.value().attribute_value(strength, face))] += 1
+    assert(tally[0] == 6 and tally[1] == 3 and tally[2] == 6)
+    # Material 0: the new faces take the material used first (face 0's).
+    let painted = try MaterialAssignment.faces(cube, "0", "material", "/red")
+    defer painted.release()
+    let both = try MaterialAssignment.faces(painted, "1-5", "material", "/blue")
+    defer both.release()
+    let dressed = try run(both, "p6-7", 2, Bevel(material = 0.0), 1)
+    defer dressed.release()
+    let material = dressed.value().find_attribute("material", 2)
+    let red = try dressed.value().attribute_value(material, 0)
+    assert(try dressed.value().attribute_value(material, dressed.value().face_count() - 1) == red)
+    assert(try dressed.value().attribute_value(material, 1) != red)
+
+## How many points within `reach` of `p` touch exactly one sharp edge.
+func sharp_ends_near(mesh: interop.Reference[Mesh], p: Vector3, reach: f64) -> i64!:
+    let sharp = mesh.value().find_attribute("sharp", 4)
+    assert(sharp >= 0)
+    let points = mesh.value().point_count()
+    var touches: i64[256]
+    for at in 0..<(usize)256: touches[at] = 0
+    for edge in 0..<(try mesh.value().edge_count()):
+        if (try mesh.value().attribute_value(sharp, edge)) == 0.0: continue
+        touches[(usize)(try mesh.value().edge_point(edge, 0))] += 1
+        touches[(usize)(try mesh.value().edge_point(edge, 1))] += 1
+    var ends = 0
+    for point in 0..<points:
+        if touches[(usize)point] == 1 and (try mesh.value().point(point)).subtract(p).length() < reach: ends += 1
+    return ends
+
+## Every combination of the options on closed shapes (a cube, the L block,
+## a cylinder with n-gon caps, a sphere with triangle fans at its poles, a
+## torus) stays a closed surface with every face outward (positive
+## volume). The round and chamfer shapes never fold: those runs warn of
+## nothing. (A square cut-off point of odd segments, or Cutoff with Percent
+## widths round the L's inner corner, can fold faces flat; those runs pass
+## the input through with a warning, as any verb does.)
+func sweep(cube: interop.Reference[Mesh]) -> !:
+    let block = try l_block()
+    defer block.release()
+    let cylinder = try MeshPrimitives.cylinder(1.0, 2.0, 8)
+    defer cylinder.release()
+    let sphere = try MeshPrimitives.sphere(1.0, 8)
+    defer sphere.release()
+    let torus = try MeshPrimitives.torus(1.0, 0.3, 8)
+    defer torus.release()
+    let shapes: f64[5] = [0.0, 0.25, 0.5, 0.8, 1.0]
+    for segments in 1..<6:
+        for shape in shapes:
+            for kind in 0..<5:
+                let width = 10.0 if kind == 3 else 0.1
+                let options = Bevel(width = width, segments = (f64)segments, shape = shape, width_type = (f64)kind, outer = (f64)(segments % 3), inner = (f64)(segments % 2), cutoff = 1.0 if shape == 0.8 else 0.0)
+                let plain = shape == 0.25 or shape == 0.5
+                try closed_run(cube, options, plain)
+                try closed_run(block, options, plain)
+                try closed_run(cylinder, options, plain)
+                try closed_run(sphere, options, plain)
+                try closed_run(torus, options, plain)
+                var vertices = options
+                vertices.affect = 2.0
+                try closed_run(cube, vertices, plain)
+                try closed_run(cylinder, vertices, plain)
+    # A custom profile everywhere (its default round ramp).
+    for segments in 1..<6:
+        try closed_run(cube, Bevel(segments = (f64)segments, custom = 1.0), true)
+        try closed_run(block, Bevel(segments = (f64)segments, custom = 1.0, outer = 2.0), true)
+        try closed_run(torus, Bevel(segments = (f64)segments, custom = 1.0), true)
+
+## Bevel every edge (or point) of `mesh`: the result is closed and faces
+## out; with `quiet`, the run warns of nothing.
+func closed_run(mesh: interop.Reference[Mesh], options: Bevel, quiet: bool) -> !:
+    let values = numbers(options)
+    let attempt = try Verbs.run("PolyBevel", mesh, "", 0, values[..<19])
+    defer attempt.release()
+    if quiet and attempt.value().warning().length > 0:
+        print(f"warned: segments {options.segments} shape {options.shape} type {options.width_type} affect {options.affect} outer {options.outer} inner {options.inner} custom {options.custom}: {attempt.value().warning()}")
+        assert(false)
+    let result = try attempt.value().mesh()
+    defer result.release()
+    try surface(result, true)
+    assert(try volume(result) > 0.0)
+
+## A boundary edge is skipped with a warning; an edge of three faces
+## refuses the run.
+func refusal_checks(cube: interop.Reference[Mesh]) -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let values = numbers(Bevel())
+    let border = try Verbs.run("PolyBevel", grid, "p0-1", 2, values[..<19])
+    defer border.release()
+    assert(border.value().warning().length > 0)
+    var builder = try MeshBuilder()
+    defer builder.close()
+    let fin: f64[18] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, -1.0, 0.0]
+    for at in 0..<(usize)6: _ = try builder.point(Vector3(fin[at * 3], fin[at * 3 + 1], fin[at * 3 + 2]))
+    let quads: i64[12] = [0, 2, 3, 1, 1, 4, 0, 0, 0, 5, 1, 1]
+    try builder.face(4)
+    for at in 0..<(usize)4: try builder.corner(quads[at])
+    try builder.face(3)
+    try builder.corner(0)
+    try builder.corner(1)
+    try builder.corner(4)
+    try builder.face(3)
+    try builder.corner(1)
+    try builder.corner(0)
+    try builder.corner(5)
+    let fins = try builder.finish()
+    defer fins.release()
+    assert(refuses(fins, "p0-1", values[..<19]))
+
+## Whether Bevel refuses to run on `mesh`'s `group`, saying why.
+func refuses(mesh: interop.Reference[Mesh], group: str, values: const f64[]) -> bool:
+    let attempt = Verbs.run("PolyBevel", mesh, group, 2, values) catch failure:
+        return failure.message.length > 0
+    attempt.release()
+    return false
+
+## The L: (0,0) (2,0) (2,1) (1,1) (1,2) (0,2) in XZ, from y 0 to 1.
+func l_block() -> interop.Reference[Mesh]!:
+    let outline: f64[12] = [0.0, 0.0, 2.0, 0.0, 2.0, 1.0, 1.0, 1.0, 1.0, 2.0, 0.0, 2.0]
+    var builder = try MeshBuilder()
+    defer builder.close()
+    for level in 0..<(usize)2:
+        for at in 0..<(usize)6: _ = try builder.point(Vector3(outline[at * 2], (f64)level, outline[at * 2 + 1]))
+    # Bottom (facing down), top (facing up), the walls.
+    try builder.face(6)
+    for at in 0..<(i64)6: try builder.corner(at)
+    try builder.face(6)
+    for at in 0..<(i64)6: try builder.corner(6 + 5 - at)
+    for at in 0..<(i64)6:
+        let next_at = (at + 1) % 6
+        try builder.face(4)
+        try builder.corner(at)
+        try builder.corner(6 + at)
+        try builder.corner(6 + next_at)
+        try builder.corner(next_at)
+    return try builder.finish()

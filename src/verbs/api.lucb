@@ -5,7 +5,7 @@
 ## Every modeling verb's constructor, in menu order: the array's length is
 ## the registry's size, so a verb added here is counted. The select rules
 ## (selecting/registry.lucb) follow them as the Select verbs.
-let makers: (func() -> Verb)[32] = [
+let makers: (func() -> Verb)[33] = [
     transform_verb,
     smooth_verb,
     mountain_verb,
@@ -23,6 +23,7 @@ let makers: (func() -> Verb)[32] = [
     fuse_verb,
     clean_verb,
     bevel_verb,
+    bevel_weight_verb,
     fill_verb,
     dissolve_verb,
     loop_cut_verb,
@@ -101,7 +102,7 @@ pub struct Verbs:
     pub static func parm_label(index: i64, parm: i64) -> str:
         return parm_of(index, parm).label
 
-    ## 0 number, 1 integer, 2 toggle, 3 vector, 4 menu.
+    ## 0 number, 1 integer, 2 toggle, 3 vector, 4 menu, 5 ramp.
     pub static func parm_kind(index: i64, parm: i64) -> i64:
         return (i64)(u8)parm_of(index, parm).kind
 
@@ -197,6 +198,30 @@ pub struct Verbs:
     pub static func axis_choice(index: i64) -> i64:
         return verb_at(checked(index)).axis_choice
 
+    ## How many keys change verb `index` while its drag lasts.
+    pub static func key_count(index: i64) -> i64:
+        return (i64)verb_at(checked(index)).keys.length
+
+    ## Key `key`'s letter ("A"), the parameter it acts on, its action
+    ## ("drag", "cycle" or "toggle") and, for "drag", how the drag moves
+    ## that parameter (Verb.drag_mode's words).
+    pub static func key_name(index: i64, key: i64) -> str:
+        return key_of(index, key).key
+
+    pub static func key_parm(index: i64, key: i64) -> i64:
+        return key_of(index, key).parm
+
+    pub static func key_action(index: i64, key: i64) -> str:
+        return key_of(index, key).action
+
+    pub static func key_mode(index: i64, key: i64) -> str:
+        return key_of(index, key).mode
+
+    ## Parameter `parm`'s initial value for component `component` (a ramp's
+    ## default points; other parameters give `parm_initial` for each).
+    pub static func parm_initial_at(index: i64, parm: i64, component: i64) -> f64:
+        return parm_of(index, parm).initial_at((usize)component)
+
     ## Verb `name`'s drag frame on `mesh` for `group` (as `run` reads
     ## it) and its parameters: the group's center and average normal, and
     ## its rails for a "slide" drag.
@@ -245,6 +270,11 @@ func pick_of(index: i64, pick: i64) -> PickSpec:
     let verb = verb_at(checked(index))
     if pick < 0 or (usize)pick >= verb.picks.length: trap("verb pick out of range")
     return verb.picks[(usize)pick]
+
+func key_of(index: i64, key: i64) -> KeySpec:
+    let verb = verb_at(checked(index))
+    if key < 0 or (usize)key >= verb.keys.length: trap("verb key out of range")
+    return verb.keys[(usize)key]
 
 func parm_of(index: i64, parm: i64) -> ParmSpec:
     let verb = verb_at(checked(index))

@@ -285,10 +285,23 @@ weights for a selection, which the Edit viewport tints points by.
 
 The modeling verbs, after Houdini's SOPs and Blender's tools:
 
-- **PolyBevel** (edges): strips offset a constant distance into the faces
-  beside each interior edge, 1–64 segments along a profile, overlap clamping,
-  one patch face per corner hole; a lone edge's end vertex stays and its strip
-  fans around it.
+- **PolyBevel** (edges or points): Blender's bevel, its algorithm read and
+  written our own way in `verbs/bevel*.lucb` (the files' notes describe it).
+  Width measured as Offset, Width, Depth, Percent or Absolute; 1–64 segments
+  along a superellipse profile (Shape 0.5 round, 0.25 chamfer, 1 square, 0
+  hollow; points by equal chords) or a Custom profile ramp; corners where
+  beveled edges meet filled by a Grid Fill patch (Catmull-Clark with Sabin's
+  center rule; the cube corner an octant of the superellipsoid) or Cutoff
+  faces; outer miters Sharp, Patch or Arc and inner Sharp or Arc with Spread;
+  Clamp overlap, Loop slide with the even-widths pass, Harden normals (N on
+  corners), Mark seams and sharp, face_strength, Material, and the Angle or
+  Weight limit (`bevel_weight` on edges or points, set by the **Bevel
+  Weight** verb). Affect Vertices cuts points off. Corner values are
+  interpolated by mean value coordinates in the face each corner lies in.
+  Edges with three or more faces, and bevel vertices whose faces are not one
+  fan, refuse the run; boundary edges are left. Its keys (Blender's A, P, S,
+  M, V, O, I, Z, N, C, H, U, K, L) are `Verb.keys`, which luced-3d's drag
+  reads.
 - **PolyExtrude** (faces or edges): regions or individual faces, with an inset
   across the region boundary and wall divisions; one front point per run of
   faces around a boundary point; a closed surface moves out. Edges extrude into
@@ -377,9 +390,9 @@ and attributes included):
 | PolyExtrude, 3 edges | 50.4 ms | 700,572 |  |
 | Inset, 1k faces as a region | 32.5 ms | 702,247 |  |
 | Inset, 100k faces as a region | 54.1 ms | 702,483 |  |
-| PolyBevel, 1k faces' inner edges | 63.5 ms | 705,242 |  |
-| PolyBevel, 100k faces' inner edges, 3 segments | 453.8 ms | 1,400,093 |  |
-| PolyBevel, every edge (1.4M) | 1095.2 ms | 2,798,929 |  |
+| PolyBevel, 1k faces' inner edges | 97.7 ms | 705,240 |  |
+| PolyBevel, 100k faces' inner edges, 3 segments | 1038.0 ms | 2,197,462 |  |
+| PolyBevel, every edge (1.4M) | 1977.2 ms | 2,798,929 |  |
 | Loop Cut, one ring of 837 quads | 51.7 ms | 701,406 |  |
 | Loop Cut, every ring both ways | 420.5 ms | 1,401,138 |  |
 | Bridge, two facing 837-edge loops, 4 divisions | 35.6 ms | 703,080 |  |

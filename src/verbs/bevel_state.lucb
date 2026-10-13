@@ -1,0 +1,348 @@
+## PolyBevel's working state: the bevel vertices, their halves (one per
+## edge around a vertex, counterclockwise seen from outside), their rings
+## of boundary points with each boundary point's profile to the next, and
+## each vertex's mesh (a grid of points over the ring). Everything refers to
+## everything else by index into the arrays here.
+
+## One end of an edge at a bevel vertex (Blender's EdgeHalf). Halves of a
+## vertex are consecutive, counterclockwise from outside: half k's edge
+## leaves the vertex in face `after`, whose corner arrives along half k + 1.
+struct Half:
+    var edge: i32
+    var slot: i32
+    ## The point at the edge's other end.
+    var other: i32
+    ## The faces before (clockwise) and after this edge; -1 on a boundary.
+    var before: i32
+    var after: i32
+    var beveled: bool
+    ## The boundary points on its clockwise (left) and counterclockwise
+    ## (right) side; one point when it is not beveled.
+    var left: i32
+    var right: i32
+    ## Where along an arc miter's profile an unbeveled edge attaches.
+    var profile_index: i32
+    ## How far its strip's sides sit into the faces on each side, and what
+    ## the settings asked for before evening and clamping.
+    var offset_left: f64
+    var offset_right: f64
+    var spec_left: f64
+    var spec_right: f64
+    var visited: bool
+
+## A boundary point of a vertex's ring (Blender's BoundVert).
+struct Bound:
+    var position: Vector3
+    var slot: i32
+    ## Its place in the ring.
+    var index: i32
+    ## The halves attached here, first and last counterclockwise.
+    var first: i32
+    var last: i32
+    ## The beveled half whose left side starts here (its profile runs to the
+    ## next point), or -1.
+    var bevel: i32
+    ## The unbeveled half it was slid onto (Loop slide), and the ratio of
+    ## the sines of its angles to the two beveled edges.
+    var on: i32
+    var sine_ratio: f64
+    ## The next point along an even-widths chain, or -1.
+    var chain: i32
+    var arc_start: bool
+    var patch_start: bool
+    ## Which side a Custom profile starts from (kept consistent along
+    ## chains of beveled edges).
+    var profile_start: bool
+    var visited: bool
+    ## Mark seams and sharp: how many beveled edges past this point the mark
+    ## runs on across the patch.
+    var seam_run: i32
+    var sharp_run: i32
+    var profile: Profile
+
+## A profile from a boundary point to the next: a superellipse quadrant
+## mapped onto the parallelogram of start, middle and end, then projected
+## along `projection` onto a plane.
+struct Profile:
+    var exponent: f64
+    var start: Vector3
+    var middle: Vector3
+    var end: Vector3
+    var plane_point: Vector3
+    var plane_normal: Vector3
+    var projection: Vector3
+    ## Cutoff: how tall the profile stands over its chord.
+    var height: f64
+    ## Parameters set by a special case, not to be reset.
+    var special: bool
+    ## A Custom profile run from its end (see orient_profiles), and a miter's
+    ## arc, which keeps the superellipse under a Custom profile.
+    var reversed: bool
+    var miter: bool
+
+func blank_profile() -> Profile:
+    return Profile(2.0, Vector3(), Vector3(), Vector3(), Vector3(), Vector3(), Vector3(), 0.0, false, false, false)
+
+## What fills a vertex's ring.
+let mesh_none: u8 = 0
+let mesh_polygon: u8 = 1
+let mesh_grid: u8 = 2
+let mesh_fan: u8 = 3
+let mesh_cutoff: u8 = 4
+
+## A bevel vertex (Blender's BevVert).
+struct BevelVertex:
+    var point: i32
+    var first_half: u32
+    var halves: u32
+    ## How many of its halves are beveled.
+    var selected: u32
+    ## Its edges form a closed fan (else it is on the boundary).
+    var closed: bool
+    ## Affect Vertices: its width (weighted).
+    var width: f64
+    var normal: Vector3
+    var first_bound: u32
+    var bounds: u32
+    var kind: u8
+    ## Its mesh's points in Bevel.grid (see `vm_index`), or -1.
+    var grid: i64
+    var visited: bool
+    ## The pipe's first boundary point (-1 none), whether a Cutoff corner
+    ## has its bottom face, and the hollow cube corner (no grid).
+    var pipe: i32
+    var center_face: bool
+    var hollow_corner: bool
+
+## Profile points across the unit square for every profile of a run: the
+## segments' and, for the Grid Fill subdivision, a power of two's (at least
+## 4).
+struct Spacing:
+    var xs: Growing[f64]
+    var ys: Growing[f64]
+    var xs2: Growing[f64]
+    var ys2: Growing[f64]
+    var power: usize
+
+    func init():
+        self.xs = Growing[f64]()
+        self.ys = Growing[f64]()
+        self.xs2 = Growing[f64]()
+        self.ys2 = Growing[f64]()
+        self.power = 0
+
+    func close():
+        self.xs.close()
+        self.ys.close()
+        self.xs2.close()
+        self.ys2.close()
+
+## What each output face is (for Harden normals and Face strength): kept
+## as it was, rebuilt around bevel vertices, a strip, or a vertex patch.
+let face_kept: u8 = 0
+let face_rebuilt: u8 = 1
+let face_strip: u8 = 2
+let face_patch: u8 = 3
+
+struct Bevel:
+    var settings: BevelSettings
+    ## The width in use: the settings', or less after Clamp overlap.
+    var width: f64
+    var mesh: const Mesh*
+    var topology: Topology
+    var origin: Vector3
+    var points: const Float3[]
+    var exact: const Vector3[]
+    var face_normals: Growing[Vector3]
+    var beveled: BitsBuilder
+    var slot_of: Growing[i32]
+    var vertices: Growing[BevelVertex]
+    var halves: Growing[Half]
+    var bounds: Growing[Bound]
+    var spacing: Spacing
+    ## The superellipse's spacing for miter arcs under a Custom profile.
+    var miter_spacing: Spacing
+    ## Every vertex mesh's points: positions, links (-1 no point, -2 a point
+    ## of its own, else the grid index of the point it is) and output point
+    ## ids once emitted.
+    var grid: Growing[Vector3]
+    var grid_links: Growing[i64]
+    var grid_ids: Growing[i32]
+    var skipped_boundary: usize
+    ## The input's bevel_weight attributes, if any.
+    var edge_weights: const Attribute*?
+    var point_weights: const Attribute*?
+
+    static func start(mesh: const Mesh*, settings: BevelSettings) -> Bevel!:
+        let topology = try Topology.of(mesh)
+        var work = Bevel(settings, settings.width, mesh, topology, mesh.position_origin(), mesh.point_span(), precise_span(mesh), Growing[Vector3](), BitsBuilder(Column[u64](), 0), Growing[i32](),
+                         Growing[BevelVertex](), Growing[Half](), Growing[Bound](), Spacing(), Spacing(), Growing[Vector3](), Growing[i64](), Growing[i32](), 0, none, none)
+        errdefer work.close()
+        let edge_index = mesh.attribute_on("bevel_weight", Domain.edge)
+        if edge_index >= 0: work.edge_weights = try mesh.attribute_entry(edge_index)
+        let point_index = mesh.attribute_on("bevel_weight", Domain.point)
+        if point_index >= 0: work.point_weights = try mesh.attribute_entry(point_index)
+        try work.face_normals.fill(topology.faces(), Vector3())
+        for face in 0..<topology.faces(): work.face_normals.items[face] = newell_normal(&work, face)
+        return work
+
+    func close():
+        self.face_normals.close()
+        self.beveled.close()
+        self.slot_of.close()
+        self.vertices.close()
+        self.halves.close()
+        self.bounds.close()
+        self.spacing.close()
+        self.miter_spacing.close()
+        self.grid.close()
+        self.grid_links.close()
+        self.grid_ids.close()
+
+## Input point `point`, in world space.
+func input_point(work: const Bevel*, point: i32) -> Vector3:
+    let at = (usize)point
+    if work.exact.length > 0: return work.exact[at]
+    return work.points[at].vector().add(work.origin)
+
+## Face `face`'s unit normal (Newell's), zero for a face without area.
+func newell_normal(work: const Bevel*, face: usize) -> Vector3:
+    let first = (usize)work.topology.offsets[face]
+    let end = (usize)work.topology.offsets[face + 1]
+    var sum = Vector3()
+    for corner in first..<end:
+        let a = input_point(work, work.topology.corners[corner])
+        let b = input_point(work, work.topology.corners[corner + 1 if corner + 1 < end else first])
+        sum = sum.add(Vector3((a.y - b.y) * (a.z + b.z), (a.z - b.z) * (a.x + b.x), (a.x - b.x) * (a.y + b.y)))
+    return unit_of(sum)
+
+## The face normal of input face `face` (zero for none).
+func normal_of(work: const Bevel*, face: i32) -> Vector3:
+    if face < 0: return Vector3()
+    return work.face_normals.items[(usize)face]
+
+## Bevel vertex `slot`'s position.
+func vertex_at(work: const Bevel*, slot: i32) -> Vector3:
+    return input_point(work, work.vertices.items[(usize)slot].point)
+
+## The halves after and before `half` around its vertex.
+func next_half(work: const Bevel*, half: i32) -> i32:
+    let vertex = &work.vertices.items[(usize)work.halves.items[(usize)half].slot]
+    let first = (i32)vertex.first_half
+    return first + (half - first + 1) % (i32)vertex.halves
+
+func previous_half(work: const Bevel*, half: i32) -> i32:
+    let vertex = &work.vertices.items[(usize)work.halves.items[(usize)half].slot]
+    let first = (i32)vertex.first_half
+    return first + (half - first + (i32)vertex.halves - 1) % (i32)vertex.halves
+
+## The boundary points after and before `bound` around its ring.
+func next_bound(work: const Bevel*, bound: i32) -> i32:
+    let vertex = &work.vertices.items[(usize)work.bounds.items[(usize)bound].slot]
+    let first = (i32)vertex.first_bound
+    return first + (bound - first + 1) % (i32)vertex.bounds
+
+func previous_bound(work: const Bevel*, bound: i32) -> i32:
+    let vertex = &work.vertices.items[(usize)work.bounds.items[(usize)bound].slot]
+    let first = (i32)vertex.first_bound
+    return first + (bound - first + (i32)vertex.bounds - 1) % (i32)vertex.bounds
+
+## The unit direction from `half`'s vertex along its edge.
+func half_direction(work: const Bevel*, half: i32) -> Vector3:
+    let item = &work.halves.items[(usize)half]
+    return unit_of(input_point(work, item.other).subtract(vertex_at(work, item.slot)))
+
+## `half`'s edge length.
+func half_length(work: const Bevel*, half: i32) -> f64:
+    let item = &work.halves.items[(usize)half]
+    return input_point(work, item.other).subtract(vertex_at(work, item.slot)).length()
+
+## The half of edge `edge` at bevel vertex `slot`, or -1.
+func half_of(work: const Bevel*, slot: i32, edge: i32) -> i32:
+    let vertex = &work.vertices.items[(usize)slot]
+    for at in vertex.first_half..<vertex.first_half + vertex.halves:
+        if work.halves.items[(usize)at].edge == edge: return (i32)at
+    return -1
+
+## The half at the other end of `half`'s edge, if that end is a bevel
+## vertex; else -1.
+func far_half(work: const Bevel*, half: i32) -> i32:
+    let item = &work.halves.items[(usize)half]
+    let slot = work.slot_of.items[(usize)item.other]
+    if slot < 0: return -1
+    return half_of(work, slot, item.edge)
+
+# Vector helpers. Directions without length stay zero.
+
+func unit_of(v: Vector3) -> Vector3:
+    let length = norm(v)
+    return v.multiply_scalar(1.0 / length) if length > 0.0 else v
+
+## A vector's length (a plain square root: bevel's sizes are far from
+## overflow, and Vector3.length's careful hypot is slow in its loops).
+func norm(v: Vector3) -> f64:
+    return math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+
+func midpoint(a: Vector3, b: Vector3) -> Vector3:
+    return a.add(b).multiply_scalar(0.5)
+
+func lerp(a: Vector3, b: Vector3, t: f64) -> Vector3:
+    return a.add(b.subtract(a).multiply_scalar(t))
+
+## The angle between two directions, 0 to pi.
+func angle_between(a: Vector3, b: Vector3) -> f64:
+    return math.atan2(norm(a.cross(b)), a.dot(b))
+
+## The angle at `b` from `a` to `c`.
+func corner_angle(a: Vector3, b: Vector3, c: Vector3) -> f64:
+    return angle_between(a.subtract(b), c.subtract(b))
+
+let tiny: f64 = 0.000001
+let tiny_angle: f64 = 0.0001
+let small_angle: f64 = 0.1745329
+
+## Whether two unit directions are nearly parallel (or opposite).
+func nearly_parallel(a: Vector3, b: Vector3) -> bool:
+    let angle = angle_between(a, b)
+    return math.abs(angle) < tiny_angle or math.abs(angle - math.pi) < tiny_angle
+
+## Where the lines through a1, a2 and b1, b2 meet: (0, …) when they are
+## parallel, (1, point, point) when they meet, (2, nearest on a, nearest on
+## b) when they pass apart.
+func line_meet(a1: Vector3, a2: Vector3, b1: Vector3, b2: Vector3) -> (i64, Vector3, Vector3):
+    let u = a2.subtract(a1)
+    let v = b2.subtract(b1)
+    let w = a1.subtract(b1)
+    let a = u.dot(u)
+    let b = u.dot(v)
+    let c = v.dot(v)
+    let d = u.dot(w)
+    let e = v.dot(w)
+    let denominator = a * c - b * b
+    if a == 0.0 or c == 0.0 or denominator <= 0.000000000001 * a * c: return (0, a1, b1)
+    let s = (b * e - c * d) / denominator
+    let t = (a * e - b * d) / denominator
+    let p = a1.add(u.multiply_scalar(s))
+    let q = b1.add(v.multiply_scalar(t))
+    let scale = math.max(1.0, math.max(p.length(), q.length()))
+    if p.subtract(q).length() <= 0.000001 * scale: return (1, p, q)
+    return (2, p, q)
+
+## Where the line through `a` and `b` crosses the plane through `point`
+## with normal `normal`, if it does.
+func line_plane(a: Vector3, b: Vector3, point: Vector3, normal: Vector3) -> Vector3?:
+    let way = b.subtract(a)
+    let along = normal.dot(way)
+    if math.abs(along) < 0.000000000001: return none
+    return a.add(way.multiply_scalar(normal.dot(point.subtract(a)) / along))
+
+## `p` projected onto the plane through `point` with unit normal `normal`.
+func onto_plane(p: Vector3, point: Vector3, normal: Vector3) -> Vector3:
+    return p.subtract(normal.multiply_scalar(normal.dot(p.subtract(point))))
+
+## The point of segment a-b nearest `p`.
+func nearest_on_segment(p: Vector3, a: Vector3, b: Vector3) -> Vector3:
+    let way = b.subtract(a)
+    let length = way.dot(way)
+    if length == 0.0: return a
+    return a.add(way.multiply_scalar(math.max(0.0, math.min(1.0, p.subtract(a).dot(way) / length))))

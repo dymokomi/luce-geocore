@@ -1,0 +1,40 @@
+## Bevel Weight: the `bevel_weight` attribute of the group's edges (or, for
+## a point group, its points), which PolyBevel's Limit Weight reads: an edge
+## bevels at its width times its weight, an edge of weight 0 not at all, as
+## Blender's bevel weights do.
+
+let bevel_weight_parms: ParmSpec[2] = [
+    ParmSpec("Weight", ParmKind.number, 1.0, 0.0, 1.0, 1, "", "The weight the group's edges (or points) get: Bevel with Limit Weight scales its width by it, and leaves those of weight 0."),
+    ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Set|Clear", "Give the group this weight, or clear it to 0.")]
+
+## Points take their own weight; other groups become edges.
+let bevel_weight_also: Domain[1] = [Domain.point]
+
+func bevel_weight_verb() -> Verb:
+    return Verb("Bevel Weight", "Modeling", "Set the bevel_weight of the group's edges or points for Bevel's Limit Weight", Domain.edge, true, bevel_weight_parms, false, cook_bevel_weight, false, bevel_weight_also,
+                section = "Modify", family = "Bevel", icon = "edge-select", picks = bevel_picks, drag = 0, drag_mode = "amount")
+
+func cook_bevel_weight(input: const VerbInput*, output: VerbOutput*) -> !:
+    let weight = input.parms.at(0)
+    if not math.is_finite(weight) or weight < 0.0: error(errors.invalid, "Bevel weights must be finite and not negative")
+    let value = (f32)(0.0 if input.parms.at(1) == 1.0 else weight)
+    let mesh = input.mesh
+    let domain = Domain.point if input.domain == Domain.point else Domain.edge
+    let count = (usize)mesh.point_count() if domain == Domain.point else (usize)(try mesh.edge_count())
+    var attribute = try Attribute.create("bevel_weight", domain, DataType.float32, 1, count)
+    let values = attribute_ops.typed_mut[f32](attribute.data.span())
+    let existing = mesh.attribute_on("bevel_weight", domain)
+    for element in 0..<count:
+        if input.group.get(element):
+            values[element] = value
+            continue
+        values[element] = (f32)(0.0 if existing < 0 else (mesh.attribute_value(existing, (i64)element) catch failure: recover 0.0))
+    let made = mesh_share(mesh) catch failure:
+        attribute.release()
+        error(failure.code, failure.message)
+    put_attribute(made, attribute) catch failure:
+        mesh_dispose(made)
+        error(failure.code, failure.message)
+    output.mesh = made
+    output.selection = try BitsBuilder.copy_of(input.group)
+    output.selection_domain = domain

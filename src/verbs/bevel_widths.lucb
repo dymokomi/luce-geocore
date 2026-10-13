@@ -1,0 +1,354 @@
+## Widths after the halves are known: Clamp overlap, the even-widths pass
+## along loop-slid chains, and which side a Custom profile starts from.
+##
+## Clamp overlap finds the widest bevel before anything collides, assuming
+## every width grows in proportion with Width: the strip of an edge between
+## two others collapses when the offset lines of its neighbours meet across
+## it; a side sliding along an unbeveled edge runs out of edge; two points
+## cut off along one edge (Affect Vertices) meet. Every width scales down to
+## just short of the smallest such width.
+##
+## Loop slide puts a boundary point on an unbeveled edge, which leaves the
+## strips either side with slightly different widths at that point. The
+## even-widths pass follows the chains (or cycles) of such points along
+## their strips and solves, in the least-squares sense, for widths that
+## agree at both ends of each strip while staying near what was asked for.
+
+## How far short of a collision Clamp overlap stops, as a share of the
+## width.
+let clamp_margin: f64 = 0.0001
+
+## Scale every width down to where nothing collides.
+func limit_widths(work: Bevel*) -> !:
+    let asked = work.width
+    if asked <= 0.0: return
+    var limited = asked
+    for at in 0..<work.halves.count:
+        let reach = vertex_collision(work, (i32)at) if work.settings.vertices else strip_collision(work, (i32)at)
+        limited = math.min(limited, reach)
+    if limited >= asked: return
+    # Just short of the collision, so the faces squeezed between keep an
+    # area.
+    limited *= 1.0 - clamp_margin
+    let factor = limited / asked
+    for at in 0..<work.halves.count:
+        work.halves.items[at].spec_left *= factor
+        work.halves.items[at].spec_right *= factor
+        work.halves.items[at].offset_left *= factor
+        work.halves.items[at].offset_right *= factor
+    work.width = limited
+
+## The width at which the strip of `half` (going from its vertex b to c, in
+## the face after it, between edges a-b and c-d) collapses or runs out of
+## room sliding along a neighbour.
+func strip_collision(work: const Bevel*, half: i32) -> f64:
+    let unlimited = work.width + 1000000.0
+    let item = work.halves.items[(usize)half]
+    var kb = item.spec_left
+    let next_one = next_half(work, half)
+    let ka = work.halves.items[(usize)next_one].spec_right
+    let b = vertex_at(work, item.slot)
+    let c = input_point(work, item.other)
+    let a = input_point(work, work.halves.items[(usize)next_one].other)
+    let far = far_half(work, half)
+    let kind = work.settings.width_type
+    if kind == width_percent or kind == width_absolute:
+        if work.halves.items[(usize)next_one].beveled and far >= 0 and work.halves.items[(usize)previous_half(work, far)].beveled:
+            if kind == width_percent: return 50.0
+            let length = c.subtract(b).length()
+            return length / 2.0 if work.width > length / 2.0 else length
+        return unlimited
+    var kc = 0.0
+    var d = Vector3()
+    var c_edge: i32 = -1
+    if far >= 0:
+        let previous_far = previous_half(work, far)
+        kc = work.halves.items[(usize)previous_far].spec_left
+        d = input_point(work, work.halves.items[(usize)previous_far].other)
+        c_edge = work.halves.items[(usize)previous_far].edge
+    else:
+        # The point after c in the face after the strip's edge.
+        if item.after < 0: return unlimited
+        let at_c = face_corner(work, item.after, item.other)
+        if at_c < 0: return unlimited
+        d = input_point(work, work.topology.corners[work.topology.next((usize)at_c)])
+    if work.halves.items[(usize)next_one].edge == item.edge or c_edge == item.edge: return unlimited
+    let angle1 = corner_angle(a, b, c)
+    let angle2 = corner_angle(b, c, d)
+    var limit = unlimited
+    # The strip collapses where its neighbours' offset lines meet across it.
+    let projected = safe_ratio(ka + math.cos(angle1) * kb, math.sin(angle1)) + safe_ratio(kc + math.cos(angle2) * kb, math.sin(angle2))
+    if projected > tiny:
+        let reach = work.width * (c.subtract(b).length() / projected)
+        if reach > tiny: limit = reach
+    # A side sliding along an unbeveled neighbour runs out of that edge (and
+    # those in line with it).
+    if kb > 0.0000001 and (ka == 0.0 or kc == 0.0) and item.after >= 0:
+        kb = work.width / kb
+        let topology = &work.topology
+        let size = (usize)topology.offsets[(usize)item.after + 1] - (usize)topology.offsets[(usize)item.after]
+        if ka == 0.0:
+            let at_a = face_corner(work, item.after, work.halves.items[(usize)next_one].other)
+            if at_a >= 0:
+                var corner = (usize)at_a
+                var side = 0.0
+                var exterior = math.pi - angle1
+                for step in 0..<size:
+                    if step > 0:
+                        corner = topology.previous(corner)
+                        exterior += math.pi - corner_angle(input_point(work, topology.corners[corner]), input_point(work, topology.corners[topology.next(corner)]), input_point(work, topology.corners[topology.next(topology.next(corner))]))
+                    side += corner_edge_length(work, corner) * math.sin(exterior)
+                    if exterior >= 0.0001: break
+                limit = math.min(side * kb, limit)
+        if kc == 0.0:
+            let at_b = face_corner(work, item.after, work.vertices.items[(usize)item.slot].point)
+            if at_b >= 0:
+                var corner = topology.next((usize)at_b)
+                var side = 0.0
+                var exterior = math.pi - angle2
+                for step in 0..<size:
+                    if step > 0:
+                        corner = topology.next(corner)
+                        exterior += math.pi - corner_angle(input_point(work, topology.corners[topology.previous(corner)]), input_point(work, topology.corners[corner]), input_point(work, topology.corners[topology.next(corner)]))
+                    side += corner_edge_length(work, corner) * math.sin(exterior)
+                    if exterior >= 0.0001: break
+                limit = math.min(side * kb, limit)
+    return limit
+
+func safe_ratio(a: f64, b: f64) -> f64:
+    return 0.0 if b == 0.0 else a / b
+
+## The length of the edge leaving input corner `corner`.
+func corner_edge_length(work: const Bevel*, corner: usize) -> f64:
+    let topology = &work.topology
+    return input_point(work, topology.corners[topology.next(corner)]).subtract(input_point(work, topology.corners[corner])).length()
+
+## Affect Vertices: the width at which the points slid toward each other
+## along `half`'s edge from its two ends meet.
+func vertex_collision(work: const Bevel*, half: i32) -> f64:
+    let unlimited = work.width + 1000000.0
+    if work.width == 0.0: return unlimited
+    let ka = work.halves.items[(usize)half].spec_left / work.width
+    let far = far_half(work, half)
+    let kb = work.halves.items[(usize)far].spec_left / work.width if far >= 0 else 0.0
+    if ka + kb <= 0.0: return unlimited
+    return half_length(work, half) / (ka + kb)
+
+## Even the widths along chains and cycles of loop-slid boundary points,
+## then place the rings they changed again.
+func even_widths(work: Bevel*) -> !:
+    var evened = false
+    for slot in 0..<work.vertices.count:
+        let vertex = work.vertices.items[slot]
+        for at in vertex.first_bound..<vertex.first_bound + vertex.bounds:
+            let anchor = (i32)at
+            if work.bounds.items[at].visited or work.bounds.items[at].on < 0: continue
+            var start = anchor
+            var end = anchor
+            var current = anchor
+            var cycle = false
+            var length = 1
+            # Forward: each point's first half's strip leads to the left
+            # point at its other end.
+            while work.bounds.items[(usize)current].on >= 0 and not work.bounds.items[(usize)current].visited and not cycle:
+                work.bounds.items[(usize)current].visited = true
+                let first = work.bounds.items[(usize)current].first
+                if first < 0: break
+                let across = far_half(work, first)
+                if across < 0: break
+                let following = work.halves.items[(usize)across].left
+                work.bounds.items[(usize)current].chain = following
+                end = following
+                length += 1
+                if work.bounds.items[(usize)following].visited:
+                    if following != start: break
+                    try even_chain(work, start, true)
+                    evened = true
+                    cycle = true
+                current = following
+            if cycle: continue
+            # Backward from the start along each point's last half.
+            work.bounds.items[(usize)current].chain = -1
+            current = start
+            while true:
+                work.bounds.items[(usize)current].visited = true
+                let last = work.bounds.items[(usize)current].last
+                if last < 0: break
+                let across = far_half(work, last)
+                if across < 0: break
+                let preceding = work.halves.items[(usize)across].right
+                work.bounds.items[(usize)preceding].chain = current
+                length += 1
+                start = preceding
+                current = preceding
+                if work.bounds.items[(usize)current].visited or work.bounds.items[(usize)current].on < 0: break
+            if length >= 3 and work.bounds.items[(usize)start].on < 0 and work.bounds.items[(usize)end].on < 0:
+                try even_chain(work, start, false)
+                evened = true
+    if not evened: return
+    for slot in 0..<work.vertices.count: try build_boundary(work, slot, false)
+
+## How strongly the widths keep to what was asked, against agreeing at both
+## ends of a strip.
+let spec_weight: f64 = 0.2
+
+## One chain (or cycle) from `start` along Bound.chain. Unknown i is the
+## right width of point i's first half (the last point of a chain: the left
+## width of its last half); point i's last half's left width is its sine
+## ratio times unknown i. Rows: strip i's right width at point i equals its
+## left width at point i + 1, and, weighted down, each width near its spec.
+func even_chain(work: Bevel*, start: i32, cycle: bool) -> !:
+    var points = Growing[i32]()
+    defer points.close()
+    var current = start
+    while current >= 0:
+        try points.push(current)
+        current = work.bounds.items[(usize)current].chain
+        if current == start: break
+        if points.count > work.bounds.count: break
+    let count = points.count
+    if count < 2: return
+    var rows = Growing[i64]()
+    defer rows.close()
+    var columns = Growing[i64]()
+    defer columns.close()
+    var values = Growing[f64]()
+    defer values.close()
+    var targets = Growing[f64]()
+    defer targets.close()
+    var row: i64 = 0
+    let links = count if cycle else count - 1
+    for i in 0..<links:
+        let following = (i + 1) % count
+        let ratio = work.bounds.items[(usize)points.items[following]].sine_ratio
+        try add_entry_at(&rows, &columns, &values, row, (i64)i, 1.0)
+        let last_of_chain = not cycle and following == count - 1
+        try add_entry_at(&rows, &columns, &values, row, (i64)following, -1.0 if last_of_chain else -ratio)
+        try targets.push(0.0)
+        row += 1
+    for i in 0..<count:
+        let bound = work.bounds.items[(usize)points.items[i]]
+        if cycle or i < count - 1:
+            let right = work.halves.items[(usize)bound.first].offset_right
+            try add_entry_at(&rows, &columns, &values, row, (i64)i, spec_weight)
+            try targets.push(spec_weight * right)
+            row += 1
+        if (cycle or i > 0) and bound.last >= 0:
+            let left = work.halves.items[(usize)bound.last].offset_left
+            let ratio = 1.0 if (not cycle and i == count - 1) else bound.sine_ratio
+            try add_entry_at(&rows, &columns, &values, row, (i64)i, spec_weight * ratio)
+            try targets.push(spec_weight * left)
+            row += 1
+    var solution = Growing[f64]()
+    defer solution.close()
+    try least_squares(rows.view(), columns.view(), values.view(), targets.view(), count, &solution)
+    for i in 0..<count:
+        let bound = work.bounds.items[(usize)points.items[i]]
+        let value = solution.items[i]
+        if cycle or i < count - 1:
+            work.halves.items[(usize)bound.first].offset_right = value
+            if (cycle or i > 0) and bound.last >= 0: work.halves.items[(usize)bound.last].offset_left = bound.sine_ratio * value
+        elif bound.last >= 0:
+            work.halves.items[(usize)bound.last].offset_left = value
+
+func add_entry_at(rows: Growing[i64]*, columns: Growing[i64]*, values: Growing[f64]*, row: i64, column: i64, value: f64) -> !:
+    try rows.push(row)
+    try columns.push(column)
+    try values.push(value)
+
+## The least-squares solution of the sparse system (entries by row and
+## column) by conjugate gradients on its normal equations (CGLS).
+func least_squares(rows: const i64[], columns: const i64[], values: const f64[], targets: const f64[], count: usize, solution: Growing[f64]*) -> !:
+    let row_count = targets.length
+    try solution.fill(count, 0.0)
+    var residual = Growing[f64]()
+    defer residual.close()
+    try residual.assign(targets)
+    var gradient = Growing[f64]()
+    defer gradient.close()
+    try gradient.fill(count, 0.0)
+    var direction = Growing[f64]()
+    defer direction.close()
+    var product = Growing[f64]()
+    defer product.close()
+    try product.fill(row_count, 0.0)
+    transpose_times(rows, columns, values, residual.view(), gradient.items)
+    try direction.assign(gradient.view())
+    var gradient_norm = dot_of(gradient.view(), gradient.view())
+    let first_norm = gradient_norm
+    for _ in 0..<count * 4 + 8:
+        if gradient_norm <= first_norm * 0.000000000000000000000001 or gradient_norm == 0.0: break
+        for at in 0..<row_count: product.items[at] = 0.0
+        for at in 0..<rows.length: product.items[(usize)rows[at]] += values[at] * direction.items[(usize)columns[at]]
+        let curvature = dot_of(product.view(), product.view())
+        if curvature == 0.0: break
+        let step = gradient_norm / curvature
+        for at in 0..<count: solution.items[at] += step * direction.items[at]
+        for at in 0..<row_count: residual.items[at] -= step * product.items[at]
+        transpose_times(rows, columns, values, residual.view(), gradient.items)
+        let next_norm = dot_of(gradient.view(), gradient.view())
+        let beta = next_norm / gradient_norm
+        for at in 0..<count: direction.items[at] = gradient.items[at] + beta * direction.items[at]
+        gradient_norm = next_norm
+
+func transpose_times(rows: const i64[], columns: const i64[], values: const f64[], vector: const f64[], into: f64[]):
+    for at in 0..<into.length: into[at] = 0.0
+    for at in 0..<rows.length: into[(usize)columns[at]] += values[at] * vector[(usize)rows[at]]
+
+func dot_of(a: const f64[], b: const f64[]) -> f64:
+    var sum = 0.0
+    for at in 0..<a.length: sum += a[at] * b[at]
+    return sum
+
+## Custom profile: along every chain of beveled edges the profile starts
+## from one consistent side, so an asymmetric profile does not flip from
+## strip to strip. Each chain starts on the side of its first strip whose
+## boundary point is higher (Y).
+func orient_profiles(work: Bevel*):
+    let topology = &work.topology
+    for edge in 0..<topology.edges():
+        if not work.beveled.view().get(edge): continue
+        let slot = work.slot_of.items[(usize)topology.edge_points[edge * 2]]
+        if slot < 0: continue
+        let start = half_of(work, slot, (i32)edge)
+        if start < 0 or work.halves.items[(usize)start].visited: continue
+        let left = work.halves.items[(usize)start].left
+        let right = work.halves.items[(usize)start].right
+        let right_highest = work.bounds.items[(usize)left].position.y < work.bounds.items[(usize)right].position.y
+        work.bounds.items[(usize)left].profile_start = right_highest
+        work.halves.items[(usize)start].visited = true
+        for pass in 0..<2:
+            var toward = pass == 0
+            var half = next_beveled(work, start, toward)
+            while half >= 0 and not work.halves.items[(usize)half].visited:
+                let flag = (toward != right_highest) if pass == 0 else ((not toward) != right_highest)
+                work.bounds.items[(usize)work.halves.items[(usize)half].left].profile_start = flag
+                toward = not toward
+                work.halves.items[(usize)half].visited = true
+                half = next_beveled(work, half, toward)
+
+## The next beveled half along a chain: the other end of `half`'s edge, or
+## (`across`) the beveled half at its vertex that continues it most
+## straight, when that one is clearly the straightest.
+func next_beveled(work: const Bevel*, half: i32, across: bool) -> i32:
+    if not across: return far_half(work, half)
+    let vertex = work.vertices.items[(usize)work.halves.items[(usize)half].slot]
+    if vertex.selected == 1: return -1
+    let incoming = half_direction(work, half).multiply_scalar(-1.0)
+    var best: i32 = -1
+    var best_dot = 0.0
+    var second_dot = 0.0
+    var other = next_half(work, half)
+    while other != half:
+        if work.halves.items[(usize)other].beveled:
+            if vertex.selected == 2: return other
+            let dot = half_direction(work, other).dot(incoming)
+            if dot > best_dot:
+                second_dot = best_dot
+                best_dot = dot
+                best = other
+            elif dot > second_dot:
+                second_dot = dot
+        other = next_half(work, other)
+    if best >= 0 and math.abs(best_dot - second_dot) < 0.015: return -1
+    return best

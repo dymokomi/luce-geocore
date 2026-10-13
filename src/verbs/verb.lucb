@@ -9,6 +9,7 @@ import interop
 from luce_std import math
 import memory
 import errors
+import strings
 from luce_std import parallel
 import core.attribute_ops
 from core.growing import Growing
@@ -27,10 +28,14 @@ from geometries.topology.connectivity import Topology
 from groups import GroupType, is_blank, guess_domain, GroupResult, GroupReport, group_bits, Selection, adopt_selection, strict_conversion, selection_bits
 from selecting import converted, rule_at, rule_count, run_rule, mirror_tolerance, mirror_map, symmetric
 from core.limits import max_points, check_mesh_size
-from core.verb_specs import ParmKind, ParmSpec, PickSpec, Parms, filled_parms
+from core.verb_specs import ParmKind, ParmSpec, PickSpec, KeySpec, Parms, filled_parms
+from luce_std import ramp
 
 ## A verb with no pick declared takes one, at every level.
 let no_picks: PickSpec[1] = [PickSpec("")]
+
+## A verb with no keys for its drag.
+let no_keys: KeySpec[1] = [KeySpec("", -1, "")]
 
 ## A verb that takes no other domain as it is.
 let no_domains: Domain[1] = [Domain.detail]
@@ -170,6 +175,10 @@ pub struct Verb:
     ## none).
     pub let axis: i64 = -1
     pub let axis_choice: i64 = -1
+    ## Keys that change the tool while its drag lasts (Bevel's A, P, S for
+    ## the value the drag sets, M, V, O, I, Z, N to cycle menus, C, H, U, K
+    ## to flip toggles), as Blender's modal keys.
+    pub let keys: const KeySpec[] = no_keys[..<0]
     ## The rails a "slide" drag runs along, from the input and parameters.
     pub let rails: (func(const VerbInput*, Rails*) -> unit!)? = none
     ## Viewport input it takes besides the selection: "" none, "stroke"

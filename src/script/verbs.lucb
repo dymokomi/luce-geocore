@@ -31,7 +31,7 @@ pub struct Verb:
         errdefer verb.close()
         for _ in 0..<VerbCatalog.text_row_count(index): try verb.texts.push("")
         for parm in 0..<VerbCatalog.parm_count(index):
-            for _ in 0..<VerbCatalog.parm_components(index, parm): try verb.numbers.push(VerbCatalog.parm_initial(index, parm))
+            for component in 0..<VerbCatalog.parm_components(index, parm): try verb.numbers.push(VerbCatalog.parm_initial_at(index, parm, component))
         return verb
 
     ## Set the parameter labeled `label` (as its row shows it; case and spaces or

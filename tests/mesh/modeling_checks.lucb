@@ -101,19 +101,19 @@ func planar_uv(mesh: interop.Reference[Mesh]) -> !:
         near(try mesh.value().attribute_value(uv, corner, 1), point.z)
 
 func bevel_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) -> !:
-    let round: f64[4] = [0.2, 1.0, 0.5, 1.0]
-    # One cube edge: its ends go, two slides each; one strip.
+    # Width and Segments; the rest of Bevel's numbers keep their defaults
+    # (bevel_checks.lucb checks the options).
+    let round: f64[2] = [0.2, 1.0]
+    # One cube edge: its ends go, two points each; one strip.
     let one = try made(cube, "PolyBevel", "p0-1", 2, round, 1)
     defer one.release()
     counts(one, 10, 7)
     try closed(one)
-    # Two segments: a profile point per end and a patch where the straight
-    # cut of the third face meets the curved profile.
-    var two_segments = round
-    two_segments[1] = 2.0
-    let curved = try made(cube, "PolyBevel", "p0-1", 2, two_segments, 4)
+    # Two segments: the end faces take the profile's middle point.
+    let two_segments: f64[2] = [0.2, 2.0]
+    let curved = try made(cube, "PolyBevel", "p0-1", 2, two_segments, 2)
     defer curved.release()
-    counts(curved, 12, 10)
+    counts(curved, 12, 8)
     try closed(curved)
     # Every edge: a meet point per face corner, a triangle per cube corner.
     let all = try made(cube, "PolyBevel", "", 0, round, 20)
@@ -123,51 +123,49 @@ func bevel_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) 
     let bounds = all.value().bounds()
     near(bounds.maximum.x, 1.0)
     near(bounds.minimum.y, 0.0)
-    var three = round
-    three[1] = 3.0
-    let rounder = try made(cube, "PolyBevel", "", 0, three, 44)
+    # Three segments: grid corners of three quads round a triangle each
+    # sector, all on the corner's sphere (bevel_checks.lucb).
+    let three: f64[2] = [0.2, 3.0]
+    let rounder = try made(cube, "PolyBevel", "", 0, three, 92)
     defer rounder.release()
-    counts(rounder, 72, 50)
+    counts(rounder, 8 * 12, 6 + 92)
     try closed(rounder)
     # The same run twice builds the same topology and points.
-    let again = try made(cube, "PolyBevel", "", 0, three, 44)
+    let again = try made(cube, "PolyBevel", "", 0, three, 92)
     defer again.release()
     assert(again.value().topology_hash() == rounder.value().topology_hash())
     near((try again.value().point(40)).y, (try rounder.value().point(40)).y)
-    # A line across the grid: strips share their profiles at the points
-    # they pass through, whose slides replace them.
-    let line = try made(grid, "PolyBevel", "p10-11-12-13-14", 2, [0.1, 2.0, 0.5, 1.0], 8)
+    # A line across the grid: its points slide along the edges across it
+    # (Loop slide), corner values interpolated in their faces, so the
+    # planar uv holds; attributes and groups come through.
+    let line_numbers: f64[2] = [0.1, 2.0]
+    let line = try made(grid, "PolyBevel", "p10-11-12-13-14", 2, line_numbers, 8)
     defer line.release()
     counts(line, 35, 24)
     try planar_uv(line)
     assert(line.value().group_size("top", 2) == 4 and line.value().group_size("pinned", 0) == 4)
     try carried(line)
-    try stable(grid, "PolyBevel", "p10-11-12-13-14", 2, [0.1, 2.0, 0.5, 1.0])
+    try stable(grid, "PolyBevel", "p10-11-12-13-14", 2, line_numbers)
     # A region's edges with three segments: the strips' ends on the mesh's
-    # boundary stay open without a warning.
-    let region = try Verbs.run("PolyBevel", grid, "0-5", 3, [0.1, 3.0, 0.5, 1.0])
+    # boundary stay open without a warning (boundary edges do not bevel).
+    let region_numbers: f64[2] = [0.1, 3.0]
+    let region = try Verbs.run("PolyBevel", grid, "0-5", 3, region_numbers)
     defer region.release()
     assert(region.value().warning() == "")
-    # An edge ending inside: its ends stay, in a six-sided strip.
-    let inner = try made(grid, "PolyBevel", "p11-12", 2, round, 1)
+    # An edge ending inside: each end a fan of the strip's two sides and a
+    # point slid back along the edge beyond.
+    let inner = try made(grid, "PolyBevel", "p11-12", 2, round, 3)
     defer inner.release()
-    counts(inner, 29, 17)
-    assert((try inner.value().face_size(16)) == 6)
+    counts(inner, 29, 19)
     try planar_uv(inner)
     let edges = try inner.value().edge_count()
     assert(inner.value().point_count() - edges + inner.value().face_count() == 1)
-    let fanned = try made(grid, "PolyBevel", "p11-12", 2, [0.1, 2.0, 0.5, 1.0], 2)
-    defer fanned.release()
-    counts(fanned, 29, 18)
-    try planar_uv(fanned)
-    # Two edges meeting at a cube corner share the profile between them.
+    # Two edges meeting at a cube corner weld into one bent strip there.
     let corner = try made(cube, "PolyBevel", "p1-0-3", 2, round, 2)
     defer corner.release()
-    counts(corner, 11, 8)
     try closed(corner)
-    let shared = try made(cube, "PolyBevel", "p1-0-3", 2, two_segments, 6)
+    let shared = try made(cube, "PolyBevel", "p1-0-3", 2, two_segments, 4)
     defer shared.release()
-    counts(shared, 14, 12)
     try closed(shared)
     # Only boundary edges: nothing to bevel, the input passes through.
     let border = try Verbs.run("PolyBevel", grid, "p0-1", 2, round)
@@ -176,7 +174,7 @@ func bevel_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) 
     let same = try border.value().mesh()
     defer same.release()
     counts(same, 25, 16)
-    print("PASS PolyBevel: cube edge, segments, every edge, a line across a grid, an inner edge, boundary pass-through")
+    print("PASS PolyBevel: cube edge, segments, every edge, a line across a grid, an inner edge, two edges at a corner, boundary pass-through")
 
 func extrude_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) -> !:
     # A region of four faces: one front point per region point, the inner

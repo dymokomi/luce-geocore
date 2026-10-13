@@ -12,6 +12,12 @@ pub enum ParmKind as u8:
     toggle = 2
     vector = 3
     menu = 4
+    ## A luce-std ramp (`ramp.lucb`'s flat list) in `components` numbers,
+    ## its points after the header; the numbers past its size are unused.
+    ramp = 5
+
+## No per-component initial values: each component starts at `initial`.
+let no_initials: f64[1] = [0.0]
 
 ## One parameter of a verb: what the node's parameter pane shows, and where
 ## its values sit among the numbers a run receives.
@@ -34,6 +40,13 @@ pub struct ParmSpec:
     ## Whether it sits behind More options (a folder closed at first) on the
     ## bar and in the node's pane: the rows a modeler sets less often.
     pub let more: bool = false
+    ## Initial values per component, where they differ (a ramp's default
+    ## points); components past them start at `initial`.
+    pub let initials: const f64[] = no_initials[..<0]
+
+    ## Component `component`'s initial value.
+    pub func initial_at(component: usize) -> f64:
+        return self.initials[component] if component < self.initials.length else self.initial
 
 ## One selection a tool works on (its first is the group the verb runs on):
 ## what it is called, the selection levels it is picked at and what the
@@ -44,6 +57,16 @@ pub struct PickSpec:
     ## pieces), "points", "edges" and "faces"; "" takes every level.
     pub let levels: str = ""
     pub let prompt: str = ""
+
+## A key that changes a tool while its drag lasts, as Blender's modal keys
+## do: `action` "drag" makes the drag set parameter `parm` instead (moved
+## by `mode`, one of Verb.drag_mode's words), "cycle" steps a menu
+## parameter to its next choice, "toggle" flips a toggle.
+pub struct KeySpec:
+    pub let key: str
+    pub let parm: i64
+    pub let action: str
+    pub let mode: str = ""
 
 ## The values of one run: numbers in parameter order (a vector takes its
 ## components), one per component of the verb's parameters (`filled_parms`).
@@ -66,8 +89,8 @@ pub func filled_parms(specs: const ParmSpec[], numbers: const f64[], trailing: b
     try values.reserve(length)
     var at: usize = 0
     for spec in specs:
-        for _ in 0..<spec.components:
-            values.items[at] = numbers[at] if at < numbers.length else spec.initial
+        for component in 0..<spec.components:
+            values.items[at] = numbers[at] if at < numbers.length else spec.initial_at(component)
             at += 1
     for extra in total..<length: values.items[extra] = numbers[extra]
     values.count = length

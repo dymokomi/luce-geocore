@@ -1,0 +1,276 @@
+## Where a bevel vertex's boundary points go. Each beveled edge's strip
+## side is a line parallel to the edge, its offset into the face beside it;
+## a boundary point between two beveled edges is where their offset lines
+## meet. With edges between them, the point drops onto one of the faces in
+## between (or, with Loop slide, slides along the one unbeveled edge there so
+## the edge's loop stays straight).
+
+let good_angle: f64 = 0.1
+let tiny_big: f64 = 0.0001
+
+## `a` moved toward `b` by `distance`, stopping just short of `b`.
+func slide_toward(a: Vector3, b: Vector3, distance: f64) -> Vector3:
+    let way = b.subtract(a)
+    let length = way.length()
+    if length == 0.0: return a
+    let reach = length - 0.00000005 if distance > length else distance
+    return a.add(way.multiply_scalar(reach / length))
+
+## `half`'s vertex slid `distance` along its edge.
+func slide_half(work: const Bevel*, half: i32, distance: f64) -> Vector3:
+    let item = &work.halves.items[(usize)half]
+    return slide_toward(vertex_at(work, item.slot), input_point(work, item.other), distance)
+
+## The vertex normal of bevel vertex `slot`.
+func vertex_normal(work: const Bevel*, slot: i32) -> Vector3:
+    return work.vertices.items[(usize)slot].normal
+
+## Whether the angle from `first` to `second` (halves of one vertex,
+## counterclockwise) is under, at or over 180°: -1, 0 or 1.
+func angle_kind(work: const Bevel*, first: i32, second: i32) -> i64:
+    let slot = work.halves.items[(usize)first].slot
+    let a = half_direction(work, first).multiply_scalar(-1.0)
+    let b = half_direction(work, second).multiply_scalar(-1.0)
+    if nearly_parallel(a, b): return 0
+    var normal = vertex_normal(work, slot)
+    let after = work.halves.items[(usize)first].after
+    let before = work.halves.items[(usize)second].before
+    if after >= 0: normal = normal_of(work, after)
+    elif before >= 0: normal = normal_of(work, before)
+    return 1 if unit_of(a.cross(b)).dot(normal) < 0.0 else -1
+
+## Whether `point` (on face `face` near the vertex) lies between halves
+## `first` and `second`, sweeping counterclockwise.
+func between_halves(work: const Bevel*, point: Vector3, face: i32, first: i32, second: i32) -> bool:
+    let here = vertex_at(work, work.halves.items[(usize)first].slot)
+    let a = half_direction(work, first).multiply_scalar(-1.0)
+    let b = half_direction(work, second).multiply_scalar(-1.0)
+    let c = unit_of(here.subtract(point))
+    let normal = normal_of(work, face)
+    var whole = angle_between(a, b)
+    var part = angle_between(a, c)
+    if a.cross(b).dot(normal) < 0.0: whole = 2.0 * math.pi - whole
+    if a.cross(c).dot(normal) < 0.0: part = 2.0 * math.pi - part
+    return whole - part > -tiny_angle
+
+## If `point` is off `half`'s edge (before its vertex or past its other
+## end), the end it is nearer.
+func outside_edge(work: const Bevel*, half: i32, point: Vector3) -> Vector3?:
+    let item = &work.halves.items[(usize)half]
+    let a = vertex_at(work, item.slot)
+    let b = input_point(work, item.other)
+    let length = b.subtract(a).length()
+    if length == 0.0: return none
+    let along = unit_of(b.subtract(a)).dot(point.subtract(a))
+    if along <= -tiny_big * length: return a
+    if along >= (1.0 + tiny_big) * length: return b
+    return none
+
+## The corner of input face `face` at point `point`, or -1.
+func face_corner(work: const Bevel*, face: i32, point: i32) -> i64:
+    let topology = &work.topology
+    for corner in (usize)topology.offsets[(usize)face]..<(usize)topology.offsets[(usize)face + 1]:
+        if topology.corners[corner] == point: return (i64)corner
+    return -1
+
+## Whether the corner of `face` at `corner` turns less than 180°.
+func convex_corner(work: const Bevel*, face: i32, corner: usize) -> bool:
+    let topology = &work.topology
+    let here = input_point(work, topology.corners[corner])
+    let before = input_point(work, topology.corners[topology.previous(corner)])
+    let after = input_point(work, topology.corners[topology.next(corner)])
+    return after.subtract(here).cross(before.subtract(here)).dot(normal_of(work, face)) > 0.0
+
+## Percent and Absolute: the two lines whose meeting is the boundary point
+## between `first` and `second`. Each line runs between points slid along
+## the legs of the face beside its beveled edge: from the vertex along the
+## face's other edge there, and from the beveled edge's far end along the
+## face's next edge. With a reflex corner among them, or no face, the lines
+## are the edges themselves.
+func percent_lines(work: const Bevel*, first: i32, second: i32) -> (Vector3, Vector3, Vector3, Vector3):
+    let topology = &work.topology
+    let one = &work.halves.items[(usize)first]
+    let two = &work.halves.items[(usize)second]
+    let here = vertex_at(work, one.slot)
+    let point = work.vertices.items[(usize)one.slot].point
+    let far_one = input_point(work, one.other)
+    let far_two = input_point(work, two.other)
+    let plain = (here, far_one, here, far_two)
+    let face_one = one.after
+    let face_two = two.before
+    if face_one < 0 or face_two < 0: return plain
+    let at_one = face_corner(work, face_one, one.other)
+    let at_two = face_corner(work, face_two, two.other)
+    let here_one = face_corner(work, face_one, point)
+    let here_two = face_corner(work, face_two, point)
+    if at_one < 0 or at_two < 0 or here_one < 0 or here_two < 0: return plain
+    if not convex_corner(work, face_one, (usize)at_one) or not convex_corner(work, face_one, (usize)here_one): return plain
+    if not convex_corner(work, face_two, (usize)at_two) or not convex_corner(work, face_two, (usize)here_two): return plain
+    # The legs: in face one, the edge after the far end and the edge into
+    # the vertex; in face two, the edge into the far end and the edge out of
+    # the vertex.
+    let leg0 = input_point(work, topology.corners[topology.next((usize)at_one)])
+    let leg4 = input_point(work, topology.corners[topology.previous((usize)here_one)])
+    let leg3 = input_point(work, topology.corners[topology.previous((usize)at_two)])
+    let leg5 = input_point(work, topology.corners[topology.next((usize)here_two)])
+    var d0 = work.width
+    var d3 = d0
+    var d4 = d0
+    var d5 = d0
+    if work.settings.width_type == width_percent:
+        d0 = d0 * leg0.subtract(far_one).length() / 100.0
+        d3 = d3 * leg3.subtract(far_two).length() / 100.0
+        d4 = d4 * leg4.subtract(here).length() / 100.0
+        d5 = d5 * leg5.subtract(here).length() / 100.0
+    let weight_one = edge_weight(work, (usize)one.edge)
+    let weight_two = edge_weight(work, (usize)two.edge)
+    return (slide_toward(here, leg4, d4 * weight_one), slide_toward(far_one, leg0, d0 * weight_one), slide_toward(here, leg5, d5 * weight_two), slide_toward(far_two, leg3, d3 * weight_two))
+
+## Where the offset lines of `first` (arriving) and `second` (leaving) meet
+## at their vertex, `first` before `second` counterclockwise; `face` the
+## face between them (-1 for none). With edges between, the point drops
+## onto a face between them (not one beside `plane_skip`).
+func offset_meet(work: const Bevel*, first: i32, second: i32, face: i32, edges_between: bool, plane_skip: i32) -> Vector3:
+    let one = &work.halves.items[(usize)first]
+    let two = &work.halves.items[(usize)second]
+    let slot = one.slot
+    let here = vertex_at(work, slot)
+    let dir1 = here.subtract(input_point(work, one.other))
+    let dir2 = input_point(work, two.other).subtract(here)
+    let angle = angle_between(dir1, dir2)
+    if angle < tiny_angle:
+        # In line: straight out from the vertex, across the faces' normal.
+        var normal = Vector3()
+        if face >= 0:
+            normal = normal_of(work, face)
+        else:
+            var count = 0
+            var half = first
+            while half != second:
+                let after = work.halves.items[(usize)half].after
+                if after >= 0:
+                    normal = normal.add(normal_of(work, after))
+                    count += 1
+                half = next_half(work, half)
+            normal = vertex_normal(work, slot) if count == 0 else normal.multiply_scalar(1.0 / (f64)count)
+        let across = unit_of(dir1.add(dir2).cross(normal))
+        let reach = math.max(one.offset_right, two.offset_left) / math.cos(angle * 0.5)
+        return here.add(across.multiply_scalar(reach))
+    if math.abs(angle - math.pi) < tiny_angle:
+        # Doubled back: along the edge.
+        return slide_half(work, second, math.max(one.offset_right, two.offset_left))
+    # The plane the meeting point lies in: the face's, or the two edges'.
+    let reference = normal_of(work, face) if face >= 0 else vertex_normal(work, slot)
+    var normal1 = Vector3()
+    var normal2 = Vector3()
+    if face >= 0 and angle < small_angle:
+        normal1 = normal_of(work, face)
+        normal2 = normal1
+    elif not edges_between:
+        normal1 = unit_of(dir2.cross(dir1))
+        if normal1.dot(reference) < 0.0: normal1 = normal1.multiply_scalar(-1.0)
+        normal2 = normal1
+    else:
+        let dir1_next = input_point(work, work.halves.items[(usize)next_half(work, first)].other).subtract(here)
+        let dir2_previous = here.subtract(input_point(work, work.halves.items[(usize)previous_half(work, second)].other))
+        normal1 = unit_of(dir1_next.cross(dir1))
+        let check1 = normal_of(work, one.after) if one.after >= 0 else vertex_normal(work, slot)
+        if normal1.dot(check1) < 0.0: normal1 = normal1.multiply_scalar(-1.0)
+        normal2 = unit_of(dir2.cross(dir2_previous))
+        let check2 = normal_of(work, two.before) if two.before >= 0 else vertex_normal(work, slot)
+        if normal2.dot(check2) < 0.0: normal2 = normal2.multiply_scalar(-1.0)
+    let across1 = unit_of(dir1.cross(normal1))
+    let across2 = unit_of(dir2.cross(normal2))
+    var line1a = here.add(across1.multiply_scalar(one.offset_right))
+    var line1b = line1a.add(dir1)
+    var line2a = here.add(across2.multiply_scalar(two.offset_left))
+    var line2b = line2a.add(dir2)
+    if work.settings.width_type == width_percent or work.settings.width_type == width_absolute:
+        let lines = percent_lines(work, first, second)
+        line1a = lines.0
+        line1b = lines.1
+        line2a = lines.2
+        line2b = lines.3
+    let (kind, meet_one, meet_two) = line_meet(line1a, line1b, line2a, line2b)
+    if kind == 0: return line1a
+    var meet = meet_one
+    # A side without width must not reach past its own edge.
+    if one.offset_right == 0.0:
+        if let nearer = outside_edge(work, first, meet): meet = nearer
+    if two.offset_left == 0.0:
+        if let nearer = outside_edge(work, second, meet): meet = nearer
+    if edges_between and one.offset_right > 0.0 and two.offset_left > 0.0:
+        if kind == 2: meet = midpoint(meet_one, meet_two)
+        var half = first
+        while half != second:
+            let after = work.halves.items[(usize)half].after
+            let following = next_half(work, half)
+            if after >= 0:
+                let dropped = onto_plane(meet, here, normal_of(work, after))
+                var skip = false
+                if plane_skip >= 0 and work.halves.items[(usize)plane_skip].after >= 0:
+                    let tilt = angle_between(normal_of(work, after), normal_of(work, work.halves.items[(usize)plane_skip].after))
+                    skip = math.abs(tilt) < small_angle or math.abs(tilt - math.pi) < small_angle
+                if not skip and between_halves(work, dropped, after, half, following): return dropped
+            half = following
+    return meet
+
+## Where `first`'s and `second`'s offset lines (one of them of no width)
+## meet `second`'s or `first`'s edge: (whether they meet, the point, the
+## angle from `first` to `second`). Angles near 0 or 180° and reflex angles
+## do not meet.
+func offset_meet_edge(work: const Bevel*, first: i32, second: i32) -> (bool, Vector3, f64):
+    let one = &work.halves.items[(usize)first]
+    let two = &work.halves.items[(usize)second]
+    let here = vertex_at(work, one.slot)
+    let dir1 = half_direction(work, first)
+    let dir2 = half_direction(work, second)
+    var angle = angle_between(dir1, dir2)
+    if math.abs(angle) < good_angle: return (false, here, 0.0)
+    if dir1.cross(dir2).dot(vertex_normal(work, one.slot)) < 0.0: return (false, here, 2.0 * math.pi - angle)
+    if math.abs(angle - math.pi) < good_angle: return (false, here, angle)
+    let sine = math.sin(angle)
+    if one.offset_right == 0.0: return (true, here.add(dir1.multiply_scalar(two.offset_left / sine)), angle)
+    return (true, here.add(dir2.multiply_scalar(one.offset_right / sine)), angle)
+
+## Whether both beveled edges' offset lines meet the unbeveled `middle`
+## between them without a reflex angle.
+func good_on_edge(work: const Bevel*, first: i32, second: i32, middle: i32) -> bool:
+    let a = offset_meet_edge(work, first, middle)
+    let b = offset_meet_edge(work, middle, second)
+    return a.0 and b.0
+
+## Loop slide: the boundary point on the unbeveled `middle` between beveled
+## `first` and `second`, halfway between where their offset lines cross it
+## (Percent and Absolute slide along it by the width). Returns whether it is
+## such a compromise, the point and the ratio of the sines of the angles to
+## the two edges (which the even-widths pass keeps).
+func offset_on_edge(work: const Bevel*, first: i32, second: i32, middle: i32) -> (bool, Vector3, f64):
+    let (ok1, meet1, angle1) = offset_meet_edge(work, first, middle)
+    let (ok2, meet2, angle2) = offset_meet_edge(work, middle, second)
+    let ratio = 1.0 if angle1 == 0.0 else math.sin(angle2) / math.sin(angle1)
+    let item = &work.halves.items[(usize)middle]
+    let here = vertex_at(work, item.slot)
+    let far = input_point(work, item.other)
+    if work.settings.width_type == width_percent:
+        var weight = 1.0
+        if work.settings.limit == limit_weight:
+            weight = 0.5 * (edge_weight(work, (usize)work.halves.items[(usize)first].edge) + edge_weight(work, (usize)work.halves.items[(usize)second].edge))
+        return (true, lerp(here, far, weight * work.width / 100.0), ratio)
+    if work.settings.width_type == width_absolute:
+        return (true, here.add(unit_of(far.subtract(here)).multiply_scalar(work.width)), ratio)
+    if ok1 and ok2: return (true, midpoint(meet1, meet2), ratio)
+    if ok1: return (false, meet1, 1.0)
+    if ok2: return (false, meet2, 1.0)
+    return (false, slide_half(work, middle, work.halves.items[(usize)first].offset_right), 1.0)
+
+## `half`'s vertex moved across its edge by its left (or right) width, in
+## the plane with normal `normal` (an arbitrary plane for none).
+func offset_in_plane(work: const Bevel*, half: i32, normal: Vector3?, left: bool) -> Vector3:
+    let item = &work.halves.items[(usize)half]
+    let here = vertex_at(work, item.slot)
+    let way = half_direction(work, half)
+    var plane = Vector3(1.0, 0.0, 0.0) if math.abs(way.x) < math.abs(way.y) else Vector3(0.0, 1.0, 0.0)
+    if let given = normal: plane = given
+    let across = unit_of(way.cross(plane) if left else plane.cross(way))
+    return here.add(across.multiply_scalar(item.offset_left if left else item.offset_right))

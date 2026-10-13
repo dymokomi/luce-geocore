@@ -1,262 +1,376 @@
-## PolyBevel's per-vertex work, in parallel. Each bevel vertex (an endpoint
-## of a beveled edge) walks its fan of faces into room reserved for it (its
-## corner count), then plans its new corners twice: a counting pass sizes
-## every vertex's new points and corner entries, a prefix sum places them,
-## and a filling pass writes them. Vertices touch only their own fan's
-## corners, their own points and entries, so the passes need no locks.
+## Special vertex meshes of the Grid Fill patch.
+##
+## - A cube-like corner (three beveled edges, equal widths, faces meeting
+##   near square): the patch is an octant of a superellipsoid (a sphere for
+##   the round shape) built on the unit cube's corner and mapped onto the
+##   corner's three boundary points and the vertex. The square and hollow
+##   shapes have exact grids of their own.
+## - A pipe (two beveled edges in line, faces along them): the grid's
+##   interior points snap to the pipe's profile across it.
+## - The square shape with three or more beveled edges: offset lines
+##   parallel to each edge, meeting along center lines.
 
-## Each endpoint of a beveled edge and the faces around it in order. The
-## edges at a point whose faces do not form one fan stay unbeveled.
-func find_fans(work: Bevel*, mesh: const Mesh*, beveled: BitsBuilder*) -> !:
+## Whether vertex `slot` is a cube-like corner: -1 not, 0 near enough for
+## the octant patch, 1 exactly three edges, all beveled.
+func corner_test(work: const Bevel*, slot: i32) -> i64:
+    if work.settings.vertices or work.settings.custom: return -1
+    let vertex = work.vertices.items[(usize)slot]
+    if vertex.bounds != 3: return 0
+    let width = work.halves.items[(usize)vertex.first_half].offset_left
+    var total = 0.0
+    var flat: u32 = 0
+    for at in vertex.first_half..<vertex.first_half + vertex.halves:
+        let angle = signed_face_angle(work, (i32)at)
+        let size = math.abs(angle)
+        if size <= math.pi * 0.25: flat += 1
+        elif size >= math.pi * 0.75: return -1
+        if work.halves.items[at].beveled and math.abs(work.halves.items[at].offset_left - width) > 0.00001: return -1
+        total += angle
+    if flat != vertex.halves - 3: return -1
+    let off = math.abs(math.abs(total) - 1.5 * math.pi)
+    if (work.settings.exponent == exponent_square and off > math.pi / 16.0) or off > math.pi * 0.25: return -1
+    if vertex.halves != 3 or vertex.selected != 3: return 0
+    return 1
+
+## The angle between the faces either side of `half`'s edge (between their
+## normals), negative where the edge is concave; 0 on a boundary.
+func signed_face_angle(work: const Bevel*, half: i32) -> f64:
+    let item = work.halves.items[(usize)half]
+    if item.before < 0 or item.after < 0: return 0.0
+    let angle = angle_between(normal_of(work, item.before), normal_of(work, item.after))
     let topology = &work.topology
-    try work.slot_of.fill(topology.points, -1)
-    let around = try mesh.point_face_span()
-    # Slots in edge order; each fan's room is its point's corner count.
-    try work.fan_starts.push(0)
-    for edge in 0..<topology.edges():
-        if not beveled.view().get(edge): continue
-        for side in 0..<(usize)2:
-            let point = (usize)topology.edge_points[edge * 2 + side]
-            if work.slot_of.items[point] != -1: continue
-            work.slot_of.items[point] = (i32)work.vertex_points.count
-            try work.vertex_points.push((i32)point)
-            let room = (u32)(around.0[point + 1] - around.0[point])
-            try work.fan_starts.push(work.fan_starts.items[work.fan_starts.count - 1] + room)
-    let slots = work.vertex_points.count
-    try work.fans.fill((usize)work.fan_starts.items[slots], -1)
-    try work.cyclic.fill(slots, 0)
-    try work.fan_valid.fill(slots, 0)
-    try parallel.for_each_range(slots, 512, (void*)work, walk_fans)
-    # Edges at a point without one fan stay as they are.
-    for edge in 0..<topology.edges():
-        if not beveled.view().get(edge): continue
-        let a = work.slot_of.items[(usize)topology.edge_points[edge * 2]]
-        let b = work.slot_of.items[(usize)topology.edge_points[edge * 2 + 1]]
-        if work.fan_valid.items[(usize)a] == 0 or work.fan_valid.items[(usize)b] == 0:
-            beveled.clear(edge)
-            work.skipped += 1
-    for slot in 0..<slots:
-        if work.fan_valid.items[slot] == 0: work.slot_of.items[(usize)work.vertex_points.items[slot]] = -1
+    var center = Vector3()
+    let first = (usize)topology.offsets[(usize)item.after]
+    let end = (usize)topology.offsets[(usize)item.after + 1]
+    for corner in first..<end: center = center.add(input_point(work, topology.corners[corner]))
+    center = center.multiply_scalar(1.0 / (f64)(end - first))
+    let rise = center.subtract(vertex_at(work, item.slot)).dot(normal_of(work, item.before))
+    return -angle if rise > tiny else angle
 
-func walk_fans(context: void*, first: usize, end: usize, worker: usize):
-    let work = (Bevel*)context
-    for slot in first..<end:
-        let start = (usize)work.fan_starts.items[slot]
-        let room = (usize)work.fan_starts.items[slot + 1] - start
-        let fan = work.fans.items[start..<start + room]
-        let (valid, closed) = fan_of(&work.topology, work.vertex_points.items[slot], fan)
-        work.fan_valid.items[slot] = 1 if valid else 0
-        work.cyclic.items[slot] = 1 if closed else 0
+## The cube-like corner's patch: the octant mapped onto vertex `slot`.
+func corner_grid(work: const Bevel*, slot: i32) -> Grid!:
+    let vertex = work.vertices.items[(usize)slot]
+    let a = work.bounds.items[(usize)vertex.first_bound].position
+    let b = work.bounds.items[(usize)vertex.first_bound + 1].position
+    let c = work.bounds.items[(usize)vertex.first_bound + 2].position
+    let d = vertex_at(work, slot)
+    # The affine map taking the unit axes to a, b, c and (1, 1, 1) to d.
+    let origin = a.add(b).add(c).subtract(d).multiply_scalar(0.5)
+    let x = a.subtract(origin)
+    let y = b.subtract(origin)
+    let z = c.subtract(origin)
+    var grid = try octant_grid(work)
+    for at in 0..<grid.points.count:
+        let p = grid.points.items[at]
+        grid.points.items[at] = origin.add(x.multiply_scalar(p.x)).add(y.multiply_scalar(p.y)).add(z.multiply_scalar(p.z))
+    for i in 0..<(usize)3: grid.profiles.items[i] = work.bounds.items[(usize)vertex.first_bound + i].profile
+    return grid
 
-## The fan of `point` into `fan`: its corners in rotation order (the next is
-## across the edge leaving the point), from the boundary for an open fan.
-## Whether it fills `fan` exactly (a single fan, consistently wound) and
-## whether it closes.
-func fan_of(topology: const Topology*, point: i32, fan: i32[]) -> (bool, bool):
-    var start: i64 = -1
-    for slot in (usize)topology.point_edge_offsets[(usize)point]..<(usize)topology.point_edge_offsets[(usize)point + 1]:
-        let edge = (usize)topology.point_edges[slot]
-        for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
-            let corner = (usize)topology.edge_corners[at]
-            if topology.corners[corner] == point:
-                start = (i64)corner
-                break
-        if start >= 0: break
-    if start < 0: return (false, false)
-    # Back across each arriving edge to the start of an open fan.
-    var first = (usize)start
-    for _ in 0..<fan.length:
-        let back = topology.twin(topology.previous(first))
-        if back < 0: break
-        if topology.corners[(usize)back] != point: return (false, false)
-        if (usize)back == (usize)start: break
-        first = (usize)back
-    var count: usize = 0
-    var corner = first
-    for _ in 0..<fan.length:
-        fan[count] = (i32)corner
-        count += 1
-        let across = topology.twin(corner)
-        if across < 0: return (count == fan.length, false)
-        let next = topology.next((usize)across)
-        if topology.corners[next] != point: return (false, false)
-        if next == first: return (count == fan.length, true)
-        corner = next
-    return (false, false)
+## The unit cube's corner (1, 1, 1) beveled: boundary points on the axes,
+## quarter superellipses between them, the patch an octant of the
+## superellipsoid |x|^r + |y|^r + |z|^r = 1 with the run's segments.
+func octant_grid(work: const Bevel*) -> Grid!:
+    let segments = work.settings.segments
+    let r = work.settings.exponent
+    if r == exponent_square: return try square_octant(segments)
+    if r == exponent_hollow: return try hollow_octant(segments)
+    var coarse = try new_grid(3, 2)
+    for i in 0..<(usize)3:
+        let start = axis_point(i)
+        let end = axis_point((i + 1) % 3)
+        var profile = blank_profile()
+        profile.exponent = r
+        profile.start = start
+        profile.end = end
+        profile.middle = start.add(end)
+        profile.plane_point = start
+        profile.plane_normal = start.cross(end)
+        profile.projection = profile.plane_normal
+        coarse.profiles.items[i] = profile
+        coarse.put(i, 0, 0, start)
+        coarse.put(i, 0, 1, profile_point(work, &profile, 1, 2))
+    # The center on the superellipsoid's diagonal.
+    let m = math.pow(3.0, -1.0 / r)
+    coarse.put(0, 1, 1, Vector3(m, m, m))
+    copy_equivalents(&coarse)
+    var grid = try refined(work, coarse)
+    for at in 0..<grid.points.count: grid.points.items[at] = onto_superellipsoid(grid.points.items[at], r, false)
+    return grid
 
-## Scratch for one vertex's plan: its fan's edges (edge k arrives in face k,
-## edge k + 1 leaves it), their directions and lengths, and each edge's
-## slide (a point index within the vertex, or -1).
-struct Scratch:
-    var edges: Growing[i32]
-    var directions: Growing[Vector3]
-    var lengths: Growing[f64]
-    var slides: Growing[i32]
+func axis_point(axis: usize) -> Vector3:
+    return Vector3(1.0 if axis == 0 else 0.0, 1.0 if axis == 1 else 0.0, 1.0 if axis == 2 else 0.0)
 
-    func init():
-        self.edges = Growing[i32]()
-        self.directions = Growing[Vector3]()
-        self.lengths = Growing[f64]()
-        self.slides = Growing[i32]()
-
-    func close():
-        self.edges.close()
-        self.directions.close()
-        self.lengths.close()
-        self.slides.close()
-
-## A pass over the vertices: counting (sizes per slot) or filling (from the
-## prefix-summed starts). An allocation failure stops it.
-struct CornerPass:
-    let work: Bevel*
-    let filling: bool
-
-## The new corners of every face around every bevel vertex (see the file
-## notes and bevel.lucb).
-func place_corners(work: Bevel*) -> !:
-    let topology = &work.topology
-    let slots = work.vertex_points.count
-    try work.corner_first.fill(topology.corners.length, 0)
-    try work.corner_count.fill(topology.corners.length, 0)
-    try work.retained.fill(slots, 1)
-    try work.slot_points.fill(slots + 1, 0)
-    try work.slot_entries.fill(slots + 1, 0)
-    var counting = CornerPass(work, false)
-    try parallel.for_each_range(slots, 256, (void*)&counting, plan_corners)
-    # Starts: an exclusive prefix sum (the last entry is the total).
-    var points: u32 = 0
-    var entries: u32 = 0
-    for slot in 0..<slots + 1:
-        let point_count = work.slot_points.items[slot]
-        let entry_count = work.slot_entries.items[slot]
-        work.slot_points.items[slot] = points
-        work.slot_entries.items[slot] = entries
-        points += point_count
-        entries += entry_count
-    try work.created.fill((usize)points, NewPoint(Vector3(), -1, -1, 0.0, -1))
-    try work.point_source.fill((usize)points, -1)
-    try work.sequence.fill((usize)entries, NewCorner(-1, -1, 0.0))
-    var filling = CornerPass(work, true)
-    try parallel.for_each_range(slots, 256, (void*)&filling, plan_corners)
-
-func plan_corners(context: void*, first: usize, end: usize, worker: usize) -> !:
-    let pass = (CornerPass*)context
-    var scratch = Scratch()
-    defer scratch.close()
-    for slot in first..<end:
-        try plan_vertex(pass.work, &scratch, slot, pass.filling)
-
-## One vertex: slides on its unbeveled edges beside a beveled one, then each
-## face's new corners there. Counting records how many points and entries it
-## makes; filling writes them from its starts.
-func plan_vertex(work: Bevel*, scratch: Scratch*, slot: usize, filling: bool) -> !:
-    if work.fan_valid.items[slot] == 0: return
-    let topology = &work.topology
-    let point = work.vertex_points.items[slot]
-    let first = (usize)work.fan_starts.items[slot]
-    let count = (usize)work.fan_starts.items[slot + 1] - first
-    let closed = work.cyclic.items[slot] == 1
-    let edge_total = count if closed else count + 1
-    let here = point_at(work, point)
-    try scratch.edges.fill(count + 1, -1)
-    try scratch.directions.fill(count + 1, Vector3())
-    try scratch.lengths.fill(count + 1, 0.0)
-    try scratch.slides.fill(count + 1, -1)
-    let edges = scratch.edges.items
-    let directions = scratch.directions.items
-    let lengths = scratch.lengths.items
-    let slides = scratch.slides.items
-    for k in 0..<count:
-        edges[k] = topology.corner_edges[topology.previous((usize)work.fans.items[first + k])]
-    edges[count] = topology.corner_edges[(usize)work.fans.items[first + count - 1]]
-    for k in 0..<edge_total:
-        let delta = point_at(work, far_end(work, edges[k], point)).subtract(here)
-        let length = delta.length()
-        lengths[k] = length
-        if length > 0.0: directions[k] = delta.multiply_scalar(1.0 / length)
-    if closed:
-        directions[count] = directions[0]
-        lengths[count] = lengths[0]
-    # New points of this vertex: local indices from 0, placed from its start.
-    let point_base = (usize)work.slot_points.items[slot]
-    var made: usize = 0
-    var keeps_point = false
-    var beveled_here: usize = 0
-    for k in 0..<edge_total:
-        if work.beveled.get((usize)edges[k]):
-            beveled_here += 1
-            continue
-        var distance = 0.0
-        for side in 0..<(usize)2:
-            var index = (i64)k - 1 if side == 0 else (i64)k + 1
-            if closed: index = (index + (i64)count) % (i64)count
-            if index < 0 or index >= (i64)edge_total: continue
-            if not work.beveled.get((usize)edges[(usize)index]): continue
-            let sine = directions[k].cross(directions[(usize)index]).length()
-            distance = math.max(distance, work.offset / math.max(sine, 0.000001))
-        if distance == 0.0 or lengths[k] == 0.0:
-            keeps_point = true
-            continue
-        if work.clamp: distance = math.min(distance, lengths[k] * 0.5)
-        slides[k] = (i32)made
-        if filling:
-            work.created.items[point_base + made] = NewPoint(here.add(directions[k].multiply_scalar(distance)), point, far_end(work, edges[k], point), (f32)(distance / lengths[k]), (i32)slot)
-        made += 1
-    work.retained.items[slot] = 0 if not keeps_point else (2 if beveled_here == 1 else 1)
-    let entry_base = (usize)work.slot_entries.items[slot]
-    var entries: usize = 0
-    for k in 0..<count:
-        let corner = (usize)work.fans.items[first + k]
-        let out = (k + 1) % count if closed else k + 1
-        let in_beveled = work.beveled.get((usize)edges[k])
-        let out_beveled = work.beveled.get((usize)edges[out])
-        let begin = entries
-        if in_beveled and out_beveled:
-            # Both offset lines meet at the sum of the two edge directions
-            # scaled by offset / sin(angle).
-            let a = directions[k]
-            let b = directions[out]
-            var reach = a.add(b).multiply_scalar(work.offset / math.max(a.cross(b).length(), 0.000001))
-            let limit = 0.5 * math.min(lengths[k], lengths[out])
-            if work.clamp and reach.length() > limit: reach = reach.multiply_scalar(limit / reach.length())
-            if filling:
-                work.created.items[point_base + made] = NewPoint(here.add(reach), point, -1, 0.0, (i32)slot)
-                add_entry(work, corner, entry_base + entries, NewCorner(global(work, point_base + made), -1, 0.0))
-            made += 1
-            entries += 1
+## `p` (in the positive octant) moved radially onto |x|^r + |y|^r + |z|^r =
+## 1; the square shapes (only in 2D) snap to the nearer leg, or with
+## `midline` to the corner.
+func onto_superellipsoid(p: Vector3, r: f64, midline: bool) -> Vector3:
+    if r == exponent_circle: return unit_of(p)
+    let a = math.max(0.0, p.x)
+    let b = math.max(0.0, p.y)
+    let c = math.max(0.0, p.z)
+    if r == exponent_square or r == exponent_hollow:
+        var x = math.min(1.0, a)
+        var y = math.min(1.0, b)
+        if r == exponent_square:
+            if 1.0 - x < 1.0 - y:
+                x = 1.0
+                if midline: y = 1.0
+            else:
+                y = 1.0
+                if midline: x = 1.0
         else:
-            let slide_in = slides[k]
-            let slide_out = slides[out]
-            if slide_in >= 0:
-                if filling: add_entry(work, corner, entry_base + entries, slide_entry(work, point_base, slide_in, topology.previous(corner)))
-                entries += 1
-            if (not in_beveled and not out_beveled and keeps_point) or (slide_in < 0 and slide_out < 0):
-                if filling: add_entry(work, corner, entry_base + entries, NewCorner(point, -1, 0.0))
-                entries += 1
-            if slide_out >= 0:
-                if filling: add_entry(work, corner, entry_base + entries, slide_entry(work, point_base, slide_out, topology.next(corner)))
-                entries += 1
-        work.corner_first.items[corner] = (u32)(entry_base + begin)
-        work.corner_count.items[corner] = (u8)(entries - begin)
-    if not filling:
-        work.slot_points.items[slot] = (u32)made
-        work.slot_entries.items[slot] = (u32)entries
+            if x < y:
+                x = 0.0
+                if midline: y = 0.0
+            else:
+                y = 0.0
+                if midline: x = 0.0
+        return Vector3(x, y, 0.0)
+    let inverse = 1.0 / r
+    if a == 0.0:
+        if b == 0.0: return Vector3(0.0, 0.0, math.pow(c, inverse))
+        let y = math.pow(1.0 / (1.0 + math.pow(c / b, r)), inverse)
+        return Vector3(0.0, y, c * y / b)
+    let x = math.pow(1.0 / (1.0 + math.pow(b / a, r) + math.pow(c / a, r)), inverse)
+    return Vector3(x, b * x / a, c * x / a)
 
-## The id of new point `index` (points follow the input's).
-func global(work: const Bevel*, index: usize) -> i32:
-    return (i32)(work.topology.points + index)
+## The square shape's cube corner: each sector a flat quarter of the face
+## it lies in.
+func square_octant(segments: usize) -> Grid!:
+    let half = segments // 2
+    var grid = try new_grid(3, segments)
+    for i in 0..<(usize)3:
+        grid.profiles.items[i] = blank_profile()
+        for j in 0..<half + 1:
+            for k in 0..<half + 1:
+                if not is_canonical(segments, i, j, k): continue
+                var p = axis_point(i)
+                p = p.with_coordinate((i + 1) % 3, (f64)k * 2.0 / (f64)segments)
+                p = p.with_coordinate((i + 2) % 3, (f64)j * 2.0 / (f64)segments)
+                grid.put(i, j, k, p)
+    copy_equivalents(&grid)
+    return grid
 
-## A corner on a slide: the slid point, blended with the face's corner at
-## the far end of the edge by how far it slid.
-func slide_entry(work: const Bevel*, point_base: usize, slide: i32, other: usize) -> NewCorner:
-    let index = point_base + (usize)slide
-    return NewCorner(global(work, index), (i32)other, work.created.items[index].t)
+## The hollow shape's cube corner: only its boundary (the profiles run
+## along the axes into the opposite corner and meet there).
+func hollow_octant(segments: usize) -> Grid!:
+    let half = segments // 2
+    let step = 2.0 / (2.0 * (f64)half + math.sqrt(2.0)) if segments % 2 == 1 else 2.0 / (f64)segments
+    var grid = try new_grid(3, segments)
+    for i in 0..<(usize)3:
+        grid.profiles.items[i] = blank_profile()
+        for k in 0..<half + 1:
+            grid.put(i, 0, k, Vector3().with_coordinate(i, 1.0 - (f64)k * step))
+            grid.put(i, 0, segments - k, Vector3().with_coordinate((i + 1) % 3, 1.0 - (f64)k * step))
+    return grid
 
-## Write entry `at` of face corner `corner`, noting where a new point first
-## appears (its corner and entry; patches take its values).
-func add_entry(work: Bevel*, corner: usize, at: usize, made: NewCorner):
-    work.sequence.items[at] = made
-    let point = (usize)made.point
-    if point < work.topology.points: return
-    let index = point - work.topology.points
-    if work.point_source.items[index] < 0: work.point_source.items[index] = ((i64)corner << 32) | (i64)at
+## A pipe: two beveled edges in line (with one or two more beveled edges
+## off it), every face along the pipe. Returns the boundary point whose
+## beveled edge starts the pipe, or -1.
+func pipe_test(work: const Bevel*, slot: i32) -> i32:
+    let vertex = work.vertices.items[(usize)slot]
+    if vertex.bounds < 3 or vertex.bounds > 4 or vertex.selected < 3 or vertex.selected > 4: return -1
+    let here = vertex_at(work, slot)
+    var found: i32 = -1
+    var along = Vector3()
+    for at in vertex.first_bound..<vertex.first_bound + vertex.bounds:
+        let one = (i32)at
+        let two = next_bound(work, one)
+        let three = next_bound(work, two)
+        let first = work.bounds.items[(usize)one].bevel
+        let third = work.bounds.items[(usize)three].bevel
+        if first < 0 or work.bounds.items[(usize)two].bevel < 0 or third < 0: continue
+        let dir1 = unit_of(here.subtract(input_point(work, work.halves.items[(usize)first].other)))
+        let dir3 = unit_of(input_point(work, work.halves.items[(usize)third].other).subtract(here))
+        if angle_between(dir1, dir3) < tiny_angle:
+            found = one
+            along = dir1
+            break
+    if found < 0: return -1
+    for at in vertex.first_half..<vertex.first_half + vertex.halves:
+        let after = work.halves.items[at].after
+        if after >= 0 and math.abs(along.dot(normal_of(work, after))) > tiny_big: return -1
+    return found
+
+## The pipe's patch: the Grid Fill patch with its interior points snapped
+## to the pipe's profile in the plane across the pipe through each (a
+## Custom profile's shape is carried across instead).
+func pipe_grid(work: const Bevel*, slot: i32, pipe: i32) -> Grid!:
+    var grid = try grid_patch(work, slot)
+    let vertex = work.vertices.items[(usize)slot]
+    let count = (usize)vertex.bounds
+    let segments = work.settings.segments
+    let half = segments // 2
+    let first_pipe = (usize)(pipe - (i32)vertex.first_bound)
+    let second_pipe = (usize)(next_bound(work, next_bound(work, pipe)) - (i32)vertex.first_bound)
+    let even = segments % 2 == 0
+    for i in 0..<count:
+        for j in 1..<half + 1:
+            for k in 0..<half + 1:
+                if not is_canonical(segments, i, j, k): continue
+                if work.settings.custom:
+                    var a = Vector3()
+                    var b = Vector3()
+                    var f = 0.0
+                    if i == first_pipe or i == second_pipe:
+                        if count == 3 and i == first_pipe:
+                            let ring = j if j > k else k
+                            b = grid.at(i, 0, ring)
+                            a = canonical_at(&grid, i, ring, 0)
+                            f = (math.min((f64)j, (f64)k) if k < j else 2.0 * (f64)ring - (f64)j) / (2.0 * (f64)ring)
+                        else:
+                            a = grid.at(i, 0, k)
+                            b = grid.at(second_pipe if i == first_pipe else first_pipe, 0, segments - k)
+                            f = (f64)j / (f64)segments
+                    else:
+                        a = canonical_at(&grid, i, j, 0)
+                        b = canonical_at(&grid, i, j, segments)
+                        f = (f64)k / (f64)segments
+                    grid.put(i, j, k, lerp(a, b, f))
+                else:
+                    let midline = even and k == half and ((i == 0 and j == half) or i == first_pipe or i == second_pipe)
+                    grid.put(i, j, k, onto_pipe(work, pipe, midline, grid.at(i, j, k)))
+    copy_equivalents(&grid)
+    return grid
+
+## `p` moved onto the pipe's profile, in the plane across the pipe through
+## `p`.
+func onto_pipe(work: const Bevel*, pipe: i32, midline: bool, p: Vector3) -> Vector3:
+    let profile = work.bounds.items[(usize)pipe].profile
+    if profile.start.subtract(profile.end).length() < 0.0000001: return profile.start
+    let half = work.halves.items[(usize)work.bounds.items[(usize)pipe].bevel]
+    let along = unit_of(vertex_at(work, half.slot).subtract(input_point(work, half.other)))
+    let start = onto_plane(profile.start, p, along)
+    let end = onto_plane(profile.end, p, along)
+    let middle = onto_plane(profile.middle, p, along)
+    var flat = profile
+    flat.start = start
+    flat.end = end
+    flat.middle = middle
+    let map = square_map(&flat) else return nearest_on_segment(p, start, end)
+    # Into the unit square (z across it), onto the superellipse, and back.
+    let z_axis = unit_of(map.2.cross(map.1))
+    let local = solve3(map.1, map.2, z_axis, p.subtract(map.0)) else return nearest_on_segment(p, start, end)
+    let snapped = onto_superellipsoid(local, profile.exponent, midline)
+    return map.0.add(map.1.multiply_scalar(snapped.x)).add(map.2.multiply_scalar(snapped.y)).add(z_axis.multiply_scalar(snapped.z))
+
+## The coordinates of `v` in the basis a, b, c (Cramer's rule), if any.
+func solve3(a: Vector3, b: Vector3, c: Vector3, v: Vector3) -> Vector3?:
+    let det = a.dot(b.cross(c))
+    if math.abs(det) < 0.000000000001: return none
+    return Vector3(v.dot(b.cross(c)) / det, a.dot(v.cross(c)) / det, a.dot(b.cross(v)) / det)
+
+## The square shape with three or more beveled edges (an even count of
+## segments): lines parallel to each beveled edge's sides, spaced across
+## the half strips, meeting along a center line in each sector from the
+## sector's edge to the vertex.
+func square_grid(work: const Bevel*, slot: i32) -> Grid!:
+    let vertex = work.vertices.items[(usize)slot]
+    let count = (usize)vertex.bounds
+    let segments = work.settings.segments
+    let half = segments // 2
+    let odd = segments % 2 == 1
+    var step = 1.0 / (f64)half
+    let here = vertex_at(work, slot)
+    var grid = try new_grid(count, segments)
+    errdefer grid.close()
+    var centers = Growing[Vector3]()
+    defer centers.close()
+    try centers.fill(count * (half + 1), Vector3())
+    var placed = Growing[u8]()
+    defer placed.close()
+    try placed.fill(count, 0)
+    var i: usize = 0
+    while i < count:
+        let bound_index = (i32)vertex.first_bound + (i32)i
+        let bound = work.bounds.items[(usize)bound_index]
+        grid.profiles.items[i] = bound.profile
+        var kind: i64 = 0
+        if bound.first >= 0 and bound.last >= 0: kind = angle_kind(work, bound.first, bound.last)
+        if bound.patch_start:
+            centers.items[i * (half + 1)] = midpoint(bound.position, work.bounds.items[(usize)next_bound(work, bound_index)].position)
+            placed.items[i] = 1
+            i += 1
+            if i < count:
+                let middle = work.bounds.items[(usize)vertex.first_bound + i]
+                centers.items[i * (half + 1)] = midpoint(middle.position, work.bounds.items[(usize)next_bound(work, (i32)vertex.first_bound + (i32)i)].position)
+                placed.items[i] = 1
+            i += 2
+            continue
+        if bound.arc_start:
+            centers.items[i * (half + 1)] = bound.profile.middle
+            placed.items[i] = 1
+            i += 2
+            continue
+        if kind == -1:
+            let first_point = input_point(work, work.halves.items[(usize)bound.first].other)
+            let last_point = input_point(work, work.halves.items[(usize)bound.last].other)
+            let dir1 = here.subtract(first_point)
+            let dir2 = here.subtract(last_point)
+            let (k1, on_first, _) = line_meet(here, first_point, bound.position, bound.position.add(dir2))
+            let (k2, on_last, _) = line_meet(here, last_point, bound.position, bound.position.add(dir1))
+            let previous = (i + count - 1) % count
+            if k2 != 0:
+                if placed.items[i] == 1: centers.items[i * (half + 1)] = closer_point(centers.items[i * (half + 1)], on_last, here)
+                else: centers.items[i * (half + 1)] = on_last
+                placed.items[i] = 1
+            if k1 != 0:
+                if placed.items[previous] == 1: centers.items[previous * (half + 1)] = closer_point(centers.items[previous * (half + 1)], on_first, here)
+                else: centers.items[previous * (half + 1)] = on_first
+                placed.items[previous] = 1
+        i += 1
+    # Center lines still unset start on the edge after their sector.
+    for at in 0..<count:
+        if placed.items[at] == 1: continue
+        let bound_index = (i32)vertex.first_bound + (i32)at
+        let bound = work.bounds.items[(usize)bound_index]
+        let following = work.bounds.items[(usize)next_bound(work, bound_index)]
+        let edge = following.first
+        if edge >= 0:
+            let edge_far = input_point(work, work.halves.items[(usize)edge].other)
+            let before_arc = work.bounds.items[(usize)previous_bound(work, bound_index)].arc_start
+            if before_arc and following.arc_start:
+                let (meets, meet, _) = line_meet(here, edge_far, bound.position, following.position)
+                if meets != 0:
+                    centers.items[at * (half + 1)] = meet
+                    placed.items[at] = 1
+            else:
+                let from_point = bound.position if before_arc else following.position
+                centers.items[at * (half + 1)] = nearest_on_segment(from_point, here, edge_far)
+                placed.items[at] = 1
+        if placed.items[at] == 0: centers.items[at * (half + 1)] = midpoint(bound.position, following.position)
+    # Each center line runs from its start toward the vertex.
+    for at in 0..<count:
+        if odd:
+            let bound = work.bounds.items[(usize)vertex.first_bound + at]
+            let following = work.bounds.items[(usize)next_bound(work, (i32)vertex.first_bound + (i32)at)]
+            let angle = 0.5 * corner_angle(bound.position, centers.items[at * (half + 1)], following.position)
+            let reach = math.min(0.8, 0.5 / math.sin(angle)) if angle > small_angle else 0.8
+            step = 1.0 / ((f64)half + reach)
+        let start = centers.items[at * (half + 1)]
+        for j in 1..<half + 1: centers.items[at * (half + 1) + j] = lerp(start, here, (f64)j * step)
+    # The sectors' edges, then their interiors where the lines cross.
+    for at in 0..<count:
+        let bound = work.bounds.items[(usize)vertex.first_bound + at]
+        let previous_line = ((at + count - 1) % count) * (half + 1)
+        for j in 0..<half + (1 if odd else 0):
+            grid.put(at, j, 0, lerp(bound.position, centers.items[previous_line], (f64)j * step))
+        for k in 1..<half + 1:
+            grid.put(at, 0, k, lerp(bound.position, centers.items[at * (half + 1)], (f64)k * step))
+    if not odd: grid.put(0, half, half, here)
+    copy_equivalents(&grid)
+    for at in 0..<count:
+        let previous_line = ((at + count - 1) % count) * (half + 1)
+        for j in 1..<half + (1 if odd else 0):
+            for k in 1..<half + 1:
+                let (meets, meet_a, meet_b) = line_meet(grid.at(at, 0, k), centers.items[previous_line + k], grid.at(at, j, 0), centers.items[at * (half + 1) + j])
+                var position = meet_a
+                if meets == 0: position = lerp(grid.at(at, 0, k), centers.items[previous_line + k], (f64)j * step)
+                elif meets == 2: position = midpoint(meet_a, meet_b)
+                grid.put(at, j, k, position)
+    copy_equivalents(&grid)
+    return grid
+
+## Whichever of `a` and `b` is nearer `point`.
+func closer_point(a: Vector3, b: Vector3, point: Vector3) -> Vector3:
+    return a if a.subtract(point).length() <= b.subtract(point).length() else b

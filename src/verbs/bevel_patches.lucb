@@ -1,177 +1,213 @@
-## PolyBevel's corner patches: where strips leave a hole around a vertex (the
-## triangle where three beveled edges meet, the n-gon a profile leaves beside
-## a straight cut), the directed edges among the vertex's own points that no
-## face answers in reverse form loops, and each loop becomes a face. Those
-## edges come from the vertex's rebuilt face corners and its strips' profile
-## sides, so each vertex finds its loops on its own, in parallel (count,
-## prefix sum, fill); the faces are then emitted in vertex order.
+## Each bevel vertex's mesh: the points that replace the vertex, by kind.
+##
+## - none: two boundary points and nothing between (two beveled edges
+##   welded into one strip, a terminal edge at a three-edge corner, a point
+##   cut off between two edges);
+## - polygon: one face over the ring (one segment);
+## - fan: one face over a terminal edge's three points, as a fan;
+## - grid: the Grid Fill patch (bevel_grid.lucb, bevel_corners.lucb);
+## - cutoff: a face across each profile's end, down to a bottom face.
+##
+## Points are stored per vertex in Bevel.grid by (sector, ring, along) as
+## bevel_grid.lucb lays them out; the faces are made in bevel_emit.lucb.
 
-## Scratch for one vertex's loops.
-struct Loops:
-    var pairs: Growing[i64]
-    var open: Growing[i64]
-    var used: Growing[u8]
-    var loop: Growing[i32]
+## Where point (i, j, k) of vertex `slot`'s mesh is in Bevel.grid.
+func vm_index(work: const Bevel*, slot: i32, i: usize, j: usize, k: usize) -> usize:
+    let vertex = &work.vertices.items[(usize)slot]
+    let segments = work.settings.segments
+    return (usize)vertex.grid + (i * (segments // 2 + 1) + j) * (segments + 1) + k
 
-    func init():
-        self.pairs = Growing[i64]()
-        self.open = Growing[i64]()
-        self.used = Growing[u8]()
-        self.loop = Growing[i32]()
+func vm_at(work: const Bevel*, slot: i32, i: usize, j: usize, k: usize) -> Vector3:
+    return work.grid.items[vm_index(work, slot, i, j, k)]
 
-    func close():
-        self.pairs.close()
-        self.open.close()
-        self.used.close()
-        self.loop.close()
+func vm_put(work: Bevel*, slot: i32, i: usize, j: usize, k: usize, position: Vector3):
+    work.grid.items[vm_index(work, slot, i, j, k)] = position
 
-## A patch pass over the vertices (see CornerPass). Sizes per slot: loops in
-## `slot_points`, their points in `slot_entries`.
-struct PatchPass:
-    let work: Bevel*
-    let filling: bool
+## (i, j, k) becomes a point of its own at `position`.
+func vm_own(work: Bevel*, slot: i32, i: usize, j: usize, k: usize, position: Vector3):
+    let at = vm_index(work, slot, i, j, k)
+    work.grid.items[at] = position
+    work.grid_links.items[at] = -2
 
-func patches(work: Bevel*, builder: TopologyBuilder*) -> !:
-    let slots = work.vertex_points.count
-    for slot in 0..<slots + 1:
-        work.slot_points.items[slot] = 0
-        work.slot_entries.items[slot] = 0
-    try work.patch_skipped.fill(slots, 0)
-    var counting = PatchPass(work, false)
-    try parallel.for_each_range(slots, 256, (void*)&counting, plan_patches)
-    var loops: u32 = 0
-    var points: u32 = 0
-    for slot in 0..<slots + 1:
-        let loop_count = work.slot_points.items[slot]
-        let point_count = work.slot_entries.items[slot]
-        work.slot_points.items[slot] = loops
-        work.slot_entries.items[slot] = points
-        loops += loop_count
-        points += point_count
-    try work.patch_sizes.fill((usize)loops, 0)
-    try work.patch_points.fill((usize)points, -1)
-    var filling = PatchPass(work, true)
-    try parallel.for_each_range(slots, 256, (void*)&filling, plan_patches)
-    for slot in 0..<slots: work.skipped += (usize)work.patch_skipped.items[slot]
-    # Emit in vertex order; corners take the values a face gave each point.
-    let mask: i64 = 0xFFFFFFFF
-    var at: usize = 0
-    for slot in 0..<slots:
-        let corner = work.fans.items[(usize)work.fan_starts.items[slot]]
-        let face = work.topology.corner_faces[(usize)corner]
-        for index in (usize)work.slot_points.items[slot]..<(usize)work.slot_points.items[slot + 1]:
-            let size = (usize)work.patch_sizes.items[index]
-            try builder.face(face)
-            for point in work.patch_points.items[at..<at + size]:
-                var source: i64 = -1
-                if (usize)point >= work.topology.points: source = work.point_source.items[(usize)point - work.topology.points]
-                if source < 0:
-                    try builder.corner(point, corner)
-                    continue
-                let made = work.sequence.items[(usize)(source & mask)]
-                if made.other < 0:
-                    try builder.corner(point, (i32)(source >> 32))
-                    continue
-                let parents: i32[2] = [(i32)(source >> 32), made.other]
-                let weights: f32[2] = [1.0 - made.weight, made.weight]
-                try builder.mixed_corner(point, parents[..<2], weights[..<2])
-            try builder.end_face()
-            at += size
+## (i, j, k) is the point at (a, b, c).
+func vm_alias(work: Bevel*, slot: i32, i: usize, j: usize, k: usize, a: usize, b: usize, c: usize):
+    let at = vm_index(work, slot, i, j, k)
+    let source = vm_index(work, slot, a, b, c)
+    if at == source: return
+    work.grid.items[at] = work.grid.items[source]
+    work.grid_links.items[at] = (i64)source
 
-func plan_patches(context: void*, first: usize, end: usize, worker: usize) -> !:
-    let pass = (PatchPass*)context
-    var scratch = Loops()
-    defer scratch.close()
-    for slot in first..<end:
-        try vertex_patches(pass, &scratch, slot)
+## Copy the grid's non-canonical points from their canonical ones.
+func vm_copy_equivalents(work: Bevel*, slot: i32):
+    let count = (usize)work.vertices.items[(usize)slot].bounds
+    let segments = work.settings.segments
+    for i in 0..<count:
+        for j in 0..<segments // 2 + 1:
+            for k in 0..<segments + 1:
+                if is_canonical(segments, i, j, k): continue
+                let (a, b, c) = canonical(count, segments, i, j, k)
+                vm_alias(work, slot, i, j, k, a, b, c)
 
-## The directed edges among one vertex's points: along each face's run of
-## new corners there, and along each strip's profile side there.
-func vertex_pairs(work: const Bevel*, slot: usize, pairs: Growing[i64]*) -> !:
-    let topology = &work.topology
-    let vertex = work.vertex_points.items[slot]
-    let first = (usize)work.fan_starts.items[slot]
-    for k in first..<(usize)work.fan_starts.items[slot + 1]:
-        let corner = (usize)work.fans.items[k]
-        let start = (usize)work.corner_first.items[corner]
-        for at in start..<start + (usize)work.corner_count.items[corner] - 1:
-            try pairs.push(directed(work.sequence.items[at].point, work.sequence.items[at + 1].point))
-    let n = work.segments
-    for at in (usize)topology.point_edge_offsets[(usize)vertex]..<(usize)topology.point_edge_offsets[(usize)vertex + 1]:
-        let edge = (usize)topology.point_edges[at]
-        if not work.beveled.get(edge): continue
-        let c1 = (usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge]]
-        # Strip quads run along the start side's profile forwards and along
-        # the end side's backwards.
-        let side: usize = 0 if topology.corners[c1] == vertex else 1
-        for step in 0..<n:
-            let a = profile_point(work, edge, side, step)
-            let b = profile_point(work, edge, side, step + 1)
-            try pairs.push(directed(a, b) if side == 0 else directed(b, a))
+## Build every vertex mesh, vertices in parallel (each fills its own room,
+## reserve_rings').
+func build_vertex_meshes(work: Bevel*) -> !:
+    try parallel.for_each_range(work.vertices.count, 64, (void*)work, mesh_range)
 
-func directed(from_point: i32, to_point: i32) -> i64:
-    return ((i64)from_point << 32) | (i64)to_point
+func mesh_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (Bevel*)context
+    for slot in first..<end: try build_vertex_mesh(work, slot)
 
-## One vertex's patch loops: counted, or written from its starts. A vertex
-## that stays at a lone edge's end, or on the mesh's boundary with an open
-## run, has no hole to close.
-func vertex_patches(pass: PatchPass*, scratch: Loops*, slot: usize) -> !:
-    let work = pass.work
-    if work.fan_valid.items[slot] == 0 or work.retained.items[slot] == 2: return
-    let mask: i64 = 0xFFFFFFFF
-    scratch.pairs.clear()
-    try vertex_pairs(work, slot, &scratch.pairs)
-    let pairs = scratch.pairs.view()
-    scratch.open.clear()
-    for edge in pairs:
-        let reverse = ((edge & mask) << 32) | (edge >> 32)
-        var answered = false
-        for other in pairs:
-            if other == reverse:
-                answered = true
-                break
-        if not answered: try scratch.open.push(edge)
-    let open = scratch.open.view()
-    if open.length < 3: return
-    try scratch.used.fill(open.length, 0)
-    let used = scratch.used.items
-    var loops: usize = 0
-    var points: usize = 0
-    var skipped: usize = 0
-    let loop_base = (usize)work.slot_points.items[slot]
-    let point_base = (usize)work.slot_entries.items[slot]
-    for start in 0..<open.length:
-        if used[start] != 0: continue
-        scratch.loop.clear()
-        var at = start
-        var closed = false
-        for _ in 0..<open.length:
-            used[at] = 1
-            try scratch.loop.push((i32)(open[at] >> 32))
-            let target = open[at] & mask
-            if target == open[start] >> 32:
-                closed = true
-                break
-            var next: i64 = -1
-            for candidate in 0..<open.length:
-                if used[candidate] != 0 or open[candidate] >> 32 != target: continue
-                next = (i64)candidate if next == -1 else -2
-            if next < 0: break
-            at = (usize)next
-        # At a point on the mesh's boundary the strips' ends are boundary
-        # too: an open run there is no hole.
-        if not closed and work.cyclic.items[slot] == 0: continue
-        let size = scratch.loop.count
-        if not closed or size < 3:
-            skipped += 1
-            continue
-        if pass.filling:
-            # The hole's edges run the way no face does: the patch reverses them.
-            work.patch_sizes.items[loop_base + loops] = (u32)size
-            for index in 0..<size: work.patch_points.items[point_base + points + index] = scratch.loop.items[size - 1 - index]
-        loops += 1
-        points += size
-    if not pass.filling:
-        work.slot_points.items[slot] = (u32)loops
-        work.slot_entries.items[slot] = (u32)points
-        work.patch_skipped.items[slot] = (u8)math.min(255.0, (f64)skipped)
+## Build vertex `slot`'s mesh: its ring's profiles and the points of its
+## kind.
+func build_vertex_mesh(work: Bevel*, slot: usize) -> !:
+    let id = (i32)slot
+    let segments = work.settings.segments
+    let count = (usize)work.vertices.items[slot].bounds
+    if count == 0: return
+    let first_bound = (usize)work.vertices.items[slot].first_bound
+    let weld = not work.settings.vertices and work.vertices.items[slot].selected == 2 and count == 2
+    var weld_one: i32 = -1
+    var weld_two: i32 = -1
+    for i in 0..<count:
+        let bound = (i32)(first_bound + i)
+        vm_own(work, id, i, 0, 0, work.bounds.items[(usize)bound].position)
+        if weld and work.bounds.items[(usize)bound].bevel >= 0:
+            if weld_one < 0:
+                weld_one = bound
+            else:
+                weld_two = bound
+                set_profile(work, id, weld_one)
+                set_profile(work, id, weld_two)
+                move_weld_planes(work, id, weld_one, weld_two)
+    set_ring_profiles(work, id)
+    var kind = work.vertices.items[slot].kind
+    for i in 0..<count:
+        let bound = work.bounds.items[first_bound + i]
+        vm_alias(work, id, i, 0, segments, (i + 1) % count, 0, 0)
+        if kind != mesh_grid and bound.bevel >= 0:
+            for k in 1..<segments:
+                let position = profile_point(work, &bound.profile, k, segments)
+                if weld: vm_put(work, id, i, 0, k, position)
+                else: vm_own(work, id, i, 0, k, position)
+    # Two points with one profile between them: the other side runs the
+    # same points back.
+    if count == 2 and kind != mesh_grid:
+        for i in 0..<(usize)2:
+            if work.bounds.items[first_bound + i].bevel >= 0: continue
+            for k in 1..<segments: vm_alias(work, id, i, 0, k, 1 - i, 0, segments - k)
+    if weld:
+        kind = mesh_none
+        let one = (usize)(weld_one - (i32)first_bound)
+        let two = (usize)(weld_two - (i32)first_bound)
+        let line_one = work.bounds.items[(usize)weld_one].profile.exponent == exponent_line
+        let line_two = work.bounds.items[(usize)weld_two].profile.exponent == exponent_line
+        for k in 1..<segments:
+            let a = vm_at(work, id, one, 0, k)
+            let b = vm_at(work, id, two, 0, segments - k)
+            # Where one profile is straight and the other not, the curved one
+            # wins; else they meet halfway.
+            var position = midpoint(a, b)
+            if not work.settings.custom and line_one and not line_two: position = b
+            elif not work.settings.custom and line_two and not line_one: position = a
+            vm_own(work, id, one, 0, k, position)
+        for k in 1..<segments: vm_alias(work, id, two, 0, segments - k, one, 0, k)
+    if (count == 3 or count == 4) and segments > 1:
+        let pipe = pipe_test(work, id)
+        work.vertices.items[slot].pipe = pipe
+        if pipe >= 0: kind = mesh_grid
+    work.vertices.items[slot].kind = kind
+    if kind == mesh_none and count == 2 and work.settings.vertices: two_edge_point(work, id)
+    elif kind == mesh_grid: try grid_points(work, id)
+    elif kind == mesh_cutoff: cutoff_points(work, id)
+
+## A point cut off between two edges: the profile between its two boundary
+## points, bulging toward the point (the faces around it take it).
+func two_edge_point(work: Bevel*, slot: i32):
+    let segments = work.settings.segments
+    if segments <= 1: return
+    let first = (usize)work.vertices.items[(usize)slot].first_bound
+    var profile = blank_profile()
+    profile.exponent = work.settings.exponent
+    profile.start = work.bounds.items[first].position
+    profile.end = work.bounds.items[first + 1].position
+    profile.middle = vertex_at(work, slot)
+    work.bounds.items[first].profile = profile
+    for k in 1..<segments: vm_own(work, slot, 0, 0, k, profile_point(work, &profile, k, segments))
+    for k in 1..<segments: vm_alias(work, slot, 1, 0, segments - k, 0, 0, k)
+
+## The Grid Fill patch's points.
+func grid_points(work: Bevel*, slot: i32) -> !:
+    let vertex = work.vertices.items[(usize)slot]
+    let segments = work.settings.segments
+    let half = segments // 2
+    let count = (usize)vertex.bounds
+    var grid = Grid(0, 0)
+    if work.settings.exponent == exponent_square and vertex.selected >= 3 and segments % 2 == 0 and not work.settings.custom:
+        grid = try square_grid(work, slot)
+    elif vertex.pipe >= 0:
+        grid = try pipe_grid(work, slot, vertex.pipe)
+    elif corner_test(work, slot) == 1:
+        grid = try corner_grid(work, slot)
+        if work.settings.exponent == exponent_hollow and not work.settings.custom:
+            defer grid.close()
+            hollow_corner_points(work, slot, &grid)
+            return
+    else:
+        grid = try grid_patch(work, slot)
+    defer grid.close()
+    for i in 0..<count:
+        for j in 0..<half + 1:
+            for k in 0..<segments + 1:
+                if j == 0 and (k == 0 or k == segments): continue
+                if not is_canonical(segments, i, j, k): continue
+                vm_own(work, slot, i, j, k, grid.at(i, j, k))
+    vm_copy_equivalents(work, slot)
+
+## The hollow cube corner: the profiles run into the opposite corner and
+## meet there; each profile's points past its middle are the next one's,
+## and an odd count leaves a small face at the center.
+func hollow_corner_points(work: Bevel*, slot: i32, grid: const Grid*):
+    let count = (usize)work.vertices.items[(usize)slot].bounds
+    let segments = work.settings.segments
+    let half = segments // 2
+    for i in 0..<count:
+        for k in 1..<segments:
+            let position = grid.at(i, 0, k)
+            if i > 0 and k <= half:
+                vm_alias(work, slot, i, 0, k, i - 1, 0, segments - k)
+            elif i == count - 1 and k > half:
+                vm_alias(work, slot, i, 0, k, 0, 0, segments - k)
+            else:
+                vm_own(work, slot, i, 0, k, position)
+    if segments % 2 == 1:
+        for i in 0..<count: vm_alias(work, slot, i, half, half, i, 0, half)
+    work.vertices.items[(usize)slot].hollow_corner = true
+
+## Cutoff: under each boundary point, a point down from it by the mean
+## height of the two profiles there (along where their planes meet), shared
+## by the two cut faces; one point for all when they would coincide.
+func cutoff_points(work: Bevel*, slot: i32):
+    let vertex = work.vertices.items[(usize)slot]
+    let count = (usize)vertex.bounds
+    let normal = vertex_normal(work, slot)
+    for i in 0..<count:
+        let bound = work.bounds.items[(usize)vertex.first_bound + i]
+        let previous = work.bounds.items[(usize)previous_bound(work, (i32)vertex.first_bound + (i32)i)]
+        var down = bound.profile.plane_normal.cross(previous.profile.plane_normal)
+        if down.dot(normal) > 0.0: down = down.multiply_scalar(-1.0)
+        let reach = (profile_height(&bound.profile) + profile_height(&previous.profile)) / (2.0 * math.sqrt(2.0))
+        let position = bound.position.add(down.multiply_scalar(reach))
+        vm_put(work, slot, i, 1, 0, position)
+        vm_put(work, slot, (i + count - 1) % count, 1, 1, position)
+    var center = true
+    if count == 3:
+        for i in 0..<(usize)3:
+            if vm_at(work, slot, i, 1, 0).subtract(vm_at(work, slot, (i + 1) % 3, 1, 0)).length() * vm_at(work, slot, i, 1, 0).subtract(vm_at(work, slot, (i + 1) % 3, 1, 0)).length() <= tiny: center = false
+    work.vertices.items[(usize)slot].center_face = center
+    if center:
+        for i in 0..<count:
+            vm_own(work, slot, i, 1, 0, vm_at(work, slot, i, 1, 0))
+            vm_alias(work, slot, (i + count - 1) % count, 1, 1, i, 1, 0)
+    else:
+        vm_own(work, slot, 0, 1, 0, vm_at(work, slot, 0, 1, 0))
+        for i in 1..<count: vm_alias(work, slot, i, 1, 0, 0, 1, 0)
