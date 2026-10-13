@@ -21,6 +21,7 @@ pub func exercise() -> !:
     try islands(grid)
     try paths(grid)
     try similar(grid)
+    try similar_marks(grid)
     try regions(grid)
     try traits(grid)
     try nonmanifold(grid)
@@ -205,6 +206,59 @@ func similar(grid: interop.Reference[Mesh]) -> !:
     _ = seed.value().ruled(grid, "Select Similar", area[..<3]) catch failure:
         return
     trap("Select Similar by area took points")
+
+## Similar by the marks and groups: seams, sharp, crease, material,
+## group membership, face angle and plane; Connected's UV delimit.
+func similar_marks(grid: interop.Reference[Mesh]) -> !:
+    let seamed = try Groups.with_group(grid, "seam", 4, "p2-7-12-17-22")
+    defer seamed.release()
+    let seam: f64[3] = [11.0, 0.0, 0.0]
+    try expect(seamed, "p2-7", 4, "Select Similar", seam[..<3], 4)
+    try expect(seamed, "p0-1", 4, "Select Similar", seam[..<3], 36)
+    let sharp_marked = try Groups.with_group(grid, "sharp", 4, "p0-1-2")
+    defer sharp_marked.release()
+    let sharp: f64[3] = [12.0, 0.0, 0.0]
+    try expect(sharp_marked, "p0-1", 4, "Select Similar", sharp[..<3], 2)
+    let crease_result = try Verbs.run("Crease", grid, "p0-1-2-3", 2, none_given())
+    defer crease_result.release()
+    let creased = try crease_result.value().mesh()
+    defer creased.release()
+    let crease: f64[3] = [10.0, 0.0, 0.001]
+    try expect(creased, "p0-1", 4, "Select Similar", crease[..<3], 3)
+    let painted = try MaterialAssignment.faces(grid, "0-7", "material", "red")
+    defer painted.release()
+    let material: f64[3] = [5.0, 0.0, 0.0]
+    try expect(painted, "0", 2, "Select Similar", material[..<3], 8)
+    let grouped = try Groups.with_group(grid, "top", 2, "12-15")
+    defer grouped.release()
+    let group: f64[3] = [6.0, 0.0, 0.0]
+    try expect(grouped, "12", 2, "Select Similar", group[..<3], 4)
+    try expect(grouped, "0", 2, "Select Similar", group[..<3], 12)
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    let angle: f64[3] = [9.0, 0.0, 0.01]
+    try expect(cube, "p0", 4, "Select Similar", angle[..<3], 12)
+    # Two grids one above the other: the same normal, two planes.
+    let raised = try grid.value().transformed(Vector3(0.0, 1.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer raised.release()
+    let stacked = try grid.value().merged(raised)
+    defer stacked.release()
+    let coplanar: f64[3] = [4.0, 0.0, 0.01]
+    try expect(stacked, "0", 2, "Select Similar", coplanar[..<3], 16)
+    let normal: f64[3] = [0.0, 0.0, 0.01]
+    try expect(stacked, "0", 2, "Select Similar", normal[..<3], 32)
+    # UV islands: the right half's corners offset by 10 in u.
+    var uv: f64[128]
+    for corner in 0..<(usize)64:
+        let point = try grid.value().corner_point((i64)corner)
+        let face = (usize)(try grid.value().corner_face((i64)corner))
+        uv[corner * 2] = (f64)(point % 5) + (10.0 if face % 4 >= 2 else 0.0)
+        uv[corner * 2 + 1] = (f64)(point // 5)
+    let mapped = try grid.value().with_attribute("uv", 1, 2, uv[..<128])
+    defer mapped.release()
+    let uv_seams: f64[4] = [0.0, 0.0, 0.0, 1.0]
+    try expect(mapped, "0", 2, "Select Connected", uv_seams[..<4], 8)
+    try expect(mapped, "0", 2, "Select Connected", none_given(), 16)
 
 func regions(grid: interop.Reference[Mesh]) -> !:
     let plain = none_given()
