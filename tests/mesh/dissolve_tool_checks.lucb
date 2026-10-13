@@ -1,0 +1,97 @@
+## Dissolve's Clean points, Delete Edge Loop and Limited Dissolve
+## (POLY-MODELING.md Stage 5): a cylinder cut round its middle loses that
+## loop again (one row fewer, the cylinder back); a flat grid joins into one
+## face, its outline's straight points staying unless Boundaries; a cube
+## and a coarse cylinder keep their facets; a grid folded by 2° joins
+## across the fold at 5° but not at 1°; a sharp mark delimits.
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3, Groups
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try delete_loop_checks()
+    try limited_checks()
+    print("PASS Delete Edge Loop and Limited Dissolve: a cylinder's cut loop taken out again; a flat grid one face, its straight outline points kept or gone; facets kept; a fold joined within the angle only; sharp marks delimit")
+
+let no_numbers: f64[1] = [0.0]
+
+func delete_loop_checks() -> !:
+    let cylinder = try MeshPrimitives.cylinder(1.0, 2.0, 8)
+    defer cylinder.release()
+    let one_cut: f64[5] = [1.0, 0.0, 1.0, 0.0, 0.0]
+    let cut = try Verbs.run("Loop Cut", cylinder, "p0-8", 2, one_cut[..<5])
+    defer cut.release()
+    let rows = try cut.value().mesh()
+    defer rows.release()
+    try counts(rows, 24, 18)
+    let loop = try cut.value().selection()
+    defer loop.release()
+    let expression = try loop.value().expression(rows)
+    defer expression.release()
+    let back = try made(rows, "Delete Edge Loop", expression.value, 2, no_numbers[..<0], 8)
+    defer back.release()
+    try counts(back, 16, 10)
+    try surface(back, true)
+    near(try volume(back), try volume(cylinder))
+    for face in 0..<back.value().face_count():
+        let size = try back.value().face_size(face)
+        assert(size == 4 or size == 8)
+    # Plain Dissolve without Clean points keeps the loop's points: the
+    # sides become hexagons.
+    let keep: f64[1] = [0.0]
+    let hexagons = try made(rows, "Dissolve", expression.value, 2, keep[..<1], 8)
+    defer hexagons.release()
+    try counts(hexagons, 24, 10)
+
+## Limited Dissolve's numbers: angle, boundaries, delimit sharp, seams,
+## materials, UVs.
+func limited(angle: f64, boundaries: bool = false, sharp: bool = false) -> f64[6]:
+    return [angle, 1.0 if boundaries else 0.0, 1.0 if sharp else 0.0, 0.0, 0.0, 0.0]
+
+func limited_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let five = limited(5.0)
+    let flat = try made(grid, "Limited Dissolve", "", 3, five[..<6], 1)
+    defer flat.release()
+    try counts(flat, 16, 1)
+    near(try area(flat, 0), 4.0)
+    let edges = limited(5.0, boundaries = true)
+    let square = try made(grid, "Limited Dissolve", "", 3, edges[..<6], 1)
+    defer square.release()
+    try counts(square, 4, 1)
+    # A cube and an eight-sided cylinder keep every facet.
+    let cube = try Mesh.cube()
+    defer cube.release()
+    let kept = try Verbs.run("Limited Dissolve", cube, "", 3, five[..<6])
+    defer kept.release()
+    assert(kept.value().warning().length > 0)
+    let cylinder = try MeshPrimitives.cylinder(1.0, 2.0, 8)
+    defer cylinder.release()
+    let sides = try Verbs.run("Limited Dissolve", cylinder, "", 3, five[..<6])
+    defer sides.release()
+    assert(sides.value().warning().length > 0)
+    # The grid's far half tipped up 2° about its middle line: joined across
+    # the fold at 5°, two faces at 1°.
+    let tilt: f64[15] = [0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+    let tipping = try Verbs.run("Transform Components", grid, "@P.z>0.01", 1, tilt[..<15])
+    defer tipping.release()
+    let folded = try tipping.value().mesh()
+    defer folded.release()
+    let joined = try made(folded, "Limited Dissolve", "", 3, five[..<6], 1)
+    defer joined.release()
+    assert(joined.value().face_count() == 1)
+    let one = limited(1.0)
+    let halves = try made(folded, "Limited Dissolve", "", 3, one[..<6], 2)
+    defer halves.release()
+    assert(halves.value().face_count() == 2)
+    # A sharp mark across the middle keeps the halves apart.
+    let marked = try Groups.with_group(grid, "sharp", 4, "p10-11-12-13-14")
+    defer marked.release()
+    let sharp = limited(5.0, sharp = true)
+    let apart = try made(marked, "Limited Dissolve", "", 3, sharp[..<6], 2)
+    defer apart.release()
+    assert(apart.value().face_count() == 2)

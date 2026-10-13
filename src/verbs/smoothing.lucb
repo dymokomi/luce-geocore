@@ -1,0 +1,140 @@
+## Smooth and Relax: the group's points moved toward the mean of their
+## neighbors, in rounds, after Blender's Smooth Vertices and Laplacian
+## Smooth and Modo's Relax. Smooth moves each point Amount of the way to its
+## neighbors' mean, on the axes it is let; Keep volume follows each round
+## with a step back (Taubin's λ|μ), so a closed surface does not shrink;
+## Keep boundary holds points on the mesh's boundary. Relax keeps the shape:
+## only the part of each move along the surface goes (square to the
+## point's normal), so the points even out where they lie. Each round
+## reads the last and writes every point in parallel. The output selection
+## is the group.
+
+let smooth_parms: ParmSpec[5] = [
+    ParmSpec("Amount", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "How far each point moves toward the mean of its neighbors in a round."),
+    ParmSpec("Iterations", ParmKind.integer, 1.0, 1.0, 100.0, 1, "", "Rounds of smoothing."),
+    ParmSpec("Keep volume", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Step back after each round (Taubin's smoothing), so the surface does not shrink."),
+    ParmSpec("Keep boundary", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Hold the points on the mesh's boundary."),
+    ParmSpec("Axes", ParmKind.vector, 1.0, 0.0, 1.0, 3, "", "How much of the move each axis takes (0 holds an axis).", more = true)]
+
+func smooth_verb() -> Verb:
+    return Verb("Smooth", "Deform", "Laplacian smoothing of the group's points", Domain.point, true, smooth_parms, false, cook_smooth, label = "Smooth", section = "Modify", family = "Shape", icon = "smooth-tool", drag = 0, drag_mode = "amount", wheel = 1)
+
+let relax_parms: ParmSpec[3] = [
+    ParmSpec("Amount", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "How far each point moves along the surface toward the mean of its neighbors in a round."),
+    ParmSpec("Iterations", ParmKind.integer, 5.0, 1.0, 100.0, 1, "", "Rounds of relaxing."),
+    ParmSpec("Keep boundary", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Hold the points on the mesh's boundary.")]
+
+func relax_verb() -> Verb:
+    return Verb("Relax", "Deform", "Even out the group's points along the surface, keeping its shape", Domain.point, true, relax_parms, false, cook_relax, section = "Modify", family = "Shape", icon = "smudge-tool", drag = 0, drag_mode = "amount", wheel = 1)
+
+## What a round reads: the positions, the group's points, the edges round
+## each point, the held points and the axes, or the normals for Relax.
+struct SmoothWork:
+    let positions: const Float3[]
+    let moved: const u32[]
+    let edges: const i32[]
+    let offsets: const i32[]
+    let point_edges: const i32[]
+    let held: Bits
+    let next: Float3[]
+    var amount: f64
+    let axes: Vector3
+    ## Relax: each point's normal (empty for Smooth).
+    let normals: const Vector3[]
+
+func smooth_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (SmoothWork*)context
+    for at in first..<end:
+        let point = (usize)work.moved[at]
+        let p = work.positions[point].vector()
+        work.next[at] = work.positions[point]
+        if work.held.count > 0 and work.held.get(point): continue
+        var sum = Vector3()
+        var count = 0.0
+        for slot in (usize)work.offsets[point]..<(usize)work.offsets[point + 1]:
+            let edge = (usize)work.point_edges[slot]
+            let a = (usize)work.edges[edge * 2]
+            let other = (usize)work.edges[edge * 2 + 1] if a == point else a
+            sum = sum.add(work.positions[other].vector())
+            count += 1.0
+        if count == 0.0: continue
+        var step = sum.multiply_scalar(1.0 / count).subtract(p).multiply_scalar(work.amount)
+        if work.normals.length > 0:
+            let normal = work.normals[point]
+            step = step.subtract(normal.multiply_scalar(step.dot(normal)))
+        else:
+            step = Vector3(step.x * work.axes.x, step.y * work.axes.y, step.z * work.axes.z)
+        work.next[at] = Float3.of(p.add(step))
+
+## Points on a boundary edge.
+func boundary_points(mesh: const Mesh*) -> BitsBuilder!:
+    let topology = try Topology.of(mesh)
+    var held = try BitsBuilder.zeros(topology.points)
+    for edge in 0..<topology.edges():
+        if topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge] != 1: continue
+        held.set((usize)topology.edge_points[edge * 2])
+        held.set((usize)topology.edge_points[edge * 2 + 1])
+    return held
+
+## `rounds` rounds over the group's points: each moves `amount` (and, with
+## `back`, then `back` the other way: Taubin's μ), held points staying.
+func smooth_rounds(input: const VerbInput*, output: VerbOutput*, amount: f64, back: f64, rounds: usize, held: Bits, axes: Vector3, normals: const Vector3[]) -> !:
+    let moved = try begin_points(input, output)
+    let edges = try input.mesh.edge_span()
+    let around = try input.mesh.point_edge_span()
+    let positions = output.positions.span()
+    let next = try new Float3[moved.length] --- in memory.heap
+    defer free(next) in memory.heap
+    var work = SmoothWork(positions, moved, edges, around.0, around.1, held, next, amount, axes, normals)
+    for _ in 0..<rounds:
+        work.amount = amount
+        try parallel.for_each_range(moved.length, 4096, (void*)&work, smooth_points)
+        for at in 0..<moved.length: positions[(usize)moved[at]] = next[at]
+        if back == 0.0: continue
+        work.amount = back
+        try parallel.for_each_range(moved.length, 4096, (void*)&work, smooth_points)
+        for at in 0..<moved.length: positions[(usize)moved[at]] = next[at]
+
+let no_normals: Vector3[1] = [Vector3()]
+
+func cook_smooth(input: const VerbInput*, output: VerbOutput*) -> !:
+    let amount = input.parms.at(0)
+    let rounds = (usize)math.max(1.0, math.min(100.0, input.parms.at(1)))
+    if not (amount >= 0.0 and amount <= 1.0): error(errors.invalid, "Smooth amount must be in 0..1")
+    let axes = Vector3(input.parms.at(4), input.parms.at(5), input.parms.at(6))
+    if not axes.is_finite(): error(errors.invalid, "Smooth's axes must be finite")
+    # Taubin's step back: 1 / (k - 1/λ) with the pass band k = 0.1.
+    var back = 0.0
+    if input.parms.at(2) != 0.0 and amount > 0.0: back = 1.0 / (0.1 - 1.0 / amount)
+    var held = try BitsBuilder.zeros(0)
+    defer held.close()
+    if input.parms.at(3) != 0.0:
+        held.close()
+        held = try boundary_points(input.mesh)
+    try smooth_rounds(input, output, amount, back, rounds, held.view(), axes, no_normals[..<0])
+
+func cook_relax(input: const VerbInput*, output: VerbOutput*) -> !:
+    let amount = input.parms.at(0)
+    let rounds = (usize)math.max(1.0, math.min(100.0, input.parms.at(1)))
+    if not (amount >= 0.0 and amount <= 1.0): error(errors.invalid, "Relax amount must be in 0..1")
+    var held = try BitsBuilder.zeros(0)
+    defer held.close()
+    if input.parms.at(2) != 0.0:
+        held.close()
+        held = try boundary_points(input.mesh)
+    # Each point's normal: the mean of its faces'.
+    let mesh = input.mesh
+    let points = (usize)mesh.point_count()
+    let normals = try new Vector3[points] --- in memory.heap
+    defer free(normals) in memory.heap
+    for at in 0..<points: normals[at] = Vector3()
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
+    let face_normals = mesh.face_normal_span()
+    for face in 0..<face_normals.length:
+        for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
+            normals[(usize)corners[corner]] = normals[(usize)corners[corner]].add(face_normals[face].vector())
+    for at in 0..<points:
+        let length = normals[at].length()
+        if length > 0.0: normals[at] = normals[at].multiply_scalar(1.0 / length)
+    try smooth_rounds(input, output, amount, 0.0, rounds, held.view(), Vector3(1.0, 1.0, 1.0), normals[..<points])

@@ -1,0 +1,168 @@
+## Un-subdivide (PolyReduce's mode): undo subdivision on the group's quads,
+## after Blender's Un-Subdivide. The quads are labeled as a subdivision
+## makes them: each has an old point, then an edge point, then a face
+## point, then another edge point round it. Starting from an old point (a
+## pole, or a corner of the outline, where one is), labels spread from quad
+## to quad through old and face points; then each face point's fan of quads
+## becomes one face through their old points, and the edge and face points
+## go. Quads that do not label consistently (no subdivision made them), or a
+## face point on the outline, leave the input as it was, with a warning.
+## Positions stay (a Catmull-Clark mesh keeps its smoothed shape).
+
+let old_point: i8 = 0
+let edge_point: i8 = 1
+let face_point: i8 = 2
+
+## Undo `iterations` subdivisions of the group's quads.
+func unsubdivide(input: const VerbInput*, output: VerbOutput*, iterations: usize) -> !:
+    var current = try mesh_share(input.mesh)
+    var group = try BitsBuilder.copy_of(input.group)
+    defer group.close()
+    for _ in 0..<iterations:
+        var level = VerbOutput()
+        defer level.close()
+        let undone = unsubdivide_level(current, group.view(), &level) catch failure:
+            mesh_dispose(current)
+            error(failure.code, failure.message)
+        if not undone:
+            output.warning = level.warning
+            break
+        let next = level.builder.finish(current) catch failure:
+            mesh_dispose(current)
+            error(failure.code, failure.message)
+        mesh_dispose(current)
+        current = next
+        group.close()
+        group = level.selection
+        level.selection = try BitsBuilder.zeros(0)
+    output.mesh = current
+    output.selection = group
+    group = try BitsBuilder.zeros(0)
+    output.selection_domain = Domain.face
+
+## One level: the coarse faces built into `level.builder` (and its
+## selection), or false with a warning when the quads do not label.
+func unsubdivide_level(mesh: const Mesh*, group: Bits, level: VerbOutput*) -> bool!:
+    let topology = try Topology.of(mesh)
+    let faces = topology.faces()
+    let points = topology.points
+    let label = try new i8[points] --- in memory.heap
+    defer free(label) in memory.heap
+    for at in 0..<points: label[at] = -1
+    var any = false
+    for face in 0..<faces:
+        if not group.get(face): continue
+        any = true
+        if topology.offsets[face + 1] - topology.offsets[face] != 4:
+            level.warning = "Un-subdivide needs quads, as a subdivision makes them; the input passes through"
+            return false
+    if not any:
+        level.warning = "No faces in the group to un-subdivide; the input passes through"
+        return false
+    # Label each part of the group from an old point of its own.
+    var queue = Growing[i32]()
+    defer queue.close()
+    for face in 0..<faces:
+        if not group.get(face): continue
+        var labeled = false
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if label[(usize)topology.corners[corner]] >= 0: labeled = true
+        if labeled: continue
+        let seed = seed_point(&topology, group, face)
+        label[(usize)seed] = old_point
+        queue.clear()
+        try queue.push(seed)
+        while queue.count > 0:
+            queue.count -= 1
+            let point = (usize)queue.items[queue.count]
+            if not try label_quads(mesh, &topology, group, label[..<points], point, &queue):
+                level.warning = "The group's quads are not one subdivision's (their points do not label as old, edge and face points); the input passes through"
+                return false
+    # Each face point's fan becomes one face through its old points.
+    var builder = &level.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    var olds = Growing[i32]()
+    defer olds.close()
+    var fan = Growing[i32]()
+    defer fan.close()
+    var run: usize = 0
+    var made: usize = 0
+    var selected = Growing[u32]()
+    defer selected.close()
+    for face in 0..<faces:
+        if not group.get(face): continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        var center: i32 = -1
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if label[(usize)topology.corners[corner]] == face_point: center = topology.corners[corner]
+        # Each fan is built at its first face.
+        if center < 0 or not first_of_fan(mesh, &topology, group, (usize)center, face): continue
+        let closed = try fan_corners(mesh, &topology, (usize)center, &fan)
+        var inside = closed
+        for corner in fan.view():
+            if not group.get((usize)topology.corner_faces[(usize)corner]): inside = false
+        if not inside:
+            level.warning = "A face point lies on the group's outline: its quads are not one subdivision's; the input passes through"
+            return false
+        olds.clear()
+        # Round the face point the fan runs clockwise: the old points in
+        # reverse keep the faces' winding.
+        var k = fan.count
+        while k > 0:
+            k -= 1
+            try olds.push((i32)topology.next(topology.next((usize)fan.items[k])))
+        try selected.push((u32)builder.face_count())
+        try builder.face((i32)face)
+        for corner in olds.view(): try builder.corner(topology.corners[(usize)corner], corner)
+        try builder.end_face()
+        made += 1
+    try builder.copy_faces(mesh, run, faces)
+    try builder.drop_unused_points()
+    level.built = true
+    level.selection = try BitsBuilder.zeros(builder.face_count())
+    for face in selected.view(): level.selection.set((usize)face)
+    return made > 0
+
+## Where labeling starts in `face`'s part: a corner of a pole (not four
+## edges) or of the outline with two edges, else the face's first corner.
+func seed_point(topology: const Topology*, group: Bits, face: usize) -> i32:
+    for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+        let point = (usize)topology.corners[corner]
+        let valence = topology.valence(point)
+        if valence != 4 and valence != 3: return (i32)point
+    return topology.corners[(usize)topology.offsets[face]]
+
+## Label the quads round labeled point `point` (an old or face point fixes
+## all four of a quad's labels); points newly labeled old or face join the
+## queue. False on a conflict.
+func label_quads(mesh: const Mesh*, topology: const Topology*, group: Bits, label: i8[], point: usize, queue: Growing[i32]*) -> bool!:
+    let (offsets, faces) = try mesh.point_face_span()
+    let own = label[point]
+    if own == edge_point: return true
+    for slot in (usize)offsets[point]..<(usize)offsets[point + 1]:
+        let face = (usize)faces[slot]
+        if not group.get(face): continue
+        let start = (usize)topology.offsets[face]
+        var at: usize = 0
+        for k in 0..<(usize)4:
+            if (usize)topology.corners[start + k] == point: at = k
+        for k in 0..<(usize)4:
+            let other = (usize)topology.corners[start + (at + k) % 4]
+            let wanted: i8 = edge_point if k % 2 == 1 else (own if k == 0 else (face_point if own == old_point else old_point))
+            if label[other] < 0:
+                label[other] = wanted
+                if wanted != edge_point: try queue.push((i32)other)
+            elif label[other] != wanted:
+                return false
+    return true
+
+## Whether `face` is the first face of the group round face point `center`.
+func first_of_fan(mesh: const Mesh*, topology: const Topology*, group: Bits, center: usize, face: usize) -> bool:
+    let (offsets, faces) = mesh.point_face_span() catch failure:
+        return false
+    for slot in (usize)offsets[center]..<(usize)offsets[center + 1]:
+        let other = (usize)faces[slot]
+        if group.get(other) and other < face: return false
+    return true

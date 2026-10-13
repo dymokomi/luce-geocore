@@ -1,0 +1,123 @@
+## Symmetrize and Snap to Symmetry (POLY-MODELING.md Stage 5): a lopsided
+## sphere symmetrized matches its own mirror within 1e-6 and keeps the half
+## it was told to; a box with one side pushed out comes back to the box;
+## a grid the plane cuts through gets the cut points and the mirrored half;
+## Snap to Symmetry meets halfway or copies the leading side, and puts the
+## points on the plane onto it.
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try symmetrize_checks()
+    try snap_checks()
+    print("PASS Symmetrize and Snap to Symmetry: a lopsided sphere made symmetric within 1e-6, its kept half unchanged; a box pushed out made whole; a grid cut on the plane; pairs meeting halfway and copied, points onto the plane")
+
+## `mesh` with points `group` moved by `offset`.
+func moved(mesh: interop.Reference[Mesh], group: str, offset: Vector3) -> interop.Reference[Mesh]!:
+    let numbers: f64[15] = [offset.x, offset.y, offset.z, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+    let result = try Verbs.run("Transform Components", mesh, group, 1, numbers[..<15])
+    defer result.release()
+    return try result.value().mesh()
+
+## Whether every point of `mesh` has a point at its reflection across X.
+func mirror_symmetric(mesh: interop.Reference[Mesh], tolerance: f64) -> bool!:
+    let geometry = mesh.value()
+    for point in 0..<geometry.point_count():
+        let p = try geometry.point(point)
+        var found = false
+        for other in 0..<geometry.point_count():
+            let q = try geometry.point(other)
+            if math.abs(q.x + p.x) <= tolerance and math.abs(q.y - p.y) <= tolerance and math.abs(q.z - p.z) <= tolerance: found = true
+        if not found: return false
+    return true
+
+func symmetrize_checks() -> !:
+    let sphere = try MeshPrimitives.sphere(1.0, 8)
+    defer sphere.release()
+    # Lopsided: the +X half's points pushed out and up.
+    var lopsided = try moved(sphere, "@P.x>0.01", Vector3(0.3, 0.2, -0.1))
+    defer lopsided.release()
+    assert(not try mirror_symmetric(lopsided, 0.000001))
+    let keep_low: f64[2] = [0.0, 0.0001]
+    let fixed = try made(lopsided, "Symmetrize", "", 3, keep_low[..<2], sphere.value().face_count() // 2)
+    defer fixed.release()
+    try surface(fixed, true)
+    assert(try mirror_symmetric(fixed, 0.000001))
+    try counts(fixed, sphere.value().point_count(), sphere.value().face_count())
+    near(try volume(fixed), try volume(sphere), 0.000001)
+    # +X to -X keeps the pushed half: wider than the sphere.
+    let keep_high: f64[2] = [1.0, 0.0001]
+    let pushed = try made(lopsided, "Symmetrize", "", 3, keep_high[..<2], sphere.value().face_count() // 2)
+    defer pushed.release()
+    assert(try mirror_symmetric(pushed, 0.000001))
+    assert(pushed.value().bounds().minimum.x < -1.2)
+    # A box whose +X side was pushed out 0.5: the -X side and the -X halves
+    # of the four faces round it mirrored back.
+    let cube = try Mesh.cube()
+    defer cube.release()
+    let long = try moved(cube, "@P.x>0", Vector3(0.5, 0.0, 0.0))
+    defer long.release()
+    let boxed = try made(long, "Symmetrize", "", 3, keep_low[..<2], 5)
+    defer boxed.release()
+    near(try volume(boxed), 8.0)
+    near(boxed.value().bounds().maximum.x, 1.0)
+    try surface(boxed, true)
+    # A 3 by 3 grid the plane cuts down its middle column: 6 half faces
+    # kept, 6 mirrored, the 4 cut points shared.
+    let grid = try MeshPrimitives.grid(2.0, 3)
+    defer grid.release()
+    let halves = try made(grid, "Symmetrize", "", 3, keep_low[..<2], 6)
+    defer halves.release()
+    try counts(halves, 20, 12)
+    try surface(halves, false)
+    var total = 0.0
+    for face in 0..<halves.value().face_count(): total += try area(halves, face)
+    near(total, 4.0)
+    # Threshold: a 4 by 4 grid's middle column 0.01 off the plane moves
+    # back onto it first, so nothing is cut.
+    let four = try MeshPrimitives.grid(2.0, 4)
+    defer four.release()
+    let off_center = try moved(four, "2 7 12 17 22", Vector3(0.01, 0.0, 0.0))
+    defer off_center.release()
+    let wide: f64[2] = [0.0, 0.05]
+    let welded = try made(off_center, "Symmetrize", "", 3, wide[..<2], 8)
+    defer welded.release()
+    try counts(welded, 25, 16)
+    try surface(welded, false)
+    assert(try mirror_symmetric(welded, 0.000001))
+    # Without it the faces beside the seam are cut.
+    let cut = try made(off_center, "Symmetrize", "", 3, keep_low[..<2], 8)
+    defer cut.release()
+    assert(try mirror_symmetric(cut, 0.000001))
+    try counts(cut, 25, 16)
+
+func snap_checks() -> !:
+    let cube = try Mesh.cube()
+    defer cube.release()
+    # One -X corner nudged: its pair meets halfway, or takes the -X side.
+    let nudged = try moved(cube, "0", Vector3(0.02, 0.01, 0.0))
+    defer nudged.release()
+    let first = try nudged.value().point(0)
+    let halfway: f64[4] = [0.0, 0.05, 0.5, 1.0]
+    let met = try made(nudged, "Snap to Symmetry", "", 1, halfway[..<4], 8)
+    defer met.release()
+    assert(try mirror_symmetric(met, 0.000001))
+    near((try met.value().point(0)).y, first.y - 0.005)
+    let lead: f64[4] = [0.0, 0.05, 0.0, 1.0]
+    let copied = try made(nudged, "Snap to Symmetry", "", 1, lead[..<4], 8)
+    defer copied.release()
+    assert(try mirror_symmetric(copied, 0.000001))
+    near_point(try copied.value().point(0), first)
+    # A grid's middle column, 0.01 off the plane: onto it.
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let shifted = try moved(grid, "2 7 12 17 22", Vector3(0.01, 0.0, 0.0))
+    defer shifted.release()
+    let centered = try made(shifted, "Snap to Symmetry", "", 1, halfway[..<4], 25)
+    defer centered.release()
+    near((try centered.value().point(12)).x, 0.0)
+    assert(try mirror_symmetric(centered, 0.000001))

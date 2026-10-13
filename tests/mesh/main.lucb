@@ -41,6 +41,16 @@ import instance_checks
 import g6_checks
 import extrude_inset_checks
 import cut_slide_checks
+import face_tool_checks
+import symmetry_checks
+import fill_checks
+import split_checks
+import dissolve_tool_checks
+import merge_checks
+import sweep_checks
+import knife_checks
+import reduce_checks
+import shape_checks
 import large_face_checks
 import contract_checks
 import unit_checks
@@ -190,6 +200,36 @@ func checks(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 300, cut_slide_checks.exercise)
     try cut_slide_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, face_tool_checks.exercise)
+    try face_tool_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, symmetry_checks.exercise)
+    try symmetry_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, fill_checks.exercise)
+    try fill_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, split_checks.exercise)
+    try split_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, dissolve_tool_checks.exercise)
+    try dissolve_tool_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, merge_checks.exercise)
+    try merge_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, sweep_checks.exercise)
+    try sweep_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, knife_checks.exercise)
+    try knife_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, reduce_checks.exercise)
+    try reduce_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, shape_checks.exercise)
+    try shape_checks.exercise()
     settle(&tracker)
     inject(&tracker, 300, subdivision_checks.exercise)
     try subdivision_checks.exercise()

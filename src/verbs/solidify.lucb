@@ -1,0 +1,201 @@
+## Solidify: the group's faces become a shell of a thickness, after
+## Blender's Solidify modifier (simple mode) and Modo's Thicken. Every
+## point of the group's faces moves out along its normal (the faces'
+## normals there, weighted by their corner angles) and a copy of it moves
+## in, so the shell spans Thickness, split by Offset: -1 keeps the surface
+## where it was and builds the shell behind it, 1 in front, 0 either side.
+## With Even thickness a point moves farther where faces meet at an angle,
+## by its faces' mean 1/cos to its normal, so every face's sheet stands
+## exactly Thickness apart (a cube's corner moves √3 times as far). The
+## inner sheet winds the other way; the rim joins the sheets with a quad
+## along every edge of the group's outline (Fill rim). Flip turns every
+## face of the shell over. The inner sheet and the rim are the output
+## selection. Points, normals and faces are built in parallel.
+
+let solidify_parms: ParmSpec[5] = [
+    ParmSpec("Thickness", ParmKind.number, 0.1, -100000.0, 100000.0, 1, "", "How far apart the two sheets stand.", 1.0),
+    ParmSpec("Offset", ParmKind.number, -1.0, -1.0, 1.0, 1, "", "Where the shell lies against the surface: -1 behind it, 1 in front, 0 centered."),
+    ParmSpec("Even thickness", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep every face's sheets Thickness apart where faces meet at an angle."),
+    ParmSpec("Fill rim", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Join the two sheets along the group's outline."),
+    ParmSpec("Flip", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Turn the shell's faces over.", more = true)]
+
+func solidify_verb() -> Verb:
+    return Verb("Solidify", "Modeling", "Give the group's faces a thickness: a second sheet behind them, joined at the rim", Domain.face, true, solidify_parms, true, cook_solidify, section = "Modify", family = "Extrude", icon = "shell", picks = pick_pieces, drag = 0)
+
+## What the parallel passes read and write.
+struct SolidifyWork:
+    let mesh: const Mesh*
+    let offsets: const i32[]
+    let corners: const i32[]
+    let normals: const Float3[]
+    let point_face_offsets: const i32[]
+    let point_faces: const i32[]
+    let group: Bits
+    ## Per point: its inner copy's number (-1: not in the shell).
+    let inner: const i32[]
+    let builder: TopologyBuilder*
+    let thickness: f64
+    let offset: f64
+    let even: bool
+    let flip: bool
+    ## The group's faces and the rim's corners, in order.
+    let shell: const i32[]
+    let rim: const i32[]
+
+func cook_solidify(input: const VerbInput*, output: VerbOutput*) -> !:
+    let thickness = input.parms.at(0)
+    let offset = math.max(-1.0, math.min(1.0, input.parms.at(1)))
+    if not math.is_finite(thickness) or not math.is_finite(offset): error(errors.invalid, "Solidify's thickness and offset must be finite")
+    let even = input.parms.at(2) != 0.0
+    let rim_on = input.parms.at(3) != 0.0
+    let flip = input.parms.at(4) != 0.0
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let faces = topology.faces()
+    let points = topology.points
+    if input.group.population() == 0:
+        output.warning = "No faces in the group to solidify; the input passes through"
+        return
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    # Inner copies: one per point of the group's faces, in point order.
+    let inner = try new i32[points] --- in memory.heap
+    defer free(inner) in memory.heap
+    for at in 0..<points: inner[at] = -1
+    var shell = Growing[i32]()
+    defer shell.close()
+    for face in 0..<faces:
+        if not input.group.get(face): continue
+        try shell.push((i32)face)
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]: inner[(usize)topology.corners[corner]] = 0
+    var count: usize = 0
+    for at in 0..<points:
+        if inner[at] < 0: continue
+        inner[at] = (i32)(points + count)
+        count += 1
+    _ = try builder.extend_points(count)
+    # The rim: corners of group faces whose edge has no other group face.
+    var rim = Growing[i32]()
+    defer rim.close()
+    if rim_on:
+        for face in shell.view():
+            for corner in (usize)topology.offsets[(usize)face]..<(usize)topology.offsets[(usize)face + 1]:
+                let edge = (usize)topology.corner_edges[corner]
+                var members: usize = 0
+                for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                    if input.group.get((usize)topology.corner_faces[(usize)topology.edge_corners[at]]): members += 1
+                if members == 1: try rim.push((i32)corner)
+    let (point_face_offsets, point_faces) = try mesh.point_face_span()
+    var work = SolidifyWork(mesh, topology.offsets, topology.corners, mesh.face_normal_span(), point_face_offsets, point_faces, input.group, inner[..<points], builder, thickness, offset, even, flip, shell.view(), rim.view())
+    try parallel.for_each_range(points, 8192, (void*)&work, solidify_points)
+    let made = shell.count + rim.count
+    try batched_faces(builder, mesh, faces + made, 4096, (void*)&work, solidify_faces)
+    output.selection = try BitsBuilder.zeros(faces + made)
+    output.selection.set_range(faces, faces + made)
+    output.selection_domain = Domain.face
+
+## Points first..<end of the shell: the outer place (the point itself) and
+## the inner copy, along the angle-weighted normal of the group's faces
+## (measured on the input, which no thread moves).
+func solidify_points(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (SolidifyWork*)context
+    for point in first..<end:
+        let copy = work.inner[point]
+        if copy < 0: continue
+        let here = builder_position(work.mesh, point)
+        var normal = Vector3()
+        var weights = 0.0
+        var cosines = 0.0
+        for slot in (usize)work.point_face_offsets[point]..<(usize)work.point_face_offsets[point + 1]:
+            let face = (usize)work.point_faces[slot]
+            if not work.group.get(face): continue
+            let angle = shell_angle(work, face, point)
+            normal = normal.add(work.normals[face].vector().multiply_scalar(angle))
+            weights += angle
+        let length = normal.length()
+        var direction = Vector3()
+        if length > 0.0: direction = normal.multiply_scalar(1.0 / length)
+        var scale = 1.0
+        if work.even and length > 0.0:
+            for slot in (usize)work.point_face_offsets[point]..<(usize)work.point_face_offsets[point + 1]:
+                let face = (usize)work.point_faces[slot]
+                if not work.group.get(face): continue
+                cosines += shell_angle(work, face, point) * math.max(0.1, direction.dot(work.normals[face].vector()))
+            if cosines > 0.0: scale = math.min(10.0, weights / cosines)
+        let span = work.thickness * scale
+        let outer = here.add(direction.multiply_scalar(span * (1.0 + work.offset) * 0.5))
+        let below = here.subtract(direction.multiply_scalar(span * (1.0 - work.offset) * 0.5))
+        work.builder.move_point((i32)point, outer)
+        work.builder.place_point((usize)copy, below, (i32)point)
+
+## The angle of face `face`'s corner at `point` (0 when it has none).
+func shell_angle(work: const SolidifyWork*, face: usize, point: usize) -> f64:
+    let start = (usize)work.offsets[face]
+    let end = (usize)work.offsets[face + 1]
+    let size = end - start
+    for at in 0..<size:
+        if (usize)work.corners[start + at] != point: continue
+        let here = builder_position(work.mesh, point)
+        let before = builder_position(work.mesh, (usize)work.corners[start + (at + size - 1) % size]).subtract(here)
+        let after = builder_position(work.mesh, (usize)work.corners[start + (at + 1) % size]).subtract(here)
+        let lengths = before.length() * after.length()
+        if lengths <= 0.0: return 0.0
+        return math.acos(math.max(-1.0, math.min(1.0, before.dot(after) / lengths)))
+    return 0.0
+
+## Output faces first..<end: the input's (outer sheet), then the inner
+## sheet's, then the rim's quads.
+func solidify_faces(context: void*, first: usize, end: usize, batch: FaceBatch*) -> !:
+    let work = (const SolidifyWork*)context
+    let faces = work.offsets.length - 1
+    for index in first..<end:
+        if index < faces:
+            if not work.flip or not work.group.get(index):
+                try batch.copy_face(work.offsets, index)
+                continue
+            try sheet_face(work, index, false, true, batch)
+            continue
+        let shelled = index - faces
+        if shelled < work.shell.length:
+            try sheet_face(work, (usize)work.shell[shelled], true, not work.flip, batch)
+            continue
+        let corner = (usize)work.rim[shelled - work.shell.length]
+        let face = solidify_face_of(work, corner)
+        let start = (usize)work.offsets[face]
+        let size = (usize)work.offsets[face + 1] - start
+        let next = start + (corner - start + 1) % size
+        let a = work.corners[corner]
+        let b = work.corners[next]
+        let ids: i32[4] = [b, a, work.inner[(usize)a], work.inner[(usize)b]]
+        let parents: i32[4] = [(i32)next, (i32)corner, (i32)corner, (i32)next]
+        try batch.face((i32)face)
+        for k in 0..<(usize)4:
+            let at = 3 - k if work.flip else k
+            try batch.corner(ids[at], parents[at])
+        try batch.end_face()
+
+## Face `face` as a sheet: on its inner copies (`inside`) or its own
+## points, its corners in reverse (`reversed`) or in order.
+func sheet_face(work: const SolidifyWork*, face: usize, inside: bool, reversed: bool, batch: FaceBatch*) -> !:
+    let start = (usize)work.offsets[face]
+    let size = (usize)work.offsets[face + 1] - start
+    try batch.face((i32)face)
+    for k in 0..<size:
+        let corner = start + (size - 1 - k if reversed else k)
+        let point = work.corners[corner]
+        try batch.corner(work.inner[(usize)point] if inside else point, (i32)corner)
+    try batch.end_face()
+
+## The face of corner `corner` (a binary search of the offsets).
+func solidify_face_of(work: const SolidifyWork*, corner: usize) -> usize:
+    var low: usize = 0
+    var high = work.offsets.length - 1
+    while high - low > 1:
+        let middle = (low + high) // 2
+        if (usize)work.offsets[middle] <= corner:
+            low = middle
+        else:
+            high = middle
+    return low

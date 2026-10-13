@@ -1,8 +1,9 @@
 ## Verbs that move points and keep the topology: Transform (move, rotate,
-## scale about a pivot), Smooth, Mountain (noise), Peak (along normals),
-## Flatten and Snap. They copy the positions once, write the group's points
-## in parallel, and share the topology, its caches, the triangles and every
-## attribute; the output selection is the input's group.
+## scale about a pivot), Mountain (noise), Peak (along normals), Flatten
+## and Snap (Smooth and Relax are smoothing.lucb's). They copy the
+## positions once, write the group's points in parallel, and share the
+## topology, its caches, the triangles and every attribute; the output
+## selection is the input's group.
 
 let transform_parms: ParmSpec[7] = [
     ParmSpec("Translate", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "Moves the group, after rotating and scaling."),
@@ -41,13 +42,6 @@ pub struct ComponentTransform:
 
 func transform_verb() -> Verb:
     return Verb("Transform Components", "Deform", "Move, rotate and scale components about a pivot", Domain.point, true, transform_parms, false, cook_transform)
-
-let smooth_parms: ParmSpec[2] = [
-    ParmSpec("Amount", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "How far each point moves toward the average of its neighbors."),
-    ParmSpec("Iterations", ParmKind.integer, 1.0, 1.0, 100.0, 1, "", "Rounds of smoothing.")]
-
-func smooth_verb() -> Verb:
-    return Verb("Smooth", "Deform", "Laplacian relaxation of the group's points", Domain.point, true, smooth_parms, false, cook_smooth, label = "Smooth", section = "Modify", family = "Shape", icon = "smooth-tool", drag = 0, drag_mode = "amount", wheel = 1)
 
 let mountain_parms: ParmSpec[2] = [
     ParmSpec("Height", ParmKind.number, 0.2, 0.0, 100000.0, 1, "", "Largest displacement of the noise.", 2.0),
@@ -182,45 +176,6 @@ func mirror_points(mesh: const Mesh*, positions: Float3[], affected: const u32[]
         positions[(usize)point] = Float3.of(partner.reflected((usize)(axis - 1)).subtract(origin))
 
 ## Neighbor averages over the edges, `iterations` rounds.
-func cook_smooth(input: const VerbInput*, output: VerbOutput*) -> !:
-    let moved = try begin_points(input, output)
-    let amount = input.parms.at(0)
-    let rounds = (usize)math.max(1.0, math.min(100.0, input.parms.at(1)))
-    if not (amount >= 0.0 and amount <= 1.0): error(errors.invalid, "Smooth amount must be in 0..1")
-    let edges = try input.mesh.edge_span()
-    let around = try input.mesh.point_edge_span()
-    let positions = output.positions.span()
-    let next = try new Float3[moved.length] --- in memory.heap
-    defer free(next) in memory.heap
-    for _ in 0..<rounds:
-        var work = SmoothWork(positions, moved, edges, around.0, around.1, next, amount)
-        try parallel.for_each_range(moved.length, 4096, (void*)&work, smooth_points)
-        for at in 0..<moved.length: positions[(usize)moved[at]] = next[at]
-
-struct SmoothWork:
-    let positions: const Float3[]
-    let moved: const u32[]
-    let edges: const i32[]
-    let offsets: const i32[]
-    let point_edges: const i32[]
-    let next: Float3[]
-    let amount: f64
-
-func smooth_points(context: void*, first: usize, end: usize, worker: usize):
-    let work = (SmoothWork*)context
-    for at in first..<end:
-        let point = (usize)work.moved[at]
-        let p = work.positions[point].vector()
-        var sum = Vector3()
-        var count = 0.0
-        for slot in (usize)work.offsets[point]..<(usize)work.offsets[point + 1]:
-            let edge = (usize)work.point_edges[slot]
-            let a = (usize)work.edges[edge * 2]
-            let other = (usize)work.edges[edge * 2 + 1] if a == point else a
-            sum = sum.add(work.positions[other].vector())
-            count += 1.0
-        work.next[at] = Float3.of(p.add(sum.multiply_scalar(1.0 / count).subtract(p).multiply_scalar(work.amount))) if count > 0.0 else work.positions[point]
-
 func noise(seed: f64) -> f64:
     let value = math.sin(seed * 12.9898) * 43758.5453
     return (value - math.floor(value)) * 2.0 - 1.0

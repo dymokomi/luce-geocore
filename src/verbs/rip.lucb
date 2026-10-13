@@ -1,0 +1,414 @@
+## Edge Split and Rip, after Blender's Edge Split and Rip (V, Alt V).
+##
+## Both cut the surface open along edges: around each point the faces fall
+## into sectors, apart at the cut edges (and the mesh's boundary), and every
+## home but the first gets a copy of the point. Edge Split cuts the
+## group's edges where they make sectors: a chain's interior points split,
+## its ends where they meet a boundary or another cut.
+##
+## Rip opens a hole as Blender's does: where a chain of the group's edges
+## ends inside the surface, the cut goes on one more edge at that end (the
+## one opposite at a four-edge point, the next one on the ripped side at a
+## three-edge point, the second round at others), so the end point splits
+## too. The ripped side (left of each chain as it runs, Flip for the other)
+## moves Offset away from the cut, along its faces. A point of the group on
+## no ripped edge splits its fan in two along two opposite edges (Turn picks
+## which), its Flip half moving. Fill closes the opened gap with faces
+## (Blender's Rip Fill). The ripped side's edges (a point rip's copy) are
+## the output selection; Edge Split selects the cut edges.
+
+let edge_split_parms: ParmSpec[1] = [ParmSpec("", ParmKind.number, 0.0, 0.0, 0.0)]
+
+func edge_split_verb() -> Verb:
+    return Verb("Edge Split", "Modeling", "Tear the surface open along the group's edges: the faces either side get their own points", Domain.edge, true, edge_split_parms[..<0], true, cook_edge_split, section = "Modify", family = "Split", icon = "split-face", picks = pick_edges)
+
+let rip_parms: ParmSpec[4] = [
+    ParmSpec("Offset", ParmKind.number, 0.1, -100000.0, 100000.0, 1, "", "How far the ripped side moves away from the cut, along its faces.", 1.0),
+    ParmSpec("Fill", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Close the opened gap with faces."),
+    ParmSpec("Flip", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Rip the other side (the other half of a point's fan)."),
+    ParmSpec("Turn", ParmKind.integer, 0.0, -64.0, 64.0, 1, "", "A ripped point: which pair of its edges splits its fan, counted round it.", more = true)]
+
+let rip_keys: KeySpec[2] = [KeySpec("F", 2, "toggle"), KeySpec("L", 1, "toggle")]
+
+## Points rip as they are.
+let rip_also: Domain[1] = [Domain.point]
+
+func rip_verb() -> Verb:
+    return Verb("Rip", "Modeling", "Tear the surface open along the group's edges (or at its points) and pull one side away", Domain.edge, true, rip_parms, true, cook_rip, false, rip_also, section = "Modify", family = "Split", icon = "sketch-break", picks = pick_components, drag = 0, keys = rip_keys)
+
+## The cut: which edges split, each corner's home root, and per point
+## the copies its sectors get.
+struct Tear:
+    var split: BitsBuilder
+    var root: Growing[i32]
+    ## Per corner: the output point it takes.
+    var point_of: Growing[i32]
+
+    func init():
+        self.split = BitsBuilder(Column[u64](), 0)
+        self.root = Growing[i32]()
+        self.point_of = Growing[i32]()
+
+    func close():
+        self.split.close()
+        self.root.close()
+        self.point_of.close()
+
+func cook_edge_split(input: const VerbInput*, output: VerbOutput*) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var cut = Tear()
+    defer cut.close()
+    cut.split = try manifold_edges(&topology, input.group)
+    let made = try cut_open(mesh, &topology, &cut, output)
+    if made == 0:
+        output.warning = "No point of the group's edges splits (an edge alone inside the surface needs another cut at its ends; Rip makes one); the input passes through"
+        output.built = false
+        return
+    try finish_faces(mesh, &topology, &cut, output)
+    for edge in 0..<topology.edges():
+        if not cut.split.view().get(edge): continue
+        for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+            let corner = (usize)topology.edge_corners[at]
+            try output.builder.select_edge(cut.point_of.items[corner], cut.point_of.items[topology.next(corner)])
+
+## The group's edges with exactly two faces (the only ones a cut opens).
+func manifold_edges(topology: const Topology*, group: Bits) -> BitsBuilder!:
+    var result = try BitsBuilder.zeros(topology.edges())
+    for edge in 0..<topology.edges():
+        if group.get(edge) and topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge] == 2: result.set(edge)
+    return result
+
+## The sectors: corners at a point join across every manifold edge that is
+## not cut; each point's first home keeps it, the others get copies. How
+## many copies were made.
+func cut_open(mesh: const Mesh*, topology: const Topology*, cut: Tear*, output: VerbOutput*) -> usize!:
+    let corners = topology.corners.length
+    try cut.root.reserve(corners)
+    cut.root.count = corners
+    for at in 0..<corners: cut.root.items[at] = (i32)at
+    for edge in 0..<topology.edges():
+        if cut.split.view().get(edge): continue
+        let first = (usize)topology.edge_corner_offsets[edge]
+        if (usize)topology.edge_corner_offsets[edge + 1] - first != 2: continue
+        let a = (usize)topology.edge_corners[first]
+        let b = (usize)topology.edge_corners[first + 1]
+        # a runs p to q in its face, b q to p: p's corners are a and the
+        # one after b, q's the one after a and b.
+        sector_join(cut.root.items[..<corners], (i32)a, (i32)topology.next(b))
+        sector_join(cut.root.items[..<corners], (i32)topology.next(a), (i32)b)
+    for at in 0..<corners: cut.root.items[at] = sector_root(cut.root.items[..<corners], (i32)at)
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    try cut.point_of.fill(corners, -1)
+    # Per point: the root of the home that keeps it (-1: none seen yet).
+    let keeper = try new i32[topology.points] --- in memory.heap
+    defer free(keeper) in memory.heap
+    for at in 0..<topology.points: keeper[at] = -1
+    var made: usize = 0
+    # Roots are their sectors' lowest corners, so a root is numbered before
+    # the corners joined to it.
+    for corner in 0..<corners:
+        let point = topology.corners[corner]
+        let home = cut.root.items[corner]
+        if home != (i32)corner:
+            cut.point_of.items[corner] = cut.point_of.items[(usize)home]
+            continue
+        if keeper[(usize)point] < 0:
+            keeper[(usize)point] = home
+            cut.point_of.items[corner] = point
+            continue
+        cut.point_of.items[corner] = try builder.point(builder.position(point), point)
+        made += 1
+    return made
+
+## The faces over the cut's points: faces with a moved corner rebuilt,
+## the rest copied in runs.
+func finish_faces(mesh: const Mesh*, topology: const Topology*, cut: const Tear*, output: VerbOutput*) -> !:
+    var builder = &output.builder
+    var run: usize = 0
+    for face in 0..<topology.faces():
+        var moved = false
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if cut.point_of.items[corner] != topology.corners[corner]: moved = true
+        if not moved: continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        try builder.face((i32)face, true)
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]: try builder.corner(cut.point_of.items[corner], (i32)corner)
+        try builder.end_face()
+    try builder.copy_faces(mesh, run, topology.faces())
+
+func sector_root(parent: i32[], at: i32) -> i32:
+    var here = at
+    while parent[(usize)here] != here:
+        parent[(usize)here] = parent[(usize)parent[(usize)here]]
+        here = parent[(usize)here]
+    return here
+
+## Join two corners' sectors; the lower corner is the root.
+func sector_join(parent: i32[], a: i32, b: i32):
+    let x = sector_root(parent, a)
+    let y = sector_root(parent, b)
+    if x == y: return
+    if x < y:
+        parent[(usize)y] = x
+    else:
+        parent[(usize)x] = y
+
+## The corners round point `point` in fan order (from each corner across
+## the edge leaving it to the next face's corner at the point), from a
+## boundary when the fan is open; whether it is closed.
+func fan_corners(mesh: const Mesh*, topology: const Topology*, point: usize, out: Growing[i32]*) -> bool!:
+    out.clear()
+    let (offsets, faces) = try mesh.point_face_span()
+    let first_slot = (usize)offsets[point]
+    if (usize)offsets[point + 1] == first_slot: return false
+    let initial = face_corner_at(topology, (usize)faces[first_slot], point)
+    # Back across arriving edges to a boundary, if there is one.
+    var start = initial
+    var steps: usize = 0
+    while steps <= topology.corners.length:
+        let back = topology.twin(topology.previous(start))
+        if back < 0 or (usize)back == initial: break
+        start = (usize)back
+        steps += 1
+    var at = start
+    var closed = false
+    while out.count <= topology.corners.length:
+        try out.push((i32)at)
+        let across = topology.twin(at)
+        if across < 0: break
+        at = topology.next((usize)across)
+        if at == start:
+            closed = true
+            break
+    return closed
+
+## Face `face`'s corner at `point`.
+func face_corner_at(topology: const Topology*, face: usize, point: usize) -> usize:
+    for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+        if (usize)topology.corners[corner] == point: return corner
+    return (usize)topology.offsets[face]
+
+## What ripping moves: corners whose sectors move, and per corner the way.
+struct Ripped:
+    var corners: Growing[i32]
+    var ways: Growing[Vector3]
+    ## Corners of the moving side along the ripped edges (their edges are
+    ## the output selection).
+    var edges: Growing[i32]
+
+    func init():
+        self.corners = Growing[i32]()
+        self.ways = Growing[Vector3]()
+        self.edges = Growing[i32]()
+
+    func close():
+        self.corners.close()
+        self.ways.close()
+        self.edges.close()
+
+func cook_rip(input: const VerbInput*, output: VerbOutput*) -> !:
+    let offset = input.parms.at(0)
+    if not math.is_finite(offset): error(errors.invalid, "Rip's offset must be finite")
+    let fill = input.parms.at(1) != 0.0
+    let flip = input.parms.at(2) != 0.0
+    let turns = (i64)math.max(-64.0, math.min(64.0, input.parms.at(3)))
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var cut = Tear()
+    defer cut.close()
+    var ripped = Ripped()
+    defer ripped.close()
+    if input.domain == Domain.point:
+        cut.split = try BitsBuilder.zeros(topology.edges())
+        try point_rips(mesh, &topology, input.group, flip, turns, &cut, &ripped)
+    else:
+        cut.split = try manifold_edges(&topology, input.group)
+        try edge_rips(mesh, &topology, flip, &cut, &ripped)
+    let made = try cut_open(mesh, &topology, &cut, output)
+    if made == 0:
+        output.warning = "Nothing to rip: the group has no edge between two faces, or no point whose fan splits; the input passes through"
+        output.built = false
+        return
+    try finish_faces(mesh, &topology, &cut, output)
+    var builder = &output.builder
+    # The ripped side moves: each moving point along the mean of its ways.
+    let points = builder.point_count()
+    let ways = try new Vector3[points] --- in memory.heap
+    defer free(ways) in memory.heap
+    for at in 0..<points: ways[at] = Vector3()
+    for at in 0..<ripped.corners.count:
+        let point = (usize)cut.point_of.items[(usize)ripped.corners.items[at]]
+        ways[point] = ways[point].add(ripped.ways.items[at])
+    if offset != 0.0:
+        for point in 0..<points:
+            let length = ways[point].length()
+            if length > 0.0: builder.move_point((i32)point, builder.position((i32)point).add(ways[point].multiply_scalar(offset / length)))
+    if fill: try fill_gaps(&topology, &cut, builder)
+    if input.domain == Domain.point:
+        output.selection = try BitsBuilder.zeros(points)
+        output.selection_domain = Domain.point
+        for at in 0..<points:
+            if ways[at].length() > 0.0: output.selection.set(at)
+        return
+    for corner in ripped.edges.view():
+        try builder.select_edge(cut.point_of.items[(usize)corner], cut.point_of.items[topology.next((usize)corner)])
+
+## Ripping the cut's edges: per chain (in the order its points run) the
+## faces on its left (right with `flip`) move; a chain end inside the
+## surface cuts on one more edge (Blender's rule), so it splits too.
+func edge_rips(mesh: const Mesh*, topology: const Topology*, flip: bool, cut: Tear*, ripped: Ripped*) -> !:
+    var chains = EdgeChains()
+    defer chains.close()
+    try edge_chains(topology, cut.split.view(), &chains)
+    var extra = try BitsBuilder.zeros(topology.edges())
+    defer extra.close()
+    for index in 0..<chains.count():
+        let chain = chains.chain(index)
+        let closed = chains.closed.items[index] != 0
+        let segments = chain.length if closed else chain.length - 1
+        for at in 0..<segments:
+            let p = chain[at]
+            let q = chain[(at + 1) % chain.length]
+            let corner = directed_corner(topology, p, q, flip)
+            if corner < 0: continue
+            try ripped.edges.push(corner)
+            let way = rip_way(mesh, topology, (usize)corner)
+            try ripped.corners.push(corner)
+            try ripped.ways.push(way)
+            try ripped.corners.push((i32)topology.next((usize)corner))
+            try ripped.ways.push(way)
+            # A chain end inside the surface: the cut goes on one edge.
+            if not closed and at == 0: extend_end(topology, (usize)corner, (usize)p, &extra)
+            if not closed and at == segments - 1: extend_end(topology, (usize)corner, (usize)q, &extra)
+    cut.split.unite(extra.view())
+
+## The corner of the face on the left of `p` → `q` (its edge runs p to q;
+## with `flip` the one running q to p), or -1.
+func directed_corner(topology: const Topology*, p: i32, q: i32, flip: bool) -> i32:
+    for slot in (usize)topology.point_edge_offsets[(usize)p]..<(usize)topology.point_edge_offsets[(usize)p + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+            let corner = (usize)topology.edge_corners[at]
+            let from_point = topology.corners[corner]
+            let to_point = topology.corners[topology.next(corner)]
+            if (not flip and from_point == p and to_point == q) or (flip and from_point == q and to_point == p): return (i32)corner
+    return -1
+
+## The way into corner `corner`'s face, square to its edge, in its plane.
+func rip_way(mesh: const Mesh*, topology: const Topology*, corner: usize) -> Vector3:
+    let a = point_of(mesh, topology.corners[corner])
+    let b = point_of(mesh, topology.corners[topology.next(corner)])
+    let normal = mesh.face_normal_span()[(usize)topology.corner_faces[corner]].vector()
+    let way = normal.cross(b.subtract(a))
+    let length = way.length()
+    return way.multiply_scalar(1.0 / length) if length > 0.0 else Vector3()
+
+## At chain end `point` (inside the surface), where the moving face's
+## corner `corner` runs along the ripped edge: Blender's next cut. The face's other edge at the point
+## is e1; at a three-edge point e1 is cut, else the edge after e1 in the
+## face across it.
+func extend_end(topology: const Topology*, corner: usize, point: usize, extra: BitsBuilder*):
+    # Every edge at the point has two faces: the point is inside.
+    var valence: usize = 0
+    for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        if topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge] != 2: return
+        valence += 1
+    if valence < 3: return
+    let at_point = corner if (usize)topology.corners[corner] == point else topology.next(corner)
+    # The ripped edge is one of this face's edges at the point; e1 the other.
+    let leaving = (usize)topology.corner_edges[at_point]
+    let arriving = (usize)topology.corner_edges[topology.previous(at_point)]
+    let ripped_edge = (usize)topology.corner_edges[corner]
+    let e1 = arriving if leaving == ripped_edge else leaving
+    if valence == 3:
+        extra.set(e1)
+        return
+    # The face across e1, and its other edge at the point.
+    var across: usize = 0
+    if e1 == leaving:
+        let twin = topology.twin(at_point)
+        if twin < 0: return
+        across = topology.next((usize)twin)
+    else:
+        let twin = topology.twin(topology.previous(at_point))
+        if twin < 0: return
+        across = (usize)twin
+    let out = (usize)topology.corner_edges[across]
+    let back = (usize)topology.corner_edges[topology.previous(across)]
+    extra.set(back if out == e1 else out)
+
+## Ripping points: each group point's fan splits along two opposite edges
+## (a boundary point's along the middle one); one half moves into itself.
+func point_rips(mesh: const Mesh*, topology: const Topology*, group: Bits, flip: bool, turns: i64, cut: Tear*, ripped: Ripped*) -> !:
+    var fan = Growing[i32]()
+    defer fan.close()
+    for point in 0..<topology.points:
+        if not group.get(point): continue
+        let closed = try fan_corners(mesh, topology, point, &fan)
+        let n = fan.count
+        var moving_first: usize = 0
+        var moving_count: usize = 0
+        if closed:
+            if n < 2: continue
+            let k = (usize)((turns % (i64)n + (i64)n) % (i64)n)
+            cut.split.set((usize)topology.corner_edges[(usize)fan.items[k]])
+            cut.split.set((usize)topology.corner_edges[(usize)fan.items[(k + n // 2) % n]])
+            moving_first = (k + 1) % n if not flip else (k + n // 2 + 1) % n
+            moving_count = n // 2 if not flip else n - n // 2
+        else:
+            if n < 2: continue
+            let m = (usize)((((i64)(n // 2) - 1 + turns) % (i64)(n - 1) + (i64)(n - 1)) % (i64)(n - 1))
+            cut.split.set((usize)topology.corner_edges[(usize)fan.items[m]])
+            moving_first = m + 1 if not flip else 0
+            moving_count = n - m - 1 if not flip else m + 1
+        let here = point_of(mesh, (i32)point)
+        var way = Vector3()
+        for step in 0..<moving_count:
+            let corner = (usize)fan.items[(moving_first + step) % n]
+            let face = (usize)topology.corner_faces[corner]
+            var middle = Vector3()
+            let size = topology.offsets[face + 1] - topology.offsets[face]
+            for at in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]: middle = middle.add(point_of(mesh, topology.corners[at]))
+            way = way.add(middle.multiply_scalar(1.0 / (f64)size).subtract(here))
+        let length = way.length()
+        if length > 0.0: way = way.multiply_scalar(1.0 / length)
+        for step in 0..<moving_count:
+            try ripped.corners.push(fan.items[(moving_first + step) % n])
+            try ripped.ways.push(way)
+
+## Faces across the opened gap (Rip Fill): for each cut edge whose sides
+## parted, the face between its two copies (a triangle where they share an
+## end), winding against both sides; none where they lie together.
+func fill_gaps(topology: const Topology*, cut: const Tear*, builder: TopologyBuilder*) -> !:
+    for edge in 0..<topology.edges():
+        if not cut.split.view().get(edge): continue
+        let first = (usize)topology.edge_corner_offsets[edge]
+        if (usize)topology.edge_corner_offsets[edge + 1] - first != 2: continue
+        let a = (usize)topology.edge_corners[first]
+        let b = (usize)topology.edge_corners[first + 1]
+        let ids: i32[4] = [cut.point_of.items[topology.next(b)], cut.point_of.items[b], cut.point_of.items[topology.next(a)], cut.point_of.items[a]]
+        let parents: i32[4] = [(i32)topology.next(b), (i32)b, (i32)topology.next(a), (i32)a]
+        var kept: i32[4]
+        var kept_parents: i32[4]
+        var count: usize = 0
+        for at in 0..<(usize)4:
+            if count > 0 and kept[count - 1] == ids[at]: continue
+            if at == 3 and kept[0] == ids[at]: continue
+            kept[count] = ids[at]
+            kept_parents[count] = parents[at]
+            count += 1
+        if count < 3: continue
+        # Sides that did not part (nothing moved them) leave no gap.
+        var sum = Vector3()
+        let base = builder.position(kept[0])
+        for at in 1..<count - 1: sum = sum.add(builder.position(kept[at]).subtract(base).cross(builder.position(kept[at + 1]).subtract(base)))
+        if sum.length() <= 0.000000000001: continue
+        try builder.face(topology.corner_faces[a])
+        for at in 0..<count: try builder.corner(kept[at], kept_parents[at])
+        try builder.end_face()

@@ -1,0 +1,149 @@
+## Poke, Rotate Edge and Solidify against closed forms (POLY-MODELING.md
+## Stage 5): Poke's counts and the pyramids a cube's poked faces raise
+## (volume 8 + 6·4/3 at offset 1), its centers; Rotate Edge's diagonal one
+## corner on and back, a triangle pair's other diagonal, refusals; Solidify's
+## shell of a flat grid (twice the faces plus the rim, closed, volume area ×
+## thickness), the offsets, and a cube's shell with and without Even
+## thickness. The cube spans -1..1 in X and Z and 0..2 in Y; the grid is 4
+## by 4 over -1..1 in XZ (point z*5+x, face z*4+x), facing +Y.
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, surface, quads
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let cube = try Mesh.cube()
+    defer cube.release()
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    try poke_checks(cube, grid)
+    try rotate_checks(grid)
+    try solidify_checks(cube, grid)
+    print("PASS Poke, Rotate Edge, Solidify: fans and pyramids, centers; diagonals turned both ways, a triangle pair, refusals; shells of a grid and a cube, offsets, Even thickness, flip, no rim")
+
+func poke_checks(cube: interop.Reference[Mesh], grid: interop.Reference[Mesh]) -> !:
+    let flat: f64[3] = [0.0, 0.0, 0.0]
+    let one = try made(grid, "Poke", "5", 3, flat[..<3], 4)
+    defer one.release()
+    try counts(one, 26, 19)
+    try surface(one, false)
+    near_point(try one.value().point(25), Vector3(-0.25, 0.0, -0.25))
+    # Every face of the cube raised by 1: a pyramid of 4/3 on each.
+    let raised: f64[3] = [1.0, 0.0, 0.0]
+    let spiky = try made(cube, "Poke", "", 3, raised[..<3], 24)
+    defer spiky.release()
+    try counts(spiky, 14, 24)
+    try surface(spiky, true)
+    near(try volume(spiky), 8.0 + 6.0 * 4.0 / 3.0)
+    # Relative: scaled by the mean distance to the corners (√2 on a cube face).
+    let relative: f64[3] = [1.0, 1.0, 1.0]
+    let far = try made(cube, "Poke", "2", 3, relative[..<3], 4)
+    defer far.release()
+    near(try volume(far), 8.0 + 4.0 * math.sqrt(2.0) / 3.0)
+    # Bounds, mean and weighted mean on a kite (corners 0,0 2,0 0,1 and
+    # far point 3,3): three different centers.
+    let places: Vector3[4] = [Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, 1.0), Vector3(2.0, 0.0, 0.0), Vector3(3.0, 0.0, 3.0)]
+    let kite = try quads(places[..<4], 2, 2)
+    defer kite.release()
+    let bounds: f64[3] = [0.0, 0.0, 2.0]
+    let boxed = try made(kite, "Poke", "0", 3, bounds[..<3], 4)
+    defer boxed.release()
+    near_point(try boxed.value().point(4), Vector3(1.5, 0.0, 1.5))
+    let mean: f64[3] = [0.0, 0.0, 1.0]
+    let averaged = try made(kite, "Poke", "0", 3, mean[..<3], 4)
+    defer averaged.release()
+    near_point(try averaged.value().point(4), Vector3(1.25, 0.0, 1.0))
+
+func rotate_checks(grid: interop.Reference[Mesh]) -> !:
+    # The edge between faces 5 and 6 (points 7 and 12): turned
+    # counterclockwise (seen from +Y) it joins 6 and 13, clockwise 11 and
+    # 8; the faces stay quads.
+    let forward: f64[1] = [1.0]
+    let on = try made(grid, "Rotate Edge", "p7-12", 2, forward[..<1], 1)
+    defer on.release()
+    try counts(on, 25, 16)
+    try surface(on, false)
+    assert(not try has_edge(on, 7, 12))
+    assert(try has_edge(on, 6, 13))
+    let backward: f64[1] = [0.0]
+    let back = try made(grid, "Rotate Edge", "p7-12", 2, backward[..<1], 1)
+    defer back.release()
+    assert(try has_edge(back, 11, 8))
+    var total = 0.0
+    for face in 0..<back.value().face_count(): total += try area(back, face)
+    near(total, 4.0)
+    # Two triangles of a square: the other diagonal.
+    let split = try made(grid, "Triangulate", "0", 3, backward[..<0], 2)
+    defer split.release()
+    let diagonal = try diagonal_of(split)
+    let turned = try made(split, "Rotate Edge", "p0-6" if diagonal.0 == 0 else "p1-5", 2, forward[..<1], 1)
+    defer turned.release()
+    assert(not try has_edge(turned, diagonal.0, diagonal.1))
+    try surface(turned, false)
+    # A boundary edge has one face: nothing turns.
+    let result = try Verbs.run("Rotate Edge", grid, "p0-1", 2, forward[..<1])
+    defer result.release()
+    assert(result.value().warning().length > 0)
+
+## Whether an edge of `mesh` joins points `a` and `b`.
+func has_edge(mesh: interop.Reference[Mesh], a: i64, b: i64) -> bool!:
+    let geometry = mesh.value()
+    for edge in 0..<(try geometry.edge_count()):
+        let p = try geometry.edge_point(edge, 0)
+        let q = try geometry.edge_point(edge, 1)
+        if (p == a and q == b) or (p == b and q == a): return true
+    return false
+
+## The diagonal of face 0's split: the edge between points 0 and 6 or 1 and 5.
+func diagonal_of(mesh: interop.Reference[Mesh]) -> (i64, i64)!:
+    if try has_edge(mesh, 0, 6): return (0, 6)
+    return (1, 5)
+
+func solidify_checks(cube: interop.Reference[Mesh], grid: interop.Reference[Mesh]) -> !:
+    # A grid 0.1 thick behind itself: 16 faces each side and 16 rim quads,
+    # closed, of volume 4 × 0.1.
+    let behind: f64[5] = [0.1, -1.0, 0.0, 1.0, 0.0]
+    let plate = try made(grid, "Solidify", "", 3, behind[..<5], 32)
+    defer plate.release()
+    try counts(plate, 50, 48)
+    try surface(plate, true)
+    near(try volume(plate), 0.4)
+    near(plate.value().bounds().maximum.y, 0.0)
+    near(plate.value().bounds().minimum.y, -0.1)
+    # In front, and centered.
+    let front: f64[5] = [0.1, 1.0, 0.0, 1.0, 0.0]
+    let raised = try made(grid, "Solidify", "", 3, front[..<5], 32)
+    defer raised.release()
+    near(raised.value().bounds().maximum.y, 0.1)
+    near(try volume(raised), 0.4)
+    let middle: f64[5] = [0.1, 0.0, 0.0, 1.0, 0.0]
+    let centered = try made(grid, "Solidify", "", 3, middle[..<5], 32)
+    defer centered.release()
+    near(centered.value().bounds().minimum.y, -0.05)
+    # No rim: two open sheets. Flipped: the volume turns negative.
+    let open: f64[5] = [0.1, -1.0, 0.0, 0.0, 0.0]
+    let sheets = try made(grid, "Solidify", "", 3, open[..<5], 16)
+    defer sheets.release()
+    try counts(sheets, 50, 32)
+    try surface(sheets, false)
+    let flipped: f64[5] = [0.1, -1.0, 0.0, 1.0, 1.0]
+    let over = try made(grid, "Solidify", "", 3, flipped[..<5], 32)
+    defer over.release()
+    try surface(over, true)
+    near(try volume(over), -0.4)
+    # A cube's shell 0.2 thick: with Even every inner face stands 0.2 in
+    # (an inner cube of side 1.6); without, the corners move 0.2 along
+    # their diagonals (side 2 - 0.4/√3).
+    let even: f64[5] = [0.2, -1.0, 1.0, 1.0, 0.0]
+    let walls = try made(cube, "Solidify", "", 3, even[..<5], 6)
+    defer walls.release()
+    try counts(walls, 16, 12)
+    try surface(walls, true)
+    near(try volume(walls), 8.0 - 1.6 * 1.6 * 1.6)
+    let plain: f64[5] = [0.2, -1.0, 0.0, 1.0, 0.0]
+    let thinner = try made(cube, "Solidify", "", 3, plain[..<5], 6)
+    defer thinner.release()
+    let side = 2.0 - 0.4 / math.sqrt(3.0)
+    near(try volume(thinner), 8.0 - side * side * side)

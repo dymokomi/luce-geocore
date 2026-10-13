@@ -1,0 +1,90 @@
+## Collapse, Merge Points at a point, Target Weld and Separate
+## (POLY-MODELING.md Stage 5): an edge collapsing to its middle (its two
+## faces become triangles), a block of faces to its center, two edges
+## apart to two points; Merge at a given point; Target Weld onto a picked
+## point and refusing without one; Separate's selection as a new piece
+## with its own points and path, its loose parts each a piece, two cubes'
+## first part keeping the name. The grid is 4 by 4 over -1..1 in XZ (point
+## z*5+x, face z*4+x).
+import interop
+import strings
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3, Groups
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    try collapse_checks(grid)
+    try weld_checks(grid)
+    try separate_checks(grid)
+    print("PASS Collapse, Merge at a point, Target Weld, Separate: an edge, a block and two edges collapsed; a point given; welded onto a target, refused without; a new piece with its own points and path, loose parts, the first part keeping the name")
+
+let no_numbers: f64[1] = [0.0]
+
+## How many faces of `mesh` have path `path`.
+func with_path(mesh: interop.Reference[Mesh], path: str) -> i64!:
+    var room: u8[256]
+    let expression = strings.format(room[..<256], f"@path=\"{path}\"") else ""
+    return try Groups.count(mesh, expression, 2)
+
+func collapse_checks(grid: interop.Reference[Mesh]) -> !:
+    let edge = try made(grid, "Collapse", "p6-7", 2, no_numbers[..<0], 1)
+    defer edge.release()
+    try counts(edge, 24, 16)
+    try surface(edge, false)
+    near_point(try edge.value().point(6), Vector3(-0.25, 0.0, -0.5))
+    let block = try made(grid, "Collapse", "5 6 9 10", 3, no_numbers[..<0], 1)
+    defer block.release()
+    try counts(block, 17, 12)
+    try surface(block, false)
+    let two = try made(grid, "Collapse", "p6-7 p16-17", 2, no_numbers[..<0], 2)
+    defer two.release()
+    try counts(two, 23, 16)
+
+func weld_checks(grid: interop.Reference[Mesh]) -> !:
+    let at_point: f64[5] = [5.0, 0.001, 1.0, 2.0, 3.0]
+    let merged = try made(grid, "Merge Points", "6 7 11 12", 1, at_point[..<5], 1)
+    defer merged.release()
+    try counts(merged, 22, 15)
+    near_point(try merged.value().point(6), Vector3(1.0, 2.0, 3.0))
+    let welding = try Verbs.run("Target Weld", grid, "6 7", 1, no_numbers[..<0], 0, false, "12")
+    defer welding.release()
+    let welded = try welding.value().mesh()
+    defer welded.release()
+    try counts(welded, 23, 15)
+    near_point(try welded.value().point(10), Vector3(0.0, 0.0, 0.0))
+    assert(try Verbs.wants_second("Target Weld", grid, "6 7", 1, no_numbers[..<0]))
+    let alone = try Verbs.run("Target Weld", grid, "6 7", 1, no_numbers[..<0])
+    defer alone.release()
+    assert(alone.value().warning().length > 0)
+
+func separate_checks(grid: interop.Reference[Mesh]) -> !:
+    # The middle block: its ring of eight points copied, a new path.
+    let selection: f64[1] = [0.0]
+    let block = try made(grid, "Separate", "5 6 9 10", 3, selection[..<1], 4)
+    defer block.release()
+    try counts(block, 33, 16)
+    try surface(block, false)
+    assert((try with_path(block, "/mesh.001")) == 4)
+    assert((try with_path(block, "/mesh")) == 12)
+    # Two corner faces as loose parts: two new pieces.
+    let parts: f64[1] = [1.0]
+    let corners = try made(grid, "Separate", "0 15", 3, parts[..<1], 2)
+    defer corners.release()
+    try counts(corners, 31, 16)
+    assert((try with_path(corners, "/mesh.001")) == 1)
+    assert((try with_path(corners, "/mesh.002")) == 1)
+    # Two cubes apart, all their faces: the first keeps its path.
+    let cube = try Mesh.cube()
+    defer cube.release()
+    let mirror: f64[5] = [0.0, 2.0, 0.0, 1.0, 1.0]
+    let pair = try made(cube, "PolyMirror", "", 3, mirror[..<5], 6)
+    defer pair.release()
+    let apart = try made(pair, "Separate", "", 3, parts[..<1], 12)
+    defer apart.release()
+    try counts(apart, 16, 12)
+    assert((try with_path(apart, "/mesh")) == 6)
+    assert((try with_path(apart, "/mesh.001")) == 6)

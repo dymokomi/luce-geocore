@@ -46,7 +46,10 @@ func connected_rule() -> SelectRule:
                       "points edges faces", any_picks, connected_parms, select_connected)
 
 ## Which edges a flood may not cross.
-struct Delimits:
+## What stops a flood across an edge: seams, sharp marks, a change of
+## material or of UVs, or a face angle above `angle` degrees. The verbs
+## (Limited Dissolve) read it too.
+pub struct Delimits:
     let seams: EdgeMark
     let sharp: EdgeMark
     let materials: FaceValue
@@ -58,11 +61,11 @@ struct Delimits:
     let use_normals: bool
     let angle: f64
 
-    func any() -> bool:
+    pub func any() -> bool:
         return self.use_seams or self.use_sharp or self.use_materials or self.use_uv or self.use_normals
 
     ## Whether manifold edge `edge` stops the flood.
-    func stops(mesh: const Mesh*, topology: const Topology*, edge: usize) -> bool:
+    pub func stops(mesh: const Mesh*, topology: const Topology*, edge: usize) -> bool:
         if self.use_seams and self.seams.marked(edge): return true
         if self.use_sharp and self.sharp.marked(edge): return true
         if edge_faces(topology, edge) != 2: return false
@@ -92,12 +95,15 @@ func corner_at(topology: const Topology*, corner: usize, point: usize) -> usize:
     return corner if (usize)topology.corners[corner] == point else topology.next(corner)
 
 func delimits_of(input: const RuleInput*) -> Delimits!:
-    let mesh = input.mesh
+    return try delimits_for(input.mesh, input.parms.at(0) != 0.0, input.parms.at(1) != 0.0, input.parms.at(2) != 0.0, input.parms.at(3) != 0.0, input.parms.at(4) != 0.0, input.parms.at(5))
+
+## The delimits of `mesh` turned on: seams, sharp marks, materials, UVs and
+## (beyond `angle` degrees) normals.
+pub func delimits_for(mesh: const Mesh*, seams: bool, sharp: bool, materials: bool, uv: bool, normals: bool, angle: f64) -> Delimits!:
     let uv_index = mesh.attribute_on("uv", Domain.corner)
-    var uv: const Attribute*? = none
-    if uv_index >= 0: uv = try mesh.attribute_entry(uv_index)
-    return Delimits(try EdgeMark.of(mesh, "seam"), try EdgeMark.of(mesh, "sharp"), try FaceValue.of(mesh, "material"), uv,
-                    input.parms.at(0) != 0.0, input.parms.at(1) != 0.0, input.parms.at(2) != 0.0, input.parms.at(3) != 0.0, input.parms.at(4) != 0.0, input.parms.at(5))
+    var corners: const Attribute*? = none
+    if uv_index >= 0: corners = try mesh.attribute_entry(uv_index)
+    return Delimits(try EdgeMark.of(mesh, "seam"), try EdgeMark.of(mesh, "sharp"), try FaceValue.of(mesh, "material"), corners, seams, sharp, materials, uv, normals, angle)
 
 func select_connected(input: const RuleInput*) -> RuleOutput!:
     let delimits = try delimits_of(input)

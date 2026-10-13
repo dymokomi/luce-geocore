@@ -12,7 +12,8 @@ from luce_geocore.geocore import Mesh, Vector3, Verbs, Subdivision
 from luce_std import parallel as std_parallel
 
 ## One case: what it runs, on which mesh (0 grid, 1 tube cut in two, 2 grid
-## with a ten-face hole), and its numbers.
+## with a ten-face hole, 3 the grid in triangles, 4 a 418×418 grid
+## subdivided once: 836×836 quads), its numbers and its second pick.
 struct Case:
     let name: str
     let verb: str
@@ -20,8 +21,13 @@ struct Case:
     let group_type: i64
     let mesh: u8
     let numbers: f64[16]
+    let second: str = ""
 
-let case_total: usize = 30
+let case_total: usize = 60
+
+## The Knife's numbers: a stroke straight across the grid's middle row,
+## seen from above, cutting through.
+let knife_row: f64[16] = [1.0, 0.0, -1.0, 0.0, 2.0, -500.0, 0.0, 0.25, 500.0, 0.0, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 func case_at(index: usize) -> Case:
     let row = "350000-350999"
@@ -45,7 +51,7 @@ func case_at(index: usize) -> Case:
         16: return Case("PolyBevel, every edge (1.4M)", "PolyBevel", "*", 0, 0, [0.1, 1.0, 0.5, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         17: return Case("Loop Cut, one ring of 837 quads", "Loop Cut", "p0-1", 2, 0, [1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         18: return Case("Loop Cut, every ring both ways", "Loop Cut", "0-836", 3, 0, [1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        19: return Case("Bridge, two facing 837-edge loops, 4 divisions", "Bridge", "349866-351539", 1, 1, [4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        19: return Case("Bridge, two facing 837-edge loops, 3 cuts", "Bridge", "349866-351539", 1, 1, [3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         20: return Case("Merge Points, a face's points at their center", "Merge Points", "350000-350001 350838-350839", 1, 0, [0.0, 0.001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         21: return Case("Merge Points, 250 pairs as islands", "Merge Points", "350000-350999:2,4", 1, 0, [3.0, 0.001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         22: return Case("Dissolve, 250 edges between face pairs", "Dissolve", "350000-350999:2,4", 3, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -55,15 +61,54 @@ func case_at(index: usize) -> Case:
         26: return Case("Split, 1k faces", "Split", row, 3, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         27: return Case("PolyDraw, a quad drawn onto the grid, its corners snapped", "PolyDraw", "", 0, 0, [0.001, 4.0, 135.5, 0.0, -1.5, 136.5, 0.0, -1.5, 136.5, 0.0, -0.5, 135.5, 0.0, -0.5, 0.0, 0.0])
         28: return Case("PolyDraw, through 4 selected points", "PolyDraw", "350000-350001 350838-350839", 1, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        _: return Case("Clean, everything", "Clean", "*", 0, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        29: return Case("Clean, everything", "Clean", "*", 0, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        _: return stage5_case(index - 30)
+
+## The Stage 5 tools.
+func stage5_case(index: usize) -> Case:
+    let row = "350000-350999"
+    let zero: f64[16] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    match index:
+        0: return Case("Poke, 1k faces", "Poke", row, 3, 0, [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        1: return Case("Poke, 100k faces", "Poke", "0-99999", 3, 0, [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        2: return Case("Rotate Edge, a 1k faces' edges", "Rotate Edge", row, 3, 0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        3: return Case("Solidify, 100k faces", "Solidify", "0-99999", 3, 0, [0.1, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        4: return Case("Solidify, everything, even thickness", "Solidify", "*", 3, 0, [0.1, -1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        5: return Case("Symmetrize, everything", "Symmetrize", "*", 3, 0, [0.0, 0.0001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        6: return Case("Snap to Symmetry, every point", "Snap to Symmetry", "*", 1, 0, [0.0, 0.05, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        7: return Case("Grid Fill, a 22-edge hole", "Grid Fill", "350418-350428 351256-351266", 1, 2, zero)
+        8: return Case("Bridge, two 837-edge loops, 3 cuts, blend path and profile", "Bridge", "349866-351539", 1, 1, [3.0, 0.0, 1.0, 1.0, 0.5, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        9: return Case("Bridge, the second loop as a second pick", "Bridge", "349866-350702", 1, 1, zero, "350703-351539")
+        10: return Case("Edge Split, a 1k faces' inner edges", "Edge Split", row, 3, 0, zero)
+        11: return Case("Rip, a run of 10 edges, filled", "Rip", "p350418-350419-350420-350421-350422-350423-350424-350425-350426-350427-350428", 2, 0, [0.1, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        12: return Case("Separate, 1k faces", "Separate", row, 3, 0, zero)
+        13: return Case("Separate, 100k faces as loose parts", "Separate", "0-99999", 3, 0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        14: return Case("Delete Edge Loop, a 1k faces' inner edges", "Delete Edge Loop", row, 3, 0, zero)
+        15: return Case("Limited Dissolve, everything (one face)", "Limited Dissolve", "*", 3, 0, [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        16: return Case("Collapse, a 1k faces' block", "Collapse", row, 3, 0, zero)
+        17: return Case("Merge Points, a face's points at a point", "Merge Points", "350000-350001 350838-350839", 1, 0, [5.0, 0.001, 1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        18: return Case("Target Weld, a point onto its neighbor", "Target Weld", "350418", 1, 0, zero, "350419")
+        19: return Case("Knife, a stroke across 837 faces, through", "Knife", "*", 3, 0, knife_row)
+        20: return Case("Spin, a run of 10 edges about an X axis, 12 steps", "Spin", "350418-350428", 1, 0, [0.0, 0.0, 100.0, 0.0, 360.0, 12.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        21: return Case("Screw, a run of 10 edges about an X axis, 2 turns of 12", "Screw", "350418-350428", 1, 0, [0.0, 0.0, 100.0, 0.0, 2.0, 12.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        22: return Case("Subdivide, everything, linear, smoothness 1", "Subdivide", "*", 0, 0, [1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        23: return Case("Smooth, everything, keep volume and boundary", "Smooth", "*", 0, 0, [0.5, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        24: return Case("Relax, everything, 5 rounds", "Relax", "*", 0, 0, [0.5, 5.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        25: return Case("Triangulate, everything, beauty", "Triangulate", "*", 0, 0, zero)
+        26: return Case("Tris to Quads, the grid in triangles", "Quadrangulate", "*", 3, 3, [40.0, 40.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        27: return Case("Decimate, 100k triangles collapsed to half", "PolyReduce", "0-99999", 3, 3, [0.0, 0.5, 1.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        28: return Case("Decimate, un-subdivide 836×836 quads", "PolyReduce", "*", 3, 4, [1.0, 0.5, 1.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        _: return Case("Collapse, every edge of 100k faces", "Collapse", "0-99999", 3, 0, zero)
 
 let no_numbers: f64[1] = [0.0]
+let fixed_split: f64[2] = [1.0, 0.0]
+let linear_once: f64[3] = [1.0, 0.0, 0.0]
 
 ## How many of a case's 16 numbers its verb takes (the rest are left out:
 ## a verb refuses numbers past its parameters, but PolyDraw takes its
 ## corners after them).
 func numbers_taken(verb: str) -> usize:
-    if verb == "PolyDraw": return 16
+    if verb == "PolyDraw" or verb == "Knife": return 16
     let index = Verbs.index_of(verb)
     var total: i64 = 0
     for parm in 0..<Verbs.parm_count(index): total += Verbs.parm_components(index, parm)
@@ -84,9 +129,19 @@ pub func main(arguments: str[]) -> i32!:
     defer hole.release()
     let holed = try hole.value().mesh()
     defer holed.release()
+    let splitting = try Verbs.run("Triangulate", grid, "*", 3, fixed_split[..<2])
+    defer splitting.release()
+    let triangles = try splitting.value().mesh()
+    defer triangles.release()
+    let coarse = try quad_grid(418)
+    defer coarse.release()
+    let refining = try Verbs.run("Subdivide", coarse, "*", 3, linear_once[..<3])
+    defer refining.release()
+    let fine = try refining.value().mesh()
+    defer fine.release()
     # Warm each mesh's connectivity caches (edges, their corners, point
     # edges), which every mesh with that topology shares.
-    let meshes: interop.Reference[Mesh][3] = [grid, halves, holed]
+    let meshes: interop.Reference[Mesh][5] = [grid, halves, holed, triangles, fine]
     for mesh in meshes:
         let warm = try Verbs.run("Dissolve", mesh, "0", 3, no_numbers[..<0])
         warm.release()
@@ -95,8 +150,10 @@ pub func main(arguments: str[]) -> i32!:
         var source = grid
         if case.mesh == 1: source = halves
         if case.mesh == 2: source = holed
+        if case.mesh == 3: source = triangles
+        if case.mesh == 4: source = fine
         let start = time.now()
-        let result = try Verbs.run(case.verb, source, case.group, case.group_type, case.numbers[..<numbers_taken(case.verb)])
+        let result = try Verbs.run(case.verb, source, case.group, case.group_type, case.numbers[..<numbers_taken(case.verb)], 0, false, case.second)
         let spent = (f64)time.since(start) / 1000000.0
         let mesh = try result.value().mesh()
         print(f"{case.name}\t{spent}\t{mesh.value().face_count()}\t{result.value().warning()}")

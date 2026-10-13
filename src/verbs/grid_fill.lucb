@@ -1,0 +1,171 @@
+## Grid Fill: each closed loop of the group's boundary edges (a hole) is
+## filled with a grid of quads, after Blender's Grid Fill. The loop's
+## points split into four sides, Span and n/2 - Span edges long, starting
+## at its sharpest corner (moved on by Offset points); Span 0 finds the
+## span as Blender does, from the loop's next sharpest corner (a quarter of
+## the loop when no corner stands out). Inner points sit on the Coons patch
+## of the four sides (each side carried across the hole and the corners'
+## bilinear patch taken off), or with Simple between the first and third
+## sides alone. Their values (UVs, colors) blend the boundary's with the
+## same weights; boundary corners take the faces' beside the hole. A loop
+## of odd length, or one Span leaves no room in, is left open and counted
+## in the warning. The grid's faces are the output selection.
+
+let grid_fill_parms: ParmSpec[3] = [
+    ParmSpec("Span", ParmKind.integer, 0.0, 0.0, 1000.0, 1, "", "Edges along the grid's first side (0: from the hole's corners)."),
+    ParmSpec("Offset", ParmKind.integer, 0.0, -1000.0, 1000.0, 1, "", "Points the grid's first corner moves along the hole from its sharpest corner."),
+    ParmSpec("Simple", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Blend between the first and third sides only, not across all four.")]
+
+let grid_fill_picks: PickSpec[1] = [PickSpec("Boundary edges", "edges", "Select the boundary edges around each hole")]
+
+func grid_fill_verb() -> Verb:
+    return Verb("Grid Fill", "Modeling", "Fill each hole the group's boundary edges close with a grid of quads", Domain.edge, true, grid_fill_parms, true, cook_grid_fill, section = "Modify", family = "Fill", icon = "fill-surface", picks = grid_fill_picks, wheel = 0)
+
+func cook_grid_fill(input: const VerbInput*, output: VerbOutput*) -> !:
+    let span_wanted = (i64)math.max(0.0, math.min(1000.0, input.parms.at(0)))
+    let offset = (i64)math.max(-1000.0, math.min(1000.0, input.parms.at(1)))
+    let simple = input.parms.at(2) != 0.0
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var chains = Chains()
+    defer chains.close()
+    var kept = try BitsBuilder.zeros(topology.faces())
+    defer kept.close()
+    try find_chains(&topology, input.group, &chains, kept.view())
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    let faces = topology.faces()
+    try builder.copy_faces(mesh, 0, faces)
+    var skipped: usize = 0
+    var filled: usize = 0
+    var loop = Side()
+    defer loop.close()
+    for chain in 0..<chains.count():
+        if chains.closed.items[chain] == 0: continue
+        let size = chains.size(chain)
+        if size < 4 or size % 2 != 0:
+            skipped += 1
+            continue
+        # The hole's points against the boundary's winding (the fill's own).
+        loop.points.clear()
+        loop.corners.clear()
+        for at in 0..<size:
+            let (point, corner) = chain_point(&topology, &chains, chain, size - 1 - at)
+            try loop.points.push(point)
+            try loop.corners.push(corner)
+        let (start, span) = grid_layout(builder, &loop, span_wanted, offset)
+        if span < 1 or span >= (i64)(size // 2):
+            skipped += 1
+            continue
+        try fill_grid(builder, &loop, start, span, (i64)(size // 2) - span, simple)
+        filled += 1
+    if filled == 0:
+        output.warning = "No closed loop of an even number of boundary edges in the group to fill; the input passes through"
+        return
+    output.selection = try BitsBuilder.zeros(builder.face_count())
+    output.selection.set_range(faces, builder.face_count())
+    output.selection_domain = Domain.face
+    if skipped > 0: output.warning = "Holes of an odd number of edges, open runs, or loops the span leaves no room in were left open"
+
+## How far a loop point turns from straight (0 on a straight run).
+func bend_at(builder: const TopologyBuilder*, loop: const Side*, at: usize) -> f64:
+    let size = loop.points.count
+    let here = builder.position(loop.points.items[at])
+    let before = builder.position(loop.points.items[(at + size - 1) % size]).subtract(here)
+    let after = builder.position(loop.points.items[(at + 1) % size]).subtract(here)
+    let lengths = before.length() * after.length()
+    if lengths <= 0.0: return 0.0
+    return math.abs(math.pi - math.acos(math.max(-1.0, math.min(1.0, before.dot(after) / lengths))))
+
+## Where the grid starts on the loop and its first side's edges: the
+## sharpest corner moved on by `offset`; `wanted` edges, or (0) up to the
+## next sharpest corner other than the start and its opposite, a quarter of
+## the loop when none stands out (Blender's choice).
+func grid_layout(builder: const TopologyBuilder*, loop: const Side*, wanted: i64, offset: i64) -> (usize, i64):
+    let size = loop.points.count
+    var best: usize = 0
+    var sharpest = -1.0
+    for at in 0..<size:
+        let bend = bend_at(builder, loop, at)
+        if bend > sharpest + 0.001:
+            sharpest = bend
+            best = at
+    let start = (usize)((((i64)best + offset) % (i64)size + (i64)size) % (i64)size)
+    if wanted > 0: return (start, (i64)math.min((f64)wanted, (f64)(size // 2 - 1)))
+    var span = (i64)(size // 4)
+    var next = -1.0
+    var found: usize = 0
+    var lowest = -1.0
+    for step in 1..<size:
+        if step == size // 2: continue
+        let bend = bend_at(builder, loop, (start + step) % size)
+        if bend > next:
+            next = bend
+            found = step
+        if lowest < 0.0 or bend < lowest: lowest = bend
+    if next - lowest > 0.001: span = (i64)found
+    # A corner past the opposite one: its own opposite ends the first side.
+    if span > (i64)(size // 2): span -= (i64)(size // 2)
+    return (start, span)
+
+## The grid on `loop` from point `start`: sides of `a`, `b`, `a` and `b`
+## edges; rows of quads winding as the loop does.
+func fill_grid(builder: TopologyBuilder*, loop: const Side*, start: usize, a: i64, b: i64, simple: bool) -> !:
+    let size = loop.points.count
+    let columns = (usize)a + 1
+    let rows = (usize)b + 1
+    let ids = try new i32[columns * rows] --- in memory.heap
+    defer free(ids) in memory.heap
+    let corners = try new i32[columns * rows] --- in memory.heap
+    defer free(corners) in memory.heap
+    for at in 0..<columns * rows:
+        ids[at] = -1
+        corners[at] = -1
+    # The boundary: bottom left to right, right side up, top right to left,
+    # left side down.
+    for k in 0..<size:
+        let (i, j) = grid_place(k, (usize)a, (usize)b)
+        ids[j * columns + i] = loop.points.items[(start + k) % size]
+        corners[j * columns + i] = loop.corners.items[(start + k) % size]
+    let last_i = (usize)a
+    let last_j = (usize)b
+    for j in 1..<last_j:
+        for i in 1..<last_i:
+            let u = (f64)i / (f64)a
+            let v = (f64)j / (f64)b
+            var parents: i32[8]
+            var corner_parents: i32[8]
+            var weights: f32[8]
+            var count: usize = 0
+            let places: usize[8] = [i, last_j * columns + i, j * columns, j * columns + last_i, 0, last_i, last_j * columns, last_j * columns + last_i]
+            var factors: f64[8] = [1.0 - v, v, 1.0 - u, u, -(1.0 - u) * (1.0 - v), -u * (1.0 - v), -(1.0 - u) * v, -u * v]
+            if simple:
+                factors = [1.0 - v, v, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+            var position = Vector3()
+            for k in 0..<(usize)8:
+                if factors[k] == 0.0: continue
+                let place = places[k]
+                position = position.add(builder.position(ids[place]).multiply_scalar(factors[k]))
+                parents[count] = ids[place]
+                corner_parents[count] = corners[place]
+                weights[count] = (f32)factors[k]
+                count += 1
+            ids[j * columns + i] = try builder.mixed_point(position, parents[..<count], weights[..<count])
+            corners[j * columns + i] = try builder.shared_mix(corner_parents[..<count], weights[..<count])
+    for j in 0..<last_j:
+        for i in 0..<last_i:
+            try builder.face(-1)
+            let order: usize[4] = [j * columns + i, j * columns + i + 1, (j + 1) * columns + i + 1, (j + 1) * columns + i]
+            for place in order:
+                try builder.shared_corner(ids[place], corners[place])
+            try builder.end_face()
+
+## Grid place (column, row) of the loop's `k`-th point from the start, the
+## sides `a` and `b` edges long.
+func grid_place(k: usize, a: usize, b: usize) -> (usize, usize):
+    if k <= a: return (k, 0)
+    if k <= a + b: return (a, k - a)
+    if k <= a + b + a: return (a - (k - a - b), b)
+    return (0, b - (k - a - b - a))

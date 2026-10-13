@@ -1,0 +1,174 @@
+## Rotate Edge: each of the group's edges turns within the two faces beside
+## it, after Blender's Rotate Edge and Cinema 4D's Spin Edge: the two faces
+## join into one outline and split again along the diagonal one corner on
+## (Counterclockwise, seen from the faces' front) or one corner back
+## (Clockwise). An edge on a boundary, of three or more faces, sharing a
+## face with an edge turned before it, or whose new diagonal is an edge
+## already is left, and counted in the warning. The new edges are the
+## output selection.
+
+let rotate_edge_parms: ParmSpec[1] = [
+    ParmSpec("Direction", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Clockwise|Counterclockwise", "Which way each edge turns, seen from its faces' front.")]
+
+## A face copied with its own point numbers takes an empty slice of this.
+let same_points: i32[1] = [0]
+
+func rotate_edge_verb() -> Verb:
+    return Verb("Rotate Edge", "Modeling", "Turn each of the group's edges within the two faces beside it", Domain.edge, true, rotate_edge_parms, true, cook_rotate_edge, section = "Modify", family = "Cut", icon = "rotate-tool", picks = pick_edges)
+
+## One turned edge: its two faces and the outline they join into (points
+## and, per point, its corner in the first face and in the second; -1 where
+## it has none), and where the new diagonal's ends sit on it.
+struct Turn:
+    var points: Growing[i32]
+    var first_corners: Growing[i32]
+    var second_corners: Growing[i32]
+
+    func init():
+        self.points = Growing[i32]()
+        self.first_corners = Growing[i32]()
+        self.second_corners = Growing[i32]()
+
+    func close():
+        self.points.close()
+        self.first_corners.close()
+        self.second_corners.close()
+
+func cook_rotate_edge(input: const VerbInput*, output: VerbOutput*) -> !:
+    let counterclockwise = input.parms.at(0) != 0.0
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let faces = topology.faces()
+    # Per face: the turned edge that rebuilds it (-1: none).
+    let owner = try new i32[faces] --- in memory.heap
+    defer free(owner) in memory.heap
+    for face in 0..<faces: owner[face] = -1
+    var skipped: usize = 0
+    for edge in 0..<topology.edges():
+        if not input.group.get(edge): continue
+        let first = (usize)topology.edge_corner_offsets[edge]
+        if (usize)topology.edge_corner_offsets[edge + 1] - first != 2:
+            skipped += 1
+            continue
+        let a = (usize)topology.corner_faces[(usize)topology.edge_corners[first]]
+        let b = (usize)topology.corner_faces[(usize)topology.edge_corners[first + 1]]
+        if a == b or owner[a] >= 0 or owner[b] >= 0:
+            skipped += 1
+            continue
+        owner[a] = (i32)edge
+        owner[b] = (i32)edge
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    var outline = Turn()
+    defer outline.close()
+    var run: usize = 0
+    for face in 0..<faces:
+        let edge = owner[face]
+        if edge < 0: continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        # Each pair is rebuilt at its lower face's place.
+        let first = (usize)topology.edge_corner_offsets[(usize)edge]
+        let one = (usize)topology.edge_corners[first]
+        let other = (usize)topology.edge_corners[first + 1]
+        if (usize)topology.corner_faces[one] != face and (usize)topology.corner_faces[other] != face: continue
+        let lower = one if (usize)topology.corner_faces[one] < (usize)topology.corner_faces[other] else other
+        if (usize)topology.corner_faces[lower] != face: continue
+        let upper = other if lower == one else one
+        if not try rotated_pair(&topology, &outline, lower, upper, counterclockwise, builder):
+            skipped += 1
+            try builder.copy_face(mesh, (usize)topology.corner_faces[lower], same_points[..<0])
+            try builder.copy_face(mesh, (usize)topology.corner_faces[upper], same_points[..<0])
+    try builder.copy_faces(mesh, run, faces)
+    if builder.selected_edges.count == 0:
+        output.warning = "No edge of the group could outline (each needs two faces of its own); the input passes through"
+    elif skipped > 0:
+        output.warning = "Edges on a boundary, sharing a face with another, or whose new diagonal exists already were left"
+
+## The faces of corners `lower` and `upper` (which share an edge) joined
+## and split along the diagonal turned one corner on; false when that
+## diagonal is an edge already or leaves a face under three corners.
+func rotated_pair(topology: const Topology*, outline: Turn*, lower: usize, upper: usize, counterclockwise: bool, builder: TopologyBuilder*) -> bool!:
+    outline.points.clear()
+    outline.first_corners.clear()
+    outline.second_corners.clear()
+    # The outline: the first face from the edge's far end round to its near
+    # end, then the second face's corners between.
+    let near = (usize)topology.corners[lower]
+    var at = topology.next(lower)
+    while true:
+        try outline.points.push(topology.corners[at])
+        try outline.first_corners.push((i32)at)
+        try outline.second_corners.push(-1)
+        if at == lower: break
+        at = topology.next(at)
+    let start_second = outline.points.count
+    at = topology.next(topology.next(upper))
+    while at != upper:
+        try outline.points.push(topology.corners[at])
+        try outline.first_corners.push(-1)
+        try outline.second_corners.push((i32)at)
+        at = topology.next(at)
+    let size = outline.points.count
+    # The old diagonal runs from the outline's first point (the edge's far
+    # end) to point `start_second - 1` (its near end); each end moves one
+    # point along the outline.
+    let old_far: usize = 0
+    let old_near = start_second - 1
+    if (usize)outline.points.items[old_near] != near: return false
+    let step = 1 if counterclockwise else size - 1
+    let u = (old_far + step) % size
+    let v = (old_near + step) % size
+    if u == v or (u + 1) % size == v or (v + 1) % size == u: return false
+    let a = outline.points.items[u]
+    let b = outline.points.items[v]
+    if connected(topology, (usize)a, (usize)b): return false
+    # Each end takes its corner from the face its new face lies mostly in.
+    let first_face = topology.corner_faces[lower]
+    let second_face = topology.corner_faces[upper]
+    try outline_face(topology, outline, u, v, first_face, second_face, builder)
+    try outline_face(topology, outline, v, u, first_face, second_face, builder)
+    try builder.select_edge(a, b)
+    return true
+
+## The outline's points from `head` round to `tail` as one face, whose parent
+## is whichever old face holds more of them.
+func outline_face(topology: const Topology*, outline: const Turn*, head: usize, tail: usize, first_face: i32, second_face: i32, builder: TopologyBuilder*) -> !:
+    let size = outline.points.count
+    var firsts: usize = 0
+    var seconds: usize = 0
+    var at = head
+    while true:
+        if outline.first_corners.items[at] >= 0: firsts += 1
+        if outline.second_corners.items[at] >= 0: seconds += 1
+        if at == tail: break
+        at = (at + 1) % size
+    let take_first = firsts >= seconds
+    try builder.face(first_face if take_first else second_face)
+    at = head
+    while true:
+        var corner = outline.first_corners.items[at] if take_first else outline.second_corners.items[at]
+        if corner < 0: corner = outline.second_corners.items[at] if take_first else outline.first_corners.items[at]
+        if corner < 0: corner = point_corner(topology, outline.points.items[at], first_face if take_first else second_face)
+        try builder.corner(outline.points.items[at], corner)
+        if at == tail: break
+        at = (at + 1) % size
+    try builder.end_face()
+
+## A corner of face `face` at point `point`, else any corner at it.
+func point_corner(topology: const Topology*, point: i32, face: i32) -> i32:
+    let start = (usize)topology.offsets[(usize)face]
+    for corner in start..<(usize)topology.offsets[(usize)face + 1]:
+        if topology.corners[corner] == point: return (i32)corner
+    return -1
+
+## Whether an edge joins points `a` and `b`.
+func connected(topology: const Topology*, a: usize, b: usize) -> bool:
+    for slot in (usize)topology.point_edge_offsets[a]..<(usize)topology.point_edge_offsets[a + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        let p = (usize)topology.edge_points[edge * 2]
+        let q = (usize)topology.edge_points[edge * 2 + 1]
+        if (p == a and q == b) or (p == b and q == a): return true
+    return false

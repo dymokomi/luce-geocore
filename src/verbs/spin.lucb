@@ -1,19 +1,33 @@
-## Spin: sweep the group's edges around an axis into a surface of
-## revolution, after Blender's Spin and Houdini's Revolve. Each chain of
-## the group's edges is the profile; `Steps` copies of it turn through
-## `Angle` about the axis through `Center`, and quads join each copy to the
-## next (a full turn closes on the profile itself). Profile points on the
-## axis stay single, so quads there become triangles. The new faces are the
-## output selection.
+## Spin and Screw: sweep the group's edges around an axis into a surface of
+## revolution, after Blender's Spin and Screw and Houdini's Revolve. Each
+## chain of the group's edges is the profile; copies of it turn about the
+## axis through `Center` and quads join each copy to the next. Spin turns
+## `Steps` copies through `Angle` (a full turn closes on the profile
+## itself); Screw turns `Steps` copies a turn, `Turns` times, rising `Rise`
+## along the axis each turn (a spring, a thread). Profile points on the axis
+## stay single when nothing rises, so quads there become triangles. Flip
+## turns the new faces over. The new faces are the output selection.
 
-let spin_parms: ParmSpec[4] = [
+let spin_parms: ParmSpec[5] = [
     ParmSpec("Axis", ParmKind.menu, 1.0, 0.0, 2.0, 1, "X|Y|Z", "The axis the profile turns about."),
     ParmSpec("Center", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "A point on the axis."),
     ParmSpec("Angle", ParmKind.number, 360.0, -360.0, 360.0, 1, "", "How far the profile turns, in degrees; 360 closes it."),
-    ParmSpec("Steps", ParmKind.integer, 12.0, 1.0, 512.0, 1, "", "Copies of the profile along the turn.")]
+    ParmSpec("Steps", ParmKind.integer, 12.0, 1.0, 512.0, 1, "", "Copies of the profile along the turn."),
+    ParmSpec("Flip", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Turn the new faces over.", more = true)]
 
 func spin_verb() -> Verb:
     return Verb("Spin", "Modeling", "Sweep the group's edges around an axis into a surface of revolution", Domain.edge, true, spin_parms, true, cook_spin, section = "Modify", family = "Sweep", icon = "spin", picks = pick_edges, drag = 2, drag_mode = "angle", wheel = 3)
+
+let screw_parms: ParmSpec[6] = [
+    ParmSpec("Axis", ParmKind.menu, 1.0, 0.0, 2.0, 1, "X|Y|Z", "The axis the profile turns about and rises along."),
+    ParmSpec("Center", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "A point on the axis."),
+    ParmSpec("Turns", ParmKind.integer, 2.0, 1.0, 256.0, 1, "", "Whole turns."),
+    ParmSpec("Steps", ParmKind.integer, 12.0, 1.0, 512.0, 1, "", "Copies of the profile in each turn."),
+    ParmSpec("Rise", ParmKind.number, 1.0, -100000.0, 100000.0, 1, "", "How far the profile rises along the axis each turn.", 5.0),
+    ParmSpec("Flip", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Turn the new faces over.", more = true)]
+
+func screw_verb() -> Verb:
+    return Verb("Screw", "Modeling", "Sweep the group's edges round an axis in turns, rising along it: a spring or a thread", Domain.edge, true, screw_parms, true, cook_screw, section = "Modify", family = "Sweep", icon = "curve-spiral", picks = pick_edges, drag = 4, wheel = 2)
 
 func cook_spin(input: const VerbInput*, output: VerbOutput*) -> !:
     let axis = (usize)math.max(0.0, math.min(2.0, input.parms.at(0)))
@@ -21,6 +35,21 @@ func cook_spin(input: const VerbInput*, output: VerbOutput*) -> !:
     let angle = input.parms.at(4)
     let steps = (usize)math.max(1.0, math.min(512.0, input.parms.at(5)))
     if not center.is_finite() or not math.is_finite(angle) or angle == 0.0: error(errors.invalid, "Spin needs a finite center and a nonzero angle")
+    try revolve_chains(input, output, axis, center, angle, steps, 0.0, input.parms.at(6) != 0.0)
+
+func cook_screw(input: const VerbInput*, output: VerbOutput*) -> !:
+    let axis = (usize)math.max(0.0, math.min(2.0, input.parms.at(0)))
+    let center = Vector3(input.parms.at(1), input.parms.at(2), input.parms.at(3))
+    let turns = (usize)math.max(1.0, math.min(256.0, input.parms.at(4)))
+    let steps = (usize)math.max(1.0, math.min(512.0, input.parms.at(5)))
+    let rise = input.parms.at(6)
+    if not center.is_finite() or not math.is_finite(rise): error(errors.invalid, "Screw needs a finite center and rise")
+    if turns * steps > 65536: error(errors.invalid, "Screw makes at most 65536 copies of its profile")
+    try revolve_chains(input, output, axis, center, 360.0 * (f64)turns, turns * steps, rise * (f64)turns, input.parms.at(7) != 0.0)
+
+## The profile chains swept `angle` degrees in `steps` copies, rising
+## `rise` along the axis over the whole sweep.
+func revolve_chains(input: const VerbInput*, output: VerbOutput*, axis: usize, center: Vector3, angle: f64, steps: usize, rise: f64, flip: bool) -> !:
     let mesh = input.mesh
     let topology = try Topology.of(mesh)
     var chains = EdgeChains()
@@ -34,7 +63,7 @@ func cook_spin(input: const VerbInput*, output: VerbOutput*) -> !:
     if chains.count() == 0:
         output.warning = "The group has no edges to spin; the input passes through"
         return
-    let full = math.abs(angle) >= 360.0
+    let full = math.abs(angle) == 360.0 and rise == 0.0
     let copies = steps if full else steps + 1
     let box = mesh.bounds()
     let tolerance = box.maximum.subtract(box.minimum).length() * 0.000001
@@ -50,13 +79,14 @@ func cook_spin(input: const VerbInput*, output: VerbOutput*) -> !:
         for at in 0..<chain.length:
             let point = chain[at]
             let position = builder.position(point)
-            let on_axis = radial(position.subtract(center), axis).length() <= tolerance
+            let on_axis = rise == 0.0 and radial(position.subtract(center), axis).length() <= tolerance
             rings.items[at] = point
             for copy in 1..<copies:
                 if on_axis:
                     rings.items[copy * chain.length + at] = point
                     continue
-                let turned = turn(position, center, axis, angle * (f64)copy / (f64)steps)
+                let share = (f64)copy / (f64)steps
+                let turned = turn(position, center, axis, angle * share).add(Vector3.along(axis, rise * share))
                 rings.items[copy * chain.length + at] = try builder.point(turned, point)
         let segments = chain.length if closed else chain.length - 1
         for copy in 0..<steps:
@@ -65,6 +95,7 @@ func cook_spin(input: const VerbInput*, output: VerbOutput*) -> !:
                 let b = (at + 1) % chain.length
                 var ids: i32[4] = [rings.items[copy * chain.length + at], rings.items[copy * chain.length + b],
                                    rings.items[next * chain.length + b], rings.items[next * chain.length + at]]
+                if flip: ids = [ids[3], ids[2], ids[1], ids[0]]
                 try quad(builder, ids, (i32)chain[at])
     output.selection = try BitsBuilder.zeros(builder.face_count())
     output.selection.set_range(first_face, builder.face_count())

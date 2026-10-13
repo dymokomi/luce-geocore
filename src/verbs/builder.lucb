@@ -81,6 +81,23 @@ pub struct TopologyBuilder:
         self.positions.count += positions.length
         self.point_parents.count += positions.length
 
+    ## `count` more points whose positions and parents are set afterwards
+    ## (`place_point`, by threads each on its own points); the first one's
+    ## number.
+    pub func extend_points(count: usize) -> usize!:
+        let first = self.positions.count
+        try self.positions.reserve(first + count)
+        try self.point_parents.reserve(first + count)
+        self.positions.count = first + count
+        self.point_parents.count = first + count
+        return first
+
+    ## Point `index` (from `extend_points`) at `position` (world), with one
+    ## parent (-1: new).
+    pub func place_point(index: usize, position: Vector3, parent: i32):
+        self.positions.items[index] = position.subtract(self.origin)
+        self.point_parents.items[index] = parent
+
     ## Set point `index`'s position (world).
     pub func move_point(index: i32, position: Vector3):
         self.positions.items[(usize)index] = position.subtract(self.origin)

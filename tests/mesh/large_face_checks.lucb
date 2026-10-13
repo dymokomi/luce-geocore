@@ -306,10 +306,11 @@ func verb_checks(count: usize) -> !:
     let fanned = try verb_mesh("Fill", tube, "*", 2, [1.0])
     defer fanned.release()
     assert(fanned.value().face_count() == 3 * n)
-    # Dissolve a strip of quads into one face of more than 256 corners.
+    # Dissolve a strip of quads into one face of more than 256 corners
+    # (Clean points off: its outline's points stay).
     let strip = try quad_strip(count // 2)
     defer strip.release()
-    let joined = try verb_mesh("Dissolve", strip, "*", 2, no_numbers())
+    let joined = try verb_mesh("Dissolve", strip, "*", 2, [0.0])
     defer joined.release()
     assert(joined.value().face_count() == 1 and (try joined.value().face_size(0)) == 2 * (i64)(count // 2 + 1))
     try valid(joined.value())

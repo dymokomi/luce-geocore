@@ -1,0 +1,311 @@
+## A bridge's faces between one pair of chains (bridge.lucb), after
+## Blender's Bridge Edge Loops and its edge-ring subdivision. The second
+## chain runs reversed so both run the same way across the bridge. With as
+## many edges on each side, Cuts loops of points cross between them in
+## rows of quads:
+##
+## - Linear: each cut point on the straight line between its two ends.
+## - Blend path: the loops' centers joined by a cubic Bézier leaving each
+##   loop square to its plane (toward the other), its handles Smoothness ×
+##   a length after Blender's (4/3 of the distance for loops side by side,
+##   3/4 for loops facing); the loop's shape, blended from one end's to the
+##   other's, rides along it.
+## - Blend surface: each point's own Bézier, leaving its end along the
+##   surface (away from the face beside the boundary).
+##
+## Profile swells each cut loop away from the center line (pinches below
+## 0) by Profile × the shape's value, 0 at the ends and 1 halfway. A cut
+## point's values blend its two ends' by where it sits. Sides of different
+## lengths zip together with triangles, advancing along whichever is behind
+## by length. Merge welds the second chain's points onto the first's.
+
+## Bridge's numbers, read once.
+struct BridgeSettings:
+    var cuts: usize
+    var twist: i64
+    var interpolation: usize
+    var smoothness: f64
+    var profile: f64
+    var shape: usize
+    var merge: bool
+    var factor: f64
+    ## Pairs zipped with triangles (for the warning).
+    var zipped: usize
+
+    static func of(parms: Parms) -> BridgeSettings!:
+        let smoothness = parms.at(3)
+        let profile = parms.at(4)
+        let factor = parms.at(7)
+        if not math.is_finite(smoothness) or not math.is_finite(profile) or not math.is_finite(factor): error(errors.invalid, "Bridge's numbers must be finite")
+        return BridgeSettings((usize)math.max(0.0, math.min(64.0, parms.at(0))), (i64)math.max(-1000.0, math.min(1000.0, parms.at(1))),
+                              (usize)math.max(0.0, math.min(2.0, parms.at(2))), math.max(0.0, smoothness), profile,
+                              (usize)math.max(0.0, math.min(5.0, parms.at(5))), parms.at(6) != 0.0, math.max(0.0, math.min(1.0, factor)), 0)
+
+## One side of a bridge: its points and corners in order (a closed loop
+## repeats its first at the end), the distance along it to each, and the
+## direction leaving the surface at each (away from the face beside it).
+struct Side:
+    var points: Growing[i32]
+    var corners: Growing[i32]
+    var along: Growing[f64]
+    var outward: Growing[Vector3]
+
+    func init():
+        self.points = Growing[i32]()
+        self.corners = Growing[i32]()
+        self.along = Growing[f64]()
+        self.outward = Growing[Vector3]()
+
+    func close():
+        self.points.close()
+        self.corners.close()
+        self.along.close()
+        self.outward.close()
+
+    ## The mean of its points (a closed loop's first once).
+    func center(mesh: const Mesh*, closed: bool) -> Vector3:
+        let count = self.points.count - (1 if closed else 0)
+        var sum = Vector3()
+        for at in 0..<count: sum = sum.add(point_of(mesh, self.points.items[at]))
+        return sum.multiply_scalar(1.0 / (f64)count)
+
+    ## Its plane's normal (Newell's over its points), or the mean of its
+    ## outward directions for a straight run.
+    func normal(mesh: const Mesh*) -> Vector3:
+        var sum = Vector3()
+        let count = self.points.count
+        for at in 0..<count:
+            let p = point_of(mesh, self.points.items[at])
+            let q = point_of(mesh, self.points.items[(at + 1) % count])
+            sum = sum.add(p.cross(q))
+        if sum.length() > 0.000000001: return sum.multiply_scalar(1.0 / sum.length())
+        var out = Vector3()
+        for direction in self.outward.view(): out = out.add(direction)
+        return out.multiply_scalar(1.0 / out.length()) if out.length() > 0.0 else Vector3(0.0, 1.0, 0.0)
+
+## The way out of the surface across the boundary edge of corner `corner`:
+## along its face, square to the edge, away from the face.
+func edge_outward(mesh: const Mesh*, topology: const Topology*, corner: usize) -> Vector3:
+    let a = point_of(mesh, topology.corners[corner])
+    let b = point_of(mesh, topology.corners[topology.next(corner)])
+    let normal = mesh.face_normal_span()[(usize)topology.corner_faces[corner]].vector()
+    let out = b.subtract(a).cross(normal)
+    let length = out.length()
+    return out.multiply_scalar(1.0 / length) if length > 0.0 else Vector3()
+
+## Chain point `index`'s way out: the mean of its chain edges'.
+func chain_outward(mesh: const Mesh*, topology: const Topology*, chains: const Chains*, chain: usize, index: usize) -> Vector3:
+    let start = (usize)chains.starts.items[chain]
+    let size = chains.size(chain)
+    let closed = chains.closed.items[chain] != 0
+    var sum = Vector3()
+    if index < size: sum = sum.add(edge_outward(mesh, topology, (usize)chains.corners.items[start + index]))
+    if index > 0: sum = sum.add(edge_outward(mesh, topology, (usize)chains.corners.items[start + index - 1]))
+    elif closed: sum = sum.add(edge_outward(mesh, topology, (usize)chains.corners.items[start + size - 1]))
+    let length = sum.length()
+    return sum.multiply_scalar(1.0 / length) if length > 0.0 else sum
+
+## The first chain as it runs; the second reversed (so both run the same way
+## across the bridge), starting nearest the first's start for loops.
+func side_of(mesh: const Mesh*, topology: const Topology*, chains: const Chains*, chain: usize, reversed: bool, align: Vector3, twist: i64, side: Side*) -> !:
+    let size = chains.size(chain)
+    let closed = chains.closed.items[chain] == 1
+    let total = size if closed else size + 1
+    var shift: usize = 0
+    if closed and reversed:
+        var nearest = -1.0
+        for index in 0..<total:
+            let (point, _) = chain_point(topology, chains, chain, total - 1 - index)
+            let distance = point_of(mesh, point).subtract(align).length()
+            if nearest < 0.0 or distance < nearest:
+                nearest = distance
+                shift = index
+        shift = (usize)(((i64)shift + twist % (i64)total + (i64)total) % (i64)total)
+    for step in 0..<total + (1 if closed else 0):
+        var index = (step + shift) % total
+        if reversed: index = total - 1 - index
+        let (point, corner) = chain_point(topology, chains, chain, index)
+        try side.points.push(point)
+        try side.corners.push(corner)
+        try side.outward.push(chain_outward(mesh, topology, chains, chain, index))
+        let length = 0.0 if step == 0 else side.along.items[step - 1] + point_of(mesh, point).subtract(point_of(mesh, side.points.items[step - 1])).length()
+        try side.along.push(length)
+
+## Blender's Bézier handle length between `a` leaving along `out_a` and `b`
+## along `out_b` (both unit, toward each other): 4/3 of the distance for
+## parallel ways, down to 3/4 as they come to face each other.
+func handle_length(a: Vector3, out_a: Vector3, b: Vector3, out_b: Vector3) -> f64:
+    let facing = out_a.dot(out_b)
+    var factor = 4.0 / 3.0
+    if facing < 0.0:
+        let t = 1.0 + facing
+        factor = factor * t + 0.75 * (1.0 - t)
+    return factor * b.subtract(a).length()
+
+## The cubic Bézier from `a` to `b` with handles `h` and `k`, at `t`.
+func bezier(a: Vector3, h: Vector3, k: Vector3, b: Vector3, t: f64) -> Vector3:
+    let s = 1.0 - t
+    return a.multiply_scalar(s * s * s).add(h.multiply_scalar(3.0 * s * s * t)).add(k.multiply_scalar(3.0 * s * t * t)).add(b.multiply_scalar(t * t * t))
+
+## The profile's swell at `t` (0 at the ends, 1 halfway, before Profile).
+func profile_shape(shape: usize, t: f64) -> f64:
+    let f = 1.0 - math.abs(1.0 - 2.0 * t)
+    match shape:
+        0: return f * f * (3.0 - 2.0 * f)
+        1: return math.sqrt(math.max(0.0, 2.0 * f - f * f))
+        2: return math.sqrt(f)
+        3: return f * f
+        4: return f
+        _: return f * (2.0 - f)
+
+func bridge_pair(mesh: const Mesh*, topology: const Topology*, chains: Chains*, first: usize, second: usize, settings: BridgeSettings*, builder: TopologyBuilder*) -> !:
+    var a = Side()
+    defer a.close()
+    var b = Side()
+    defer b.close()
+    try side_of(mesh, topology, chains, first, false, Vector3(), 0, &a)
+    try side_of(mesh, topology, chains, second, true, point_of(mesh, a.points.items[0]), settings.twist, &b)
+    let n = a.points.count - 1
+    let m = b.points.count - 1
+    let face = topology.corner_faces[(usize)a.corners.items[0]]
+    if n != m:
+        settings.zipped += 1
+        return try zip_sides(&a, &b, face, builder)
+    let closed = chains.closed.items[first] == 1
+    let rows = settings.cuts + 1
+    # The center line (for Blend path and the profile).
+    let center_a = a.center(mesh, closed)
+    let center_b = b.center(mesh, closed)
+    let toward = center_b.subtract(center_a)
+    var normal_a = a.normal(mesh)
+    var normal_b = b.normal(mesh)
+    if normal_a.dot(toward) < 0.0: normal_a = normal_a.multiply_scalar(-1.0)
+    if normal_b.dot(toward) > 0.0: normal_b = normal_b.multiply_scalar(-1.0)
+    let reach = handle_length(center_a, normal_a, center_b, normal_b) * settings.smoothness
+    let handle_a = center_a.add(normal_a.multiply_scalar(reach))
+    let handle_b = center_b.add(normal_b.multiply_scalar(reach))
+    # Rows between the sides: row 0 is the first chain, row `rows` the second.
+    let ids = try new i32[(n + 1) * (rows + 1)] --- in memory.heap
+    defer free(ids) in memory.heap
+    for index in 0..<n + 1:
+        ids[index] = a.points.items[index]
+        ids[rows * (n + 1) + index] = b.points.items[index]
+        let start = point_of(mesh, a.points.items[index])
+        let end = point_of(mesh, b.points.items[index])
+        for row in 1..<rows:
+            let t = (f64)row / (f64)rows
+            # A closed loop's last point is its first.
+            if index == n and closed:
+                ids[row * (n + 1) + index] = ids[row * (n + 1)]
+                continue
+            var middle = center_a.add(toward.multiply_scalar(t))
+            if settings.interpolation != 0 or settings.profile != 0.0: middle = bezier(center_a, handle_a, handle_b, center_b, t)
+            var placed = start.add(end.subtract(start).multiply_scalar(t))
+            if settings.interpolation == 1:
+                placed = middle.add(start.subtract(center_a).multiply_scalar(1.0 - t)).add(end.subtract(center_b).multiply_scalar(t))
+            elif settings.interpolation == 2:
+                let out_a = a.outward.items[index]
+                let out_b = b.outward.items[index]
+                let length = handle_length(start, out_a, end, out_b) * settings.smoothness
+                placed = bezier(start, start.add(out_a.multiply_scalar(length)), end.add(out_b.multiply_scalar(length)), end, t)
+            if settings.profile != 0.0:
+                placed = middle.add(placed.subtract(middle).multiply_scalar(1.0 + settings.profile * profile_shape(settings.shape, t)))
+            let parents: i32[2] = [a.points.items[index], b.points.items[index]]
+            let weights: f32[2] = [(f32)(1.0 - t), (f32)t]
+            ids[row * (n + 1) + index] = try builder.mixed_point(placed, parents[..<2], weights[..<2])
+    for row in 0..<rows:
+        for index in 0..<n:
+            try builder.face(face)
+            try bridge_corner(builder, ids[row * (n + 1) + index + 1], &a, &b, index + 1, row, rows)
+            try bridge_corner(builder, ids[row * (n + 1) + index], &a, &b, index, row, rows)
+            try bridge_corner(builder, ids[(row + 1) * (n + 1) + index], &a, &b, index, row + 1, rows)
+            try bridge_corner(builder, ids[(row + 1) * (n + 1) + index + 1], &a, &b, index + 1, row + 1, rows)
+            try builder.end_face()
+
+## Sides of different lengths: triangles, advancing along whichever side is
+## behind, by its share of its length.
+func zip_sides(a: const Side*, b: const Side*, face: i32, builder: TopologyBuilder*) -> !:
+    let n = a.points.count - 1
+    let m = b.points.count - 1
+    let length_a = math.max(a.along.items[n], 0.000000001)
+    let length_b = math.max(b.along.items[m], 0.000000001)
+    var i: usize = 0
+    var j: usize = 0
+    while i < n or j < m:
+        let advance_a = j == m or (i < n and a.along.items[i + 1] / length_a <= b.along.items[j + 1] / length_b)
+        try builder.face(face)
+        if advance_a:
+            try builder.corner(a.points.items[i + 1], a.corners.items[i + 1])
+            try builder.corner(a.points.items[i], a.corners.items[i])
+            try builder.corner(b.points.items[j], b.corners.items[j])
+            i += 1
+        else:
+            try builder.corner(a.points.items[i], a.corners.items[i])
+            try builder.corner(b.points.items[j], b.corners.items[j])
+            try builder.corner(b.points.items[j + 1], b.corners.items[j + 1])
+            j += 1
+        try builder.end_face()
+
+## A bridge corner at `index` on row `row`: the first side's corner values,
+## blended toward the second side's across the rows.
+func bridge_corner(builder: TopologyBuilder*, point: i32, a: const Side*, b: const Side*, index: usize, row: usize, rows: usize) -> !:
+    if row == 0: return try builder.corner(point, a.corners.items[index])
+    if row == rows: return try builder.corner(point, b.corners.items[index])
+    let t = (f32)row / (f32)rows
+    let parents: i32[2] = [a.corners.items[index], b.corners.items[index]]
+    let weights: f32[2] = [1.0 - t, t]
+    try builder.mixed_corner(point, parents[..<2], weights[..<2])
+
+## Merge: each pair of as many edges welds, the second chain's points onto
+## the first's, which move Merge factor of the way to them; the rebuilt
+## mesh keeps the merged edges selected. Pairs of different lengths stay.
+func merge_pairs(mesh: const Mesh*, topology: const Topology*, chains: Chains*, partner: const i32[], settings: BridgeSettings*, builder: TopologyBuilder*) -> !:
+    let points = topology.points
+    let target = try new i32[points] --- in memory.heap
+    defer free(target) in memory.heap
+    let places = try new Vector3[points] --- in memory.heap
+    defer free(places) in memory.heap
+    for at in 0..<points:
+        target[at] = (i32)at
+        places[at] = point_of(mesh, (i32)at)
+    var a = Side()
+    defer a.close()
+    var b = Side()
+    defer b.close()
+    var welded = Growing[i32]()
+    defer welded.close()
+    for chain in 0..<chains.count():
+        if partner[chain] <= (i32)chain: continue
+        a.points.clear()
+        a.corners.clear()
+        a.along.clear()
+        a.outward.clear()
+        b.points.clear()
+        b.corners.clear()
+        b.along.clear()
+        b.outward.clear()
+        try side_of(mesh, topology, chains, chain, false, Vector3(), 0, &a)
+        try side_of(mesh, topology, chains, (usize)partner[chain], true, point_of(mesh, a.points.items[0]), settings.twist, &b)
+        if a.points.count != b.points.count:
+            settings.zipped += 1
+            continue
+        for index in 0..<a.points.count:
+            let keep = a.points.items[index]
+            let other = b.points.items[index]
+            target[(usize)other] = keep
+            places[(usize)keep] = point_of(mesh, keep).add(point_of(mesh, other).subtract(point_of(mesh, keep)).multiply_scalar(settings.factor))
+            if index > 0:
+                try welded.push(a.points.items[index - 1])
+                try welded.push(keep)
+    # The faces over the welded points (cleanup.lucb's rebuild, by hand: the
+    # builder already holds the input's faces).
+    try weld_faces(mesh, topology, target[..<points], places[..<points], builder)
+    for at in 0..<welded.count // 2: try builder.select_edge(welded.items[at * 2], welded.items[at * 2 + 1])
+    try builder.drop_unused_points()
+
+## The builder's faces (copied from the input) with every point mapped
+## through `target`, the kept points at `places`.
+func weld_faces(mesh: const Mesh*, topology: const Topology*, target: const i32[], places: const Vector3[], builder: TopologyBuilder*) -> !:
+    for point in 0..<target.length:
+        if target[point] != (i32)point: builder.move_point(target[point], places[(usize)target[point]])
+    for at in 0..<builder.corners.count: builder.corners.items[at] = target[(usize)builder.corners.items[at]]

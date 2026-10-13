@@ -1,7 +1,7 @@
 ## Verbs over faces that keep the rest of the mesh as it is: Delete (Blast),
-## Reverse, Triangulate, Duplicate and Split. Faces outside
-## the group are copied with their triangles; the output selection is what
-## the verb made (the kept, reversed, new or inner faces).
+## Reverse, Duplicate and Split (Triangulate is triangulate.lucb's). Faces
+## outside the group are copied with their triangles; the output selection
+## is what the verb made (the kept, reversed, new or inner faces).
 
 let delete_parms: ParmSpec[1] = [ParmSpec("Keep group", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "On: keep only the group. Off: delete it.")]
 
@@ -13,9 +13,6 @@ let placeholder_parms: ParmSpec[1] = [ParmSpec("", ParmKind.number, 0.0, 0.0, 0.
 
 func reverse_verb() -> Verb:
     return Verb("Reverse", "Modeling", "Flip the winding of the group's faces", Domain.face, true, placeholder_parms[..<0], true, cook_reverse, section = "Modify", family = "Normals", icon = "reverse-normals", picks = pick_pieces)
-
-func triangulate_verb() -> Verb:
-    return Verb("Triangulate", "Modeling", "Split the group's faces into their triangles", Domain.face, true, placeholder_parms[..<0], true, cook_triangulate, section = "Modify", family = "Subdivide", icon = "triangulate", picks = pick_pieces)
 
 let duplicate_parms: ParmSpec[1] = [ParmSpec("Offset", ParmKind.number, 0.2, -100000.0, 100000.0, 1, "", "Distance of the copies along their face normals.", 2.0)]
 
@@ -70,31 +67,6 @@ func reverse_face(input: const VerbInput*, builder: TopologyBuilder*, face: usiz
         let corner = end - 1 - at
         try builder.corner(corners[corner], (i32)corner)
     try builder.end_face()
-
-## Each group face becomes its display triangles (faces in order, so the
-## selection counts them as they come).
-func cook_triangulate(input: const VerbInput*, output: VerbOutput*) -> !:
-    let offsets = input.mesh.offset_span()
-    var extra: usize = 0
-    for face in 0..<(usize)input.mesh.face_count():
-        if input.group.get(face): extra += (usize)(offsets[face + 1] - offsets[face]) - 3
-    try begin_selection(output, (usize)input.mesh.face_count() + extra)
-    try each_face(input, output, triangulate_face)
-
-func triangulate_face(input: const VerbInput*, builder: TopologyBuilder*, face: usize, selection: BitsBuilder*) -> !:
-    let offsets = input.mesh.offset_span()
-    let corners = input.mesh.corner_span()
-    let triangles = input.mesh.triangle_span()
-    let start = (usize)offsets[face]
-    let size = (usize)offsets[face + 1] - start
-    let first = (start - face * 2) * 3
-    for triangle in 0..<size - 2:
-        selection.set(builder.face_count())
-        try builder.face((i32)face)
-        for side in 0..<(usize)3:
-            let corner = (usize)triangles[first + triangle * 3 + side]
-            try builder.corner(corners[corner], (i32)corner)
-        try builder.end_face()
 
 func cook_duplicate(input: const VerbInput*, output: VerbOutput*) -> !:
     try begin_selection(output, (usize)input.mesh.face_count() + input.group.population())

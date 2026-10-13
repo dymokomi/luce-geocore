@@ -1,0 +1,136 @@
+## Poke: each of the group's faces becomes a fan of triangles round a new
+## point at its center, moved along the face's normal, after Blender's Poke
+## Faces and Modo's Poly Poke. The center is the corners' mean weighted by
+## the lengths of the two edges at each corner (Blender's weighted mean), their
+## plain mean, or the middle of their bounds. Relative scales the offset by
+## the face's mean distance from that center to its corners. The center's
+## values (UVs, colors) are the corners' mean; every triangle's center
+## corner shares one mix of its face's corners. The triangles are the
+## output selection. The fans are built in parallel, in ranges of faces.
+
+let poke_parms: ParmSpec[3] = [
+    ParmSpec("Offset", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "How far each new center moves along its face's normal.", 1.0),
+    ParmSpec("Relative", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Scale Offset by each face's mean distance from its center to its corners."),
+    ParmSpec("Center", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Weighted mean|Mean|Bounds", "Where the new point sits: the corners' mean weighted by the lengths of their edges, their plain mean, or the middle of their bounds.")]
+
+func poke_verb() -> Verb:
+    return Verb("Poke", "Modeling", "Fan each of the group's faces into triangles round a new point at its center", Domain.face, true, poke_parms, true, cook_poke, section = "Modify", family = "Subdivide", icon = "polygon-inscribed", picks = pick_faces, drag = 0, drag_mode = "normal")
+
+## What the fans read: the faces and their center points (-1 for a face
+## kept as it is).
+struct PokeWork:
+    let offsets: const i32[]
+    let corners: const i32[]
+    let centers: const i32[]
+
+func cook_poke(input: const VerbInput*, output: VerbOutput*) -> !:
+    let offset = input.parms.at(0)
+    if not math.is_finite(offset): error(errors.invalid, "Poke's offset must be finite")
+    let relative = input.parms.at(1) != 0.0
+    let mode = (usize)math.max(0.0, math.min(2.0, input.parms.at(2)))
+    let mesh = input.mesh
+    let faces = (usize)mesh.face_count()
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
+    let normals = mesh.face_normal_span()
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    let centers = try new i32[faces] --- in memory.heap
+    defer free(centers) in memory.heap
+    var extra: usize = 0
+    var point_stack: i32[256]
+    var weight_stack: f32[256]
+    for face in 0..<faces:
+        centers[face] = -1
+        if not input.group.get(face): continue
+        let start = (usize)offsets[face]
+        let size = (usize)offsets[face + 1] - start
+        let points = try face_scratch.take[i32](point_stack, size, size)
+        defer face_scratch.release[i32](point_stack, points)
+        let weights = try face_scratch.take[f32](weight_stack, size, size)
+        defer face_scratch.release[f32](weight_stack, weights)
+        for at in 0..<size:
+            points[at] = corners[start + at]
+            weights[at] = 1.0 / (f32)size
+        let center = poke_center(builder, points, mode)
+        var spread = 1.0
+        if relative:
+            spread = 0.0
+            for point in points: spread += builder.position(point).subtract(center).length()
+            spread = spread / (f64)size
+        let placed = center.add(normals[face].vector().multiply_scalar(offset * spread))
+        centers[face] = try builder.mixed_point(placed, points, weights)
+        extra += size - 1
+    var work = PokeWork(offsets, corners, centers[..<faces])
+    try batched_faces(builder, mesh, faces, 4096, (void*)&work, poke_range)
+    # The triangles are every face's fan, numbered in face order.
+    output.selection = try BitsBuilder.zeros(faces + extra)
+    output.selection_domain = Domain.face
+    var at: usize = 0
+    for face in 0..<faces:
+        let size = (usize)(offsets[face + 1] - offsets[face])
+        if centers[face] >= 0:
+            output.selection.set_range(at, at + size)
+            at += size
+        else:
+            at += 1
+
+## Where a face with corners at `points` gets its new point (`mode`: 0 the
+## mean weighted by the two edges at each corner, 1 the plain mean, 2 the
+## middle of the bounds).
+func poke_center(builder: const TopologyBuilder*, points: const i32[], mode: usize) -> Vector3:
+    let size = points.length
+    if mode == 2:
+        var low = builder.position(points[0])
+        var high = low
+        for point in points:
+            let p = builder.position(point)
+            low = Vector3(math.min(low.x, p.x), math.min(low.y, p.y), math.min(low.z, p.z))
+            high = Vector3(math.max(high.x, p.x), math.max(high.y, p.y), math.max(high.z, p.z))
+        return low.add(high).multiply_scalar(0.5)
+    var sum = Vector3()
+    var total = 0.0
+    for at in 0..<size:
+        let p = builder.position(points[at])
+        var weight = 1.0
+        if mode == 0:
+            let before = builder.position(points[(at + size - 1) % size])
+            let after = builder.position(points[(at + 1) % size])
+            weight = p.subtract(before).length() + after.subtract(p).length()
+        sum = sum.add(p.multiply_scalar(weight))
+        total += weight
+    if total <= 0.0:
+        sum = Vector3()
+        for point in points: sum = sum.add(builder.position(point))
+        return sum.multiply_scalar(1.0 / (f64)size)
+    return sum.multiply_scalar(1.0 / total)
+
+## Faces first..<end: a poked face's fan (its center corners sharing one
+## mix of the face's corners), any other copied.
+func poke_range(context: void*, first: usize, end: usize, batch: FaceBatch*) -> !:
+    let work = (const PokeWork*)context
+    var parent_stack: i32[256]
+    var weight_stack: f32[256]
+    for face in first..<end:
+        if work.centers[face] < 0:
+            try batch.copy_face(work.offsets, face)
+            continue
+        let start = (usize)work.offsets[face]
+        let size = (usize)work.offsets[face + 1] - start
+        let parents = try face_scratch.take[i32](parent_stack, size, size)
+        defer face_scratch.release[i32](parent_stack, parents)
+        let weights = try face_scratch.take[f32](weight_stack, size, size)
+        defer face_scratch.release[f32](weight_stack, weights)
+        for at in 0..<size:
+            parents[at] = (i32)(start + at)
+            weights[at] = 1.0 / (f32)size
+        let mix = try batch.shared_mix(parents, weights)
+        for at in 0..<size:
+            let next = start + (at + 1) % size
+            try batch.face((i32)face)
+            try batch.shared_corner(work.centers[face], mix)
+            try batch.corner(work.corners[start + at], (i32)(start + at))
+            try batch.corner(work.corners[next], (i32)next)
+            try batch.end_face()

@@ -1,0 +1,192 @@
+## Symmetrize and Snap to Symmetry, after Blender's. Both work across an
+## axis plane through the origin, the Edit node's Symmetry plane.
+##
+## Symmetrize makes the group's faces symmetric by building one half from
+## the other: points within Threshold of the plane move onto it, the faces
+## are cut by the plane (Clip's cut, which neighbors outside the group take
+## into their boundaries), the half Direction names goes, and the half it
+## keeps is mirrored over, winding the other way, welded to it on the
+## plane. The mirrored faces are the output selection.
+##
+## Snap to Symmetry moves the group's points to symmetric places without
+## changing the topology: each point is paired with the point nearest its
+## mirror image within Threshold (each paired once, the nearest first), and
+## the pair moves to mirror places Factor of the way from the source side
+## (Direction's first half) to the reflection of its partner: 0.5 meets
+## halfway, 0 copies the source side over. Points left without a partner
+## within Threshold of the plane move onto it (Center). The moved points
+## are the output selection; those left unpaired are counted in the
+## warning.
+
+let direction_choices = "-X to +X|+X to -X|-Y to +Y|+Y to -Y|-Z to +Z|+Z to -Z"
+
+let symmetrize_parms: ParmSpec[2] = [
+    ParmSpec("Direction", ParmKind.menu, 0.0, 0.0, 5.0, 1, direction_choices, "The half kept, and the half it is mirrored over."),
+    ParmSpec("Threshold", ParmKind.number, 0.0001, 0.0, 100000.0, 1, "", "Points this close to the plane move onto it, where the halves weld.", 0.01)]
+
+func symmetrize_verb() -> Verb:
+    return Verb("Symmetrize", "Modeling", "Make the group's faces symmetric: one half cut away and the other mirrored over it", Domain.face, true, symmetrize_parms, true, cook_symmetrize, section = "Modify", family = "Symmetry", icon = "constraint-symmetry", picks = pick_pieces, whole = true)
+
+let symmetry_snap_parms: ParmSpec[4] = [
+    ParmSpec("Direction", ParmKind.menu, 0.0, 0.0, 5.0, 1, direction_choices, "The half whose points lead (the first named)."),
+    ParmSpec("Threshold", ParmKind.number, 0.05, 0.0, 100000.0, 1, "", "How far a point's partner may sit from its mirror image.", 1.0),
+    ParmSpec("Factor", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "Where a pair meets: 0 at the leading point, 0.5 halfway, 1 at its partner's reflection."),
+    ParmSpec("Center", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Move unpaired points within Threshold of the plane onto it.")]
+
+func symmetry_snap_verb() -> Verb:
+    return Verb("Snap to Symmetry", "Modeling", "Move the group's points to symmetric places, each pair meeting across the plane", Domain.point, true, symmetry_snap_parms, false, cook_symmetry_snap, section = "Modify", family = "Symmetry", icon = "symmetry-align", picks = pick_components, drag = 2, drag_mode = "amount", whole = true)
+
+func cook_symmetrize(input: const VerbInput*, output: VerbOutput*) -> !:
+    let direction = (usize)math.max(0.0, math.min(5.0, input.parms.at(0)))
+    let threshold = math.max(0.0, input.parms.at(1))
+    if not math.is_finite(threshold): error(errors.invalid, "Symmetrize's threshold must be finite")
+    let axis = direction // 2
+    let keep_low = direction % 2 == 0
+    let source = input.mesh
+    if input.group.population() == 0:
+        output.warning = "No faces in the group to symmetrize; the input passes through"
+        return
+    # Points near the plane onto it.
+    var snapping = VerbOutput()
+    defer snapping.close()
+    snapping.positions = mesh_positions(source)
+    let positions = try snapping.positions.writable()
+    let origin = source.position_origin()
+    let topology = try Topology.of(source)
+    var seen = try BitsBuilder.zeros(topology.points)
+    defer seen.close()
+    for face in 0..<topology.faces():
+        if not input.group.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let point = (usize)topology.corners[corner]
+            if seen.view().get(point): continue
+            seen.set(point)
+            let place = builder_position(source, point)
+            let off = place.coordinate(axis)
+            if off == 0.0 or math.abs(off) > threshold: continue
+            positions[point] = Float3.of(place.with_coordinate(axis, 0.0).subtract(origin))
+            try snapping.moved.push((u32)point)
+    let snapped = try finish(source, &snapping)
+    defer mesh_dispose(snapped)
+    # The cut: Clip on the plane, keeping the half named first.
+    let clip_numbers: f64[10] = [(f64)axis, 0.0, 0.0, 1.0 if keep_low else 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var cutting = VerbOutput()
+    defer cutting.close()
+    let cut_input = VerbInput(snapped, input.group, Parms(clip_numbers[..<10]))
+    try cook_clip(&cut_input, &cutting)
+    if cutting.warning.length > 0: output.warning = cutting.warning
+    let half = try finish(snapped, &cutting)
+    defer mesh_dispose(half)
+    var kept = cutting.selection.finish()
+    defer kept.release()
+    let faces = (usize)half.face_count()
+    try mirrored_half(half, Bits(kept.view(), faces), axis, threshold, output)
+
+## `mesh` with faces `kept` reflected across the plane of `axis` through
+## the origin, winding the other way; points within `threshold` of the
+## plane are their own mirrors (the halves weld there). The reflections are
+## the output selection.
+func mirrored_half(mesh: const Mesh*, kept: Bits, axis: usize, threshold: f64, output: VerbOutput*) -> !:
+    let topology = try Topology.of(mesh)
+    let faces = topology.faces()
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    try builder.copy_faces(mesh, 0, faces)
+    var reflected = Growing[i32]()
+    defer reflected.close()
+    try reflected.fill(topology.points, -1)
+    for face in 0..<faces:
+        if not kept.get(face): continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let point = (usize)topology.corners[corner]
+            if reflected.items[point] >= 0: continue
+            let position = builder.position((i32)point)
+            if math.abs(position.coordinate(axis)) <= threshold:
+                reflected.items[point] = (i32)point
+                continue
+            reflected.items[point] = try builder.point(position.reflected(axis, 0.0), (i32)point)
+    let first = builder.face_count()
+    for face in 0..<faces:
+        if not kept.get(face): continue
+        let start = (usize)topology.offsets[face]
+        try builder.face((i32)face, false, true)
+        var corner = (usize)topology.offsets[face + 1]
+        while corner > start:
+            corner -= 1
+            try builder.corner(reflected.items[(usize)topology.corners[corner]], (i32)corner)
+        try builder.end_face()
+    output.selection = try BitsBuilder.zeros(builder.face_count())
+    output.selection.set_range(first, builder.face_count())
+    output.selection_domain = Domain.face
+
+## What pairing reads: the group's points, where they are, and the axis.
+struct PairWork:
+    let positions: const Vector3[]
+    let group: Bits
+    let grid: const PointHash*
+    let axis: usize
+    let threshold: f64
+    ## Per point: its partner (-1: none), found in parallel.
+    let partner: i32[]
+
+## Points first..<end of the group: the group point nearest its mirror
+## image within the threshold (-1: none, or itself).
+func find_partners(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (PairWork*)context
+    for point in first..<end:
+        work.partner[point] = -1
+        if not work.group.get(point): continue
+        let found = work.grid.nearest(work.positions, work.positions[point].reflected(work.axis, 0.0), work.threshold)
+        if found >= 0 and work.group.get((usize)found): work.partner[point] = found
+
+func cook_symmetry_snap(input: const VerbInput*, output: VerbOutput*) -> !:
+    let direction = (usize)math.max(0.0, math.min(5.0, input.parms.at(0)))
+    let threshold = math.max(0.0, input.parms.at(1))
+    let factor = math.max(0.0, math.min(1.0, input.parms.at(2)))
+    let center = input.parms.at(3) != 0.0
+    if not math.is_finite(threshold): error(errors.invalid, "Snap to Symmetry's threshold must be finite")
+    let axis = direction // 2
+    let lead_low = direction % 2 == 0
+    let mesh = input.mesh
+    let points = (usize)mesh.point_count()
+    let places = try new Vector3[points] --- in memory.heap
+    defer free(places) in memory.heap
+    for point in 0..<points: places[point] = builder_position(mesh, point)
+    var grid = try PointHash.build(places[..<points], math.max(threshold, 0.000000001) * 2.0)
+    defer grid.close()
+    let partner = try new i32[points] --- in memory.heap
+    defer free(partner) in memory.heap
+    var work = PairWork(places[..<points], input.group, &grid, axis, math.max(threshold, 0.000000001), partner[..<points])
+    try parallel.for_each_range(points, 16384, (void*)&work, find_partners)
+    output.positions = mesh_positions(mesh)
+    let positions = try output.positions.writable()
+    let origin = mesh.position_origin()
+    output.selection = try BitsBuilder.zeros(points)
+    output.selection_domain = Domain.point
+    var unpaired: usize = 0
+    for point in 0..<points:
+        if not input.group.get(point): continue
+        let other = partner[point]
+        let on_plane = other < 0 or (usize)other == point
+        if on_plane:
+            if center and math.abs(places[point].coordinate(axis)) <= threshold:
+                positions[point] = Float3.of(places[point].with_coordinate(axis, 0.0).subtract(origin))
+                try output.moved.push((u32)point)
+                output.selection.set(point)
+            elif other < 0:
+                unpaired += 1
+            continue
+        # Each pair once, from the leading side: a mutual pair only.
+        let mine = places[point].coordinate(axis)
+        if partner[(usize)other] != (i32)point or (mine < 0.0) != lead_low: continue
+        let target = places[(usize)other].reflected(axis, 0.0)
+        let meet = places[point].add(target.subtract(places[point]).multiply_scalar(factor))
+        positions[point] = Float3.of(meet.subtract(origin))
+        positions[(usize)other] = Float3.of(meet.reflected(axis, 0.0).subtract(origin))
+        try output.moved.push((u32)point)
+        try output.moved.push((u32)other)
+        output.selection.set(point)
+        output.selection.set((usize)other)
+    if unpaired > 0: output.warning = "Some points of the group found no partner within the threshold and stayed"

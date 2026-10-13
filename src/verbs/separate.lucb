@@ -1,0 +1,195 @@
+## Separate: the group's faces become pieces of their own, after Blender's
+## Separate (P) and Maya's Extract. A piece is the faces sharing a `path`
+## (Edit Mesh's Object level). Selection makes the group one new piece;
+## Loose parts makes each island of the group (faces joined through shared
+## points) its own. A separated island gets its own points where it touched
+## other faces, and its faces the path of its first face (or /mesh) with
+## Blender's suffix, the first of .001, .002, … no face has: an island that
+## shares its path with nothing outside it keeps it. The separated faces
+## are the output selection.
+
+let separate_parms: ParmSpec[1] = [
+    ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Selection|Loose parts", "The group as one new piece, or each of its parts as its own.")]
+
+func separate_verb() -> Verb:
+    return Verb("Separate", "Modeling", "Make the group's faces pieces of their own: one, or one per island", Domain.face, true, separate_parms, true, cook_separate, section = "Modify", family = "Split", icon = "split-body", picks = pick_pieces)
+
+## A point's copy for one island (a linked list per point).
+struct PointCopy:
+    let island: i32
+    let point: i32
+    let next: i32
+
+func cook_separate(input: const VerbInput*, output: VerbOutput*) -> !:
+    let loose = input.parms.at(0) != 0.0
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let faces = topology.faces()
+    let points = topology.points
+    if input.group.population() == 0:
+        output.warning = "No faces in the group to separate; the input passes through"
+        return
+    # Each group face's island (-1 outside): one island, or one per part
+    # joined through shared points.
+    let island = try new i32[faces] --- in memory.heap
+    defer free(island) in memory.heap
+    let parts = try face_islands(&topology, input.group, loose, island[..<faces])
+    # Who keeps each point: the outside when any outside face uses it, else
+    # the island of its first face; other parts get copies.
+    let keeper = try new i32[points] --- in memory.heap
+    defer free(keeper) in memory.heap
+    for at in 0..<points: keeper[at] = -2
+    for face in 0..<faces:
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let point = (usize)topology.corners[corner]
+            if island[face] < 0:
+                keeper[point] = -1
+            elif keeper[point] == -2:
+                keeper[point] = island[face]
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    let heads = try new i32[points] --- in memory.heap
+    defer free(heads) in memory.heap
+    for at in 0..<points: heads[at] = -1
+    var copies = Growing[PointCopy]()
+    defer copies.close()
+    var run: usize = 0
+    for face in 0..<faces:
+        let own = island[face]
+        var moved = false
+        if own >= 0:
+            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                if keeper[(usize)topology.corners[corner]] != own: moved = true
+        if not moved: continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        try builder.face((i32)face, true)
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let point = topology.corners[corner]
+            var id = point
+            if keeper[(usize)point] != own: id = try copy_for(builder, &copies, heads[..<points], point, own)
+            try builder.corner(id, (i32)corner)
+        try builder.end_face()
+    try builder.copy_faces(mesh, run, faces)
+    output.built = false
+    let made = try builder.finish(mesh)
+    errdefer mesh_dispose(made)
+    try name_islands(made, island[..<faces], parts)
+    output.mesh = made
+    output.selection = try BitsBuilder.copy_of(input.group)
+    output.selection_domain = Domain.face
+
+## Point `point`'s copy for island `own`, made the first time.
+func copy_for(builder: TopologyBuilder*, copies: Growing[PointCopy]*, heads: i32[], point: i32, own: i32) -> i32!:
+    var at = heads[(usize)point]
+    while at >= 0:
+        let entry = copies.items[(usize)at]
+        if entry.island == own: return entry.point
+        at = entry.next
+    let made = try builder.point(builder.position(point), point)
+    try copies.push(PointCopy(own, made, heads[(usize)point]))
+    heads[(usize)point] = (i32)(copies.count - 1)
+    return made
+
+## Each face's island among the group's faces (-1 outside), numbered in
+## face order: all one, or (`loose`) parts joined through shared points.
+## How many parts.
+func face_islands(topology: const Topology*, group: Bits, loose: bool, island: i32[]) -> usize!:
+    let faces = island.length
+    for face in 0..<faces: island[face] = (i32)face if group.get(face) else -1
+    if not loose:
+        for face in 0..<faces:
+            if island[face] >= 0: island[face] = 0
+        return 1
+    # Union the group's faces at each point (the first face there is the
+    # root its others join).
+    let first = try new i32[topology.points] --- in memory.heap
+    defer free(first) in memory.heap
+    for at in 0..<topology.points: first[at] = -1
+    for face in 0..<faces:
+        if island[face] < 0: continue
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let point = (usize)topology.corners[corner]
+            if first[point] < 0:
+                first[point] = (i32)face
+                continue
+            let a = root(island, first[point])
+            let b = root(island, (i32)face)
+            if a != b: island[(usize)(a if a > b else b)] = a if a < b else b
+    # Compact: parts numbered by their lowest face (the roots found first,
+    # then the numbers written over the parents).
+    let number = try new i32[faces] --- in memory.heap
+    defer free(number) in memory.heap
+    var count: usize = 0
+    for face in 0..<faces:
+        number[face] = -1
+        if island[face] < 0: continue
+        number[face] = root(island, (i32)face)
+    let ids = try new i32[faces] --- in memory.heap
+    defer free(ids) in memory.heap
+    for face in 0..<faces:
+        ids[face] = -1
+        if number[face] == (i32)face:
+            ids[face] = (i32)count
+            count += 1
+    for face in 0..<faces:
+        if number[face] >= 0: island[face] = ids[(usize)number[face]]
+    return count
+
+## Paths for the separated parts of `mesh` (faces as `island` says): each
+## takes its first face's path (or /mesh) with the first unused .NNN
+## suffix, but the first island with a path no face outside the parts
+## has keeps it.
+func name_islands(mesh: Mesh*, island: const i32[], parts: usize) -> !:
+    let faces = island.length
+    let index = mesh.attribute_on("path", Domain.face)
+    var old: const Attribute*? = none
+    if index >= 0:
+        let entry = try mesh.attribute_entry(index)
+        if entry.kind == DataType.text: old = entry
+    var table = TableBuilder()
+    defer table.close()
+    let values = try new i32[faces] --- in memory.heap
+    defer free(values) in memory.heap
+    for face in 0..<faces:
+        var text = "/mesh"
+        if let entry = old:
+            let found = entry.text_at(face)
+            if found.length > 0: text = found
+        values[face] = try table.intern(text)
+    # The first island with a path no outside face has keeps it; every
+    # other takes a fresh one.
+    let first_face = try new i32[parts] --- in memory.heap
+    defer free(first_face) in memory.heap
+    for at in 0..<parts: first_face[at] = -1
+    for face in 0..<faces:
+        if island[face] >= 0 and first_face[(usize)island[face]] < 0: first_face[(usize)island[face]] = (i32)face
+    let renamed = try new i32[parts] --- in memory.heap
+    defer free(renamed) in memory.heap
+    for at in 0..<parts:
+        let base = values[(usize)first_face[at]]
+        var taken = false
+        for face in 0..<faces:
+            if island[face] < 0 and values[face] == base: taken = true
+        for earlier in 0..<at:
+            if renamed[earlier] == base: taken = true
+        renamed[at] = try fresh_path(&table, table.text((usize)base)) if taken else base
+    for face in 0..<faces:
+        if island[face] >= 0: values[face] = renamed[(usize)island[face]]
+    var column = try table.finish()
+    defer column.release()
+    remove_attribute(mesh, "path", Domain.face)
+    try put_attribute(mesh, try Attribute.text("path", Domain.face, faces, column, values[..<faces]))
+
+## `base` with the first suffix .001, .002, … not in `table` yet, interned.
+func fresh_path(table: TableBuilder*, base: str) -> i32!:
+    var room: u8[512]
+    for number in 1..<(usize)1000:
+        let name = strings.format(room[..<512], f"{base}.{number // 100}{number // 10 % 10}{number % 10}") else error(errors.limit, "a piece's path is too long")
+        var taken = false
+        for at in 0..<table.count():
+            if table.text(at) == name: taken = true
+        if not taken: return try table.intern(name)
+    error(errors.limit, "a thousand pieces share one path")

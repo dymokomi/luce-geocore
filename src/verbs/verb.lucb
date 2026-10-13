@@ -13,6 +13,7 @@ import strings
 from luce_std import parallel
 import core.attribute_ops
 from core.growing import Growing
+from core.strings import TableBuilder
 from core.shared import Column
 from core.float3 import Float3
 from core.bits import Bits, BitsBuilder, popcount, trailing_zeros
@@ -26,10 +27,11 @@ import geometries.triangulation.face_scratch
 from geometries.point_hash import PointHash
 from geometries.topology.connectivity import Topology
 from groups import GroupType, is_blank, guess_domain, GroupResult, GroupReport, group_bits, Selection, adopt_selection, strict_conversion, selection_bits
-from selecting import converted, rule_at, rule_count, run_rule, mirror_tolerance, mirror_map, symmetric
+from selecting import converted, rule_at, rule_count, run_rule, mirror_tolerance, mirror_map, symmetric, Delimits, delimits_for
 from core.limits import max_points, check_mesh_size
 from core.verb_specs import ParmKind, ParmSpec, PickSpec, KeySpec, Parms, filled_parms
 from luce_std import ramp
+from luce_std import sort
 
 ## A verb with no pick declared takes one, at every level.
 let no_picks: PickSpec[1] = [PickSpec("")]
@@ -75,6 +77,9 @@ pub struct VerbInput:
     pub let symmetry: i64 = 0
     ## The domain of `group`: the verb's, or its second domain.
     pub let domain: Domain = Domain.face
+    ## The second pick's elements (Bridge's second loop, Target Weld's
+    ## target), on the domain its levels name, when one was given.
+    pub let second: Bits? = none
 
 ## What a kernel returns: new positions over the same topology, a topology
 ## built with parents, or a finished mesh; and the output selection.
@@ -190,6 +195,10 @@ pub struct Verb:
     ## The select rule it runs instead of `cook` (selecting/registry.lucb's
     ## index; -1: none).
     pub let rule: i64 = -1
+    ## Whether, run on its first pick alone, it still wants its second
+    ## (Bridge with fewer than two loops; Target Weld always); none: the
+    ## second pick is never asked for.
+    pub let wants: (func(const VerbInput*) -> bool!)? = none
 
     ## Whether the kernel takes groups on `domain` as they are (`also`).
     pub func takes(domain: Domain) -> bool:
@@ -211,13 +220,16 @@ pub struct VerbRun:
         self.selection.release()
 
 ## Run `verb` on `mesh`: the group (text; empty is every element) on
-## `group_type`'s domain, made symmetric across `symmetry` (0 none, 1 X,
-## 2 Y, 3 Z), converted to the verb's domain. With `keep`, the output
+## `group_type`'s domain (the second pick's `second` read the same way),
+## made symmetric across `symmetry` (0 none, 1 X, 2 Y, 3 Z), converted to
+## the verb's domain. With `keep`, the output
 ## selection is the group carried through the verb (a new element is
 ## selected when all its parents were) instead of what the verb made.
-pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false) -> VerbRun!:
+pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false, second: str = "") -> VerbRun!:
     var resolved = try resolve_group(verb, mesh, group, group_type, symmetry)
     defer resolved.close()
+    var picked = try second_pick(verb, mesh, second, group_type)
+    defer picked.close()
     let domain = resolved.domain
     let target = resolved.target
     # The group rides through the verb as `.carried` when it is kept.
@@ -234,7 +246,9 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
     defer values.close()
     var output = VerbOutput()
     defer output.close()
-    let input = VerbInput(source, bits, Parms(values.view()), symmetry, target)
+    var second_bits: Bits? = none
+    if not is_blank(second) and verb.picks.length > 1: second_bits = picked.view()
+    let input = VerbInput(source, bits, Parms(values.view()), symmetry, target, second_bits)
     if verb.rule >= 0:
         let rule = rule_at((usize)verb.rule)
         let made = try run_rule(&rule, source, bits, target, values.view())
@@ -276,6 +290,41 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
         selection.release()
         error(failure.code, failure.message)
     return VerbRun(product, selection, count, selection_domain, output.warning, resolved.misses)
+
+## The second pick's expression, read on `group_type`'s domain as the
+## first is, as bits on the domain its levels name first (points, edges or
+## faces); none given is no bits.
+func second_pick(verb: const Verb*, mesh: const Mesh*, expression: str, group_type: i64) -> BitsBuilder!:
+    if is_blank(expression) or verb.picks.length < 2: return try BitsBuilder.zeros(0)
+    let target = pick_domain(&verb.picks[1])
+    let named = try GroupType.of(group_type)
+    var domain = named.domain(target)
+    if named == GroupType.guess: domain = try guess_domain(mesh, expression, target)
+    var result = try group_bits(mesh, expression, domain)
+    defer result.bits.release()
+    var bits = try BitsBuilder.copy_of(Bits(result.bits.view(), try mesh.domain_size(domain)))
+    if domain == target: return bits
+    defer bits.close()
+    let topology = try Topology.of(mesh)
+    return try converted(&topology, bits.view(), domain, target, strict_conversion(domain, target))
+
+## The domain a pick's first level names (faces for objects or none).
+func pick_domain(pick: const PickSpec*) -> Domain:
+    if strings.starts_with(pick.levels, "points"): return Domain.point
+    if strings.starts_with(pick.levels, "edges"): return Domain.edge
+    return Domain.face
+
+## Whether `verb` on `group` alone (as `run_verb` reads it) wants its
+## second pick.
+pub func verb_wants_second(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[]) -> bool!:
+    let check = verb.wants else return false
+    if verb.picks.length < 2: return false
+    var resolved = try resolve_group(verb, mesh, group, group_type, 0)
+    defer resolved.close()
+    var values = try filled_parms(verb.parms, numbers, verb.trailing)
+    defer values.close()
+    let input = VerbInput(mesh, resolved.bits.view(), Parms(values.view()), 0, resolved.target)
+    return try check(&input)
 
 ## A group as a verb reads it: `chosen` on the domain it names (made
 ## symmetric), and `bits` on the domain the kernel works on.

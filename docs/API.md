@@ -267,7 +267,8 @@ list it under), `icon` (a luciaos-assets name), `picks` (`PickSpec`: what it
 works on, the selection levels it is picked at, as `objects points edges
 faces`, and the prompt while it waits; none declared is one pick at every
 level), `drag` (the parameter a drag in the viewport sets after it runs),
-`gesture` (`stroke` for the knife, `place` for PolyDraw's clicked corners)
+`gesture` (`stroke` for Bisect's line, `place` for PolyDraw's clicked
+corners, `hover` for Loop Cut's ring, `knife` for the Knife's points)
 and `whole` (with nothing selected it runs on everything). A parameter with
 `bar` off stays off the tool's bar (numbers a gesture records). `Verbs.label`,
 `section`, `family`, `icon`, `pick_*`, `drag`, `gesture`, `whole` and
@@ -278,7 +279,7 @@ center, its average normal and a slide's rails; `Verbs.frame_at(center,
 axis)` is a frame of a center and an axis alone, for a tool that is no verb
 (luced-3d's CAD tools, measured on their own geometry).
 
-`Verbs.run(name, mesh, group, group_type, numbers, symmetry=0, keep=false)`
+`Verbs.run(name, mesh, group, group_type, numbers, symmetry=0, keep=false, second="")`
 also carries the Edit engine's options: `symmetry` (1..3) adds the mirror of
 every group member across the X, Y or Z plane through the origin, and `keep`
 makes the output selection the group carried through the verb instead of what
@@ -318,8 +319,71 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
   or one by one, clamped to half the boundary edges.
 - **Loop Cut** (edges): loops across the quads of each edge ring, with cuts and
   slide; other faces on a ring take the new points.
-- **Bridge** (edges): boundary loops or runs, paired by nearness, joined by rows
-  of quads (same edge counts) or zipped with triangles.
+- **Bridge** (edges, or faces whose outlines it bridges and removes):
+  boundary loops or runs paired by nearness, or each first-pick chain with
+  the nearest chain of the second pick (`Verbs.run`'s `second`); joined by
+  Cuts + 1 rows of quads (same edge counts) shaped Linear, Blend path (a
+  cubic Bézier between the loops' centers, handles after Blender's length)
+  or Blend surface (each point's own Bézier leaving the faces), with a
+  Profile swell of six shapes; Twist; Merge welds the loops at Merge factor
+  instead. Runs of different lengths zip with triangles.
+- **Grid Fill** (edges): each closed hole of an even number of boundary
+  edges filled with a quad grid, Span edges by n/2 - Span from its sharpest
+  corner (Offset moves it; Span 0 finds the next corner, else a quarter),
+  inner points on the Coons patch of the four sides (Simple: the first and
+  third only).
+- **Solidify** (faces): a shell Thickness thick, Offset placing it behind,
+  centered or in front, Even thickness by each point's mean 1/cos, Fill rim
+  along the group's outline, Flip.
+- **Poke** (faces): each face a fan round a new point at its weighted mean,
+  mean or bounds center, moved Offset (Relative: times its mean radius)
+  along its normal.
+- **Rotate Edge** (edges): each edge turned one corner on (or back) within
+  its two faces.
+- **Edge Split** and **Rip** (edges, Rip also points): the surface cut open
+  by sectors round each point; Rip carries a chain end inside the surface
+  one edge on (Blender's rule), moves one side Offset into its faces (Flip
+  for the other) and with Fill closes the gap; a ripped point splits its fan
+  along two opposite edges (Turn picks which).
+- **Separate** (faces): the group, or each of its loose parts, a piece of its
+  own: own points where it touched others, its path suffixed .001, .002, …
+- **Dissolve**'s Clean points, **Delete Edge Loop** and **Limited Dissolve**:
+  points left between two edges go; a loop's faces either side join and its
+  points go; faces flatter than Angle join flattest first while the regions'
+  area-weighted normals stay within it, straight-run points go (Boundaries,
+  delimits for sharp, seams, materials, UVs).
+- **Collapse** (edges, faces): each island to its center. **Merge Points**
+  gains At point. **Target Weld** (points): the group onto the second
+  pick's point.
+- **Knife** (faces; a stroke's points after its parameters, `trailing`):
+  each segment cuts with the ribbon its points sweep along the stroke's
+  direction, through every face (Cut through) or the faces facing it that
+  nothing hides; paths across faces split them, ends inside a face trimmed
+  back, neighbors take the cut points. **Clip** is the editor's Bisect.
+- **Spin** gains Flip; **Screw** (edges): Turns of Steps copies rising Rise
+  each turn.
+- **Symmetrize** (faces): points within Threshold of the plane moved onto it,
+  the faces cut on it (Clip), one half deleted and the other mirrored,
+  welded on the plane. **Snap to Symmetry** (points): each point paired
+  with the point nearest its mirror within Threshold, the pair placed
+  Factor between, centered points onto the plane.
+- **Subdivide**'s Smoothness: Linear's new points onto the sphere the
+  corners' normals describe. **Smooth**: Keep volume (Taubin's λ|μ), Keep
+  boundary, Axes. **Relax**: the move along the surface only.
+- **Triangulate**'s quad methods (Beauty, Fixed, Alternate, Shortest,
+  Longest) and n-gon methods (Beauty: Delaunay flips; Clip). **Tris to
+  Quads** (`Quadrangulate`): triangle pairs within Face and Shape angles
+  joined squarest first, candidates priced in parallel.
+- **Decimate** (`PolyReduce`): Collapse by Garland–Heckbert quadrics (outline
+  planes weighted, flips and link refusals, ties to the shortest edge, Lock
+  boundary), Un-subdivide by labeling the quads as a subdivision made them,
+  Planar as Limited Dissolve.
+
+A verb of two picks declares a second `PickSpec`; `Verbs.run(..., second)`
+reads that pick's group on the first's group type and converts it to the
+pick's domain (`VerbInput.second`), and `Verbs.wants_second` says whether the
+first pick alone still wants it (Bridge with one loop, Target Weld always),
+so the editor asks for it.
 - **Merge Points**: at the center, first, last, per island or by distance.
 - **Fill**: one face per boundary loop, or a fan around a center point;
   loops of any length.
@@ -384,33 +448,63 @@ and attributes included):
 
 | Verb run | Time | Faces out | Warning |
 |---|---:|---:|---|
-| Transform Components, 1k faces | 16.9 ms | 700,569 |  |
-| Smooth, everything | 4.9 ms | 700,569 |  |
-| Delete, 1k faces | 5.7 ms | 699,569 |  |
-| Reverse, 1k faces | 12.3 ms | 700,569 |  |
-| Triangulate, half | 46.3 ms | 1,050,570 |  |
-| Duplicate, 1k faces | 11.2 ms | 701,569 |  |
-| Subdivide, everything to 2.8M faces | 516.8 ms | 2,802,276 |  |
-| Fuse, 1k faces' points | 25.4 ms | 700,569 |  |
-| PolyExtrude, 1k faces as a region | 22.2 ms | 702,247 |  |
-| PolyExtrude, 1k faces one by one, inset, 2 divisions | 24.7 ms | 708,569 |  |
-| PolyExtrude, 100k faces as a region | 50.6 ms | 702,483 |  |
-| PolyExtrude, 3 edges | 33.5 ms | 700,572 |  |
-| Inset, 1k faces as a region | 21.6 ms | 702,247 |  |
-| Inset, 100k faces as a region | 54.3 ms | 702,483 |  |
-| PolyBevel, 1k faces' inner edges | 31.1 ms | 705,240 |  |
-| PolyBevel, 100k faces' inner edges, 3 segments | 209.6 ms | 2,197,462 |  |
-| PolyBevel, every edge (1.4M) | 454.5 ms | 2,798,929 |  |
-| Loop Cut, one ring of 837 quads | 41.2 ms | 701,406 |  |
-| Loop Cut, every ring both ways | 375.2 ms | 1,401,138 |  |
-| Bridge, two facing 837-edge loops, 4 divisions | 17.1 ms | 703,080 |  |
-| Merge Points, a face's points at their center | 20.9 ms | 700,568 |  |
-| Merge Points, 250 pairs as islands | 20.7 ms | 700,569 |  |
-| Dissolve, 250 edges between face pairs | 36.2 ms | 700,278 |  |
-| Dissolve, 250 points | 27.0 ms | 699,821 |  |
-| Fill, a 22-edge hole | 14.1 ms | 700,561 |  |
-| Fill, a 22-edge hole as a fan | 11.3 ms | 703,929 |  |
-| Split, 1k faces | 10.7 ms | 700,569 |  |
-| PolyDraw, a quad drawn onto the grid, its corners snapped | 17.7 ms | 700,570 |  |
-| PolyDraw, through 4 selected points | 9.6 ms | 700,570 |  |
-| Clean, everything | 14.3 ms | 700,569 |  |
+| Transform Components, 1k faces | 15.4 ms | 700,569 |  |
+| Smooth, everything | 5.3 ms | 700,569 |  |
+| Delete, 1k faces | 5.9 ms | 699,569 |  |
+| Reverse, 1k faces | 13.5 ms | 700,569 |  |
+| Triangulate, half | 35.5 ms | 1,050,570 |  |
+| Duplicate, 1k faces | 11.5 ms | 701,569 |  |
+| Subdivide, everything to 2.8M faces | 554.8 ms | 2,802,276 |  |
+| Fuse, 1k faces' points | 26.6 ms | 700,569 |  |
+| PolyExtrude, 1k faces as a region | 23.9 ms | 702,247 |  |
+| PolyExtrude, 1k faces one by one, inset, 2 divisions | 27.1 ms | 708,569 |  |
+| PolyExtrude, 100k faces as a region | 71.2 ms | 702,483 |  |
+| PolyExtrude, 3 edges | 47.0 ms | 700,572 |  |
+| Inset, 1k faces as a region | 26.1 ms | 702,247 |  |
+| Inset, 100k faces as a region | 80.1 ms | 702,483 |  |
+| PolyBevel, 1k faces' inner edges | 83.5 ms | 705,240 |  |
+| PolyBevel, 100k faces' inner edges, 3 segments | 325.0 ms | 2,197,462 |  |
+| PolyBevel, every edge (1.4M) | 516.7 ms | 2,798,929 |  |
+| Loop Cut, one ring of 837 quads | 42.9 ms | 701,406 |  |
+| Loop Cut, every ring both ways | 385.9 ms | 1,401,138 |  |
+| Bridge, two facing 837-edge loops, 3 cuts | 19.9 ms | 703,080 |  |
+| Merge Points, a face's points at their center | 23.9 ms | 700,568 |  |
+| Merge Points, 250 pairs as islands | 24.3 ms | 700,569 |  |
+| Dissolve, 250 edges between face pairs | 37.9 ms | 700,278 |  |
+| Dissolve, 250 points | 33.8 ms | 699,821 |  |
+| Fill, a 22-edge hole | 45.4 ms | 700,561 |  |
+| Fill, a 22-edge hole as a fan | 19.5 ms | 703,929 |  |
+| Split, 1k faces | 14.4 ms | 700,569 |  |
+| PolyDraw, a quad drawn onto the grid, its corners snapped | 26.0 ms | 700,570 |  |
+| PolyDraw, through 4 selected points | 13.0 ms | 700,570 |  |
+| Clean, everything | 25.5 ms | 700,569 |  |
+| Poke, 1k faces | 17.3 ms | 703,569 |  |
+| Poke, 100k faces | 53.7 ms | 1,000,569 |  |
+| Rotate Edge, a 1k faces' edges | 46.2 ms | 700,569 | Edges on a boundary, sharing a face with another, or whose new diagonal exists already were left |
+| Solidify, 100k faces | 33.6 ms | 802,483 |  |
+| Solidify, everything, even thickness | 69.7 ms | 1,404,486 |  |
+| Symmetrize, everything | 103.1 ms | 701,406 |  |
+| Snap to Symmetry, every point | 43.6 ms | 700,569 |  |
+| Grid Fill, a 22-edge hole | 17.4 ms | 700,569 |  |
+| Bridge, two 837-edge loops, 3 cuts, blend path and profile | 19.3 ms | 703,080 |  |
+| Bridge, the second loop as a second pick | 27.5 ms | 700,569 |  |
+| Edge Split, a 1k faces' inner edges | 58.1 ms | 700,569 |  |
+| Rip, a run of 10 edges, filled | 55.9 ms | 700,581 |  |
+| Separate, 1k faces | 23.0 ms | 700,569 |  |
+| Separate, 100k faces as loose parts | 25.5 ms | 700,569 |  |
+| Delete Edge Loop, a 1k faces' inner edges | 45.4 ms | 699,570 |  |
+| Limited Dissolve, everything (one face) | 149.5 ms | 1 |  |
+| Collapse, a 1k faces' block | 24.8 ms | 699,567 |  |
+| Merge Points, a face's points at a point | 20.1 ms | 700,568 |  |
+| Target Weld, a point onto its neighbor | 17.5 ms | 700,569 |  |
+| Knife, a stroke across 837 faces, through | 54.7 ms | 701,406 |  |
+| Spin, a run of 10 edges about an X axis, 12 steps | 17.0 ms | 700,689 |  |
+| Screw, a run of 10 edges about an X axis, 2 turns of 12 | 17.7 ms | 700,809 |  |
+| Subdivide, everything, linear, smoothness 1 | 744.9 ms | 2,802,276 |  |
+| Smooth, everything, keep volume and boundary | 13.0 ms | 700,569 |  |
+| Relax, everything, 5 rounds | 29.2 ms | 700,569 |  |
+| Triangulate, everything, beauty | 70.9 ms | 1,401,138 |  |
+| Tris to Quads, the grid in triangles | 136.6 ms | 700,569 |  |
+| Decimate, 100k triangles collapsed to half | 88.1 ms | 1,351,137 |  |
+| Decimate, un-subdivide 836×836 quads | 76.0 ms | 174,724 |  |
+| Collapse, every edge of 100k faces | 23.5 ms | 600,568 |  |

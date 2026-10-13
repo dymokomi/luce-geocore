@@ -1,0 +1,148 @@
+## Triangulate: the group's faces split into triangles, after Blender's
+## Triangulate Faces. A quad splits along a diagonal by Quad method:
+## Beauty (the split whose worse triangle is the rounder: the larger
+## smallest angle), Fixed (corner 1 to 3 in the face's order, 0-based 0 to
+## 2), Alternate (1 to 3), Shortest or Longest diagonal. Larger faces split
+## by N-gon method: Clip (their ear-clipped display triangles) or Beauty
+## (those, with the diagonals inside flipped while that makes the triangles
+## rounder: Delaunay in the face's plane). Faces are split in parallel, in
+## ranges, and kept in order: a face's triangles where it was. The
+## triangles are the output selection.
+
+let triangulate_parms: ParmSpec[2] = [
+    ParmSpec("Quad method", ParmKind.menu, 0.0, 0.0, 4.0, 1, "Beauty|Fixed|Alternate|Shortest diagonal|Longest diagonal", "Which diagonal splits a quad."),
+    ParmSpec("N-gon method", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Beauty|Clip", "How larger faces split: rounder triangles, or the ear-clipped display triangles.")]
+
+func triangulate_verb() -> Verb:
+    return Verb("Triangulate", "Modeling", "Split the group's faces into triangles", Domain.face, true, triangulate_parms, true, cook_triangulate, section = "Modify", family = "Subdivide", icon = "triangulate", picks = pick_pieces, whole = true)
+
+struct TriangulateWork:
+    let mesh: const Mesh*
+    let group: Bits
+    let quads: usize
+    let ngons: usize
+
+func cook_triangulate(input: const VerbInput*, output: VerbOutput*) -> !:
+    let mesh = input.mesh
+    let faces = (usize)mesh.face_count()
+    let offsets = mesh.offset_span()
+    var total: usize = 0
+    for face in 0..<faces:
+        total += (usize)(offsets[face + 1] - offsets[face]) - 2 if input.group.get(face) else 1
+    try output.builder.begin(mesh)
+    try output.builder.copy_points(mesh)
+    output.built = true
+    var work = TriangulateWork(mesh, input.group, (usize)math.max(0.0, math.min(4.0, input.parms.at(0))), (usize)math.max(0.0, math.min(1.0, input.parms.at(1))))
+    try batched_faces(&output.builder, mesh, faces, 4096, (void*)&work, triangulate_range)
+    output.selection = try BitsBuilder.zeros(total)
+    output.selection_domain = Domain.face
+    var at: usize = 0
+    for face in 0..<faces:
+        if not input.group.get(face):
+            at += 1
+            continue
+        let made = (usize)(offsets[face + 1] - offsets[face]) - 2
+        output.selection.set_range(at, at + made)
+        at += made
+
+func triangulate_range(context: void*, first: usize, end: usize, batch: FaceBatch*) -> !:
+    let work = (const TriangulateWork*)context
+    let mesh = work.mesh
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
+    let triangles = mesh.triangle_span()
+    var trio_stack: i32[768]
+    for face in first..<end:
+        let start = (usize)offsets[face]
+        let size = (usize)offsets[face + 1] - start
+        if not work.group.get(face) or size == 3:
+            try batch.copy_face(offsets, face)
+            continue
+        # The face's triangles as corners of it (offsets from `start`).
+        let count = (size - 2) * 3
+        let trios = try face_scratch.take[i32](trio_stack, count, count)
+        defer face_scratch.release[i32](trio_stack, trios)
+        if size == 4:
+            let split = quad_split(mesh, corners, start, work.quads)
+            let order: i32[6] = [0, 1, 2, 0, 2, 3] if split == 0 else [1, 2, 3, 1, 3, 0]
+            for k in 0..<(usize)6: trios[k] = order[k]
+        else:
+            let triangle_start = (start - face * 2) * 3
+            for k in 0..<count: trios[k] = triangles[triangle_start + k] - (i32)start
+            if work.ngons == 0: beautify(mesh, corners, start, trios)
+        for triangle in 0..<size - 2:
+            try batch.face((i32)face)
+            for side in 0..<(usize)3:
+                let corner = start + (usize)trios[triangle * 3 + side]
+                try batch.corner(corners[corner], (i32)corner)
+            try batch.end_face()
+
+## Which diagonal splits the quad whose corners start at `start`: 0 joins
+## corners 0 and 2, 1 joins 1 and 3.
+func quad_split(mesh: const Mesh*, corners: const i32[], start: usize, method: usize) -> usize:
+    if method == 1: return 0
+    if method == 2: return 1
+    let p0 = point_of(mesh, corners[start])
+    let p1 = point_of(mesh, corners[start + 1])
+    let p2 = point_of(mesh, corners[start + 2])
+    let p3 = point_of(mesh, corners[start + 3])
+    if method == 3 or method == 4:
+        let first = p2.subtract(p0).length()
+        let second = p3.subtract(p1).length()
+        let shorter: usize = 0 if first <= second else 1
+        return shorter if method == 3 else 1 - shorter
+    # Beauty: the split whose worse triangle has the larger smallest angle.
+    let even = math.min(smallest_angle(p0, p1, p2), smallest_angle(p0, p2, p3))
+    let odd = math.min(smallest_angle(p1, p2, p3), smallest_angle(p1, p3, p0))
+    return 0 if even >= odd else 1
+
+## The smallest angle of triangle a, b, c.
+func smallest_angle(a: Vector3, b: Vector3, c: Vector3) -> f64:
+    return math.min(corner_turn(a, b, c), math.min(corner_turn(b, c, a), corner_turn(c, a, b)))
+
+## The angle at `a` between `b` and `c`.
+func corner_turn(a: Vector3, b: Vector3, c: Vector3) -> f64:
+    let u = b.subtract(a)
+    let v = c.subtract(a)
+    let lengths = u.length() * v.length()
+    if lengths <= 0.0: return 0.0
+    return math.acos(math.max(-1.0, math.min(1.0, u.dot(v) / lengths)))
+
+## Flip the diagonals between `trios`' triangles while a flip makes the pair
+## rounder (the angles facing the diagonal sum past π: not Delaunay) and
+## keeps it convex; a bounded number of passes.
+func beautify(mesh: const Mesh*, corners: const i32[], start: usize, trios: i32[]):
+    let count = trios.length // 3
+    for pass in 0..<count * 2:
+        var flipped = false
+        for t in 0..<count:
+            for side in 0..<(usize)3:
+                let a = trios[t * 3 + side]
+                let b = trios[t * 3 + (side + 1) % 3]
+                let c = trios[t * 3 + (side + 2) % 3]
+                # The other triangle on edge b → a.
+                for u in t + 1..<count:
+                    for other in 0..<(usize)3:
+                        if trios[u * 3 + other] != b or trios[u * 3 + (other + 1) % 3] != a: continue
+                        let d = trios[u * 3 + (other + 2) % 3]
+                        let pa = point_of(mesh, corners[start + (usize)a])
+                        let pb = point_of(mesh, corners[start + (usize)b])
+                        let pc = point_of(mesh, corners[start + (usize)c])
+                        let pd = point_of(mesh, corners[start + (usize)d])
+                        let facing = corner_turn(pc, pa, pb) + corner_turn(pd, pb, pa)
+                        if facing <= math.pi + 0.000001: continue
+                        # The new pair c, a, d and d, b, c must keep their winding.
+                        let normal = pb.subtract(pa).cross(pc.subtract(pa))
+                        if pa.subtract(pc).cross(pd.subtract(pc)).dot(normal) <= 0.0 or pb.subtract(pd).cross(pc.subtract(pd)).dot(normal) <= 0.0: continue
+                        if math.min(smallest_angle(pc, pa, pd), smallest_angle(pd, pb, pc)) <= math.min(smallest_angle(pa, pb, pc), smallest_angle(pb, pa, pd)): continue
+                        trios[t * 3] = c
+                        trios[t * 3 + 1] = a
+                        trios[t * 3 + 2] = d
+                        trios[u * 3] = d
+                        trios[u * 3 + 1] = b
+                        trios[u * 3 + 2] = c
+                        flipped = true
+                        break
+                if flipped: break
+            if flipped: break
+        if not flipped: return

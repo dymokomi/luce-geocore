@@ -1,0 +1,97 @@
+## Smooth, Relax and Subdivide's Smoothness (POLY-MODELING.md Stage 5): a
+## cube smoothed shrinks, less with Keep volume; Keep boundary holds a
+## grid's outline; Axes hold an axis; Relax evens a grid's points without
+## leaving its plane; a sphere subdivided with Smoothness 1 keeps its new
+## points on the sphere (0: inside it).
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try smooth_checks()
+    try relax_checks()
+    try smoothness_checks()
+    print("PASS Smooth, Relax, Subdivide Smoothness: shrinking held by Keep volume, boundary and axes held; points evened in their plane; new points rounded onto a sphere")
+
+## `mesh` with points `group` moved by `offset`.
+func moved(mesh: interop.Reference[Mesh], group: str, offset: Vector3) -> interop.Reference[Mesh]!:
+    let numbers: f64[15] = [offset.x, offset.y, offset.z, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+    let result = try Verbs.run("Transform Components", mesh, group, 1, numbers[..<15])
+    defer result.release()
+    return try result.value().mesh()
+
+## Smooth's numbers: amount, iterations, keep volume, keep boundary, axes.
+func smoothing(amount: f64, rounds: f64, keep_volume: bool = false, keep_boundary: bool = false, axes: Vector3 = Vector3(1.0, 1.0, 1.0)) -> f64[7]:
+    return [amount, rounds, 1.0 if keep_volume else 0.0, 1.0 if keep_boundary else 0.0, axes.x, axes.y, axes.z]
+
+func smooth_checks() -> !:
+    let sphere = try MeshPrimitives.sphere(1.0, 16)
+    defer sphere.release()
+    let plain = smoothing(0.5, 10.0)
+    let shrunk = try made(sphere, "Smooth", "", 1, plain[..<7], sphere.value().point_count())
+    defer shrunk.release()
+    let held = smoothing(0.5, 10.0, keep_volume = true)
+    let kept = try made(sphere, "Smooth", "", 1, held[..<7], sphere.value().point_count())
+    defer kept.release()
+    let original = try volume(sphere)
+    assert((try volume(shrunk)) < original * 0.9)
+    assert(math.abs((try volume(kept)) - original) < math.abs((try volume(shrunk)) - original) * 0.5)
+    # A grid's middle point raised: Keep boundary holds the outline, Axes
+    # (1, 0, 1) hold every height.
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let bump = try moved(grid, "12", Vector3(0.0, 1.0, 0.0))
+    defer bump.release()
+    let edges = smoothing(1.0, 3.0, keep_boundary = true)
+    let calm = try made(bump, "Smooth", "", 1, edges[..<7], 25)
+    defer calm.release()
+    let outline: i64[16] = [0, 1, 2, 3, 4, 5, 9, 10, 14, 15, 19, 20, 21, 22, 23, 24]
+    for point in outline: near_point(try calm.value().point(point), try bump.value().point(point))
+    assert((try calm.value().point(12)).y < 1.0)
+    let flat_axes = smoothing(1.0, 3.0, axes = Vector3(1.0, 0.0, 1.0))
+    let level = try made(bump, "Smooth", "", 1, flat_axes[..<7], 25)
+    defer level.release()
+    for point in 0..<(i64)25: near((try level.value().point(point)).y, (try bump.value().point(point)).y)
+
+func relax_checks() -> !:
+    # A grid's middle point pushed toward a corner: relaxed back toward the
+    # middle, all in the plane, the outline held.
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let pushed = try moved(grid, "12", Vector3(0.3, 0.0, 0.2))
+    defer pushed.release()
+    let numbers: f64[3] = [0.5, 20.0, 1.0]
+    let relaxed = try made(pushed, "Relax", "", 1, numbers[..<3], 25)
+    defer relaxed.release()
+    for point in 0..<(i64)25: near((try relaxed.value().point(point)).y, 0.0)
+    assert((try relaxed.value().point(12)).subtract(try grid.value().point(12)).length() < 0.05)
+    near_point(try relaxed.value().point(0), try grid.value().point(0))
+
+## Verb `name` on every face of `mesh`.
+func ran(mesh: interop.Reference[Mesh], name: str, numbers: const f64[]) -> interop.Reference[Mesh]!:
+    let result = try Verbs.run(name, mesh, "", 3, numbers)
+    defer result.release()
+    return try result.value().mesh()
+
+func smoothness_checks() -> !:
+    let sphere = try MeshPrimitives.sphere(1.0, 16)
+    defer sphere.release()
+    let rounded: f64[3] = [1.0, 0.0, 1.0]
+    let round = try ran(sphere, "Subdivide", rounded[..<3])
+    defer round.release()
+    let straight: f64[3] = [1.0, 0.0, 0.0]
+    let flat = try ran(sphere, "Subdivide", straight[..<3])
+    defer flat.release()
+    let box = sphere.value().bounds()
+    let center = box.minimum.add(box.maximum).multiply_scalar(0.5)
+    var worst_round = 0.0
+    var deepest = 0.0
+    for point in sphere.value().point_count()..<round.value().point_count():
+        worst_round = math.max(worst_round, math.abs((try round.value().point(point)).subtract(center).length() - 1.0))
+        deepest = math.max(deepest, 1.0 - (try flat.value().point(point)).subtract(center).length())
+    assert(worst_round < 0.002)
+    assert(deepest > 0.02)
+    assert(worst_round < deepest * 0.1)

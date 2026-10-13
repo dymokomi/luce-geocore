@@ -1,0 +1,359 @@
+## Dissolve, Delete Edge Loop and Limited Dissolve: faces joined across
+## edges into one face per region, after Blender's Dissolve, Delete Edge
+## Loops and Limited Dissolve. A region is walked round its one boundary
+## loop; a region with a hole or a pinch is left as it was and counted in
+## the warning. Points left between two edges go (Blender's Dissolve
+## Vertices): with Dissolve's Clean points, those of the dissolved edges;
+## a point group's always; Delete Edge Loop's always (the faces either side
+## of a loop become one row); Limited Dissolve's where their two edges run
+## on within the angle. Points no face uses any more go. When nothing
+## applies the input passes through with a warning.
+##
+## Limited Dissolve joins faces flatter than Angle, flattest first, after
+## Blender's: each join only when the two regions' normals (area-weighted)
+## stay within Angle of each other, so a gently curved surface keeps its
+## facets instead of joining all round. Delimits (sharp marks, seams,
+## materials, UVs) keep edges.
+
+let dissolve_parms: ParmSpec[1] = [
+    ParmSpec("Clean points", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Take out points left between two edges once the faces join (Blender's Dissolve Vertices).")]
+
+## Points dissolve as they are; other groups become edges.
+let dissolve_also: Domain[1] = [Domain.point]
+
+func dissolve_verb() -> Verb:
+    return Verb("Dissolve", "Modeling", "Join the faces across the group's interior edges (or around its points), one face per region", Domain.edge, true, dissolve_parms, true, cook_dissolve, false, dissolve_also, true, section = "Modify", family = "Delete", icon = "dissolve", picks = pick_components)
+
+func delete_loop_verb() -> Verb:
+    return Verb("Delete Edge Loop", "Modeling", "Remove the group's edge loops: the faces either side join and the loop's points go", Domain.edge, true, dissolve_parms[..<0], true, cook_delete_loop, false, no_domains[..<0], true, section = "Modify", family = "Delete", icon = "remove-faces", picks = pick_edges)
+
+let limited_parms: ParmSpec[6] = [
+    ParmSpec("Angle", ParmKind.number, 5.0, 0.0, 180.0, 1, "", "Faces meeting flatter than this many degrees join; points whose two edges bend less go.", 30.0),
+    ParmSpec("Boundaries", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Take out points on the mesh's boundary too, where it runs straight."),
+    ParmSpec("Delimit sharp", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep edges marked sharp.", more = true),
+    ParmSpec("Delimit seams", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep edges marked as seams.", more = true),
+    ParmSpec("Delimit materials", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep edges between faces of different materials.", more = true),
+    ParmSpec("Delimit UVs", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep edges where the UVs part.", more = true)]
+
+func limited_dissolve_verb() -> Verb:
+    return Verb("Limited Dissolve", "Modeling", "Join the group's faces where they meet flatter than an angle, and take out the points left on straight runs", Domain.edge, true, limited_parms, true, cook_limited_dissolve, false, dissolve_also, false, section = "Modify", family = "Delete", icon = "set-planar", picks = pick_pieces, drag = 0, drag_mode = "amount", whole = true)
+
+func cook_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
+    let clean = input.parms.at(0) != 0.0
+    let by_points = input.domain == Domain.point
+    try dissolve_edges(input, output, clean or by_points, by_points)
+
+func cook_delete_loop(input: const VerbInput*, output: VerbOutput*) -> !:
+    try dissolve_edges(input, output, true, false)
+
+## Dissolve the group's edges (a point group's: every edge at its points),
+## points left between two edges going when `clean`.
+func dissolve_edges(input: const VerbInput*, output: VerbOutput*, clean: bool, by_points: bool) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let faces = topology.faces()
+    # Regions: faces joined across dissolved interior edges (union-find).
+    let parent = try new i32[faces] --- in memory.heap
+    defer free(parent) in memory.heap
+    for face in 0..<faces: parent[face] = (i32)face
+    var dissolved = try BitsBuilder.zeros(topology.edges())
+    defer dissolved.close()
+    for edge in 0..<topology.edges():
+        var chosen = input.group.get(edge) if not by_points else false
+        if by_points: chosen = input.group.get((usize)topology.edge_points[edge * 2]) or input.group.get((usize)topology.edge_points[edge * 2 + 1])
+        if not chosen: continue
+        let first = (usize)topology.edge_corner_offsets[edge]
+        if (usize)topology.edge_corner_offsets[edge + 1] - first != 2: continue
+        let a = find(parent[..<faces], topology.corner_faces[(usize)topology.edge_corners[first]])
+        let b = find(parent[..<faces], topology.corner_faces[(usize)topology.edge_corners[first + 1]])
+        dissolved.set(edge)
+        if a != b: parent[(usize)(a if a > b else b)] = a if a < b else b
+    for face in 0..<faces: parent[face] = find(parent[..<faces], (i32)face)
+    var candidates = try BitsBuilder.zeros(topology.points)
+    defer candidates.close()
+    if by_points:
+        candidates.unite(input.group)
+    elif clean:
+        for edge in 0..<topology.edges():
+            if not dissolved.view().get(edge): continue
+            candidates.set((usize)topology.edge_points[edge * 2])
+            candidates.set((usize)topology.edge_points[edge * 2 + 1])
+    try join_regions(mesh, &topology, parent[..<faces], &dissolved, candidates.view(), by_points, none, (void*)0, output)
+
+## What Limited Dissolve's point test reads.
+struct LimitedWork:
+    let mesh: const Mesh*
+    let cosine: f64
+    let boundaries: bool
+
+## Whether point `point`, left with two edges, runs straight enough to go:
+## its edges bend less than the angle, and it is inside the surface unless
+## boundaries go too.
+func straight_enough(context: void*, topology: const Topology*, dissolved: Bits, point: usize) -> bool:
+    let work = (LimitedWork*)context
+    var ends: Vector3[2] = [Vector3(), Vector3()]
+    var count: usize = 0
+    for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        if dissolved.get(edge): continue
+        if topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge] < 2 and not work.boundaries: return false
+        let other = topology.edge_points[edge * 2] if (usize)topology.edge_points[edge * 2 + 1] == point else topology.edge_points[edge * 2 + 1]
+        if count < 2: ends[count] = point_of(work.mesh, other)
+        count += 1
+    if count != 2: return false
+    let here = point_of(work.mesh, (i32)point)
+    let a = here.subtract(ends[0])
+    let b = ends[1].subtract(here)
+    let lengths = a.length() * b.length()
+    return lengths > 0.0 and a.dot(b) / lengths >= work.cosine
+
+## An edge Limited Dissolve may join across, by its face angle.
+struct Flat:
+    let angle: f64
+    let edge: i32
+
+func flatter(a: Flat, b: Flat) -> bool:
+    return a.angle < b.angle or (a.angle == b.angle and a.edge < b.edge)
+
+func cook_limited_dissolve(input: const VerbInput*, output: VerbOutput*) -> !:
+    let limit = math.max(0.0, math.min(180.0, input.parms.at(0)))
+    let boundaries = input.parms.at(1) != 0.0
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let faces = topology.faces()
+    let delimits = try delimits_for(mesh, input.parms.at(3) != 0.0, input.parms.at(2) != 0.0, input.parms.at(4) != 0.0, input.parms.at(5) != 0.0, false, 0.0)
+    # The group's faces (an edge group: the faces along its edges; points:
+    # the faces round them) and the edges between two of them, flattest first.
+    var faces_in = try converted(&topology, input.group, input.domain, Domain.face, false)
+    defer faces_in.close()
+    var flats = Growing[Flat]()
+    defer flats.close()
+    for edge in 0..<topology.edges():
+        let first = (usize)topology.edge_corner_offsets[edge]
+        if (usize)topology.edge_corner_offsets[edge + 1] - first != 2: continue
+        let a = (usize)topology.corner_faces[(usize)topology.edge_corners[first]]
+        let b = (usize)topology.corner_faces[(usize)topology.edge_corners[first + 1]]
+        if not faces_in.view().get(a) or not faces_in.view().get(b): continue
+        let angle = fold_angle(mesh, a, b)
+        if angle > limit or delimits.stops(mesh, &topology, edge): continue
+        try flats.push(Flat(angle, (i32)edge))
+    sort.by[Flat](flats.items[..<flats.count], flatter)
+    # Regions grow flattest first while their area-weighted normals agree.
+    let parent = try new i32[faces] --- in memory.heap
+    defer free(parent) in memory.heap
+    let normals = try new Vector3[faces] --- in memory.heap
+    defer free(normals) in memory.heap
+    for face in 0..<faces:
+        parent[face] = (i32)face
+        normals[face] = face_vector_area(mesh, &topology, face)
+    let cosine = math.cos(limit * math.pi / 180.0)
+    for flat in flats.view():
+        let first = (usize)topology.edge_corner_offsets[(usize)flat.edge]
+        let a = find(parent[..<faces], topology.corner_faces[(usize)topology.edge_corners[first]])
+        let b = find(parent[..<faces], topology.corner_faces[(usize)topology.edge_corners[first + 1]])
+        if a == b: continue
+        let p = normals[(usize)a]
+        let q = normals[(usize)b]
+        let lengths = p.length() * q.length()
+        if lengths > 0.0 and p.dot(q) / lengths < cosine - 0.000000000001: continue
+        let low = a if a < b else b
+        let high = b if a < b else a
+        parent[(usize)high] = low
+        normals[(usize)low] = p.add(q)
+    for face in 0..<faces: parent[face] = find(parent[..<faces], (i32)face)
+    # Every edge between two faces of one region dissolves.
+    var dissolved = try BitsBuilder.zeros(topology.edges())
+    defer dissolved.close()
+    var candidates = try BitsBuilder.zeros(topology.points)
+    defer candidates.close()
+    for edge in 0..<topology.edges():
+        let first = (usize)topology.edge_corner_offsets[edge]
+        let count = (usize)topology.edge_corner_offsets[edge + 1] - first
+        if count == 2 and parent[(usize)topology.corner_faces[(usize)topology.edge_corners[first]]] == parent[(usize)topology.corner_faces[(usize)topology.edge_corners[first + 1]]]:
+            dissolved.set(edge)
+        # Points of the group's faces may go where they run straight.
+        if count >= 1 and faces_in.view().get((usize)topology.corner_faces[(usize)topology.edge_corners[first]]):
+            candidates.set((usize)topology.edge_points[edge * 2])
+            candidates.set((usize)topology.edge_points[edge * 2 + 1])
+    var work = LimitedWork(mesh, cosine, boundaries)
+    try join_regions(mesh, &topology, parent[..<faces], &dissolved, candidates.view(), true, straight_enough, (void*)&work, output)
+
+## The angle between faces `a` and `b`'s normals, in degrees.
+func fold_angle(mesh: const Mesh*, a: usize, b: usize) -> f64:
+    let normals = mesh.face_normal_span()
+    return math.acos(math.max(-1.0, math.min(1.0, normals[a].vector().dot(normals[b].vector())))) * 180.0 / math.pi
+
+## Face `face`'s normal scaled by its area (Newell's).
+func face_vector_area(mesh: const Mesh*, topology: const Topology*, face: usize) -> Vector3:
+    var sum = Vector3()
+    let start = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    for corner in start..<end:
+        let p = point_of(mesh, topology.corners[corner])
+        let q = point_of(mesh, topology.corners[corner + 1 if corner + 1 < end else start])
+        sum = sum.add(p.cross(q))
+    return sum.multiply_scalar(0.5)
+
+## Join the faces of each region of `parent` (every face's region root,
+## its lowest face) across the `dissolved` edges into one face, round its
+## one boundary loop; a region with a hole or a pinch is left as it was.
+## Points of `candidates` left with two edges go (where `takes` agrees);
+## with `by_points` they go though no edge of theirs dissolved. The joined
+## faces are the output selection.
+func join_regions(mesh: const Mesh*, topology: const Topology*, parent: const i32[], dissolved: BitsBuilder*, candidates: Bits, by_points: bool, takes: (func(void*, const Topology*, Bits, usize) -> bool)?, context: void*, output: VerbOutput*) -> !:
+    let faces = topology.faces()
+    let members = try new u32[faces] --- in memory.heap
+    defer free(members) in memory.heap
+    memory.set(u8[]((u8*)members.data, faces * 4), 0)
+    for face in 0..<faces: members[(usize)parent[face]] += 1
+    # Each region's boundary corners, walked into one loop when it is simple.
+    var boundary_count = try new u32[faces] --- in memory.heap
+    defer free(boundary_count) in memory.heap
+    memory.set(u8[]((u8*)boundary_count.data, faces * 4), 0)
+    for corner in 0..<topology.corners.length:
+        let region = (usize)parent[(usize)topology.corner_faces[corner]]
+        if members[region] < 2 or dissolved.view().get((usize)topology.corner_edges[corner]): continue
+        boundary_count[region] += 1
+    # Walk each region once, from its first boundary corner.
+    let loop_of = try new i32[faces] --- in memory.heap
+    defer free(loop_of) in memory.heap
+    for face in 0..<faces: loop_of[face] = -1
+    var loops = Growing[i32]()
+    defer loops.close()
+    var loop_starts = Growing[u32]()
+    defer loop_starts.close()
+    var skipped: usize = 0
+    for corner in 0..<topology.corners.length:
+        let region = (usize)parent[(usize)topology.corner_faces[corner]]
+        if members[region] < 2 or loop_of[region] != -1 or dissolved.view().get((usize)topology.corner_edges[corner]): continue
+        loop_of[region] = -2
+        let begin = loops.count
+        var current = (i32)corner
+        var closed = false
+        for _ in 0..<(usize)boundary_count[region]:
+            try loops.push(current)
+            let next = next_boundary(topology, parent, (i32)region, dissolved.view(), (usize)topology.corners[topology.next((usize)current)])
+            if next < 0: break
+            if next == (i32)corner:
+                closed = true
+                break
+            current = next
+        let size = loops.count - begin
+        # One loop must use every boundary corner: otherwise the region has a hole.
+        if not closed or size != (usize)boundary_count[region] or size < 3:
+            skipped += 1
+            loops.count = begin
+            continue
+        loop_of[region] = (i32)loop_starts.count
+        try loop_starts.push((u32)begin)
+    try loop_starts.push((u32)loops.count)
+    let merged = loop_starts.count - 1
+    # Edges inside a region left as it was stay; points whose two edges
+    # are all that stay (and that `takes` lets go) go from the faces round
+    # them.
+    for edge in 0..<topology.edges():
+        if not dissolved.view().get(edge): continue
+        let region = (usize)parent[(usize)topology.corner_faces[(usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge]]]]
+        if loop_of[region] < 0: dissolved.clear(edge)
+    let removable = try new u8[topology.points] --- in memory.heap
+    defer free(removable) in memory.heap
+    memory.set(removable, 0)
+    var removals: usize = 0
+    for point in 0..<topology.points:
+        if not candidates.get(point): continue
+        var kept: usize = 0
+        var touched = false
+        for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+            if dissolved.view().get((usize)topology.point_edges[slot]):
+                touched = true
+            else:
+                kept += 1
+        if kept != 2 or not (touched or by_points): continue
+        if let check = takes:
+            if not check(context, topology, dissolved.view(), point): continue
+        removable[point] = 1
+        removals += 1
+    if merged == 0 and removals == 0:
+        output.warning = "Nothing to dissolve: the group joins no region of faces into a simple face; the input passes through"
+        return
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    var face_total: usize = 0
+    for face in 0..<faces:
+        let region = (usize)parent[face]
+        if members[region] < 2 or loop_of[region] < 0 or region == face: face_total += 1
+    output.selection = try BitsBuilder.zeros(face_total)
+    output.selection_domain = Domain.face
+    var run: usize = 0
+    var ring_stack: i32[256]
+    for face in 0..<faces:
+        let region = (usize)parent[face]
+        let joined = members[region] >= 2 and loop_of[region] >= 0
+        if not joined and not touches(topology, removable, face): continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        if joined and region != face: continue
+        # The region's face at its lowest face's place, from its loop (or
+        # an unjoined face's own corners), without removable points. Small
+        # faces on the stack, larger ones in heap scratch.
+        var corners_in: usize = 0
+        if joined:
+            let index = (usize)loop_of[region]
+            corners_in = (usize)(loop_starts.items[index + 1] - loop_starts.items[index])
+        else:
+            corners_in = (usize)(topology.offsets[face + 1] - topology.offsets[face])
+        let ring = try face_scratch.take[i32](ring_stack, corners_in, corners_in)
+        defer face_scratch.release[i32](ring_stack, ring)
+        var size: usize = 0
+        if joined:
+            let index = (usize)loop_of[region]
+            for at in (usize)loop_starts.items[index]..<(usize)loop_starts.items[index + 1]:
+                ring[size] = loops.items[at]
+                size += 1
+        else:
+            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                ring[size] = (i32)corner
+                size += 1
+        var staying: usize = 0
+        for at in 0..<size:
+            if removable[(usize)topology.corners[(usize)ring[at]]] == 0: staying += 1
+        if joined: output.selection.set(builder.face_count())
+        try builder.face((i32)face)
+        for at in 0..<size:
+            let corner = ring[at]
+            if staying >= 3 and removable[(usize)topology.corners[(usize)corner]] != 0: continue
+            try builder.corner(topology.corners[(usize)corner], corner)
+        try builder.end_face()
+    try builder.copy_faces(mesh, run, faces)
+    try builder.drop_unused_points()
+    if skipped > 0: output.warning = "Regions with holes or pinches were left as they were"
+
+## Whether face `face` has a corner at a removable point.
+func touches(topology: const Topology*, removable: const u8[], face: usize) -> bool:
+    for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+        if removable[(usize)topology.corners[corner]] != 0: return true
+    return false
+
+## The one boundary corner of `region` leaving `point` (its edge not
+## dissolved), or -1 for none or a pinch (several).
+func next_boundary(topology: const Topology*, parent: const i32[], region: i32, dissolved: Bits, point: usize) -> i32:
+    var found: i32 = -1
+    for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        if dissolved.get(edge): continue
+        for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+            let corner = topology.edge_corners[at]
+            if (usize)topology.corners[(usize)corner] != point or parent[(usize)topology.corner_faces[(usize)corner]] != region: continue
+            if found >= 0: return -1
+            found = corner
+    return found
+
+## The root of `face`'s region, halving paths as it goes.
+func find(parent: i32[], face: i32) -> i32:
+    var at = face
+    while parent[(usize)at] != at:
+        parent[(usize)at] = parent[(usize)parent[(usize)at]]
+        at = parent[(usize)at]
+    return at

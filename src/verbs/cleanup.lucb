@@ -1,9 +1,11 @@
 ## Fuse (merge the group's points closer than a distance), Merge (the
 ## group's points into one at their center, the first or the last, each
-## connected island into one, or by distance) and Clean (drop unused
-## points). Faces keep their corner order; a face whose corners collapse
-## below three disappears. Fuse and Merge select the points that absorbed
-## others.
+## connected island into one, by distance, or at a point: Blender's At
+## Cursor), Collapse (each island of the group's edges or faces into its
+## center: Blender's Collapse), Target Weld (the group's points onto a
+## picked point: Maya's) and Clean (drop unused points). Faces keep their
+## corner order; a face whose corners collapse below three disappears. They
+## select the points that absorbed others.
 
 let fuse_parms: ParmSpec[1] = [ParmSpec("Distance", ParmKind.number, 0.001, 0.000001, 100000.0, 1, "", "Points of the group closer than this merge into the first of them.")]
 
@@ -12,12 +14,29 @@ let fuse_picks: PickSpec[1] = [PickSpec("Points", "objects points")]
 func fuse_verb() -> Verb:
     return Verb("Fuse", "Modeling", "Merge nearby points of the group", Domain.point, true, fuse_parms, true, cook_fuse, section = "Modify", family = "Merge", icon = "fuse", picks = fuse_picks, drag = 0)
 
-let merge_parms: ParmSpec[2] = [
-    ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 4.0, 1, "At center|At first|At last|Collapse islands|By distance", "Where the group's points merge: all at their center, the first or the last point; each connected island at its center; or those within the distance."),
-    ParmSpec("Distance", ParmKind.number, 0.001, 0.000001, 100000.0, 1, "", "By distance: points of the group closer than this merge.")]
+let merge_parms: ParmSpec[3] = [
+    ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 5.0, 1, "At center|At first|At last|Collapse islands|By distance|At point", "Where the group's points merge: all at their center, the first or the last point; each connected island at its center; those within the distance; or all at the point below (Blender's At Cursor)."),
+    ParmSpec("Distance", ParmKind.number, 0.001, 0.000001, 100000.0, 1, "", "By distance: points of the group closer than this merge."),
+    ParmSpec("Point", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "At point: where the merged point goes (the 3D cursor's place).")]
 
 func merge_verb() -> Verb:
     return Verb("Merge Points", "Modeling", "Merge the group's points: at their center, first, last, per island or by distance", Domain.point, true, merge_parms, true, cook_merge, section = "Modify", family = "Merge", icon = "merge-vertices", picks = pick_components)
+
+let collapse_also: Domain[1] = [Domain.face]
+
+func collapse_verb() -> Verb:
+    return Verb("Collapse", "Modeling", "Collapse each island of the group's edges or faces into one point at its center", Domain.edge, true, placeholder_parms[..<0], true, cook_collapse, false, collapse_also, section = "Modify", family = "Merge", icon = "merge-geometry", picks = pick_components)
+
+let target_weld_picks: PickSpec[2] = [
+    PickSpec("Points", "points", "Select the points to weld"),
+    PickSpec("Target", "points", "Pick the point they weld onto")]
+
+func target_weld_verb() -> Verb:
+    return Verb("Target Weld", "Modeling", "Weld the group's points onto a picked point", Domain.point, true, placeholder_parms[..<0], true, cook_target_weld, section = "Modify", family = "Merge", icon = "constraint-coincident", picks = target_weld_picks, wants = always_wants)
+
+## Target Weld always asks for its target.
+func always_wants(input: const VerbInput*) -> bool!:
+    return true
 
 func clean_verb() -> Verb:
     return Verb("Clean", "Modeling", "Remove points no face uses", Domain.point, true, placeholder_parms[..<0], true, cook_clean, section = "Modify", family = "Delete", icon = "clean-mesh", whole = true)
@@ -94,6 +113,7 @@ func cook_merge(input: const VerbInput*, output: VerbOutput*) -> !:
         let keep = last if mode == 2.0 else first
         for point in 0..<points:
             if input.group.get(point): target[point] = keep
+        if mode == 5.0: places[(usize)keep] = Vector3(input.parms.at(2), input.parms.at(3), input.parms.at(4))
     # At a center: each kept point moves to the mean of those merging into it.
     if mode == 0.0 or mode == 3.0:
         let sums = try new Vector3[points] --- in memory.heap
@@ -133,6 +153,75 @@ func root(parent: i32[], point: i32) -> i32:
         parent[(usize)at] = parent[(usize)parent[(usize)at]]
         at = parent[(usize)at]
     return at
+
+## Each island of the group's edges (points joined by them), or of its
+## faces (points joined by their edges), into one point at its center.
+func cook_collapse(input: const VerbInput*, output: VerbOutput*) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let points = topology.points
+    let target = try new i32[points] --- in memory.heap
+    defer free(target) in memory.heap
+    for at in 0..<points: target[at] = (i32)at
+    var islands_found = false
+    for edge in 0..<topology.edges():
+        var joins = input.group.get(edge) if input.domain == Domain.edge else false
+        if input.domain == Domain.face:
+            for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                if input.group.get((usize)topology.corner_faces[(usize)topology.edge_corners[at]]): joins = true
+        if not joins: continue
+        islands_found = true
+        let a = root(target[..<points], topology.edge_points[edge * 2])
+        let b = root(target[..<points], topology.edge_points[edge * 2 + 1])
+        if a != b: target[(usize)(a if a > b else b)] = a if a < b else b
+    if not islands_found:
+        output.warning = "No edges or faces in the group to collapse; the input passes through"
+        return
+    for point in 0..<points: target[point] = root(target[..<points], (i32)point)
+    # Each island's point at the mean of its points.
+    let places = try new Vector3[points] --- in memory.heap
+    defer free(places) in memory.heap
+    let counts = try new u32[points] --- in memory.heap
+    defer free(counts) in memory.heap
+    for at in 0..<points:
+        places[at] = Vector3()
+        counts[at] = 0
+    for point in 0..<points:
+        let into = (usize)target[point]
+        places[into] = places[into].add(builder_position(mesh, point))
+        counts[into] += 1
+    for point in 0..<points:
+        if counts[point] > 0: places[point] = places[point].multiply_scalar(1.0 / (f64)counts[point])
+    try rebuild(input, output, target[..<points], places[..<points])
+    output.selection_domain = Domain.point
+
+## The group's points onto the second pick's point (its first), there.
+func cook_target_weld(input: const VerbInput*, output: VerbOutput*) -> !:
+    let mesh = input.mesh
+    let points = (usize)mesh.point_count()
+    var onto: i64 = -1
+    if let second = input.second:
+        for point in 0..<points:
+            if second.get(point):
+                onto = (i64)point
+                break
+    if onto < 0:
+        output.warning = "Target Weld needs a target point (its second pick); the input passes through"
+        return
+    let target = try new i32[points] --- in memory.heap
+    defer free(target) in memory.heap
+    var moved = false
+    for point in 0..<points:
+        target[point] = (i32)point
+        if input.group.get(point) and (i64)point != onto:
+            target[point] = (i32)onto
+            moved = true
+    if not moved:
+        output.warning = "No point of the group besides the target to weld; the input passes through"
+        return
+    var nothing: Vector3[]
+    try rebuild(input, output, target[..<points], nothing)
+    output.selection_domain = Domain.point
 
 func cook_clean(input: const VerbInput*, output: VerbOutput*) -> !:
     let points = (usize)input.mesh.point_count()

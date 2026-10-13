@@ -1,0 +1,65 @@
+## Spin and Screw (POLY-MODELING.md Stage 5): a segment parallel to Z at
+## x = 1 spun a full turn about Z in 16 steps makes a tube of 16 quads (the
+## turn closes on the profile; every point on the unit circle), a quarter
+## turn 4 quads and a fifth copy; Flip turns the faces over. Screwed two
+## turns of 8 rising 1 a turn: 16 quads, 16 copies, the last two above the
+## first by 2 and as far round as it. A 2 by 2 grid of one face: points
+## 0 (-1,-1), 1 (1,-1), 2 (-1,1), 3 (1,1) in XZ.
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let quad = try MeshPrimitives.grid(2.0, 1)
+    defer quad.release()
+    try spin_checks(quad)
+    try screw_checks(quad)
+    print("PASS Spin and Screw: a full turn closing into a tube on its circle, a quarter turn, flipped faces; two turns of a screw rising a turn each")
+
+## Whether `mesh` has a point at `p`.
+func has_point(mesh: interop.Reference[Mesh], p: Vector3) -> bool!:
+    for point in 0..<mesh.value().point_count():
+        if (try mesh.value().point(point)).subtract(p).length() < 0.000001: return true
+    return false
+
+## Spin's numbers: axis, center, angle, steps, flip.
+func spinning(angle: f64, steps: f64, flip: bool = false) -> f64[7]:
+    return [2.0, 0.0, 0.0, 0.0, angle, steps, 1.0 if flip else 0.0]
+
+func spin_checks(quad: interop.Reference[Mesh]) -> !:
+    let full = spinning(360.0, 16.0)
+    let tube = try made(quad, "Spin", "p1-3", 2, full[..<7], 16)
+    defer tube.release()
+    try counts(tube, 4 + 2 * 15, 17)
+    for point in 4..<34:
+        let p = try tube.value().point(point)
+        near(math.sqrt(p.x * p.x + p.y * p.y), 1.0)
+    for face in 1..<17: assert((try tube.value().face_size(face)) == 4)
+    let quarter = spinning(90.0, 4.0)
+    let bent = try made(quad, "Spin", "p1-3", 2, quarter[..<7], 4)
+    defer bent.release()
+    try counts(bent, 4 + 2 * 4, 5)
+    assert(try has_point(bent, Vector3(0.0, 1.0, -1.0)))
+    # Flip winds every new face the other way: the normals point back.
+    let flipped = spinning(90.0, 4.0, flip = true)
+    let over = try made(quad, "Spin", "p1-3", 2, flipped[..<7], 4)
+    defer over.release()
+    for face in 1..<5: near((try over.value().face_normal(face)).dot(try bent.value().face_normal(face)), -1.0)
+
+## Screw's numbers: axis, center, turns, steps, rise, flip.
+func screwing(turns: f64, steps: f64, rise: f64) -> f64[8]:
+    return [2.0, 0.0, 0.0, 0.0, turns, steps, rise, 0.0]
+
+func screw_checks(quad: interop.Reference[Mesh]) -> !:
+    let two = screwing(2.0, 8.0, 1.0)
+    let spring = try made(quad, "Screw", "p1-3", 2, two[..<8], 16)
+    defer spring.release()
+    try counts(spring, 4 + 2 * 16, 17)
+    # Copies 8 and 16: whole turns round, risen 1 and 2.
+    let start = try quad.value().point(1)
+    assert(try has_point(spring, start.add(Vector3(0.0, 0.0, 1.0))))
+    assert(try has_point(spring, start.add(Vector3(0.0, 0.0, 2.0))))
+    near(spring.value().bounds().maximum.z, (try quad.value().point(3)).z + 2.0)

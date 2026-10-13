@@ -1,12 +1,20 @@
 ## Subdivide: every face of n corners becomes n quads through its edge
 ## midpoints and its center; Catmull-Clark then moves the points (Linear
-## keeps the shape). Edge and face points mix their parents' attributes, and
-## each new corner mixes the corners it lies between, so UVs interpolate
-## within faces. Edges used by more than two faces act as creases.
+## keeps the shape). Linear's Smoothness rounds the new points out as
+## Blender's Subdivide Smoothness does, onto the sphere the corners'
+## normals describe: a new point at the mean of points p_i with normals n_i
+## rises along the normals' mean by R (1 - |mean n_i|), R the radius the
+## edges give (an edge's length over 2 sin of half the angle between its
+## ends' normals), so an edge's point rises by its arc's sagitta; the old
+## points stay.
+## Edge and face points mix their parents' attributes, and each new corner
+## mixes the corners it lies between, so UVs interpolate within faces.
+## Edges used by more than two faces act as creases.
 
-let subdivide_parms: ParmSpec[2] = [
+let subdivide_parms: ParmSpec[3] = [
     ParmSpec("Levels", ParmKind.integer, 1.0, 1.0, 4.0, 1, "", "Each level splits every face into quads."),
-    ParmSpec("Method", ParmKind.menu, 1.0, 0.0, 1.0, 1, "Linear|Catmull-Clark", "Catmull-Clark smooths as it splits; Linear keeps the shape.")]
+    ParmSpec("Method", ParmKind.menu, 1.0, 0.0, 1.0, 1, "Linear|Catmull-Clark", "Catmull-Clark smooths as it splits; Linear keeps the shape."),
+    ParmSpec("Smoothness", ParmKind.number, 0.0, 0.0, 1.0, 1, "", "Linear: round the new points out along the surface's curve (1: onto the circle the normals describe).")]
 
 func subdivide_verb() -> Verb:
     return Verb("Subdivide", "Modeling", "Split faces into quads, optionally with Catmull-Clark smoothing", Domain.face, true, subdivide_parms, true, cook_subdivide, section = "Modify", family = "Subdivide", icon = "subdivide", picks = pick_pieces, whole = true)
@@ -14,13 +22,14 @@ func subdivide_verb() -> Verb:
 func cook_subdivide(input: const VerbInput*, output: VerbOutput*) -> !:
     let levels = (usize)math.max(1.0, math.min(4.0, input.parms.at(0)))
     let smooth = input.parms.at(1) != 0.0
+    let smoothness = 0.0 if smooth else math.max(0.0, math.min(1.0, input.parms.at(2)))
     if input.group.population() != input.group.count:
         output.warning = "Subdivide works on the whole mesh; the group is ignored"
     var current = try mesh_share(input.mesh)
     for _ in 0..<levels:
         var level = TopologyBuilder()
         defer level.close()
-        subdivide_level(current, smooth, &level) catch failure:
+        subdivide_level(current, smooth, smoothness, &level) catch failure:
             mesh_dispose(current)
             error(failure.code, failure.message)
         let next = level.finish(current) catch failure:
@@ -32,7 +41,7 @@ func cook_subdivide(input: const VerbInput*, output: VerbOutput*) -> !:
     output.selection = try BitsBuilder.ones((usize)current.face_count())
     output.selection_domain = Domain.face
 
-func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*) -> !:
+func subdivide_level(mesh: const Mesh*, smooth: bool, smoothness: f64, builder: TopologyBuilder*) -> !:
     let topology = try Topology.of(mesh)
     let offsets = topology.offsets
     let corners = topology.corners
@@ -52,9 +61,22 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
         for at in 0..<size: sum = sum.add(builder.position(corners[start + at]))
         centers[face] = sum.multiply_scalar(1.0 / (f64)size)
     # Edge points: midpoints, or with Catmull-Clark the average of the ends
-    # and the two face points of an interior edge.
+    # and the two face points of an interior edge; with Smoothness risen
+    # off the middle (their rises kept for the face points).
     var parents: i32[256]
     var weights: f32[256]
+    let rises = try new Vector3[edges] --- in memory.heap
+    defer free(rises) in memory.heap
+    let radii = try new f64[edges] --- in memory.heap
+    defer free(radii) in memory.heap
+    let point_normals = try new Vector3[points] --- in memory.heap
+    defer free(point_normals) in memory.heap
+    for edge in 0..<edges:
+        rises[edge] = Vector3()
+        radii[edge] = 0.0
+    if smoothness > 0.0:
+        try corner_normals(mesh, &topology, point_normals[..<points])
+        edge_rises(mesh, &topology, smoothness, point_normals[..<points], rises[..<edges], radii[..<edges])
     for edge in 0..<edges:
         let a = topology.edge_points[edge * 2]
         let b = topology.edge_points[edge * 2 + 1]
@@ -65,6 +87,7 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
             let f1 = centers[(usize)topology.corner_faces[(usize)topology.edge_corners[first]]]
             let f2 = centers[(usize)topology.corner_faces[(usize)topology.edge_corners[first + 1]]]
             position = builder.position(a).add(builder.position(b)).add(f1).add(f2).multiply_scalar(0.25)
+        position = position.add(rises[edge])
         parents[0] = a
         parents[1] = b
         weights[0] = 0.5
@@ -78,10 +101,22 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
         defer face_scratch.release[i32](parents, face_parents)
         let face_weights = try face_scratch.take[f32](weights, size, size)
         defer face_scratch.release[f32](weights, face_weights)
+        var normal_sum = Vector3()
+        var radius = 0.0
+        var curved: usize = 0
         for at in 0..<size:
             face_parents[at] = corners[start + at]
             face_weights[at] = (f32)(1.0 / (f64)size)
-        _ = try builder.mixed_point(centers[face], face_parents, face_weights)
+            normal_sum = normal_sum.add(point_normals[(usize)corners[start + at]])
+            let edge_radius = radii[(usize)topology.corner_edges[start + at]]
+            if edge_radius > 0.0:
+                radius += edge_radius
+                curved += 1
+        var center = centers[face]
+        let mean = normal_sum.length() / (f64)size
+        if smoothness > 0.0 and curved > 0 and mean > 0.0:
+            center = center.add(normal_sum.multiply_scalar(smoothness * radius / (f64)curved * (1.0 - mean) / normal_sum.length()))
+        _ = try builder.mixed_point(center, face_parents, face_weights)
     if smooth: try catmull_clark_points(&topology, builder, centers)
     # n quads per face.
     let edge_base = (i32)points
@@ -113,6 +148,40 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, builder: TopologyBuilder*)
             let back: i32[2] = [(i32)previous, (i32)corner]
             try builder.mixed_corner(edge_base + topology.corner_edges[previous], back, half)
             try builder.end_face()
+
+## Each point's normal: its faces', weighted by their corner angles (zero
+## for a point no face uses).
+func corner_normals(mesh: const Mesh*, topology: const Topology*, point_normals: Vector3[]) -> !:
+    let normals = mesh.face_normal_span()
+    for at in 0..<point_normals.length: point_normals[at] = Vector3()
+    for corner in 0..<topology.corners.length:
+        let point = topology.corners[corner]
+        let here = point_of(mesh, point)
+        let before = point_of(mesh, topology.corners[topology.previous(corner)]).subtract(here)
+        let after = point_of(mesh, topology.corners[topology.next(corner)]).subtract(here)
+        let lengths = before.length() * after.length()
+        if lengths <= 0.0: continue
+        let angle = math.acos(math.max(-1.0, math.min(1.0, before.dot(after) / lengths)))
+        point_normals[(usize)point] = point_normals[(usize)point].add(normals[(usize)topology.corner_faces[corner]].vector().multiply_scalar(angle))
+    for at in 0..<point_normals.length:
+        let length = point_normals[at].length()
+        if length > 0.0: point_normals[at] = point_normals[at].multiply_scalar(1.0 / length)
+
+## Each edge's rise for Smoothness (its arc's sagitta along its ends'
+## mean normal, times `smoothness`) and the radius its ends' normals give
+## (0 where they agree).
+func edge_rises(mesh: const Mesh*, topology: const Topology*, smoothness: f64, point_normals: const Vector3[], rises: Vector3[], radii: f64[]):
+    for edge in 0..<rises.length:
+        let na = point_normals[(usize)topology.edge_points[edge * 2]]
+        let nb = point_normals[(usize)topology.edge_points[edge * 2 + 1]]
+        let mean = na.add(nb)
+        let length = mean.length()
+        if length <= 0.0: continue
+        let angle = math.acos(math.max(-1.0, math.min(1.0, na.dot(nb))))
+        if angle < 0.000001: continue
+        let chord = point_of(mesh, topology.edge_points[edge * 2 + 1]).subtract(point_of(mesh, topology.edge_points[edge * 2])).length()
+        radii[edge] = chord / (2.0 * math.sin(angle * 0.5))
+        rises[edge] = mean.multiply_scalar(smoothness * radii[edge] * (1.0 - length * 0.5) / length)
 
 ## Catmull-Clark positions of the original points: interior (F + 2R + (n-3)P)/n
 ## over n faces, boundary 3/4 P + 1/8 each boundary neighbor; points on

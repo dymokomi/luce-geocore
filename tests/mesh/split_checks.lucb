@@ -1,0 +1,121 @@
+## Edge Split and Rip (POLY-MODELING.md Stage 5). Edge Split: a row of a
+## grid's edges cuts it in two; an edge alone inside the surface splits
+## nothing. Rip: an edge inside a 6 by 6 grid tears a hole (its ends cut on
+## one more edge each, Blender's rule: the copies of the edge are both
+## boundary edges, six in all round the hole), the ripped side moves by the
+## offset into its faces, Fill closes the gap so the area stays; a point
+## rip opens its fan in two; a cube's edge (three-edge ends) tears too.
+## The 4 by 4 grid spans -1..1 in XZ (point z*5+x, face z*4+x).
+import interop
+import memory
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try edge_split_checks()
+    try rip_checks()
+    print("PASS Edge Split and Rip: a grid cut in two, a lone edge left; an edge's hole of six boundary edges, the side moved, filled back to its area; a point's fan opened; a cube's edge torn")
+
+## Edges with one face.
+func boundary_edges(mesh: interop.Reference[Mesh]) -> i64!:
+    let geometry = mesh.value()
+    let edges = try geometry.edge_count()
+    let uses = try new i32[(usize)edges] --- in memory.heap
+    defer free(uses) in memory.heap
+    for at in 0..<uses.length: uses[at] = 0
+    for face in 0..<geometry.face_count():
+        for at in 0..<(try geometry.face_size(face)): uses[(usize)(try geometry.face_edge(face, at))] += 1
+    var count: i64 = 0
+    for use in uses:
+        if use == 1: count += 1
+    return count
+
+## Every face's area, summed.
+func total_area(mesh: interop.Reference[Mesh]) -> f64!:
+    var total = 0.0
+    for face in 0..<mesh.value().face_count(): total += try area(mesh, face)
+    return total
+
+let no_numbers: f64[1] = [0.0]
+
+## How far points `a` and `b` (a point and its copy) moved off the row at
+## `z`, together: one of them stays on it.
+func shift(mesh: interop.Reference[Mesh], a: i64, b: i64, z: f64) -> f64!:
+    let off_a = (try mesh.value().point(a)).z - z
+    let off_b = (try mesh.value().point(b)).z - z
+    assert(math.abs(off_a) < 0.000001 or math.abs(off_b) < 0.000001)
+    return off_a + off_b
+
+func edge_split_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    # A row of edges from boundary to boundary: every point on it splits.
+    let halves = try made(grid, "Edge Split", "p5-6-7-8-9", 2, no_numbers[..<0], 8)
+    defer halves.release()
+    try counts(halves, 30, 16)
+    try surface(halves, false)
+    assert((try boundary_edges(halves)) == 24)
+    # One edge inside: neither end has a second cut to split it.
+    let alone = try Verbs.run("Edge Split", grid, "p6-7", 2, no_numbers[..<0])
+    defer alone.release()
+    assert(alone.value().warning().length > 0)
+
+## Rip's numbers: offset, fill, flip, turn.
+func ripping(offset: f64, fill: bool = false, flip: bool = false, turns: f64 = 0.0) -> f64[4]:
+    return [offset, 1.0 if fill else 0.0, 1.0 if flip else 0.0, turns]
+
+func rip_checks() -> !:
+    # A 6 by 6 grid over -1..1 (point z*7+x); the edge between points 16 and
+    # 17 lies inside, its ends of four edges each.
+    let grid = try MeshPrimitives.grid(2.0, 6)
+    defer grid.release()
+    let still = ripping(0.0)
+    let slit = try made(grid, "Rip", "p16-17", 2, still[..<4], 1)
+    defer slit.release()
+    try counts(slit, 51, 36)
+    try surface(slit, false)
+    assert((try boundary_edges(slit)) == 24 + 6)
+    # Pulled 0.1 into its side's faces: one copy of each of 16 and 17 (the
+    # original or the new point) moves 0.1 off the row, square to it.
+    let pulled = ripping(0.1)
+    let opened = try made(grid, "Rip", "p16-17", 2, pulled[..<4], 1)
+    defer opened.release()
+    let row_z = (try grid.value().point(16)).z
+    let moved = try shift(opened, 16, 49, row_z)
+    near(math.abs(moved), 0.1)
+    near(math.abs(try shift(opened, 17, 50, row_z)), 0.1)
+    # Flipped: the other side moves, the other way.
+    let other = ripping(0.1, flip = true)
+    let flipped = try made(grid, "Rip", "p16-17", 2, other[..<4], 1)
+    defer flipped.release()
+    near(try shift(flipped, 16, 49, row_z), -moved)
+    # Fill: a quad and two triangles close the gap; the grid's area stays.
+    let filling = ripping(0.1, fill = true)
+    let filled = try made(grid, "Rip", "p16-17", 2, filling[..<4], 1)
+    defer filled.release()
+    try counts(filled, 51, 39)
+    try surface(filled, false)
+    assert((try boundary_edges(filled)) == 24)
+    near(try total_area(filled), 4.0)
+    # A point inside the 4 by 4 grid: its fan opens between two opposite
+    # edges, its copy selected and moved into its half.
+    let small = try MeshPrimitives.grid(2.0, 4)
+    defer small.release()
+    let point = try made(small, "Rip", "12", 1, pulled[..<4], 1)
+    defer point.release()
+    try counts(point, 26, 16)
+    assert((try boundary_edges(point)) == 20)
+    let center = try small.value().point(12)
+    near((try point.value().point(25)).subtract(center).length() + (try point.value().point(12)).subtract(center).length(), 0.1)
+    # A cube's edge: three edges at each end, so each end cuts the next
+    # edge round on the ripped side.
+    let cube = try Mesh.cube()
+    defer cube.release()
+    let torn = try made(cube, "Rip", "p0-1", 2, still[..<4], 1)
+    defer torn.release()
+    try counts(torn, 10, 6)
+    try surface(torn, false)
+    assert((try boundary_edges(torn)) == 6)

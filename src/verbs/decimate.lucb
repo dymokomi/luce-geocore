@@ -1,0 +1,429 @@
+## PolyReduce (Decimate): fewer faces for the group, after Blender's
+## Decimate and Houdini's PolyReduce. Collapse merges edges, cheapest first,
+## until the group's triangles are Ratio of what they were: the
+## Garland–Heckbert quadric of each point (the planes of its triangles,
+## weighted by area, and on the outline planes square to the faces there,
+## weighted heavily so the outline keeps its shape) prices moving it; an
+## edge collapses to the place its two quadrics price lowest, unless that
+## turns a triangle over or would join the surface where it should not
+## (the two ends sharing more neighbors than the triangles on the edge).
+## Lock boundary keeps the outline's points (and every point a face outside
+## the group uses) where they are. The result is triangles. Un-subdivide
+## undoes subdivision on the group's quads (unsubdivide.lucb); Planar is
+## Limited Dissolve's join by angle. The new faces are the output
+## selection.
+
+let reduce_parms: ParmSpec[5] = [
+    ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Collapse|Un-subdivide|Planar", "Collapse edges to a share of the triangles, undo subdivision, or join faces flatter than the angle."),
+    ParmSpec("Ratio", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "Collapse: the share of the group's triangles kept."),
+    ParmSpec("Iterations", ParmKind.integer, 1.0, 1.0, 16.0, 1, "", "Un-subdivide: how many subdivisions to undo."),
+    ParmSpec("Angle", ParmKind.number, 5.0, 0.0, 180.0, 1, "", "Planar: faces meeting flatter than this many degrees join.", 30.0),
+    ParmSpec("Lock boundary", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Collapse: keep the outline's points where they are.")]
+
+func reduce_verb() -> Verb:
+    return Verb("PolyReduce", "Modeling", "Fewer faces: collapse edges to a share of the triangles, undo subdivision, or join flat faces", Domain.face, true, reduce_parms, true, cook_reduce, label = "Decimate", section = "Modify", family = "Delete", icon = "clean-mesh", picks = pick_pieces, whole = true, drag = 1, drag_mode = "amount")
+
+func cook_reduce(input: const VerbInput*, output: VerbOutput*) -> !:
+    let mode = (usize)math.max(0.0, math.min(2.0, input.parms.at(0)))
+    if mode == 1: return try unsubdivide(input, output, (usize)math.max(1.0, math.min(16.0, input.parms.at(2))))
+    if mode == 2:
+        let numbers: f64[6] = [input.parms.at(3), 0.0, 0.0, 0.0, 0.0, 0.0]
+        let planar = VerbInput(input.mesh, input.group, Parms(numbers[..<6]), input.symmetry, input.domain)
+        return try cook_limited_dissolve(&planar, output)
+    let ratio = input.parms.at(1)
+    if not (ratio >= 0.0 and ratio <= 1.0): error(errors.invalid, "Decimate's ratio must be in 0..1")
+    try collapse_edges(input, output, ratio, input.parms.at(4) != 0.0)
+
+## A symmetric 4×4 quadric (plane equations squared): its ten numbers.
+struct Quadric:
+    var a: f64[10]
+
+    func plus(other: Quadric) -> Quadric:
+        var sum = Quadric([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        for k in 0..<(usize)10: sum.a[k] = self.a[k] + other.a[k]
+        return sum
+
+    ## Its price at `p`.
+    func at(p: Vector3) -> f64:
+        let q = self.a
+        return q[0] * p.x * p.x + 2.0 * q[1] * p.x * p.y + 2.0 * q[2] * p.x * p.z + 2.0 * q[3] * p.x + q[4] * p.y * p.y + 2.0 * q[5] * p.y * p.z + 2.0 * q[6] * p.y + q[7] * p.z * p.z + 2.0 * q[8] * p.z + q[9]
+
+## The quadric of the plane through `p` with unit normal `n`, times `weight`.
+func plane_quadric(n: Vector3, p: Vector3, weight: f64) -> Quadric:
+    let d = -n.dot(p)
+    return Quadric([n.x * n.x * weight, n.x * n.y * weight, n.x * n.z * weight, n.x * d * weight, n.y * n.y * weight, n.y * n.z * weight, n.y * d * weight, n.z * n.z * weight, n.z * d * weight, d * d * weight])
+
+## Where quadric `q` prices lowest (its 3×3 system solved), else the best
+## of `a`, `b` and their middle.
+func cheapest(q: Quadric, a: Vector3, b: Vector3) -> Vector3:
+    let m = q.a
+    let det = m[0] * (m[4] * m[7] - m[5] * m[5]) - m[1] * (m[1] * m[7] - m[5] * m[2]) + m[2] * (m[1] * m[5] - m[4] * m[2])
+    let scale = math.max(math.abs(m[0]) + math.abs(m[4]) + math.abs(m[7]), 0.000000000001)
+    if math.abs(det) > 0.000001 * scale * scale * scale:
+        let bx = -m[3]
+        let by = -m[6]
+        let bz = -m[8]
+        let x = (bx * (m[4] * m[7] - m[5] * m[5]) - m[1] * (by * m[7] - m[5] * bz) + m[2] * (by * m[5] - m[4] * bz)) / det
+        let y = (m[0] * (by * m[7] - bz * m[5]) - bx * (m[1] * m[7] - m[5] * m[2]) + m[2] * (m[1] * bz - by * m[2])) / det
+        let z = (m[0] * (m[4] * bz - m[5] * by) - m[1] * (m[1] * bz - by * m[2]) + bx * (m[1] * m[5] - m[4] * m[2])) / det
+        let solved = Vector3(x, y, z)
+        if solved.is_finite(): return solved
+    let middle = a.add(b).multiply_scalar(0.5)
+    var best = a
+    if q.at(b) < q.at(best): best = b
+    if q.at(middle) < q.at(best): best = middle
+    return best
+
+## A candidate collapse in the heap: its price, its ends, and the versions
+## of its ends it was priced at.
+struct Candidate:
+    var cost: f64
+    var u: i32
+    var v: i32
+    var stamp_u: u32
+    var stamp_v: u32
+
+## The collapse's state, over the points of the group's triangles only
+## (numbered apart: `globals` gives each its mesh point): the triangles
+## (their corners always the points they are at now), each point's live
+## triangles (a slice of `pool`; a merge writes the joined list as a new
+## slice), places, quadrics, locks and versions.
+struct Collapse:
+    var globals: Growing[i32]
+    var corners: Growing[i32]
+    var sources: Growing[i32]
+    var alive: Growing[u8]
+    var places: Growing[Vector3]
+    var quadrics: Growing[Quadric]
+    var locked: Growing[u8]
+    var merged_into: Growing[i32]
+    var stamps: Growing[u32]
+    var list_start: Growing[i32]
+    var list_count: Growing[i32]
+    var pool: Growing[i32]
+    var heap: Growing[Candidate]
+    var live_triangles: usize
+    ## Scratch marks for neighbor sets.
+    var marks: Growing[u32]
+    var mark: u32
+
+    func init():
+        self.globals = Growing[i32]()
+        self.corners = Growing[i32]()
+        self.sources = Growing[i32]()
+        self.alive = Growing[u8]()
+        self.places = Growing[Vector3]()
+        self.quadrics = Growing[Quadric]()
+        self.locked = Growing[u8]()
+        self.merged_into = Growing[i32]()
+        self.stamps = Growing[u32]()
+        self.list_start = Growing[i32]()
+        self.list_count = Growing[i32]()
+        self.pool = Growing[i32]()
+        self.heap = Growing[Candidate]()
+        self.live_triangles = 0
+        self.marks = Growing[u32]()
+        self.mark = 0
+
+    func close():
+        self.globals.close()
+        self.corners.close()
+        self.sources.close()
+        self.alive.close()
+        self.places.close()
+        self.quadrics.close()
+        self.locked.close()
+        self.merged_into.close()
+        self.stamps.close()
+        self.list_start.close()
+        self.list_count.close()
+        self.pool.close()
+        self.heap.close()
+        self.marks.close()
+
+    ## Point `point`'s triangles (some may have died since).
+    func triangles_of(point: i32) -> const i32[]:
+        let start = (usize)self.list_start.items[(usize)point]
+        return self.pool.items[start..<start + (usize)self.list_count.items[(usize)point]]
+
+    ## Whether live triangle `t` has point `point`.
+    func has(t: usize, point: i32) -> bool:
+        return self.corners.items[t * 3] == point or self.corners.items[t * 3 + 1] == point or self.corners.items[t * 3 + 2] == point
+
+func collapse_edges(input: const VerbInput*, output: VerbOutput*, ratio: f64, lock_boundary: bool) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var state = Collapse()
+    defer state.close()
+    try collapse_setup(mesh, &topology, input.group, lock_boundary, &state)
+    if state.live_triangles == 0:
+        output.warning = "No faces in the group to decimate; the input passes through"
+        return
+    let target = (usize)math.round((f64)state.live_triangles * ratio)
+    while state.live_triangles > target and state.heap.count > 0:
+        let next = heap_pop(&state.heap)
+        if next.stamp_u != state.stamps.items[(usize)next.u] or next.stamp_v != state.stamps.items[(usize)next.v]: continue
+        if state.merged_into.items[(usize)next.u] >= 0 or state.merged_into.items[(usize)next.v] >= 0: continue
+        try collapse_one(&state, next.u, next.v)
+    try collapse_output(mesh, &topology, input.group, &state, output)
+
+## The triangles of the group's faces, each point's quadric, the locked
+## points and every edge's first price.
+func collapse_setup(mesh: const Mesh*, topology: const Topology*, group: Bits, lock_boundary: bool, state: Collapse*) -> !:
+    let triangles = mesh.triangle_span()
+    let offsets = topology.offsets
+    # The group's triangles over their own numbering of points.
+    let local = try new i32[topology.points] --- in memory.heap
+    defer free(local) in memory.heap
+    for at in 0..<topology.points: local[at] = -1
+    for face in 0..<topology.faces():
+        if not group.get(face): continue
+        let start = (usize)offsets[face]
+        let size = (usize)offsets[face + 1] - start
+        let first = (start - face * 2) * 3
+        for k in 0..<(size - 2) * 3:
+            let corner = (usize)triangles[first + k]
+            let point = (usize)topology.corners[corner]
+            if local[point] < 0:
+                local[point] = (i32)state.globals.count
+                try state.globals.push((i32)point)
+            try state.corners.push(local[point])
+            try state.sources.push((i32)corner)
+        for _ in 0..<size - 2: try state.alive.push(1)
+    state.live_triangles = state.alive.count
+    let points = state.globals.count
+    try state.places.reserve(points)
+    for at in 0..<points: try state.places.push(point_of(mesh, state.globals.items[at]))
+    try state.quadrics.fill(points, Quadric([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+    try state.locked.fill(points, 0)
+    try state.merged_into.fill(points, -1)
+    try state.stamps.fill(points, 0)
+    try state.marks.fill(points, 0)
+    # Each point's triangles: its slice of the pool.
+    try state.list_count.fill(points, 0)
+    for point in state.corners.view(): state.list_count.items[(usize)point] += 1
+    try state.list_start.fill(points, 0)
+    var total: i32 = 0
+    for at in 0..<points:
+        state.list_start.items[at] = total
+        total += state.list_count.items[at]
+    try state.pool.fill((usize)total, 0)
+    var fill = Growing[i32]()
+    defer fill.close()
+    try fill.assign(state.list_start.view())
+    for at in 0..<state.corners.count:
+        let point = (usize)state.corners.items[at]
+        state.pool.items[(usize)fill.items[point]] = (i32)(at // 3)
+        fill.items[point] += 1
+    # Quadrics: the triangles' planes by area; the outline's (edges with one
+    # triangle) square planes, heavily.
+    let triangle_count = state.alive.count
+    for t in 0..<triangle_count:
+        let a = state.places.items[(usize)state.corners.items[t * 3]]
+        let b = state.places.items[(usize)state.corners.items[t * 3 + 1]]
+        let c = state.places.items[(usize)state.corners.items[t * 3 + 2]]
+        let normal = b.subtract(a).cross(c.subtract(a))
+        let doubled = normal.length()
+        if doubled <= 0.0: continue
+        let plane = plane_quadric(normal.multiply_scalar(1.0 / doubled), a, doubled * 0.5)
+        for k in 0..<(usize)3:
+            let point = (usize)state.corners.items[t * 3 + k]
+            state.quadrics.items[point] = state.quadrics.items[point].plus(plane)
+        for k in 0..<(usize)3:
+            let p = state.corners.items[t * 3 + k]
+            let q = state.corners.items[t * 3 + (k + 1) % 3]
+            if triangles_on(state, p, q) != 1: continue
+            let pp = state.places.items[(usize)p]
+            let along = state.places.items[(usize)q].subtract(pp)
+            let side = along.cross(normal)
+            let length = side.length()
+            if length <= 0.0: continue
+            let wall = plane_quadric(side.multiply_scalar(1.0 / length), pp, 1000.0 * along.dot(along))
+            state.quadrics.items[(usize)p] = state.quadrics.items[(usize)p].plus(wall)
+            state.quadrics.items[(usize)q] = state.quadrics.items[(usize)q].plus(wall)
+            if lock_boundary:
+                state.locked.items[(usize)p] = 1
+                state.locked.items[(usize)q] = 1
+    # Points a face outside the group uses stay.
+    for face in 0..<topology.faces():
+        if group.get(face): continue
+        for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
+            let at = local[(usize)topology.corners[corner]]
+            if at >= 0: state.locked.items[(usize)at] = 1
+    for t in 0..<triangle_count:
+        for k in 0..<(usize)3:
+            let p = state.corners.items[t * 3 + k]
+            let q = state.corners.items[t * 3 + (k + 1) % 3]
+            if p < q or triangles_on(state, p, q) == 1: try price(state, p, q)
+
+## How many live triangles have both `p` and `q`.
+func triangles_on(state: const Collapse*, p: i32, q: i32) -> usize:
+    var count: usize = 0
+    for t in state.triangles_of(p):
+        if state.alive.items[(usize)t] != 0 and state.has((usize)t, q): count += 1
+    return count
+
+## Push edge `p`–`q`'s collapse at its price (none when both are locked).
+func price(state: Collapse*, p: i32, q: i32) -> !:
+    let lock_p = state.locked.items[(usize)p] != 0
+    let lock_q = state.locked.items[(usize)q] != 0
+    if lock_p and lock_q: return
+    let quadric = state.quadrics.items[(usize)p].plus(state.quadrics.items[(usize)q])
+    let place = target_place(state, p, q, quadric)
+    # Ties (a flat region prices every collapse 0) go to the shortest edge,
+    # so the collapses spread evenly instead of piling on one point.
+    let span = state.places.items[(usize)q].subtract(state.places.items[(usize)p])
+    let length = span.dot(span)
+    try heap_push(&state.heap, Candidate(quadric.at(place) + 0.000001 * length * length, p, q, state.stamps.items[(usize)p], state.stamps.items[(usize)q]))
+
+## Where `p` and `q` meet: a locked end's place, else the quadric's best.
+func target_place(state: const Collapse*, p: i32, q: i32, quadric: Quadric) -> Vector3:
+    if state.locked.items[(usize)p] != 0: return state.places.items[(usize)p]
+    if state.locked.items[(usize)q] != 0: return state.places.items[(usize)q]
+    return cheapest(quadric, state.places.items[(usize)p], state.places.items[(usize)q])
+
+## Collapse edge `u`–`v` if it is still valid: `v` merges into `u`, which
+## moves to the pair's best place; the edges round `u` are priced again.
+func collapse_one(state: Collapse*, u_in: i32, v_in: i32) -> !:
+    # The locked end survives.
+    var u = u_in
+    var v = v_in
+    if state.locked.items[(usize)v] != 0:
+        u = v_in
+        v = u_in
+    let shared = triangles_on(state, u, v)
+    if shared == 0: return
+    let quadric = state.quadrics.items[(usize)u].plus(state.quadrics.items[(usize)v])
+    let place = target_place(state, u, v, quadric)
+    # The link condition: common neighbors only the triangles' third points.
+    state.mark += 2
+    mark_neighbors(state, u)
+    var common: usize = 0
+    for t in state.triangles_of(v):
+        if state.alive.items[(usize)t] == 0: continue
+        for k in 0..<(usize)3:
+            let corner = state.corners.items[(usize)t * 3 + k]
+            if corner == u or corner == v or state.marks.items[(usize)corner] != state.mark: continue
+            state.marks.items[(usize)corner] = state.mark + 1
+            common += 1
+    if common != shared: return
+    # No triangle round either end may turn over.
+    if flips(state, u, v, place) or flips(state, v, u, place): return
+    # Merge: the joined list as a new slice; the triangles on the edge die,
+    # v's others now name u.
+    state.merged_into.items[(usize)v] = u
+    state.places.items[(usize)u] = place
+    state.quadrics.items[(usize)u] = quadric
+    state.stamps.items[(usize)u] += 1
+    let start = state.pool.count
+    let ends: i32[2] = [u, v]
+    for end in ends:
+        let first = (usize)state.list_start.items[(usize)end]
+        let count = (usize)state.list_count.items[(usize)end]
+        for slot in first..<first + count:
+            let t = (usize)state.pool.items[slot]
+            if state.alive.items[t] == 0: continue
+            if state.has(t, u) and state.has(t, v):
+                state.alive.items[t] = 0
+                state.live_triangles -= 1
+                continue
+            for k in 0..<(usize)3:
+                if state.corners.items[t * 3 + k] == v: state.corners.items[t * 3 + k] = u
+            try state.pool.push((i32)t)
+    state.list_start.items[(usize)u] = (i32)start
+    state.list_count.items[(usize)u] = (i32)(state.pool.count - start)
+    state.list_count.items[(usize)v] = 0
+    # Price the edges round u again (u's new version voids its old prices;
+    # its neighbors' other edges stand).
+    state.mark += 2
+    mark_neighbors(state, u)
+    for t in state.triangles_of(u):
+        for k in 0..<(usize)3:
+            let corner = state.corners.items[(usize)t * 3 + k]
+            if corner == u or state.marks.items[(usize)corner] != state.mark: continue
+            state.marks.items[(usize)corner] = state.mark + 1
+            try price(state, u, corner)
+
+## Mark the points sharing a live triangle with `point` with the current
+## mark.
+func mark_neighbors(state: Collapse*, point: i32):
+    for t in state.triangles_of(point):
+        if state.alive.items[(usize)t] == 0: continue
+        for k in 0..<(usize)3:
+            let corner = state.corners.items[(usize)t * 3 + k]
+            if corner != point: state.marks.items[(usize)corner] = state.mark
+
+## Whether moving `moving` to `place` turns over (or flattens) a live
+## triangle of it that does not have `other`.
+func flips(state: const Collapse*, moving: i32, other: i32, place: Vector3) -> bool:
+    for t in state.triangles_of(moving):
+        let at = (usize)t
+        if state.alive.items[at] == 0 or state.has(at, other): continue
+        var ids: i32[3] = [state.corners.items[at * 3], state.corners.items[at * 3 + 1], state.corners.items[at * 3 + 2]]
+        let a = state.places.items[(usize)ids[0]]
+        let b = state.places.items[(usize)ids[1]]
+        let c = state.places.items[(usize)ids[2]]
+        let before = b.subtract(a).cross(c.subtract(a))
+        var moved: Vector3[3] = [a, b, c]
+        for k in 0..<(usize)3:
+            if ids[k] == moving: moved[k] = place
+        let after = moved[1].subtract(moved[0]).cross(moved[2].subtract(moved[0]))
+        if after.length() <= 0.0 or after.dot(before) <= 0.2 * before.length() * after.length(): return true
+    return false
+
+## The decimated mesh: faces outside the group as they were, then the live
+## triangles; points at their merged places, unused ones gone.
+func collapse_output(mesh: const Mesh*, topology: const Topology*, group: Bits, state: const Collapse*, output: VerbOutput*) -> !:
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    for point in 0..<state.globals.count:
+        if state.merged_into.items[point] < 0 and state.stamps.items[point] > 0: builder.move_point(state.globals.items[point], state.places.items[point])
+    var run: usize = 0
+    for face in 0..<topology.faces():
+        if not group.get(face): continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+    try builder.copy_faces(mesh, run, topology.faces())
+    let first = builder.face_count()
+    for t in 0..<state.alive.count:
+        if state.alive.items[t] == 0: continue
+        try builder.face(topology.corner_faces[(usize)state.sources.items[t * 3]])
+        for k in 0..<(usize)3: try builder.corner(state.globals.items[(usize)state.corners.items[t * 3 + k]], state.sources.items[t * 3 + k])
+        try builder.end_face()
+    try builder.drop_unused_points()
+    output.selection = try BitsBuilder.zeros(builder.face_count())
+    output.selection.set_range(first, builder.face_count())
+    output.selection_domain = Domain.face
+
+## A binary min-heap of candidates by cost.
+func heap_push(heap: Growing[Candidate]*, item: Candidate) -> !:
+    try heap.push(item)
+    var at = heap.count - 1
+    while at > 0:
+        let parent = (at - 1) // 2
+        if heap.items[parent].cost <= heap.items[at].cost: break
+        let swap = heap.items[parent]
+        heap.items[parent] = heap.items[at]
+        heap.items[at] = swap
+        at = parent
+
+func heap_pop(heap: Growing[Candidate]*) -> Candidate:
+    let top = heap.items[0]
+    heap.count -= 1
+    if heap.count == 0: return top
+    heap.items[0] = heap.items[heap.count]
+    var at: usize = 0
+    while true:
+        let left = at * 2 + 1
+        let right = left + 1
+        var smallest = at
+        if left < heap.count and heap.items[left].cost < heap.items[smallest].cost: smallest = left
+        if right < heap.count and heap.items[right].cost < heap.items[smallest].cost: smallest = right
+        if smallest == at: break
+        let swap = heap.items[smallest]
+        heap.items[smallest] = heap.items[at]
+        heap.items[at] = swap
+        at = smallest
+    return top

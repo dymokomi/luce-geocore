@@ -1,0 +1,358 @@
+## The knife's faces (knife.lucb): its chords trimmed where they end inside
+## a face, joined into paths across each face, and each face split along
+## its paths; faces beside a cut edge take its points into their outlines.
+
+## A chord end inside a face that no chord goes on from: the chord goes,
+## and so on back along its path (the stroke's first and last points, and
+## any corner whose next segment was hidden).
+func trim_dangling(knife: Knife*) -> !:
+    let count = knife.points.count
+    let uses = try new u32[count] --- in memory.heap
+    defer free(uses) in memory.heap
+    for at in 0..<count: uses[at] = 0
+    for chord in knife.chords.view():
+        if not chord.live: continue
+        uses[(usize)chord.a] += 1
+        uses[(usize)chord.b] += 1
+    var changed = true
+    while changed:
+        changed = false
+        for at in 0..<knife.chords.count:
+            let chord = knife.chords.items[at]
+            if not chord.live: continue
+            let loose_a = knife.points.items[(usize)chord.a].kind == knife_in_face and uses[(usize)chord.a] < 2
+            let loose_b = knife.points.items[(usize)chord.b].kind == knife_in_face and uses[(usize)chord.b] < 2
+            if not loose_a and not loose_b: continue
+            knife.chords.items[at].live = false
+            uses[(usize)chord.a] -= 1
+            uses[(usize)chord.b] -= 1
+            changed = true
+
+## One corner of a face being split: its point and its values' parent.
+struct FaceNode:
+    var point: i32
+    var code: i32
+    ## The knife point it stands for (-1: the face's own corner).
+    var knife_point: i32
+
+func split_faces(mesh: const Mesh*, topology: const Topology*, knife: Knife*, output: VerbOutput*) -> !:
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    # Number the knife points the live chords use; faces with a live chord
+    # or a live point on an edge are rebuilt.
+    let faces = topology.faces()
+    var touched = try BitsBuilder.zeros(faces)
+    defer touched.close()
+    var parents: i32[64] = ---
+    var weights: f32[64] = ---
+    for chord in knife.chords.view():
+        if not chord.live: continue
+        touched.set((usize)chord.face)
+        let ends: i32[2] = [chord.a, chord.b]
+        for end in ends:
+            let point = &knife.points.items[(usize)end]
+            if point.id >= 0: continue
+            if point.kind == knife_on_point:
+                point.id = point.element
+            elif point.kind == knife_on_edge:
+                let edge = (usize)point.element
+                let pair: i32[2] = [topology.edge_points[edge * 2], topology.edge_points[edge * 2 + 1]]
+                let split: f32[2] = [(f32)(1.0 - point.t), (f32)point.t]
+                point.id = try builder.mixed_point(point.position, pair[..<2], split[..<2])
+                for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                    touched.set((usize)topology.corner_faces[(usize)topology.edge_corners[at]])
+            else:
+                let count = polygon_weights(mesh, topology, (usize)point.element, point.position, parents[..<64], weights[..<64])
+                for at in 0..<count: parents[at] = topology.corners[(usize)parents[at]]
+                point.id = try builder.mixed_point(point.position, parents[..<count], weights[..<count])
+    # Each face's live chords, as lists.
+    let heads = try new i32[faces] --- in memory.heap
+    defer free(heads) in memory.heap
+    let next = try new i32[knife.chords.count] --- in memory.heap
+    defer free(next) in memory.heap
+    for at in 0..<faces: heads[at] = -1
+    for at in 0..<knife.chords.count:
+        next[at] = -1
+        let chord = knife.chords.items[at]
+        if not chord.live: continue
+        next[at] = heads[(usize)chord.face]
+        heads[(usize)chord.face] = (i32)at
+    var nodes = Growing[FaceNode]()
+    defer nodes.close()
+    var shapes = Growing[i32]()
+    defer shapes.close()
+    var shape_ends = Growing[u32]()
+    defer shape_ends.close()
+    var run: usize = 0
+    var skipped: usize = 0
+    for face in 0..<faces:
+        if not touched.view().get(face): continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        try outline_nodes(topology, knife, face, builder, &nodes)
+        shapes.clear()
+        shape_ends.clear()
+        for at in 0..<nodes.count: try shapes.push((i32)at)
+        try shape_ends.push((u32)nodes.count)
+        skipped += try cut_face(mesh, topology, knife, face, heads[face], next[..<knife.chords.count], builder, &nodes, &shapes, &shape_ends)
+        var begin: usize = 0
+        for end in shape_ends.view():
+            try builder.face((i32)face)
+            for at in begin..<(usize)end:
+                let node = nodes.items[(usize)shapes.items[at]]
+                try builder.shared_corner(node.point, node.code)
+            try builder.end_face()
+            begin = (usize)end
+    try builder.copy_faces(mesh, run, faces)
+    if skipped > 0: output.warning = "Cuts crossing each other inside one face were left out there"
+
+## Face `face`'s outline: its corners, each followed by the live knife
+## points on its edge in order along it.
+func outline_nodes(topology: const Topology*, knife: const Knife*, face: usize, builder: TopologyBuilder*, nodes: Growing[FaceNode]*) -> !:
+    nodes.clear()
+    var on_edge_points: i32[64] = ---
+    var places: f64[64] = ---
+    for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+        try nodes.push(FaceNode(topology.corners[corner], (i32)corner, -1))
+        let edge = (usize)topology.corner_edges[corner]
+        let forward = topology.edge_points[edge * 2] == topology.corners[corner]
+        # The numbered points on this edge, by how far along from this corner.
+        var count: usize = 0
+        var at = knife.on_edges.items[edge]
+        while at >= 0 and count < 64:
+            let point = knife.points.items[(usize)at]
+            if point.id >= 0:
+                on_edge_points[count] = at
+                places[count] = point.t if forward else 1.0 - point.t
+                count += 1
+            at = point.next
+        for i in 1..<count:
+            var j = i
+            while j > 0 and places[j - 1] > places[j]:
+                let place = places[j]
+                places[j] = places[j - 1]
+                places[j - 1] = place
+                let index = on_edge_points[j]
+                on_edge_points[j] = on_edge_points[j - 1]
+                on_edge_points[j - 1] = index
+                j -= 1
+        for k in 0..<count:
+            let pair: i32[2] = [(i32)corner, (i32)topology.next(corner)]
+            let split: f32[2] = [(f32)(1.0 - places[k]), (f32)places[k]]
+            let code = try builder.shared_mix(pair[..<2], split[..<2])
+            try nodes.push(FaceNode(knife.points.items[(usize)on_edge_points[k]].id, code, on_edge_points[k]))
+
+## Split face `face`'s shapes (one at first: its outline) along each path
+## its chords make; how many paths found no shape holding both ends.
+func cut_face(mesh: const Mesh*, topology: const Topology*, knife: Knife*, face: usize, head: i32, next: const i32[], builder: TopologyBuilder*, nodes: Growing[FaceNode]*, shapes: Growing[i32]*, shape_ends: Growing[u32]*) -> usize!:
+    var used = Growing[u8]()
+    defer used.close()
+    var path = Growing[i32]()
+    defer path.close()
+    var skipped: usize = 0
+    var start_chord = head
+    while start_chord >= 0:
+        let chord = knife.chords.items[(usize)start_chord]
+        let here = start_chord
+        start_chord = next[(usize)start_chord]
+        # A path starts at a chord with an end on the outline.
+        if chord_marked(&used, here): continue
+        var from_point: i32 = -1
+        if knife.points.items[(usize)chord.a].kind != knife_in_face:
+            from_point = chord.a
+        elif knife.points.items[(usize)chord.b].kind != knife_in_face:
+            from_point = chord.b
+        if from_point < 0: continue
+        path.clear()
+        try path.push(from_point)
+        var current = here
+        var point = from_point
+        while true:
+            try mark_chord(&used, current)
+            let piece = knife.chords.items[(usize)current]
+            point = piece.b if piece.a == point else piece.a
+            try path.push(point)
+            if knife.points.items[(usize)point].kind != knife_in_face: break
+            # On through the stroke's corner inside the face.
+            current = other_chord(knife, head, next, &used, point)
+            if current < 0: break
+        if knife.points.items[(usize)point].kind == knife_in_face: continue
+        if not try split_shape(mesh, topology, knife, face, path.view(), builder, nodes, shapes, shape_ends): skipped += 1
+    return skipped
+
+func chord_marked(used: const Growing[u8]*, at: i32) -> bool:
+    return (usize)at < used.count and used.items[(usize)at] != 0
+
+func mark_chord(used: Growing[u8]*, at: i32) -> !:
+    while used.count <= (usize)at: try used.push(0)
+    used.items[(usize)at] = 1
+
+## The face's unused chord at knife point `point`, or -1.
+func other_chord(knife: const Knife*, head: i32, next: const i32[], used: const Growing[u8]*, point: i32) -> i32:
+    var at = head
+    while at >= 0:
+        let chord = knife.chords.items[(usize)at]
+        if not chord_marked(used, at) and (chord.a == point or chord.b == point): return at
+        at = next[(usize)at]
+    return -1
+
+## The node of knife point `point` in the face (an outline corner or an
+## edge point; an inner corner is added), or -1.
+func node_of(mesh: const Mesh*, topology: const Topology*, knife: const Knife*, face: usize, point: i32, builder: TopologyBuilder*, nodes: Growing[FaceNode]*) -> i32!:
+    let knife_point = knife.points.items[(usize)point]
+    for at in 0..<nodes.count:
+        let node = nodes.items[at]
+        if node.knife_point == point or (knife_point.kind == knife_on_point and node.knife_point < 0 and node.point == knife_point.element): return (i32)at
+    if knife_point.kind != knife_in_face: return -1
+    var parents: i32[64] = ---
+    var weights: f32[64] = ---
+    let count = polygon_weights(mesh, topology, face, knife_point.position, parents[..<64], weights[..<64])
+    let code = try builder.shared_mix(parents[..<count], weights[..<count])
+    try nodes.push(FaceNode(knife_point.id, code, point))
+    return (i32)(nodes.count - 1)
+
+## Split the shape holding both ends of `path` (knife points) in two along
+## it; false when no shape holds both or the path is one of its edges.
+func split_shape(mesh: const Mesh*, topology: const Topology*, knife: const Knife*, face: usize, path: const i32[], builder: TopologyBuilder*, nodes: Growing[FaceNode]*, shapes: Growing[i32]*, shape_ends: Growing[u32]*) -> bool!:
+    let first = try node_of(mesh, topology, knife, face, path[0], builder, nodes)
+    let last = try node_of(mesh, topology, knife, face, path[path.length - 1], builder, nodes)
+    if first < 0 or last < 0 or first == last: return false
+    var inner = Growing[i32]()
+    defer inner.close()
+    for at in 1..<path.length - 1:
+        let node = try node_of(mesh, topology, knife, face, path[at], builder, nodes)
+        if node < 0: return false
+        try inner.push(node)
+    var begin: usize = 0
+    for which in 0..<shape_ends.count:
+        let end = (usize)shape_ends.items[which]
+        var i: i64 = -1
+        var j: i64 = -1
+        for at in begin..<end:
+            if shapes.items[at] == first: i = (i64)(at - begin)
+            if shapes.items[at] == last: j = (i64)(at - begin)
+        if i < 0 or j < 0:
+            begin = end
+            continue
+        let size = end - begin
+        let gap = ((j - i) % (i64)size + (i64)size) % (i64)size
+        if inner.count == 0 and (gap == 1 or gap == (i64)size - 1): return false
+        # The two shapes: first round to last, back along the path; last
+        # round to first, on along it.
+        var made = Growing[i32]()
+        defer made.close()
+        var at = (usize)i
+        while true:
+            try made.push(shapes.items[begin + at])
+            if at == (usize)j: break
+            at = (at + 1) % size
+        var back = inner.count
+        while back > 0:
+            back -= 1
+            try made.push(inner.items[back])
+        let split_at = made.count
+        at = (usize)j
+        while true:
+            try made.push(shapes.items[begin + at])
+            if at == (usize)i: break
+            at = (at + 1) % size
+        for node in inner.view(): try made.push(node)
+        # Replace the shape with the two.
+        var rest = Growing[i32]()
+        defer rest.close()
+        var ends = Growing[u32]()
+        defer ends.close()
+        var from_at: usize = 0
+        for other in 0..<shape_ends.count:
+            let shape_end = (usize)shape_ends.items[other]
+            if other != which:
+                for k in from_at..<shape_end: try rest.push(shapes.items[k])
+                try ends.push((u32)rest.count)
+            from_at = shape_end
+        for k in 0..<split_at: try rest.push(made.items[k])
+        try ends.push((u32)rest.count)
+        for k in split_at..<made.count: try rest.push(made.items[k])
+        try ends.push((u32)rest.count)
+        try shapes.assign(rest.view())
+        try shape_ends.assign(ends.view())
+        # The cut edges are the output selection.
+        let ids: i32[2] = [nodes.items[(usize)first].point, nodes.items[(usize)last].point]
+        var previous = ids[0]
+        for node in inner.view():
+            try builder.select_edge(previous, nodes.items[(usize)node].point)
+            previous = nodes.items[(usize)node].point
+        try builder.select_edge(previous, ids[1])
+        return true
+    return false
+
+## Mean value coordinates of `position` in face `face` (on its plane):
+## weights of its corners (corner numbers in `parents`); exact at a corner
+## or on an edge. A face of more than 64 corners takes its nearest corner.
+## How many.
+func polygon_weights(mesh: const Mesh*, topology: const Topology*, face: usize, position: Vector3, parents: i32[], weights: f32[]) -> usize:
+    let first = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    let size = end - first
+    if size > 64:
+        var best = first
+        var best_distance = point_of(mesh, topology.corners[first]).subtract(position).length()
+        for corner in first..<end:
+            let distance = point_of(mesh, topology.corners[corner]).subtract(position).length()
+            if distance < best_distance:
+                best = corner
+                best_distance = distance
+        parents[0] = (i32)best
+        weights[0] = 1.0
+        return 1
+    let normal = mesh.face_normal_span()[face].vector()
+    let side = normal.cross(Vector3(1.0, 0.0, 0.0) if math.abs(normal.x) < 0.9 else Vector3(0.0, 1.0, 0.0))
+    let u = side.multiply_scalar(1.0 / side.length()) if side.length() > 0.0 else Vector3(1.0, 0.0, 0.0)
+    let v = normal.cross(u)
+    var xs: f64[64] = ---
+    var ys: f64[64] = ---
+    var lengths: f64[64] = ---
+    var scale = 0.0
+    for at in 0..<size:
+        let offset = point_of(mesh, topology.corners[first + at]).subtract(position)
+        xs[at] = offset.dot(u)
+        ys[at] = offset.dot(v)
+        lengths[at] = math.sqrt(xs[at] * xs[at] + ys[at] * ys[at])
+        scale = math.max(scale, lengths[at])
+    let close_by = 0.0000001 * math.max(scale, 1.0)
+    for at in 0..<size:
+        if lengths[at] <= close_by:
+            parents[0] = (i32)(first + at)
+            weights[0] = 1.0
+            return 1
+    for at in 0..<size:
+        let after = (at + 1) % size
+        let cross = xs[at] * ys[after] - ys[at] * xs[after]
+        let dot = xs[at] * xs[after] + ys[at] * ys[after]
+        if math.abs(cross) <= close_by * scale and dot < 0.0:
+            let total = lengths[at] + lengths[after]
+            parents[0] = (i32)(first + at)
+            weights[0] = (f32)(lengths[after] / total)
+            parents[1] = (i32)(first + after)
+            weights[1] = (f32)(lengths[at] / total)
+            return 2
+    var sum = 0.0
+    var raw: f64[64] = ---
+    for at in 0..<size:
+        let before = (at + size - 1) % size
+        let after = (at + 1) % size
+        raw[at] = (half_tan(xs[before], ys[before], lengths[before], xs[at], ys[at], lengths[at]) + half_tan(xs[at], ys[at], lengths[at], xs[after], ys[after], lengths[after])) / lengths[at]
+        sum += raw[at]
+    for at in 0..<size:
+        parents[at] = (i32)(first + at)
+        weights[at] = (f32)(raw[at] / sum) if sum != 0.0 and math.is_finite(sum) else (f32)(1.0 / (f64)size)
+    return size
+
+## tan(θ/2) of the angle between (ax, ay) and (bx, by), signed.
+func half_tan(ax: f64, ay: f64, al: f64, bx: f64, by: f64, bl: f64) -> f64:
+    let cross = ax * by - ay * bx
+    let dot = ax * bx + ay * by
+    let denominator = al * bl + dot
+    if math.abs(denominator) < 0.000000000001: return 0.0
+    return cross / denominator

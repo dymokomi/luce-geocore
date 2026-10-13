@@ -1,0 +1,90 @@
+## The Knife (POLY-MODELING.md Stage 5), seen from above (direction -Y)
+## on the 4 by 4 grid over -1..1 in XZ (point z*5+x, face z*4+x) and on the
+## cube: a stroke ending inside faces is trimmed back to the edges it last
+## crossed; one running off the grid cuts every face it crosses; an L
+## stroke turns inside a face; a closed stroke round the middle point cuts
+## the four faces round it; a stroke over the cube cuts only the top
+## unless Cut through, which cuts round it; the volume and area stay.
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    try grid_checks(grid)
+    try cube_checks()
+    print("PASS Knife: ends inside faces trimmed, a stroke off the grid, an L turning inside a face, a closed loop, the cube's top and through it")
+
+## Every face's area, summed.
+func total_area(mesh: interop.Reference[Mesh]) -> f64!:
+    var total = 0.0
+    for face in 0..<mesh.value().face_count(): total += try area(mesh, face)
+    return total
+
+## The knife's numbers seen from above: Cut through, the direction, the
+## count and up to five points.
+func stroke(through: bool, points: const Vector3[]) -> f64[20]:
+    var numbers: f64[20] = [1.0 if through else 0.0, 0.0, -1.0, 0.0, (f64)points.length, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    for at in 0..<points.length:
+        numbers[5 + at * 3] = points[at].x
+        numbers[6 + at * 3] = points[at].y
+        numbers[7 + at * 3] = points[at].z
+    return numbers
+
+func grid_checks(grid: interop.Reference[Mesh]) -> !:
+    # Across the first row from inside face 0 to inside face 3: only faces
+    # 1 and 2 split; 0 and 3 take the edge points into their outlines.
+    let inside: Vector3[2] = [Vector3(-0.9, 0.0, -0.75), Vector3(0.9, 0.0, -0.75)]
+    let trimmed_numbers = stroke(false, inside[..<2])
+    let trimmed = try made(grid, "Knife", "", 3, trimmed_numbers[..<11], 2)
+    defer trimmed.release()
+    try counts(trimmed, 28, 18)
+    try surface(trimmed, false)
+    near(try total_area(trimmed), 4.0)
+    # Off the grid both ends: every face of the row splits.
+    let across: Vector3[2] = [Vector3(-1.5, 0.0, -0.75), Vector3(1.5, 0.0, -0.75)]
+    let row_numbers = stroke(false, across[..<2])
+    let row = try made(grid, "Knife", "", 3, row_numbers[..<11], 4)
+    defer row.release()
+    try counts(row, 30, 20)
+    try surface(row, false)
+    near(try total_area(row), 4.0)
+    # An L: down through face 0, turning inside face 4, right to the edge.
+    let bend: Vector3[3] = [Vector3(-0.75, 0.0, -1.5), Vector3(-0.75, 0.0, -0.25), Vector3(1.5, 0.0, -0.25)]
+    let l_numbers = stroke(false, bend[..<3])
+    let turned = try made(grid, "Knife", "", 3, l_numbers[..<14], 6)
+    defer turned.release()
+    try counts(turned, 32, 21)
+    try surface(turned, false)
+    near(try total_area(turned), 4.0)
+    # A closed square round the middle point, its corners inside faces 5,
+    # 6, 10 and 9: each of those splits along an L through its corner.
+    let square: Vector3[5] = [Vector3(-0.25, 0.0, -0.25), Vector3(0.25, 0.0, -0.25), Vector3(0.25, 0.0, 0.25), Vector3(-0.25, 0.0, 0.25), Vector3(-0.25, 0.0, -0.25)]
+    let loop_numbers = stroke(false, square[..<5])
+    let looped = try made(grid, "Knife", "", 3, loop_numbers[..<20], 8)
+    defer looped.release()
+    try counts(looped, 33, 20)
+    try surface(looped, false)
+    near(try total_area(looped), 4.0)
+
+func cube_checks() -> !:
+    let cube = try Mesh.cube()
+    defer cube.release()
+    # Over the cube along z = 0: the top only, unless through.
+    let over: Vector3[2] = [Vector3(-2.0, 3.0, 0.0), Vector3(2.0, 3.0, 0.0)]
+    let top_numbers = stroke(false, over[..<2])
+    let top = try made(cube, "Knife", "", 3, top_numbers[..<11], 1)
+    defer top.release()
+    try counts(top, 10, 7)
+    try surface(top, true)
+    near(try volume(top), 8.0)
+    let through_numbers = stroke(true, over[..<2])
+    let round = try made(cube, "Knife", "", 3, through_numbers[..<11], 4)
+    defer round.release()
+    try counts(round, 12, 10)
+    try surface(round, true)
+    near(try volume(round), 8.0)

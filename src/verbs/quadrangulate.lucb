@@ -1,0 +1,144 @@
+## Quadrangulate (Tris to Quads): pairs of the group's triangles join into
+## quads, after Blender's Join Triangles. Each edge between two triangles
+## of the group is a candidate when its faces meet within Face angle and
+## the quad they make is within Shape angle of square (its corners' largest
+## departure from 90°) and convex; delimits (sharp marks, seams, materials,
+## UVs) keep edges. Candidates join best first (the sum of the two
+## departures, each over its limit), a triangle at most once, so a grid
+## split along its diagonals comes back whole. Candidates are priced in
+## parallel. The quads are the output selection.
+
+let quadrangulate_parms: ParmSpec[6] = [
+    ParmSpec("Face angle", ParmKind.number, 40.0, 0.0, 180.0, 1, "", "Join triangles whose faces meet within this many degrees."),
+    ParmSpec("Shape angle", ParmKind.number, 40.0, 0.0, 180.0, 1, "", "Join only into quads whose corners stay within this many degrees of square."),
+    ParmSpec("Delimit sharp", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep edges marked sharp.", more = true),
+    ParmSpec("Delimit seams", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep edges marked as seams.", more = true),
+    ParmSpec("Delimit materials", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep edges between faces of different materials.", more = true),
+    ParmSpec("Delimit UVs", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep edges where the UVs part.", more = true)]
+
+func quadrangulate_verb() -> Verb:
+    return Verb("Quadrangulate", "Modeling", "Join pairs of the group's triangles into quads, the squarest first", Domain.face, true, quadrangulate_parms, true, cook_quadrangulate, label = "Tris to Quads", section = "Modify", family = "Subdivide", icon = "rectangle-tool", picks = pick_pieces, whole = true, drag = 1, drag_mode = "amount")
+
+## A candidate join: its edge and how bad the quad would be.
+struct Join:
+    let cost: f64
+    let edge: i32
+
+func cheaper(a: Join, b: Join) -> bool:
+    return a.cost < b.cost or (a.cost == b.cost and a.edge < b.edge)
+
+## What pricing the joins reads.
+struct JoinWork:
+    let mesh: const Mesh*
+    let topology: const Topology*
+    let group: Bits
+    let delimits: const Delimits*
+    let face_limit: f64
+    let shape_limit: f64
+    let prices: f64[]
+
+## Edges first..<end: the price of joining the triangles either side, or -1.
+func price_joins(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (JoinWork*)context
+    let topology = work.topology
+    let normals = work.mesh.face_normal_span()
+    for edge in first..<end:
+        work.prices[edge] = -1.0
+        let start = (usize)topology.edge_corner_offsets[edge]
+        if (usize)topology.edge_corner_offsets[edge + 1] - start != 2: continue
+        let a = (usize)topology.edge_corners[start]
+        let b = (usize)topology.edge_corners[start + 1]
+        let fa = (usize)topology.corner_faces[a]
+        let fb = (usize)topology.corner_faces[b]
+        if fa == fb or not work.group.get(fa) or not work.group.get(fb): continue
+        if topology.offsets[fa + 1] - topology.offsets[fa] != 3 or topology.offsets[fb + 1] - topology.offsets[fb] != 3: continue
+        if work.delimits.stops(work.mesh, topology, edge): continue
+        let fold = math.acos(math.max(-1.0, math.min(1.0, normals[fa].vector().dot(normals[fb].vector())))) * 180.0 / math.pi
+        if fold > work.face_limit: continue
+        let shape = quad_departure(work.mesh, topology, a, b)
+        if shape < 0.0 or shape > work.shape_limit: continue
+        work.prices[edge] = fold / math.max(work.face_limit, 0.000001) + shape / math.max(work.shape_limit, 0.000001)
+
+func cook_quadrangulate(input: const VerbInput*, output: VerbOutput*) -> !:
+    let face_limit = math.max(0.0, math.min(180.0, input.parms.at(0)))
+    let shape_limit = math.max(0.0, math.min(180.0, input.parms.at(1)))
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let faces = topology.faces()
+    let delimits = try delimits_for(mesh, input.parms.at(3) != 0.0, input.parms.at(2) != 0.0, input.parms.at(4) != 0.0, input.parms.at(5) != 0.0, false, 0.0)
+    # Each edge's price, in parallel (-1: not a candidate), then the
+    # candidates in edge order.
+    let prices = try new f64[topology.edges()] --- in memory.heap
+    defer free(prices) in memory.heap
+    var work = JoinWork(mesh, &topology, input.group, &delimits, face_limit, shape_limit, prices[..<topology.edges()])
+    try parallel.for_each_range(topology.edges(), 16384, (void*)&work, price_joins)
+    var joins = Growing[Join]()
+    defer joins.close()
+    for edge in 0..<topology.edges():
+        if prices[edge] >= 0.0: try joins.push(Join(prices[edge], (i32)edge))
+    sort.by[Join](joins.items[..<joins.count], cheaper)
+    # Best first, each triangle once: the corner of the joining edge in the
+    # lower face, per face (-1: kept).
+    let partner = try new i32[faces] --- in memory.heap
+    defer free(partner) in memory.heap
+    for face in 0..<faces: partner[face] = -1
+    var joined: usize = 0
+    for join in joins.view():
+        let first = (usize)topology.edge_corner_offsets[(usize)join.edge]
+        let a = topology.edge_corners[first]
+        let b = topology.edge_corners[first + 1]
+        let fa = (usize)topology.corner_faces[(usize)a]
+        let fb = (usize)topology.corner_faces[(usize)b]
+        if partner[fa] >= 0 or partner[fb] >= 0: continue
+        partner[fa] = a
+        partner[fb] = b
+        joined += 1
+    if joined == 0:
+        output.warning = "No two triangles of the group make a quad within the angles; the input passes through"
+        return
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    var run: usize = 0
+    output.selection = try BitsBuilder.zeros(faces - joined)
+    output.selection_domain = Domain.face
+    for face in 0..<faces:
+        if partner[face] < 0: continue
+        try builder.copy_faces(mesh, run, face)
+        run = face + 1
+        let corner = (usize)partner[face]
+        let twin = (usize)topology.twin(corner)
+        let other = (usize)topology.corner_faces[twin]
+        if other < face: continue
+        # The quad: this triangle from the joining edge's far end round to
+        # its near end, then the other triangle's third corner.
+        output.selection.set(builder.face_count())
+        try builder.face((i32)face)
+        let far = topology.next(corner)
+        try builder.corner(topology.corners[far], (i32)far)
+        let third = topology.next(far)
+        try builder.corner(topology.corners[third], (i32)third)
+        try builder.corner(topology.corners[corner], (i32)corner)
+        let opposite = topology.next(topology.next(twin))
+        try builder.corner(topology.corners[opposite], (i32)opposite)
+        try builder.end_face()
+    try builder.copy_faces(mesh, run, faces)
+
+## How far from square the quad joining the triangles of corners `a` and
+## `b` (on one edge) would be: its corners' largest departure from 90°, in
+## degrees; -1 when it is not convex.
+func quad_departure(mesh: const Mesh*, topology: const Topology*, a: usize, b: usize) -> f64:
+    let far = topology.next(a)
+    let ring: i32[4] = [topology.corners[far], topology.corners[topology.next(far)], topology.corners[a], topology.corners[topology.next(topology.next(b))]]
+    var points: Vector3[4] = [Vector3(), Vector3(), Vector3(), Vector3()]
+    for k in 0..<(usize)4: points[k] = point_of(mesh, ring[k])
+    let normal = points[1].subtract(points[0]).cross(points[2].subtract(points[0])).add(points[2].subtract(points[0]).cross(points[3].subtract(points[0])))
+    var worst = 0.0
+    for k in 0..<(usize)4:
+        let here = points[k]
+        let before = points[(k + 3) % 4].subtract(here)
+        let after = points[(k + 1) % 4].subtract(here)
+        if after.cross(before).dot(normal) <= 0.0: return -1.0
+        worst = math.max(worst, math.abs(corner_turn(here, before.add(here), after.add(here)) * 180.0 / math.pi - 90.0))
+    return worst

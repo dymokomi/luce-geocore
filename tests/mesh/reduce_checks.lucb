@@ -1,0 +1,138 @@
+## Triangulate's methods, Tris to Quads and Decimate (POLY-MODELING.md
+## Stage 5): a grid split along fixed diagonals and joined back into the
+## grid; a 16-gon split by Beauty no worse than clipped; Decimate's
+## collapse halving a sphere's triangles (closed, its volume near) and a
+## flat grid's keeping its square outline; Un-subdivide giving a grid and a
+## subdivided cube back, twice over; Planar joining a flat grid. The grid
+## is 4 by 4 over -1..1 in XZ.
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    try triangle_checks(grid)
+    try decimate_checks(grid)
+    print("PASS Triangulate, Tris to Quads, Decimate: fixed diagonals joined back into the grid, Beauty no worse than clipping; a sphere halved, a flat grid's outline kept; grids and cubes un-subdivided; Planar")
+
+## Every face's area, summed.
+func total_area(mesh: interop.Reference[Mesh]) -> f64!:
+    var total = 0.0
+    for face in 0..<mesh.value().face_count(): total += try area(mesh, face)
+    return total
+
+## The smallest angle among `mesh`'s triangles from face `first` on.
+func smallest(mesh: interop.Reference[Mesh], first: i64) -> f64!:
+    var least = 10.0
+    for face in first..<mesh.value().face_count():
+        var p: Vector3[3] = [Vector3(), Vector3(), Vector3()]
+        for k in 0..<(i64)3: p[(usize)k] = try mesh.value().point(try mesh.value().face_point(face, k))
+        for k in 0..<(usize)3:
+            let u = p[(k + 1) % 3].subtract(p[k])
+            let v = p[(k + 2) % 3].subtract(p[k])
+            least = math.min(least, math.acos(u.dot(v) / (u.length() * v.length())))
+    return least
+
+func triangle_checks(grid: interop.Reference[Mesh]) -> !:
+    let fixed: f64[2] = [1.0, 0.0]
+    let split = try made(grid, "Triangulate", "", 3, fixed[..<2], 32)
+    defer split.release()
+    try counts(split, 25, 32)
+    let methods: f64[4] = [0.0, 2.0, 3.0, 4.0]
+    for method in methods:
+        let numbers: f64[2] = [method, 0.0]
+        let other = try made(grid, "Triangulate", "", 3, numbers[..<2], 32)
+        other.release()
+    let joining: f64[6] = [40.0, 40.0, 0.0, 0.0, 0.0, 0.0]
+    let joined = try made(split, "Quadrangulate", "", 3, joining[..<6], 16)
+    defer joined.release()
+    try counts(joined, 25, 16)
+    for face in 0..<joined.value().face_count(): assert((try joined.value().face_size(face)) == 4)
+    near(try total_area(joined), 4.0)
+    # A 16-sided cap: Beauty's smallest angle at least the clip's.
+    let cylinder = try MeshPrimitives.cylinder(1.0, 2.0, 16)
+    defer cylinder.release()
+    let beauty: f64[2] = [0.0, 0.0]
+    let round = try made(cylinder, "Triangulate", "1", 3, beauty[..<2], 14)
+    defer round.release()
+    let clipping: f64[2] = [0.0, 1.0]
+    let clipped = try made(cylinder, "Triangulate", "1", 3, clipping[..<2], 14)
+    defer clipped.release()
+    try surface(round, true)
+    near(try volume(round), try volume(cylinder))
+    let cap = round.value().face_count() - 14
+    assert((try smallest(round, cap)) >= (try smallest(clipped, cap)) - 0.000001)
+
+## Decimate's numbers: mode, ratio, iterations, angle, lock boundary.
+func reducing(mode: f64, ratio: f64 = 0.5, iterations: f64 = 1.0, lock: bool = false) -> f64[5]:
+    return [mode, ratio, iterations, 5.0, 1.0 if lock else 0.0]
+
+func decimate_checks(grid: interop.Reference[Mesh]) -> !:
+    let sphere = try MeshPrimitives.sphere(1.0, 24)
+    defer sphere.release()
+    let all: f64[2] = [0.0, 0.0]
+    let triangulated = try Verbs.run("Triangulate", sphere, "", 3, all[..<2])
+    defer triangulated.release()
+    let tris = try triangulated.value().mesh()
+    defer tris.release()
+    let before = tris.value().face_count()
+    let half = reducing(0.0)
+    let result = try Verbs.run("PolyReduce", tris, "", 3, half[..<5])
+    defer result.release()
+    let halved = try result.value().mesh()
+    defer halved.release()
+    let after = halved.value().face_count()
+    assert(after <= before // 2 + 1 and after >= before * 2 // 5)
+    try surface(halved, true)
+    assert(math.abs((try volume(halved)) - (try volume(tris))) < 0.05 * (try volume(tris)))
+    # A flat 16 by 16 grid to a quarter: the outline stays a square of
+    # area 4; locked, its boundary points stay too.
+    let fine = try MeshPrimitives.grid(2.0, 16)
+    defer fine.release()
+    let quarter = reducing(0.0, ratio = 0.25)
+    let flat = try Verbs.run("PolyReduce", fine, "", 3, quarter[..<5])
+    defer flat.release()
+    let thinned = try flat.value().mesh()
+    defer thinned.release()
+    near(try total_area(thinned), 4.0)
+    near(thinned.value().bounds().minimum.x, -1.0)
+    near(thinned.value().bounds().maximum.z, 1.0)
+    try surface(thinned, false)
+    assert(thinned.value().face_count() <= 16 * 16 * 2 // 4 + 1)
+    let locking = reducing(0.0, ratio = 0.25, lock = true)
+    let locked_run = try Verbs.run("PolyReduce", fine, "", 3, locking[..<5])
+    defer locked_run.release()
+    let locked = try locked_run.value().mesh()
+    defer locked.release()
+    var outline: i64 = 0
+    for point in 0..<locked.value().point_count():
+        let p = try locked.value().point(point)
+        if math.abs(math.abs(p.x) - 1.0) < 0.000001 or math.abs(math.abs(p.z) - 1.0) < 0.000001: outline += 1
+    assert(outline == 64)
+    # Un-subdivide: the 4 by 4 grid to 2 by 2; a cube subdivided once and
+    # twice comes back.
+    let undo = reducing(1.0)
+    let coarse = try made(grid, "PolyReduce", "", 3, undo[..<5], 4)
+    defer coarse.release()
+    try counts(coarse, 9, 4)
+    near(try total_area(coarse), 4.0)
+    let cube = try Mesh.cube()
+    defer cube.release()
+    let linear: f64[3] = [2.0, 0.0, 0.0]
+    let twice = try made(cube, "Subdivide", "", 3, linear[..<3], 96)
+    defer twice.release()
+    let undo_twice = reducing(1.0, iterations = 2.0)
+    let back = try made(twice, "PolyReduce", "", 3, undo_twice[..<5], 6)
+    defer back.release()
+    try counts(back, 8, 6)
+    try surface(back, true)
+    near(try volume(back), 8.0)
+    # Planar: a flat grid is one face.
+    let planar = reducing(2.0)
+    let one = try made(grid, "PolyReduce", "", 3, planar[..<5], 1)
+    defer one.release()
+    assert(one.value().face_count() == 1)

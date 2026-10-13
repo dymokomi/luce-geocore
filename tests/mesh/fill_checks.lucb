@@ -1,0 +1,203 @@
+## Grid Fill and Bridge (POLY-MODELING.md Stage 5). Grid Fill: a 16-edge
+## circle hole gives 4×4 quads on its plane (the prism's volume back), a
+## square hole in a grid gives the grid back with its middle point at the
+## center, a 2 by 1 hole one row, Span and Offset by hand, Simple, odd
+## loops refused. Bridge: an open tube's two loops of 8 edges bridged with
+## cuts (8 × (cuts + 1) quads, every cut point on the tube), a Profile
+## swelling the middle loop to 1.5 times the radius, Blend path and Blend
+## surface on a tube, Twist, a second pick, two inset faces of a cube
+## bridged as faces (a tunnel), and Merge welding two runs of a grid at
+## the factor. The grid is 4 by 4 over -1..1 in XZ (point z*5+x, face
+## z*4+x).
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try grid_fill_checks()
+    try bridge_checks()
+    print("PASS Grid Fill and Bridge: a circle's 4×4 grid, a square hole's grid back, one row, span and offset by hand, simple blending, odd holes refused; tube loops bridged with cuts, profile, blends, twist, a second pick, faces as a tunnel, merged runs")
+
+## The edges round the hole faces 5, 6, 9 and 10 leave in the grid (its
+## outer boundary would be filled too); the middle point 12 went with them,
+## so the points after it count one less.
+let square_ring = "p6-7-8-12-17-16-15-11-6"
+
+## Every face's area, summed.
+func total_area(mesh: interop.Reference[Mesh]) -> f64!:
+    var total = 0.0
+    for face in 0..<mesh.value().face_count(): total += try area(mesh, face)
+    return total
+
+func grid_fill_checks() -> !:
+    # A cylinder of 16 sides with its top cap gone.
+    let cylinder = try MeshPrimitives.cylinder(1.0, 2.0, 16)
+    defer cylinder.release()
+    let top = try top_cap(cylinder)
+    let removal: f64[1] = [0.0]
+    let deleted = try Verbs.run("Delete", cylinder, top, 3, removal[..<1])
+    defer deleted.release()
+    let open = try deleted.value().mesh()
+    defer open.release()
+    let automatic: f64[3] = [0.0, 0.0, 0.0]
+    let capped = try made(open, "Grid Fill", "", 2, automatic[..<3], 16)
+    defer capped.release()
+    try counts(capped, 41, 33)
+    try surface(capped, true)
+    near(try volume(capped), 16.0 * math.sin(math.pi / 8.0), 0.000001)
+    for face in 17..<33: assert((try capped.value().face_size(face)) == 4)
+    # Span 2 by hand: 2 by 6.
+    let narrow: f64[3] = [2.0, 0.0, 0.0]
+    let strips = try made(open, "Grid Fill", "", 2, narrow[..<3], 12)
+    defer strips.release()
+    try counts(strips, 37, 29)
+    try surface(strips, true)
+    near(try volume(strips), 16.0 * math.sin(math.pi / 8.0), 0.000001)
+    # A square hole of four faces in the grid: the grid comes back.
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let holed = try Verbs.run("Delete", grid, "5 6 9 10", 3, removal[..<1])
+    defer holed.release()
+    let hole = try holed.value().mesh()
+    defer hole.release()
+    let refilled = try made(hole, "Grid Fill", square_ring, 2, automatic[..<3], 4)
+    defer refilled.release()
+    try counts(refilled, 25, 16)
+    try surface(refilled, false)
+    near_point(try refilled.value().point(24), Vector3(0.0, 0.0, 0.0))
+    near(try total_area(refilled), 4.0)
+    # Offset 1: the grid starts on a side's middle; the next corner ends
+    # its first side, so one row of three quads fills the square.
+    let moved: f64[3] = [0.0, 1.0, 0.0]
+    let shifted = try made(hole, "Grid Fill", square_ring, 2, moved[..<3], 3)
+    defer shifted.release()
+    try surface(shifted, false)
+    near(try total_area(shifted), 4.0)
+    # A 2 by 1 hole: one row of two, no inner points.
+    let row = try Verbs.run("Delete", grid, "5 6", 3, removal[..<1])
+    defer row.release()
+    let slot = try row.value().mesh()
+    defer slot.release()
+    let refilled_row = try made(slot, "Grid Fill", "p6-7-8-13-12-11-6", 2, automatic[..<3], 2)
+    defer refilled_row.release()
+    try counts(refilled_row, 25, 16)
+    near(try total_area(refilled_row), 4.0)
+    # Simple blending fills the circle as well, on its plane.
+    let blended: f64[3] = [0.0, 0.0, 1.0]
+    let simple = try made(open, "Grid Fill", "", 2, blended[..<3], 16)
+    defer simple.release()
+    near(try volume(simple), 16.0 * math.sin(math.pi / 8.0), 0.000001)
+    # An odd hole (a corner face's three-edge notch is no loop: delete one
+    # face to leave a 4-edge hole, then a triangle's 3) is refused.
+    let triangles = try Verbs.run("Triangulate", grid, "0", 3, removal[..<0])
+    defer triangles.release()
+    let split = try triangles.value().mesh()
+    defer split.release()
+    let notched = try Verbs.run("Delete", split, "0", 3, removal[..<1])
+    defer notched.release()
+    let notch = try notched.value().mesh()
+    defer notch.release()
+    let refused = try Verbs.run("Grid Fill", notch, "", 2, automatic[..<3])
+    defer refused.release()
+    assert(refused.value().warning().length > 0)
+
+## The cylinder's top cap: the face whose center is highest.
+func top_cap(mesh: interop.Reference[Mesh]) -> str!:
+    var best: i64 = 0
+    for face in 0..<mesh.value().face_count():
+        if (try mesh.value().face_center(face)).y > (try mesh.value().face_center(best)).y: best = face
+    return "1" if best == 1 else "0"
+
+## Bridge's numbers: cuts, twist, interpolation, smoothness, profile,
+## profile shape, merge, merge factor.
+func bridging(cuts: f64, interpolation: f64 = 0.0, profile: f64 = 0.0, shape: f64 = 0.0, twist: f64 = 0.0, merge: bool = false, factor: f64 = 0.5) -> f64[8]:
+    return [cuts, twist, interpolation, 1.0, profile, shape, 1.0 if merge else 0.0, factor]
+
+## The distance of `p` from the Y axis.
+func radius(p: Vector3) -> f64:
+    return math.sqrt(p.x * p.x + p.z * p.z)
+
+func bridge_checks() -> !:
+    # An open tube: a cylinder of 8 sides without its caps; its two loops
+    # bridged straight with 3 cuts lie on the tube.
+    let cylinder = try MeshPrimitives.cylinder(1.0, 2.0, 8)
+    defer cylinder.release()
+    let removal: f64[1] = [0.0]
+    let opened = try Verbs.run("Delete", cylinder, "0 1", 3, removal[..<1])
+    defer opened.release()
+    let tube = try opened.value().mesh()
+    defer tube.release()
+    let low = tube.value().bounds().minimum.y
+    let high = tube.value().bounds().maximum.y
+    let straight = bridging(3.0)
+    let lined = try made(tube, "Bridge", "", 2, straight[..<8], 32)
+    defer lined.release()
+    try counts(lined, 40, 40)
+    for point in 16..<40: near(radius(try lined.value().point(point)), 1.0)
+    # A sphere profile of 0.5 and one cut: the middle loop 1.5 out.
+    let swelled = bridging(1.0, profile = 0.5, shape = 1.0)
+    let bulge = try made(tube, "Bridge", "", 2, swelled[..<8], 16)
+    defer bulge.release()
+    try counts(bulge, 24, 24)
+    for point in 16..<24:
+        let p = try bulge.value().point(point)
+        near(radius(p), 1.5)
+        near(p.y, (low + high) * 0.5)
+    # Blend path between facing parallel loops keeps the tube's shape;
+    # Blend surface leaves each loop along the tube, so its cuts stay on it.
+    let path = bridging(3.0, interpolation = 1.0)
+    let pathed = try made(tube, "Bridge", "", 2, path[..<8], 32)
+    defer pathed.release()
+    for point in 16..<40: near(radius(try pathed.value().point(point)), 1.0)
+    let surfaced = bridging(3.0, interpolation = 2.0)
+    let blended = try made(tube, "Bridge", "", 2, surfaced[..<8], 32)
+    defer blended.release()
+    for point in 16..<40: near(radius(try blended.value().point(point)), 1.0)
+    # Twisted by one: as many faces, each quad leaning one step round.
+    let turned = bridging(0.0, twist = 1.0)
+    let twisted = try made(tube, "Bridge", "", 2, turned[..<8], 8)
+    defer twisted.release()
+    try counts(twisted, 16, 16)
+    # Two runs of a grid apart: the second run as a second pick.
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let apart_run = try Verbs.run("Delete", grid, "4-11", 3, removal[..<1])
+    defer apart_run.release()
+    let apart = try apart_run.value().mesh()
+    defer apart.release()
+    let one = bridging(1.0)
+    let picked = try Verbs.run("Bridge", apart, "p5-6-7-8-9", 2, one[..<8], 0, false, "p10-11-12-13-14")
+    defer picked.release()
+    let rebuilt = try picked.value().mesh()
+    defer rebuilt.release()
+    try counts(rebuilt, 25, 16)
+    assert(picked.value().warning().length == 0)
+    # One run alone wants the second pick; both runs do not.
+    assert(try Verbs.wants_second("Bridge", apart, "p5-6-7-8-9", 2, one[..<8]))
+    assert(not try Verbs.wants_second("Bridge", apart, "p5-6-7-8-9 p10-11-12-13-14", 2, one[..<8]))
+    # Merge: the runs (z = -0.5 and 0.5) weld halfway, at 0, the rows
+    # either side stretched to them.
+    let merging = bridging(0.0, merge = true)
+    let welded = try made(apart, "Bridge", "p5-6-7-8-9 p10-11-12-13-14", 2, merging[..<8], 4)
+    defer welded.release()
+    try counts(welded, 15, 8)
+    try surface(welded, false)
+    near(try total_area(welded), 4.0)
+    near((try welded.value().point(5)).z, 0.0)
+    # Two inset faces of a cube, picked as faces: bridged and gone, a
+    # tunnel through it (a closed surface of genus one).
+    let cube = try Mesh.cube()
+    defer cube.release()
+    let inset_numbers: f64[4] = [0.4, 0.0, 1.0, 1.0]
+    let insets = try made(cube, "Inset", "4 5", 3, inset_numbers[..<4], 2)
+    defer insets.release()
+    let plain = bridging(0.0)
+    let tunnel = try made(insets, "Bridge", "4 5", 3, plain[..<8], 4)
+    defer tunnel.release()
+    try counts(tunnel, 16, 16)
+    try surface(tunnel, true)
+    let edges = try tunnel.value().edge_count()
+    assert(tunnel.value().point_count() - edges + tunnel.value().face_count() == 0)

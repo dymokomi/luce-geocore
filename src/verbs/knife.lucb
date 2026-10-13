@@ -1,0 +1,285 @@
+## Knife: cut the group's faces along a stroke of several segments, after
+## Blender's Knife and Cinema 4D's Knife (Line mode). The stroke is points
+## (its corners, as the editor placed them: on the surface, snapped to
+## points or edge middles, with angles held) and the direction it was
+## drawn along (the view's); each segment cuts with the ribbon its two
+## points sweep along that direction. With Cut through every face the
+## ribbon crosses is cut; else only those facing the view that nothing
+## hides (Blender's default). A face splits along each path the cuts make
+## across it from boundary to boundary, through the stroke's corners
+## inside it; a path that ends inside a face (the stroke's first or last
+## point) is trimmed back to where it last crossed an edge. Faces beside a
+## cut edge take its new point into their boundaries, so the surface stays
+## closed. New points and corners blend their face's values (mean value
+## coordinates inside a face, along the edge on one). The cut edges are
+## the output selection. knife_faces.lucb splits the faces.
+##
+## Its numbers: Cut through, the direction (x, y, z), how many points, then
+## the points (x, y, z each) after the parameters. A stroke whose last
+## point is its first closes.
+
+let knife_parms: ParmSpec[3] = [
+    ParmSpec("Cut through", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Cut every face the stroke passes over, hidden ones too."),
+    ParmSpec("Direction", ParmKind.vector, 0.0, -1.0, 1.0, 3, "", "The direction the stroke was drawn along (the view's).", bar = false),
+    ParmSpec("Points", ParmKind.integer, 0.0, 0.0, 100000.0, 1, "", "How many stroke points follow the parameters.", bar = false)]
+
+func knife_verb() -> Verb:
+    return Verb("Knife", "Modeling", "Cut the group's faces along a stroke of segments, through or on the visible surface", Domain.face, true, knife_parms, true, cook_knife, trailing = true, section = "Modify", family = "Cut", icon = "knife", gesture = "knife", whole = true)
+
+## A point the cut passes through: on a point, on an edge (at `t` from its
+## first end), or inside a face (stroke corner `stroke` there).
+struct KnifePoint:
+    var kind: u8
+    var element: i32
+    var t: f64
+    var stroke: i32
+    var segment: i32
+    var position: Vector3
+    ## The builder's point (-1 until numbered) and the next on its element.
+    var id: i32
+    var next: i32
+
+let knife_on_point: u8 = 0
+let knife_on_edge: u8 = 1
+let knife_in_face: u8 = 2
+
+## One segment's cut across one face, between two knife points.
+struct Chord:
+    var face: i32
+    var a: i32
+    var b: i32
+    var live: bool
+
+## The stroke and what it cuts.
+struct Knife:
+    var stroke: Growing[Vector3]
+    var direction: Vector3
+    var through: bool
+    ## Whether its last segment runs back to its first point.
+    var closed: bool
+    var points: Growing[KnifePoint]
+    var chords: Growing[Chord]
+    ## Per point, edge and face: its first knife point (a linked list).
+    var on_points: Growing[i32]
+    var on_edges: Growing[i32]
+    var in_faces: Growing[i32]
+    ## Lengths below which things meet.
+    var near: f64
+
+    func init():
+        self.stroke = Growing[Vector3]()
+        self.direction = Vector3()
+        self.through = false
+        self.closed = false
+        self.points = Growing[KnifePoint]()
+        self.chords = Growing[Chord]()
+        self.on_points = Growing[i32]()
+        self.on_edges = Growing[i32]()
+        self.in_faces = Growing[i32]()
+        self.near = 0.0
+
+    func close():
+        self.stroke.close()
+        self.points.close()
+        self.chords.close()
+        self.on_points.close()
+        self.on_edges.close()
+        self.in_faces.close()
+
+    ## The knife point on point `point`, made the first time.
+    func at_point(point: i32, position: Vector3) -> i32!:
+        if self.on_points.items[(usize)point] >= 0: return self.on_points.items[(usize)point]
+        try self.points.push(KnifePoint(knife_on_point, point, 0.0, -1, -1, position, -1, -1))
+        self.on_points.items[(usize)point] = (i32)(self.points.count - 1)
+        return (i32)(self.points.count - 1)
+
+    ## The knife point segment `segment` makes on edge `edge` at `t`.
+    func at_edge(edge: i32, t: f64, segment: i32, position: Vector3) -> i32!:
+        var at = self.on_edges.items[(usize)edge]
+        while at >= 0:
+            let known = self.points.items[(usize)at]
+            if known.segment == segment and math.abs(known.t - t) <= 0.000000001: return at
+            at = known.next
+        try self.points.push(KnifePoint(knife_on_edge, edge, t, -1, segment, position, -1, self.on_edges.items[(usize)edge]))
+        self.on_edges.items[(usize)edge] = (i32)(self.points.count - 1)
+        return (i32)(self.points.count - 1)
+
+    ## The knife point of stroke corner `stroke` inside face `face`.
+    func in_face(face: i32, stroke: i32, position: Vector3) -> i32!:
+        var at = self.in_faces.items[(usize)face]
+        while at >= 0:
+            let known = self.points.items[(usize)at]
+            if known.stroke == stroke: return at
+            at = known.next
+        try self.points.push(KnifePoint(knife_in_face, face, 0.0, stroke, -1, position, -1, self.in_faces.items[(usize)face]))
+        self.in_faces.items[(usize)face] = (i32)(self.points.count - 1)
+        return (i32)(self.points.count - 1)
+
+## Where a segment's ribbon crosses a face's boundary: its knife point and
+## how far along the segment (0 at its start, 1 at its end).
+struct Crossing:
+    var point: i32
+    var along: f64
+
+func crossing_before(a: Crossing, b: Crossing) -> bool:
+    return a.along < b.along
+
+func cook_knife(input: const VerbInput*, output: VerbOutput*) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var knife = Knife()
+    defer knife.close()
+    try read_stroke(input, &knife)
+    if knife.stroke.count < 2:
+        output.warning = "Draw the knife's stroke in the viewport: it needs two points or more; the input passes through"
+        return
+    let box = mesh.bounds()
+    knife.near = math.max(0.000000001, box.maximum.subtract(box.minimum).length() * 0.000000001)
+    try knife.on_points.fill(topology.points, -1)
+    try knife.on_edges.fill(topology.edges(), -1)
+    try knife.in_faces.fill(topology.faces(), -1)
+    let segments = knife.stroke.count if knife.closed else knife.stroke.count - 1
+    for segment in 0..<segments:
+        try cut_segment(mesh, &topology, input.group, &knife, segment)
+    if not knife.through: try keep_visible(mesh, &topology, &knife)
+    try trim_dangling(&knife)
+    var live: usize = 0
+    for chord in knife.chords.view():
+        if chord.live: live += 1
+    if live == 0:
+        output.warning = "The stroke cuts across no face of the group from edge to edge; the input passes through"
+        return
+    try split_faces(mesh, &topology, &knife, output)
+
+## The stroke from the numbers: the direction (unit) and the points.
+func read_stroke(input: const VerbInput*, knife: Knife*) -> !:
+    knife.through = input.parms.at(0) != 0.0
+    let given = Vector3(input.parms.at(1), input.parms.at(2), input.parms.at(3))
+    if not given.is_finite(): error(errors.invalid, "The knife's direction must be finite")
+    # No direction is no stroke drawn yet (a node dropped in): nothing cuts.
+    if given.length() == 0.0: return
+    knife.direction = given.multiply_scalar(1.0 / given.length())
+    let count = (usize)math.max(0.0, input.parms.at(4))
+    let numbers = input.parms.numbers
+    if numbers.length < 5 + count * 3: error(errors.invalid, "The knife's stroke has fewer points than it says")
+    for at in 0..<count:
+        let point = Vector3(numbers[5 + at * 3], numbers[6 + at * 3], numbers[7 + at * 3])
+        if not point.is_finite(): error(errors.invalid, "A knife stroke point is not finite")
+        # Points placed twice in a row count once.
+        if knife.stroke.count > 0 and knife.stroke.items[knife.stroke.count - 1].subtract(point).length() == 0.0: continue
+        try knife.stroke.push(point)
+    # Back at its first point: a closed stroke.
+    if knife.stroke.count >= 4 and knife.stroke.items[knife.stroke.count - 1].subtract(knife.stroke.items[0]).length() == 0.0:
+        knife.stroke.count -= 1
+        knife.closed = true
+
+## Segment `segment`'s chords: in every face of the group its ribbon
+## crosses, the crossings paired along the segment and clipped to it (an
+## end inside the face is the stroke's corner there).
+func cut_segment(mesh: const Mesh*, topology: const Topology*, group: Bits, knife: Knife*, segment: usize) -> !:
+    let end_corner = (segment + 1) % knife.stroke.count
+    let start = knife.stroke.items[segment]
+    let end = knife.stroke.items[end_corner]
+    let across = end.subtract(start)
+    # The part of the segment square to the direction, and the ribbon's
+    # normal.
+    let flat = across.subtract(knife.direction.multiply_scalar(across.dot(knife.direction)))
+    let length = flat.length()
+    if length <= knife.near: return
+    let along = flat.multiply_scalar(1.0 / (length * length))
+    let normal_raw = across.cross(knife.direction)
+    let normal = normal_raw.multiply_scalar(1.0 / normal_raw.length())
+    let level = normal.dot(start)
+    var crossings = Growing[Crossing]()
+    defer crossings.close()
+    let normals = mesh.face_normal_span()
+    for face in 0..<topology.faces():
+        if not group.get(face): continue
+        crossings.clear()
+        let first = (usize)topology.offsets[face]
+        let size = (usize)topology.offsets[face + 1] - first
+        for at in 0..<size:
+            let corner = first + at
+            let next = first + (at + 1) % size
+            let previous = first + (at + size - 1) % size
+            let p = point_of(mesh, topology.corners[corner])
+            let q = point_of(mesh, topology.corners[next])
+            let dp = normal.dot(p) - level
+            let dq = normal.dot(q) - level
+            if math.abs(dp) <= knife.near:
+                # The ribbon through a point: a crossing where the faces
+                # either side of it lie on opposite sides, not where it
+                # only touches.
+                let dr = normal.dot(point_of(mesh, topology.corners[previous])) - level
+                if (dr > knife.near and dq > knife.near) or (dr < -knife.near and dq < -knife.near): continue
+                let made = try knife.at_point(topology.corners[corner], p)
+                try crossings.push(Crossing(made, p.subtract(start).dot(along)))
+                continue
+            if math.abs(dq) <= knife.near or (dp > 0.0) == (dq > 0.0): continue
+            let edge = (usize)topology.corner_edges[corner]
+            # t from the edge's first end, the same from either face.
+            let forward = topology.edge_points[edge * 2] == topology.corners[corner]
+            let da = dp if forward else dq
+            let db = dq if forward else dp
+            let t = da / (da - db)
+            let a = point_of(mesh, topology.edge_points[edge * 2])
+            let b = point_of(mesh, topology.edge_points[edge * 2 + 1])
+            let place = a.add(b.subtract(a).multiply_scalar(t))
+            let made = try knife.at_edge((i32)edge, t, (i32)segment, place)
+            try crossings.push(Crossing(made, place.subtract(start).dot(along)))
+        if crossings.count < 2: continue
+        sort.by[Crossing](crossings.items[..<crossings.count], crossing_before)
+        let facing = normals[face].vector()
+        var pair: usize = 0
+        while pair + 1 < crossings.count:
+            let low = crossings.items[pair]
+            let high = crossings.items[pair + 1]
+            pair += 2
+            let slack = knife.near / length
+            if high.along < -slack or low.along > 1.0 + slack: continue
+            var a = low.point
+            var b = high.point
+            if low.along < -slack:
+                a = try stroke_in_face(mesh, topology, knife, face, segment, start, facing)
+            if high.along > 1.0 + slack:
+                b = try stroke_in_face(mesh, topology, knife, face, end_corner, end, facing)
+            if a < 0 or b < 0 or a == b: continue
+            # Along an existing edge: nothing to cut.
+            if same_edge(topology, knife, a, b): continue
+            try knife.chords.push(Chord((i32)face, a, b, true))
+
+## Stroke corner `stroke` (at `place`) inside face `face`: moved onto the
+## face's plane along the direction (-1 when the face lies edge on).
+func stroke_in_face(mesh: const Mesh*, topology: const Topology*, knife: Knife*, face: usize, stroke: usize, place: Vector3, facing: Vector3) -> i32!:
+    let across = facing.dot(knife.direction)
+    if math.abs(across) <= 0.000001: return -1
+    let anchor = point_of(mesh, topology.corners[(usize)topology.offsets[face]])
+    let travel = facing.dot(anchor.subtract(place)) / across
+    return try knife.in_face((i32)face, (i32)stroke, place.add(knife.direction.multiply_scalar(travel)))
+
+## Whether knife points `a` and `b` are the two ends of one edge.
+func same_edge(topology: const Topology*, knife: const Knife*, a: i32, b: i32) -> bool:
+    let x = knife.points.items[(usize)a]
+    let y = knife.points.items[(usize)b]
+    if x.kind != knife_on_point or y.kind != knife_on_point: return false
+    let p = (usize)x.element
+    for slot in (usize)topology.point_edge_offsets[p]..<(usize)topology.point_edge_offsets[p + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        if topology.edge_points[edge * 2] == y.element or topology.edge_points[edge * 2 + 1] == y.element: return true
+    return false
+
+## Without Cut through: only chords on faces facing the view whose middle
+## nothing hides (a ray back toward the view hits no face).
+func keep_visible(mesh: const Mesh*, topology: const Topology*, knife: Knife*) -> !:
+    let normals = mesh.face_normal_span()
+    let back = knife.direction.multiply_scalar(-1.0)
+    let box = mesh.bounds()
+    let lift = math.max(0.0000001, box.maximum.subtract(box.minimum).length() * 0.000001)
+    for at in 0..<knife.chords.count:
+        let chord = knife.chords.items[at]
+        if normals[(usize)chord.face].vector().dot(knife.direction) >= 0.0:
+            knife.chords.items[at].live = false
+            continue
+        let middle = knife.points.items[(usize)chord.a].position.add(knife.points.items[(usize)chord.b].position).multiply_scalar(0.5)
+        let hit = try mesh.ray_face(middle.add(back.multiply_scalar(lift)), back)
+        if hit >= 0: knife.chords.items[at].live = false

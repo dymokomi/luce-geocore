@@ -274,21 +274,21 @@ func loop_cut_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh
     print("PASS Loop Cut: grid ring, cuts and slide, cube ring, crossing rings, group-only cut, pass-through")
 
 func bridge_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) -> !:
-    # Two rows of a grid apart: bridging their facing runs with two
-    # divisions rebuilds the missing rows, uv and all.
+    # Two rows of a grid apart: bridging their facing runs with one cut
+    # rebuilds the missing rows, uv and all.
     let apart = try made(grid, "Delete", "4-11", 3, [0.0], 0)
     defer apart.release()
     counts(apart, 20, 8)
-    let rebuilt = try made(apart, "Bridge", "p5-6-7-8-9 p10-11-12-13-14", 2, [2.0, 0.0], 8)
+    let rebuilt = try made(apart, "Bridge", "p5-6-7-8-9 p10-11-12-13-14", 2, [1.0, 0.0], 8)
     defer rebuilt.release()
     counts(rebuilt, 25, 16)
     try planar_uv(rebuilt)
     try carried(rebuilt)
-    try stable(apart, "Bridge", "p5-6-7-8-9 p10-11-12-13-14", 2, [2.0, 0.0])
+    try stable(apart, "Bridge", "p5-6-7-8-9 p10-11-12-13-14", 2, [1.0, 0.0])
     let edges = try rebuilt.value().edge_count()
     assert(rebuilt.value().point_count() - edges + rebuilt.value().face_count() == 1)
     # Runs of different lengths zip together with triangles.
-    let zipped = try made(apart, "Bridge", "p5-6-7-8-9 p10-11-12", 2, [1.0, 0.0], 6)
+    let zipped = try made(apart, "Bridge", "p5-6-7-8-9 p10-11-12", 2, [0.0, 0.0], 6)
     defer zipped.release()
     counts(zipped, 20, 14)
     # Holes through two opposite sides of a cube: bridged, a tunnel makes
@@ -297,16 +297,16 @@ func bridge_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh])
     defer insets.release()
     let holes = try made(insets, "Delete", "4 5", 3, [0.0], 0)
     defer holes.release()
-    let tunnel = try made(holes, "Bridge", "", 0, [1.0, 0.0], 4)
+    let tunnel = try made(holes, "Bridge", "", 0, [0.0, 0.0], 4)
     defer tunnel.release()
     counts(tunnel, 16, 16)
     let tunnel_edges = try tunnel.value().edge_count()
     assert((try tunnel.value().domain_count(1)) == tunnel_edges * 2 and tunnel.value().point_count() - tunnel_edges + tunnel.value().face_count() == 0)
     # One run alone has nothing to bridge to.
-    let alone = try Verbs.run("Bridge", apart, "p5-6-7", 2, [1.0, 0.0])
+    let alone = try Verbs.run("Bridge", apart, "p5-6-7", 2, [0.0, 0.0])
     defer alone.release()
     assert(alone.value().warning().length > 0)
-    print("PASS Bridge: runs with divisions, zipped runs, a tunnel through a cube, pass-through")
+    print("PASS Bridge: runs with cuts, zipped runs, a tunnel through a cube, pass-through")
 
 func merge_fill_dissolve_checks(grid: interop.Reference[Mesh], cube: interop.Reference[Mesh]) -> !:
     # Merge at the center: a face's four points become one; the faces
@@ -352,10 +352,11 @@ func merge_fill_dissolve_checks(grid: interop.Reference[Mesh], cube: interop.Ref
     try carried(inner)
     try stable(grid, "Dissolve", "12", 1, no_numbers())
     # A face group dissolves only the edges between its faces: the first
-    # two columns join into one face, their inner points gone.
+    # two columns join into one face, their inner points gone, and with
+    # them (Clean points) the points left between two edges on its outline.
     let pairs = try made(grid, "Dissolve", "0-15:2,4", 3, no_numbers(), 1)
     defer pairs.release()
-    counts(pairs, 22, 9)
+    counts(pairs, 17, 9)
     let border = try made(grid, "Dissolve", "2", 1, no_numbers(), 1)
     defer border.release()
     counts(border, 24, 15)

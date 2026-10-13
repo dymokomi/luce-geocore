@@ -1,0 +1,117 @@
+## Fill caps every closed loop of the group's boundary edges with one face
+## (or a fan of triangles around its center); loops of any length. A run or
+## a pinch is left open and counted in the warning; with nothing to fill the
+## input passes through with a warning rather than an error, so a node
+## dropped in with its defaults never fails.
+
+let fill_parms: ParmSpec[1] = [ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Single face|Fan", "One face per loop, or triangles around a new point at its center.")]
+
+let fill_picks: PickSpec[1] = [PickSpec("Boundary edges", "edges", "Select the boundary edges around each hole")]
+
+func fill_verb() -> Verb:
+    return Verb("Fill", "Modeling", "Cap each closed loop of the group's boundary edges", Domain.edge, true, fill_parms, true, cook_fill, section = "Modify", family = "Fill", icon = "fill-hole", picks = fill_picks)
+
+func cook_fill(input: const VerbInput*, output: VerbOutput*) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let points = topology.points
+    # The group's boundary edges, each as the one corner that uses it.
+    let starting = try new i32[points] --- in memory.heap
+    defer free(starting) in memory.heap
+    for at in 0..<points: starting[at] = -1
+    var candidates: usize = 0
+    for edge in 0..<topology.edges():
+        if not input.group.get(edge): continue
+        let first = (usize)topology.edge_corner_offsets[edge]
+        if (usize)topology.edge_corner_offsets[edge + 1] - first != 1: continue
+        let corner = topology.edge_corners[first]
+        let point = (usize)topology.corners[(usize)corner]
+        # Two boundary edges leaving one point: a pinch, which no loop may use.
+        starting[point] = corner if starting[point] == -1 else -2
+        candidates += 1
+    var loops = Growing[i32]()
+    defer loops.close()
+    var loop_ends = Growing[u32]()
+    defer loop_ends.close()
+    var visited = try BitsBuilder.zeros(topology.corners.length)
+    defer visited.close()
+    var skipped: usize = 0
+    for point in 0..<points:
+        if starting[point] < 0 or visited.view().get((usize)starting[point]): continue
+        let begin = loops.count
+        var corner = starting[point]
+        var closed = false
+        while true:
+            if visited.view().get((usize)corner): break
+            visited.set((usize)corner)
+            try loops.push(corner)
+            let next = starting[(usize)topology.corners[topology.next((usize)corner)]]
+            if next < 0: break
+            if next == starting[point]:
+                closed = true
+                break
+            corner = next
+        let size = loops.count - begin
+        if not closed or size < 3:
+            skipped += 1
+            loops.count = begin
+            continue
+        try loop_ends.push((u32)loops.count)
+    if loop_ends.count == 0:
+        output.warning = "No closed loop of boundary edges in the group to fill; the input passes through"
+        return
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    let faces = topology.faces()
+    try builder.copy_faces(mesh, 0, faces)
+    let fan = input.parms.at(0) == 1.0
+    var begin: usize = 0
+    var cap_stack: i32[256]
+    var parent_stack: i32[256]
+    var weight_stack: f32[256]
+    for end in loop_ends.view():
+        # The cap winds against the boundary: its corners in reverse, each
+        # taking the adjacent face's corner at that point. Small loops on
+        # the stack, larger ones in heap scratch.
+        let length = (usize)end - begin
+        let cap = try face_scratch.take[i32](cap_stack, length, length)
+        defer face_scratch.release[i32](cap_stack, cap)
+        let parents = try face_scratch.take[i32](parent_stack, length, length)
+        defer face_scratch.release[i32](parent_stack, parents)
+        var size: usize = 0
+        var at = (usize)end
+        while at > begin:
+            at -= 1
+            let corner = topology.next((usize)loops.items[at])
+            cap[size] = topology.corners[corner]
+            parents[size] = (i32)corner
+            size += 1
+        begin = (usize)end
+        if not fan:
+            try builder.face(-1)
+            for index in 0..<size: try builder.corner(cap[index], parents[index])
+            try builder.end_face()
+            continue
+        # A fan: a point at the loop's center, its values the loop's mean.
+        var center = Vector3()
+        let weights = try face_scratch.take[f32](weight_stack, size, size)
+        defer face_scratch.release[f32](weight_stack, weights)
+        for index in 0..<size:
+            center = center.add(builder.position(cap[index]))
+            weights[index] = 1.0 / (f32)size
+        let middle = try builder.mixed_point(center.multiply_scalar(1.0 / (f64)size), cap, weights)
+        # Every triangle's center corner shares one mix of the loop's corners.
+        let mix = try builder.shared_mix(parents, weights)
+        for index in 0..<size:
+            let next = (index + 1) % size
+            try builder.face(-1)
+            try builder.shared_corner(middle, mix)
+            try builder.corner(cap[index], parents[index])
+            try builder.corner(cap[next], parents[next])
+            try builder.end_face()
+    output.selection = try BitsBuilder.zeros(builder.face_count())
+    output.selection.set_range(faces, builder.face_count())
+    output.selection_domain = Domain.face
+    if skipped > 0: output.warning = "Some boundary runs in the group are not closed simple loops and were left open"
