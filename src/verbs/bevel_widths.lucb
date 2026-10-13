@@ -22,21 +22,47 @@ let clamp_margin: f64 = 0.0001
 func limit_widths(work: Bevel*) -> !:
     let asked = work.width
     if asked <= 0.0: return
+    # The least reach of each range of halves, ranges in parallel.
+    let ranges = (work.halves.count + clamp_range - 1) // clamp_range
+    var reaches = try new f64[ranges] --- in memory.heap
+    defer free(reaches) in memory.heap
+    var clamping = Clamping(work, reaches[..<ranges], 1.0)
+    try parallel.for_each_range(work.halves.count, clamp_range, (void*)&clamping, reach_range)
     var limited = asked
-    for at in 0..<work.halves.count:
-        let reach = vertex_collision(work, (i32)at) if work.settings.vertices else strip_collision(work, (i32)at)
-        limited = math.min(limited, reach)
+    for reach in reaches[..<ranges]: limited = math.min(limited, reach)
     if limited >= asked: return
     # Just short of the collision, so the faces squeezed between keep an
     # area.
     limited *= 1.0 - clamp_margin
-    let factor = limited / asked
-    for at in 0..<work.halves.count:
-        work.halves.items[at].spec_left *= factor
-        work.halves.items[at].spec_right *= factor
-        work.halves.items[at].offset_left *= factor
-        work.halves.items[at].offset_right *= factor
+    clamping.factor = limited / asked
+    try parallel.for_each_range(work.halves.count, clamp_range, (void*)&clamping, scale_range)
     work.width = limited
+
+let clamp_range: usize = 4096
+
+struct Clamping:
+    var work: Bevel*
+    var reaches: f64[]
+    var factor: f64
+
+func reach_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let clamping = (Clamping*)context
+    let work = clamping.work
+    var limited = work.width
+    for at in first..<end:
+        let reach = vertex_collision(work, (i32)at) if work.settings.vertices else strip_collision(work, (i32)at)
+        limited = math.min(limited, reach)
+    clamping.reaches[first // clamp_range] = limited
+
+func scale_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let clamping = (Clamping*)context
+    let halves = clamping.work.halves.items
+    let factor = clamping.factor
+    for at in first..<end:
+        halves[at].spec_left *= factor
+        halves[at].spec_right *= factor
+        halves[at].offset_left *= factor
+        halves[at].offset_right *= factor
 
 ## The width at which the strip of `half` (going from its vertex b to c, in
 ## the face after it, between edges a-b and c-d) collapses or runs out of
@@ -186,7 +212,12 @@ func even_widths(work: Bevel*) -> !:
                 try even_chain(work, start, false)
                 evened = true
     if not evened: return
-    for slot in 0..<work.vertices.count: try build_boundary(work, slot, false)
+    try parallel.for_each_range(work.vertices.count, 256, (void*)work, place_range)
+
+## Place every ring again at the evened widths, vertices in parallel.
+func place_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (Bevel*)context
+    for slot in first..<end: try build_boundary(work, slot, false)
 
 ## How strongly the widths keep to what was asked, against agreeing at both
 ## ends of a strip.

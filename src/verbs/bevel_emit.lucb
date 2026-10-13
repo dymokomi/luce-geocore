@@ -11,26 +11,29 @@
 ## middle, a patch's face beside its boundary point. New points copy the
 ## bevel vertex they replace. The strips and patches are the output
 ## selection; the bevel vertices go.
-
-## What emitting collects for the finishing passes (bevel_marks.lucb).
+##
+## The work is split into pieces (ranges of input faces, of edges, of
+## bevel vertices), each filling its own batch of faces in parallel; the
+## batches join in order (face_batch.lucb), so the output is the same
+## whatever the threads.
+## What emitting collects for the finishing passes (bevel_marks.lucb),
+## each part only when a pass wants it.
 struct Emitted:
-    ## Per output face: its kind (face_kept…).
+    ## Per output face: its kind (face_kept…): Harden normals, Face strength.
     var kinds: Growing[u8]
     ## Per output corner: whether its edge runs along a strip (Harden
     ## normals).
     var long: Growing[u8]
     ## Output edges that continue an input edge, as point pairs: what
     ## values they take (0 every edge value, 1 the seam, 2 the sharp mark)
-    ## and from which input edge.
+    ## and from which input edge (when the mesh has edge values).
     var pairs: Growing[i32]
     var sources: Growing[i32]
     var what: Growing[u8]
     var first_new_face: usize
-    ## Per new point: the input face its corner values were last
-    ## interpolated in, and that interpolation (a parent corner or a shared
-    ## mix), so the corners of the faces round it share one.
-    var mix_faces: Growing[i32]
-    var mix_codes: Growing[i32]
+    var wants_kinds: bool
+    var wants_long: bool
+    var wants_pairs: bool
 
     func init():
         self.kinds = Growing[u8]()
@@ -39,8 +42,9 @@ struct Emitted:
         self.sources = Growing[i32]()
         self.what = Growing[u8]()
         self.first_new_face = 0
-        self.mix_faces = Growing[i32]()
-        self.mix_codes = Growing[i32]()
+        self.wants_kinds = false
+        self.wants_long = false
+        self.wants_pairs = false
 
     func close():
         self.kinds.close()
@@ -48,11 +52,15 @@ struct Emitted:
         self.pairs.close()
         self.sources.close()
         self.what.close()
-        self.mix_faces.close()
-        self.mix_codes.close()
+
+    ## Collect what `other` collects.
+    func wanting(other: const Emitted*):
+        self.wants_kinds = other.wants_kinds
+        self.wants_long = other.wants_long
+        self.wants_pairs = other.wants_pairs
 
     func pair(a: i32, b: i32, source: i32, what: u8) -> !:
-        if a < 0 or b < 0 or a == b: return
+        if not self.wants_pairs or a < 0 or b < 0 or a == b: return
         try self.pairs.push(a)
         try self.pairs.push(b)
         try self.sources.push(source)
@@ -83,6 +91,68 @@ struct FaceDraft:
         try self.points.push(point)
         try self.faces.push(face)
 
+## Which interpolation a point's corners in a face share (the last one
+## made for each place of the cache): the corners round a new point in one
+## input face store one mix, not one each.
+let mix_cache_size: usize = 1024
+
+struct MixCache:
+    var points: i32[1024]
+    var faces: i32[1024]
+    var codes: i32[1024]
+
+func empty_cache() -> MixCache:
+    var cache: MixCache = ---
+    for at in 0..<mix_cache_size:
+        cache.points[at] = -1
+        cache.faces[at] = -1
+        cache.codes[at] = 0
+    return cache
+
+## A piece of the output: a range of input faces, of edges (their strips)
+## or of bevel vertices (their patches).
+let piece_faces: u8 = 0
+let piece_strips: u8 = 1
+let piece_patches: u8 = 2
+
+struct Piece:
+    var kind: u8
+    var first: usize
+    var end: usize
+
+## How many faces, edges and vertices a piece takes.
+let faces_per_piece: usize = 4096
+let edges_per_piece: usize = 8192
+let vertices_per_piece: usize = 2048
+
+## One piece's output: its faces, and the parts of Emitted for them.
+struct EmitBatch:
+    var faces: FaceBatch
+    var emitted: Emitted
+    var draft: FaceDraft
+    var cache: MixCache
+
+    func init():
+        self.faces = FaceBatch()
+        self.emitted = Emitted()
+        self.draft = FaceDraft()
+        self.cache = empty_cache()
+
+    func close():
+        self.faces.close()
+        self.emitted.close()
+        self.draft.close()
+
+struct Emitting:
+    var work: const Bevel*
+    ## What the whole output collects (each batch the same).
+    var whole: const Emitted*
+    var pieces: const Piece[]
+    var batches: EmitBatch[]
+    ## The output points so far, measured from `origin`.
+    var positions: const Vector3[]
+    var origin: Vector3
+
 func emit(work: Bevel*, output: VerbOutput*) -> !:
     let mesh = work.mesh
     let topology = &work.topology
@@ -93,35 +163,28 @@ func emit(work: Bevel*, output: VerbOutput*) -> !:
     try place_grid_points(work, builder)
     var emitted = Emitted()
     defer emitted.close()
-    try emitted.mix_faces.fill(builder.point_count() - topology.points, -1)
-    try emitted.mix_codes.fill(builder.point_count() - topology.points, 0)
-    var draft = FaceDraft()
-    defer draft.close()
-    # The input's faces, untouched runs copied whole.
-    let faces = topology.faces()
-    var run: usize = 0
-    for face in 0..<faces:
-        var touched = false
-        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
-            if work.slot_of.items[(usize)topology.corners[corner]] >= 0: touched = true
-        if not touched: continue
-        try copy_run(builder, &emitted, mesh, run, face)
-        run = face + 1
-        draft.clear()
-        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
-            let point = topology.corners[corner]
-            let slot = work.slot_of.items[(usize)point]
-            if slot < 0:
-                try draft.add(point, (i32)face)
-                continue
-            try rebuilt_corner(work, &draft, slot, corner, (i32)face)
-        try finish_face(work, builder, &draft, &emitted, (i32)face, face_rebuilt)
-    try copy_run(builder, &emitted, mesh, run, faces)
-    emitted.first_new_face = builder.face_count()
-    if not work.settings.vertices:
-        for edge in 0..<topology.edges():
-            if work.beveled.view().get(edge): try strip_faces(work, builder, &draft, &emitted, (i32)edge)
-    for slot in 0..<work.vertices.count: try vertex_faces(work, builder, &draft, &emitted, (i32)slot)
+    emitted.wants_kinds = work.settings.harden or work.settings.strength > 0
+    emitted.wants_long = work.settings.harden
+    emitted.wants_pairs = carries_edge_values(mesh)
+    # The pieces in output order: input faces, strips, patches.
+    var pieces = Growing[Piece]()
+    defer pieces.close()
+    try add_pieces(&pieces, piece_faces, topology.faces(), faces_per_piece)
+    let face_pieces = pieces.count
+    if not work.settings.vertices: try add_pieces(&pieces, piece_strips, topology.edges(), edges_per_piece)
+    try add_pieces(&pieces, piece_patches, work.vertices.count, vertices_per_piece)
+    let batches = try new EmitBatch[pieces.count] --- in memory.heap
+    for at in 0..<pieces.count: batches[at] = EmitBatch()
+    defer close_batches(batches)
+    var emitting = Emitting(work, &emitted, pieces.view(), batches, builder.positions.view(), builder.origin)
+    try parallel.for_each(pieces.count, (void*)&emitting, emit_piece)
+    # Join the batches in order.
+    var faces = try new FaceBatch[pieces.count] --- in memory.heap
+    defer free(faces) in memory.heap
+    for at in 0..<pieces.count: faces[at] = batches[at].faces
+    try append_batches(builder, mesh, faces[..<pieces.count])
+    for at in 0..<face_pieces: emitted.first_new_face += batches[at].faces.face_count()
+    for at in 0..<pieces.count: try join_emitted(&emitted, &batches[at].emitted)
     try unbeveled_pairs(work, &emitted)
     try mark_runs(work, &emitted)
     output.selection = try BitsBuilder.zeros(builder.face_count())
@@ -130,32 +193,136 @@ func emit(work: Bevel*, output: VerbOutput*) -> !:
     try drop_points(builder, &emitted)
     try finish_bevel(work, output, &emitted)
 
-## Copy input faces first..<end whole.
-func copy_run(builder: TopologyBuilder*, emitted: Emitted*, mesh: const Mesh*, first: usize, end: usize) -> !:
-    if end <= first: return
-    let corners_before = builder.corner_count()
-    try builder.copy_faces(mesh, first, end)
-    for _ in first..<end: try emitted.kinds.push(face_kept)
-    for _ in corners_before..<builder.corner_count(): try emitted.long.push(0)
+func close_batches(batches: EmitBatch[]):
+    for at in 0..<batches.length: batches[at].close()
+    free(batches) in memory.heap
+
+## Pieces of `kind` over `count` items, `size` each.
+func add_pieces(pieces: Growing[Piece]*, kind: u8, count: usize, size: usize) -> !:
+    var first: usize = 0
+    while first < count:
+        let end = first + size if count - first > size else count
+        try pieces.push(Piece(kind, first, end))
+        first = end
+
+## Append a batch's collected parts.
+func join_emitted(into: Emitted*, part: const Emitted*) -> !:
+    try append_all(&into.kinds, part.kinds.view())
+    try append_all(&into.long, part.long.view())
+    try append_all(&into.pairs, part.pairs.view())
+    try append_all(&into.sources, part.sources.view())
+    try append_all(&into.what, part.what.view())
+
+func append_all[T](into: Growing[T]*, values: const T[]) -> !:
+    if values.length == 0: return
+    try into.reserve(into.count + values.length)
+    memory.copy(into.items[into.count..], values, values.length)
+    into.count += values.length
+
+## Whether the mesh has edge values a strip's sides carry on.
+func carries_edge_values(mesh: const Mesh*) -> bool:
+    for index in 0..<(usize)mesh.attribute_count():
+        let entry = mesh.attribute_entry((i64)index) catch failure:
+            return true
+        if entry.domain == Domain.edge and entry.storage == Storage.array and entry.kind != DataType.text and not hidden_name(entry.name()): return true
+    return false
+
+func emit_piece(context: void*, index: usize, worker: usize) -> !:
+    let emitting = (Emitting*)context
+    let work = emitting.work
+    let piece = emitting.pieces[index]
+    let batch = &emitting.batches[index]
+    batch.emitted.wanting(emitting.whole)
+    if piece.kind == piece_faces:
+        try face_piece(emitting, batch, piece.first, piece.end)
+    elif piece.kind == piece_strips:
+        for edge in piece.first..<piece.end:
+            if work.beveled.view().get(edge): try strip_faces(emitting, batch, (i32)edge)
+    else:
+        for slot in piece.first..<piece.end: try vertex_faces(emitting, batch, (i32)slot)
+
+## Input faces first..<end: copied whole, or rebuilt round the bevel
+## vertices they touch.
+func face_piece(emitting: const Emitting*, batch: EmitBatch*, first: usize, end: usize) -> !:
+    let work = emitting.work
+    let topology = &work.topology
+    for face in first..<end:
+        let corner_first = (usize)topology.offsets[face]
+        let corner_end = (usize)topology.offsets[face + 1]
+        var touched = false
+        for corner in corner_first..<corner_end:
+            if work.slot_of.items[(usize)topology.corners[corner]] >= 0: touched = true
+        if not touched:
+            try batch.faces.copy_face(topology.offsets, face)
+            if batch.emitted.wants_kinds: try batch.emitted.kinds.push(face_kept)
+            if batch.emitted.wants_long: try batch.emitted.long.extend(batch.emitted.long.count + corner_end - corner_first, 0)
+            continue
+        var draft = &batch.draft
+        draft.clear()
+        for corner in corner_first..<corner_end:
+            let point = topology.corners[corner]
+            let slot = work.slot_of.items[(usize)point]
+            if slot < 0:
+                try draft.add(point, (i32)face)
+                continue
+            try rebuilt_corner(work, draft, slot, corner, (i32)face)
+        try finish_face(emitting, batch, (i32)face, face_rebuilt)
 
 ## Give every grid point that is its own an output point (copying the bevel
 ## vertex), and every alias its root's. Points of one vertex mesh that fall
 ## on one place (a square or hollow shape folds profiles onto the vertex or
 ## onto each other) become one point, so the faces between them collapse
-## instead of keeping no area.
+## instead of keeping no area. Vertices in parallel: each numbers its own
+## places, then takes its share of the new points in order.
 func place_grid_points(work: Bevel*, builder: TopologyBuilder*) -> !:
     try work.grid_ids.fill(work.grid.count, -1)
+    let vertices = work.vertices.count
+    var places = try new usize[vertices + 1] --- in memory.heap
+    defer free(places) in memory.heap
+    var placing = Placing(work, builder, places[..<vertices + 1])
+    try parallel.for_each_range(vertices, 1024, (void*)&placing, number_places)
+    var total: usize = 0
+    for slot in 0..<vertices:
+        let count = places[slot]
+        places[slot] = total
+        total += count
+    places[vertices] = total
+    let first = builder.positions.count
+    try builder.positions.reserve(first + total)
+    try builder.point_parents.reserve(first + total)
+    builder.positions.count = first + total
+    builder.point_parents.count = first + total
+    try parallel.for_each_range(vertices, 1024, (void*)&placing, make_places)
+    try parallel.for_each_range(work.grid.count, 65536, (void*)&placing, link_places)
+
+struct Placing:
+    var work: Bevel*
+    var builder: TopologyBuilder*
+    ## Per vertex: how many places, then the first of them among the new
+    ## points.
+    var places: usize[]
+
+## A place's number while a vertex numbers them: its first point keeps the
+## number, the points welded to it -3 - number.
+func place_number(id: i32) -> i32:
+    return id if id >= 0 else -3 - id
+
+func number_places(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let placing = (Placing*)context
+    let work = placing.work
     var owned = Growing[u32]()
     defer owned.close()
-    for slot in 0..<work.vertices.count:
+    let segments = work.settings.segments
+    for slot in first..<end:
+        placing.places[slot] = 0
         let vertex = work.vertices.items[slot]
         if vertex.grid < 0: continue
-        let segments = work.settings.segments
         let size = (usize)vertex.bounds * (segments // 2 + 1) * (segments + 1)
         owned.clear()
         for at in (usize)vertex.grid..<(usize)vertex.grid + size:
             if work.grid_links.items[at] == -2: try owned.push((u32)at)
         sort_by_x(work, owned.items[..<owned.count])
+        var count: i32 = 0
         for index in 0..<owned.count:
             let at = (usize)owned.items[index]
             let position = work.grid.items[at]
@@ -169,9 +336,39 @@ func place_grid_points(work: Bevel*, builder: TopologyBuilder*) -> !:
                 if work.grid.items[other].subtract(position).length() <= weld_distance:
                     same = (i64)other
                     break
-            if same >= 0: work.grid_ids.items[at] = work.grid_ids.items[(usize)same]
-            else: work.grid_ids.items[at] = try builder.point(position, vertex.point)
-    for at in 0..<work.grid.count:
+            if same >= 0:
+                work.grid_ids.items[at] = -3 - place_number(work.grid_ids.items[(usize)same])
+            else:
+                work.grid_ids.items[at] = count
+                count += 1
+        placing.places[slot] = (usize)count
+
+## Each vertex's own points become output points at its first place on.
+func make_places(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let placing = (Placing*)context
+    let work = placing.work
+    let builder = placing.builder
+    let base = builder.positions.count - placing.places[work.vertices.count]
+    let segments = work.settings.segments
+    for slot in first..<end:
+        let vertex = work.vertices.items[slot]
+        if vertex.grid < 0: continue
+        let size = (usize)vertex.bounds * (segments // 2 + 1) * (segments + 1)
+        let start = base + placing.places[slot]
+        for at in (usize)vertex.grid..<(usize)vertex.grid + size:
+            if work.grid_links.items[at] != -2: continue
+            let id = work.grid_ids.items[at]
+            let point = start + (usize)place_number(id)
+            if id >= 0:
+                builder.positions.items[point] = work.grid.items[at].subtract(builder.origin)
+                builder.point_parents.items[point] = vertex.point
+            work.grid_ids.items[at] = (i32)point
+
+## Every alias takes its root's output point.
+func link_places(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = ((Placing*)context).work
+    for at in first..<end:
+        if work.grid_links.items[at] < 0: continue
         var chain_root = at
         var steps = 0
         while work.grid_links.items[chain_root] >= 0 and steps < 64:
@@ -238,14 +435,16 @@ func rebuilt_corner(work: const Bevel*, draft: FaceDraft*, slot: i32, corner: us
         current = previous
         steps += 1
 
-## Close `draft` as one output face with parent `parent` and kind `kind`,
-## each corner interpolated in its draft face (an input point's corner of
-## that face copies its own values).
-func finish_face(work: const Bevel*, builder: TopologyBuilder*, draft: FaceDraft*, emitted: Emitted*, parent: i32, kind: u8) -> !:
+## Close the batch's draft as one output face with parent `parent` and
+## kind `kind`, each corner interpolated in its draft face (an input point's
+## corner of that face copies its own values).
+func finish_face(emitting: const Emitting*, batch: EmitBatch*, parent: i32, kind: u8) -> !:
+    let work = emitting.work
+    let draft = &batch.draft
     var count = draft.points.count
     if count > 1 and draft.points.items[count - 1] == draft.points.items[0]: count -= 1
     if count < 3: return
-    try builder.face(parent)
+    try batch.faces.face(parent)
     for at in 0..<count:
         let point = draft.points.items[at]
         let face = draft.faces.items[at]
@@ -253,27 +452,30 @@ func finish_face(work: const Bevel*, builder: TopologyBuilder*, draft: FaceDraft
             # An input point kept: its corner in the face is copied.
             let corner = face_corner(work, face, point)
             if corner >= 0:
-                try builder.corner(point, (i32)corner)
+                try batch.faces.corner(point, (i32)corner)
                 continue
-        try interpolated_corner(work, builder, emitted, point, face)
-    try builder.end_face()
-    try emitted.kinds.push(kind)
-    for at in 0..<count: try emitted.long.push(1 if kind == face_strip and (at == 0 or at == 2) else 0)
+        try interpolated_corner(emitting, batch, point, face)
+    try batch.faces.end_face()
+    if batch.emitted.wants_kinds: try batch.emitted.kinds.push(kind)
+    if batch.emitted.wants_long:
+        for at in 0..<count: try batch.emitted.long.push(1 if kind == face_strip and (at == 0 or at == 2) else 0)
 
 ## A corner at output point `point` whose values are face `face`'s,
-## interpolated at the point's position.
-func interpolated_corner(work: const Bevel*, builder: TopologyBuilder*, emitted: Emitted*, point: i32, face: i32) -> !:
-    let at = (usize)point - work.topology.points
-    if at < emitted.mix_faces.count and emitted.mix_faces.items[at] == face:
-        return try builder.shared_corner(point, emitted.mix_codes.items[at])
+## interpolated at the point's position (shared with the point's other
+## corners in that face while the cache holds it).
+func interpolated_corner(emitting: const Emitting*, batch: EmitBatch*, point: i32, face: i32) -> !:
+    let at = (usize)point % mix_cache_size
+    if batch.cache.points[at] == point and batch.cache.faces[at] == face:
+        return try batch.faces.shared_corner(point, batch.cache.codes[at])
     var parents: i32[64] = ---
     var weights: f32[64] = ---
-    let count = mvc_weights(work, face, builder.position(point), parents[..<64], weights[..<64])
-    let code = parents[0] if count == 1 else try builder.shared_mix(parents[..<count], weights[..<count])
-    try builder.shared_corner(point, code)
-    if at < emitted.mix_faces.count:
-        emitted.mix_faces.items[at] = face
-        emitted.mix_codes.items[at] = code
+    let position = emitting.positions[(usize)point].add(emitting.origin)
+    let count = mvc_weights(emitting.work, face, position, parents[..<64], weights[..<64])
+    let code = parents[0] if count == 1 else try batch.faces.shared_mix(parents[..<count], weights[..<count])
+    try batch.faces.shared_corner(point, code)
+    batch.cache.points[at] = point
+    batch.cache.faces[at] = face
+    batch.cache.codes[at] = code
 
 ## Mean value coordinates of `position` in input face `face` (projected to
 ## its plane): weights of its corners into `parents` and `weights`, exact at
@@ -370,7 +572,9 @@ func bound_face(work: const Bevel*, bound: i32) -> i32:
 
 ## Edge `edge`'s strip: a quad per segment between the profiles at its two
 ## ends, each side's corners in that side's face.
-func strip_faces(work: const Bevel*, builder: TopologyBuilder*, draft: FaceDraft*, emitted: Emitted*, edge: i32) -> !:
+func strip_faces(emitting: const Emitting*, batch: EmitBatch*, edge: i32) -> !:
+    let work = emitting.work
+    let draft = &batch.draft
     let topology = &work.topology
     let slot1 = work.slot_of.items[(usize)topology.edge_points[(usize)edge * 2]]
     let slot2 = work.slot_of.items[(usize)topology.edge_points[(usize)edge * 2 + 1]]
@@ -395,11 +599,11 @@ func strip_faces(work: const Bevel*, builder: TopologyBuilder*, draft: FaceDraft
         try draft.add(b, side_face(k - 1, segments, face1, face2, parent))
         try draft.add(c, side_face(k, segments, face1, face2, parent))
         try draft.add(d, side_face(k, segments, face1, face2, parent))
-        try finish_face(work, builder, draft, emitted, parent, face_strip)
+        try finish_face(emitting, batch, parent, face_strip)
         a = d
         b = c
-    try emitted.pair(bound_point(work, half1.left), bound_point(work, half2.right), edge, 0)
-    try emitted.pair(bound_point(work, half2.left), bound_point(work, half1.right), edge, 0)
+    try batch.emitted.pair(bound_point(work, half1.left), bound_point(work, half2.right), edge, 0)
+    try batch.emitted.pair(bound_point(work, half2.left), bound_point(work, half1.right), edge, 0)
 
 ## The face a strip corner `k` of `segments` across takes its values from.
 func side_face(k: usize, segments: usize, first: i32, second: i32, middle: i32) -> i32:
@@ -408,7 +612,9 @@ func side_face(k: usize, segments: usize, first: i32, second: i32, middle: i32) 
     return middle
 
 ## Vertex `slot`'s patch faces by its mesh's kind.
-func vertex_faces(work: const Bevel*, builder: TopologyBuilder*, draft: FaceDraft*, emitted: Emitted*, slot: i32) -> !:
+func vertex_faces(emitting: const Emitting*, batch: EmitBatch*, slot: i32) -> !:
+    let work = emitting.work
+    let draft = &batch.draft
     let vertex = work.vertices.items[(usize)slot]
     let count = (usize)vertex.bounds
     let segments = work.settings.segments
@@ -427,7 +633,7 @@ func vertex_faces(work: const Bevel*, builder: TopologyBuilder*, draft: FaceDraf
                 for k in 1..<segments: try draft.add(vm_point(work, slot, i, 0, k), face)
         if draft.points.count < 3: return
         if kind == mesh_polygon or draft.points.count == 3:
-            return try finish_face(work, builder, draft, emitted, draft.faces.items[0], face_patch)
+            return try finish_face(emitting, batch, draft.faces.items[0], face_patch)
         # A fan from the last point.
         var points = Growing[i32]()
         defer points.close()
@@ -441,7 +647,7 @@ func vertex_faces(work: const Bevel*, builder: TopologyBuilder*, draft: FaceDraf
             try draft.add(points.items[last], faces.items[last])
             try draft.add(points.items[at], faces.items[at])
             try draft.add(points.items[at + 1], faces.items[at + 1])
-            try finish_face(work, builder, draft, emitted, faces.items[at], face_patch)
+            try finish_face(emitting, batch, faces.items[at], face_patch)
         return
     if kind == mesh_cutoff:
         for i in 0..<count:
@@ -450,11 +656,11 @@ func vertex_faces(work: const Bevel*, builder: TopologyBuilder*, draft: FaceDraf
             try draft.add(vm_point(work, slot, i, 1, 0), face)
             for k in 0..<segments + 1: try draft.add(vm_point(work, slot, i, 0, k), face)
             if vertex.center_face: try draft.add(vm_point(work, slot, i, 1, 1), face)
-            try finish_face(work, builder, draft, emitted, face, face_patch)
+            try finish_face(emitting, batch, face, face_patch)
         if vertex.center_face:
             draft.clear()
             for i in 0..<count: try draft.add(vm_point(work, slot, i, 1, 0), bound_face(work, first + (i32)i))
-            try finish_face(work, builder, draft, emitted, draft.faces.items[0], face_patch)
+            try finish_face(emitting, batch, draft.faces.items[0], face_patch)
         return
     # The grid: quads ring by ring in each sector, a center face for an odd
     # count (corner i its sector's face).
@@ -468,11 +674,11 @@ func vertex_faces(work: const Bevel*, builder: TopologyBuilder*, draft: FaceDraf
                     try draft.add(grid_point(work, slot, i, j, k + 1), face)
                     try draft.add(grid_point(work, slot, i, j + 1, k + 1), face)
                     try draft.add(grid_point(work, slot, i, j + 1, k), face)
-                    try finish_face(work, builder, draft, emitted, face, face_patch)
+                    try finish_face(emitting, batch, face, face_patch)
     if odd:
         draft.clear()
         for i in 0..<count: try draft.add(grid_point(work, slot, i, half, half), bound_face(work, first + (i32)i))
-        try finish_face(work, builder, draft, emitted, draft.faces.items[0] if draft.faces.count > 0 else 0, face_patch)
+        try finish_face(emitting, batch, draft.faces.items[0] if draft.faces.count > 0 else 0, face_patch)
 
 ## The output point at grid place (i, j, k), any j and k (canonical).
 func grid_point(work: const Bevel*, slot: i32, i: usize, j: usize, k: usize) -> i32:
@@ -499,17 +705,4 @@ func unbeveled_pairs(work: const Bevel*, emitted: Emitted*) -> !:
 ## Remove the bevel vertices (no corner uses them any more), renumbering
 ## the recorded pairs as the builder renumbers its points.
 func drop_points(builder: TopologyBuilder*, emitted: Emitted*) -> !:
-    let points = builder.positions.count
-    let map = try new i32[points] --- in memory.heap
-    defer free(map) in memory.heap
-    for at in 0..<points: map[at] = -1
-    for point in builder.corners.view(): map[(usize)point] = 0
-    var kept: i32 = 0
-    for at in 0..<points:
-        if map[at] < 0: continue
-        map[at] = kept
-        kept += 1
-    for at in 0..<emitted.pairs.count:
-        let point = emitted.pairs.items[at]
-        emitted.pairs.items[at] = map[(usize)point] if point >= 0 and (usize)point < points else -1
-    try builder.drop_unused_points()
+    try builder.drop_unused_points(renumber = &emitted.pairs)

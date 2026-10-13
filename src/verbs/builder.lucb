@@ -168,8 +168,9 @@ pub struct TopologyBuilder:
 
     ## Remove the points no corner uses, renumbering the rest in order (a
     ## verb that replaces some input points copies them all first).
-    ## A point selection `selected`, when given, is renumbered with them.
-    pub func drop_unused_points(selected: BitsBuilder*? = none) -> !:
+    ## A point selection `selected`, when given, is renumbered with them, and
+    ## so are the point numbers in `renumber` (a removed point's become -1).
+    pub func drop_unused_points(selected: BitsBuilder*? = none, renumber: Growing[i32]*? = none) -> !:
         let points = self.positions.count
         let map = try new i32[points] --- in memory.heap
         defer free(map) in memory.heap
@@ -190,8 +191,13 @@ pub struct TopologyBuilder:
             *bits = renumbered
         self.positions.count = kept
         self.point_parents.count = kept
-        for at in 0..<self.corners.count: self.corners.items[at] = map[(usize)self.corners.items[at]]
-        for at in 0..<self.selected_edges.count: self.selected_edges.items[at] = map[(usize)self.selected_edges.items[at]]
+        var renumbering = Renumbering(map[..<points], self.corners.items[..<self.corners.count])
+        try parallel.for_each_range(self.corners.count, 65536, (void*)&renumbering, renumber_range)
+        renumbering.values = self.selected_edges.items[..<self.selected_edges.count]
+        try parallel.for_each_range(self.selected_edges.count, 65536, (void*)&renumbering, renumber_range)
+        if let others = renumber:
+            renumbering.values = others.items[..<others.count]
+            try parallel.for_each_range(others.count, 65536, (void*)&renumbering, renumber_range)
 
     ## The mesh: positions, faces, triangles (kept or clipped), normals, and
     ## every attribute of `source` through the parents.
@@ -248,6 +254,18 @@ func mix_entry(mix: Mix*, parents: const i32[], weights: const f32[]) -> i32!:
         try mix.weights.push(weights[at])
     try mix.offsets.push((i32)mix.parents.count)
     return -2 - (i32)entry
+
+## Point numbers renumbered through `map` (out of range or removed: -1).
+struct Renumbering:
+    var map: const i32[]
+    var values: i32[]
+
+func renumber_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let renumbering = (Renumbering*)context
+    let map = renumbering.map
+    for at in first..<end:
+        let point = renumbering.values[at]
+        renumbering.values[at] = map[(usize)point] if point >= 0 and (usize)point < map.length else -1
 
 struct TriangleWork:
     let source_offsets: const i32[]

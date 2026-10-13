@@ -1,0 +1,162 @@
+## Faces built apart from a TopologyBuilder, so a verb can make its faces in
+## parallel: each range of its work fills its own batch, and
+## `append_batches` adds the batches in order, all at once
+## (every batch on its own thread), renumbering each batch's corner mixes
+## after the ones before it. A face is copied whole from the source (its
+## corners and triangles are its parent's; nothing is stored but its size)
+## or drafted corner by corner.
+
+pub struct FaceBatch:
+    ## Per face: its parent, 1 when copied whole from it (0 drafted), and
+    ## its corner count.
+    var parents: Growing[i32]
+    var copied: Growing[u8]
+    var sizes: Growing[i32]
+    ## The drafted faces' corners, their parents (codes of `mix` below -1).
+    var corners: Growing[i32]
+    var corner_parents: Growing[i32]
+    var mix: Mix
+    ## Every face's corners, copied ones included.
+    var corner_total: usize
+    ## Where the face being drafted starts in `corners`.
+    var face_start: usize
+
+    pub func init():
+        self.parents = Growing[i32]()
+        self.copied = Growing[u8]()
+        self.sizes = Growing[i32]()
+        self.corners = Growing[i32]()
+        self.corner_parents = Growing[i32]()
+        self.mix = Mix()
+        self.corner_total = 0
+        self.face_start = 0
+
+    pub func close():
+        self.parents.close()
+        self.copied.close()
+        self.sizes.close()
+        self.corners.close()
+        self.corner_parents.close()
+        self.mix.close()
+
+    pub func face_count() -> usize:
+        return self.parents.count
+
+    ## Source face `face` (of `offsets`) copied whole.
+    pub func copy_face(offsets: const i32[], face: usize) -> !:
+        let size = offsets[face + 1] - offsets[face]
+        try self.parents.push((i32)face)
+        try self.copied.push(1)
+        try self.sizes.push(size)
+        self.corner_total += (usize)size
+
+    ## Start a drafted face whose parent is `parent`.
+    pub func face(parent: i32) -> !:
+        try self.parents.push(parent)
+        try self.copied.push(0)
+        self.face_start = self.corners.count
+
+    pub func corner(point: i32, parent: i32) -> !:
+        try self.corners.push(point)
+        try self.corner_parents.push(parent)
+
+    ## A corner mix several corners share (TopologyBuilder.shared_mix); its
+    ## code counts within this batch until the batch is appended.
+    pub func shared_mix(parents: const i32[], weights: const f32[]) -> i32!:
+        if self.mix.offsets.count == 0: try self.mix.offsets.push(0)
+        return try mix_entry(&self.mix, parents, weights)
+
+    pub func shared_corner(point: i32, mix: i32) -> !:
+        try self.corners.push(point)
+        try self.corner_parents.push(mix)
+
+    ## Close the face begun last (at least 3 corners).
+    pub func end_face() -> !:
+        let size = self.corners.count - self.face_start
+        if size < 3: error(errors.invalid, "an operation made a face with fewer than 3 corners")
+        try self.sizes.push((i32)size)
+        self.corner_total += size
+
+    ## Mix entries and their parents.
+    func mix_entries() -> usize:
+        return self.mix.offsets.count - 1 if self.mix.offsets.count > 0 else 0
+
+## Where each batch lands in the builder's arrays.
+struct BatchPlace:
+    var face: usize
+    var corner: usize
+    var mix_entry: usize
+    var mix_parent: usize
+
+struct AppendWork:
+    var builder: TopologyBuilder*
+    var batches: const FaceBatch[]
+    var places: const BatchPlace[]
+    var source_offsets: const i32[]
+    var source_corners: const i32[]
+
+## Add `batches` to `builder` in order (their copied faces are `source`'s),
+## every batch on its own thread.
+func append_batches(builder: TopologyBuilder*, source: const Mesh*, batches: const FaceBatch[]) -> !:
+    let places = try new BatchPlace[batches.length + 1] --- in memory.heap
+    defer free(places) in memory.heap
+    var place = BatchPlace(builder.face_parents.count, builder.corners.count, builder.corner_mix.offsets.count - 1, builder.corner_mix.parents.count)
+    for at in 0..<batches.length:
+        places[at] = place
+        place.face += batches[at].face_count()
+        place.corner += batches[at].corner_total
+        place.mix_entry += batches[at].mix_entries()
+        place.mix_parent += batches[at].mix.parents.count
+    places[batches.length] = place
+    try builder.offsets.reserve(place.face + 1)
+    try builder.face_parents.reserve(place.face)
+    try builder.copied.reserve(place.face)
+    try builder.corners.reserve(place.corner)
+    try builder.corner_parents.reserve(place.corner)
+    try builder.corner_mix.offsets.reserve(place.mix_entry + 1)
+    try builder.corner_mix.parents.reserve(place.mix_parent)
+    try builder.corner_mix.weights.reserve(place.mix_parent)
+    var work = AppendWork(builder, batches, places[..<batches.length + 1], source.offset_span(), source.corner_span())
+    try parallel.for_each(batches.length, (void*)&work, append_batch)
+    builder.offsets.count = place.face + 1
+    builder.face_parents.count = place.face
+    builder.copied.count = place.face
+    builder.corners.count = place.corner
+    builder.corner_parents.count = place.corner
+    builder.corner_mix.offsets.count = place.mix_entry + 1
+    builder.corner_mix.parents.count = place.mix_parent
+    builder.corner_mix.weights.count = place.mix_parent
+
+func append_batch(context: void*, index: usize, worker: usize) -> !:
+    let work = (AppendWork*)context
+    let builder = work.builder
+    let batch = &work.batches[index]
+    let place = work.places[index]
+    # A batch's mix code -2 - e becomes -2 - (e + its first entry).
+    let shift = (i32)place.mix_entry
+    var corner = place.corner
+    var drafted: usize = 0
+    for face in 0..<batch.face_count():
+        let at = place.face + face
+        let parent = batch.parents.items[face]
+        let size = (usize)batch.sizes.items[face]
+        builder.face_parents.items[at] = parent
+        builder.copied.items[at] = batch.copied.items[face]
+        if batch.copied.items[face] != 0:
+            let first = (usize)work.source_offsets[(usize)parent]
+            memory.copy(builder.corners.items[corner..], work.source_corners[first..<first + size], size)
+            for k in 0..<size: builder.corner_parents.items[corner + k] = (i32)(first + k)
+        else:
+            memory.copy(builder.corners.items[corner..], batch.corners.items[drafted..<drafted + size], size)
+            for k in 0..<size:
+                let code = batch.corner_parents.items[drafted + k]
+                builder.corner_parents.items[corner + k] = code - shift if code <= -2 else code
+            drafted += size
+        corner += size
+        builder.offsets.items[at + 1] = (i32)corner
+    let entries = batch.mix_entries()
+    for entry in 0..<entries: builder.corner_mix.offsets.items[place.mix_entry + entry + 1] = batch.mix.offsets.items[entry + 1] + (i32)place.mix_parent
+    let parents = batch.mix.parents.count
+    if parents > 0:
+        memory.copy(builder.corner_mix.parents.items[place.mix_parent..], batch.mix.parents.view(), parents)
+        memory.copy(builder.corner_mix.weights.items[place.mix_parent..], batch.mix.weights.view(), parents)

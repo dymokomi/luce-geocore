@@ -19,22 +19,44 @@
 ## vertex fills its own room and the rings and vertex meshes are built in
 ## parallel.
 
-## Room for every vertex's ring and mesh.
+## Room for every vertex's ring and mesh: each ring's size (in parallel),
+## then each vertex's room, which it clears itself (in parallel again).
 func reserve_rings(work: Bevel*) -> !:
+    try parallel.for_each_range(work.vertices.count, 4096, (void*)work, size_range)
     let segments = work.settings.segments
     let per_bound = (segments // 2 + 1) * (segments + 1)
     var bounds: usize = 0
     var grid: usize = 0
     for slot in 0..<work.vertices.count:
-        let count = (usize)ring_size(work, (i32)slot)
+        let count = (usize)work.vertices.items[slot].bounds
         work.vertices.items[slot].first_bound = (u32)bounds
         work.vertices.items[slot].bounds = 0
         work.vertices.items[slot].grid = (i64)grid
         bounds += count
         grid += count * per_bound
-    try work.bounds.fill(bounds, Bound(Vector3(), -1, 0, -1, -1, -1, -1, 1.0, -1, false, false, false, false, 0, 0, blank_profile()))
-    try work.grid.fill(grid, Vector3())
-    try work.grid_links.fill(grid, -1)
+    try work.bounds.reserve(bounds)
+    work.bounds.count = bounds
+    try work.grid.reserve(grid)
+    work.grid.count = grid
+    try work.grid_links.reserve(grid)
+    work.grid_links.count = grid
+    try parallel.for_each_range(work.vertices.count, 4096, (void*)work, clear_range)
+
+## Each vertex's ring size, kept in `bounds` until its room is placed.
+func size_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (Bevel*)context
+    for slot in first..<end: work.vertices.items[slot].bounds = ring_size(work, (i32)slot)
+
+## Clear each vertex's room: its boundary points and its mesh's points.
+func clear_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (Bevel*)context
+    let blank = Bound(Vector3(), -1, 0, -1, -1, -1, -1, 1.0, -1, false, false, false, false, 0, 0, blank_profile())
+    let bound_end = (usize)work.vertices.items[end].first_bound if end < work.vertices.count else work.bounds.count
+    for at in (usize)work.vertices.items[first].first_bound..<bound_end: work.bounds.items[at] = blank
+    let grid_end = (usize)work.vertices.items[end].grid if end < work.vertices.count else work.grid.count
+    for at in (usize)work.vertices.items[first].grid..<grid_end:
+        work.grid.items[at] = Vector3()
+        work.grid_links.items[at] = -1
 
 ## How many boundary points vertex `slot`'s ring takes: one per edge cut
 ## off (Affect Vertices); three, or one fewer than its edges, at a terminal

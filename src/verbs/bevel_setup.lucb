@@ -11,28 +11,76 @@ func choose_beveled(work: Bevel*, input: const VerbInput*) -> !:
     let topology = &work.topology
     try work.slot_of.fill(topology.points, -1)
     work.beveled = try BitsBuilder.zeros(topology.edges())
-    if work.settings.vertices: return try choose_points(work, input)
-    for edge in 0..<topology.edges():
-        if not edge_chosen(input, topology, edge): continue
-        let first = (usize)topology.edge_corner_offsets[edge]
-        let uses = (usize)topology.edge_corner_offsets[edge + 1] - first
+    var points = Growing[i32]()
+    defer points.close()
+    if work.settings.vertices:
+        try choose_points(work, input, &points)
+        return try add_vertices(work, points.view())
+    # Which edges bevel, ranges of whole bit words in parallel; then the
+    # bevel vertices in order of their first beveled edge.
+    let ranges = (topology.edges() + edge_range - 1) // edge_range
+    var refused = try new i64[ranges] --- in memory.heap
+    defer free(refused) in memory.heap
+    var skipped = try new usize[ranges] --- in memory.heap
+    defer free(skipped) in memory.heap
+    var choosing = Choosing(work, input, refused[..<ranges], skipped[..<ranges])
+    try parallel.for_each_range(topology.edges(), edge_range, (void*)&choosing, choose_range)
+    for at in 0..<ranges:
+        work.skipped_boundary += skipped[at]
+        if refused[at] < 0: continue
+        let edge = (usize)refused[at]
+        var buffer: u8[120]
+        let uses = (usize)topology.edge_corner_offsets[edge + 1] - (usize)topology.edge_corner_offsets[edge]
+        error(errors.invalid, strings.format(buffer, f"Bevel needs manifold edges: edge {edge} has {uses} faces") else "Bevel needs manifold edges")
+    let words = work.beveled.view().words
+    for word_at in 0..<words.length:
+        var word = words[word_at]
+        while word != 0:
+            let edge = word_at * 64 + (usize)trailing_zeros(word)
+            word = word & (word - 1)
+            for end in 0..<(usize)2:
+                let point = topology.edge_points[edge * 2 + end]
+                if work.slot_of.items[(usize)point] >= 0: continue
+                work.slot_of.items[(usize)point] = (i32)points.count
+                try points.push(point)
+    try add_vertices(work, points.view())
+
+## Edges a range of choose_beveled takes: whole words of the bits, so
+## ranges never share a word.
+let edge_range: usize = 64 * 256
+
+struct Choosing:
+    var work: Bevel*
+    var input: const VerbInput*
+    ## Per range: its first edge of three or more faces (-1 none), and its
+    ## boundary edges skipped.
+    var refused: i64[]
+    var skipped: usize[]
+
+func choose_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let choosing = (Choosing*)context
+    let work = choosing.work
+    let topology = &work.topology
+    let range = first // edge_range
+    choosing.refused[range] = -1
+    choosing.skipped[range] = 0
+    for edge in first..<end:
+        if not edge_chosen(choosing.input, topology, edge): continue
+        let at = (usize)topology.edge_corner_offsets[edge]
+        let uses = (usize)topology.edge_corner_offsets[edge + 1] - at
         if uses == 1:
-            work.skipped_boundary += 1
+            choosing.skipped[range] += 1
             continue
         if uses > 2:
-            var buffer: u8[120]
-            error(errors.invalid, strings.format(buffer, f"Bevel needs manifold edges: edge {edge} has {uses} faces") else "Bevel needs manifold edges")
+            choosing.refused[range] = (i64)edge
+            return
         if uses == 0: continue
-        let face_a = topology.corner_faces[(usize)topology.edge_corners[first]]
-        let face_b = topology.corner_faces[(usize)topology.edge_corners[first + 1]]
+        let face_a = topology.corner_faces[(usize)topology.edge_corners[at]]
+        let face_b = topology.corner_faces[(usize)topology.edge_corners[at + 1]]
         if face_a == face_b: continue
         if work.settings.limit == limit_angle and angle_between(normal_of(work, face_a), normal_of(work, face_b)) < work.settings.angle - 0.0000001: continue
         if work.settings.limit == limit_weight and edge_weight(work, edge) <= 0.0: continue
         work.beveled.set(edge)
-    for edge in 0..<topology.edges():
-        if not work.beveled.view().get(edge): continue
-        try add_vertex(work, topology.edge_points[edge * 2])
-        try add_vertex(work, topology.edge_points[edge * 2 + 1])
 
 ## Whether the group names edge `edge`: a point group names the edges
 ## whose two points it holds.
@@ -42,8 +90,8 @@ func edge_chosen(input: const VerbInput*, topology: const Topology*, edge: usize
     return input.group.get(edge)
 
 ## Affect Vertices: the group's points (an edge group's points) that have
-## faces and pass the Limit.
-func choose_points(work: Bevel*, input: const VerbInput*) -> !:
+## faces and pass the Limit, numbered in order.
+func choose_points(work: Bevel*, input: const VerbInput*, points: Growing[i32]*) -> !:
     let topology = &work.topology
     for point in 0..<topology.points:
         let first = (usize)topology.point_edge_offsets[point]
@@ -58,7 +106,8 @@ func choose_points(work: Bevel*, input: const VerbInput*) -> !:
         if not chosen: continue
         if work.settings.limit == limit_weight and point_weight(work, point) <= 0.0: continue
         if work.settings.limit == limit_angle and not sharp_point(work, point): continue
-        try add_vertex(work, (i32)point)
+        work.slot_of.items[point] = (i32)points.count
+        try points.push((i32)point)
 
 ## Whether some edge at `point` has faces at least Angle apart.
 func sharp_point(work: const Bevel*, point: usize) -> bool:
@@ -83,11 +132,55 @@ func point_weight(work: const Bevel*, point: usize) -> f64:
     let entry = work.point_weights else return 0.0
     return entry.number(point, 0)
 
-## Make `point` a bevel vertex (once): its halves counterclockwise from
-## outside, from the boundary edge when its fan is open.
-func add_vertex(work: Bevel*, point: i32) -> !:
-    if work.slot_of.items[(usize)point] >= 0: return
+## Make `points` the bevel vertices, slot by slot (slot_of numbers them
+## already): each vertex's halves counterclockwise from outside, from the
+## boundary edge when its fan is open. A vertex has a half per edge, so
+## every vertex's room is known first and the vertices are built in
+## parallel; a vertex that refuses (not one fan, or an edge of three or
+## more faces) is built again alone to report it, the first one in order.
+func add_vertices(work: Bevel*, points: const i32[]) -> !:
     let topology = &work.topology
+    var halves: usize = 0
+    try work.vertices.fill(points.length, BevelVertex(-1, 0, 0, 0, false, 0.0, Vector3(), 0, 0, mesh_none, -1, false, -1, true, false))
+    for slot in 0..<points.length:
+        let point = (usize)points[slot]
+        let count = (usize)topology.point_edge_offsets[point + 1] - (usize)topology.point_edge_offsets[point]
+        work.vertices.items[slot].point = points[slot]
+        work.vertices.items[slot].first_half = (u32)halves
+        work.vertices.items[slot].halves = (u32)count
+        halves += count
+    try work.halves.fill(halves, Half(-1, -1, -1, -1, -1, false, -1, -1, 0, 0.0, 0.0, 0.0, 0.0, false))
+    let ranges = (points.length + vertex_range - 1) // vertex_range
+    var refused = try new i64[ranges] --- in memory.heap
+    defer free(refused) in memory.heap
+    var adding = Adding(work, refused[..<ranges])
+    try parallel.for_each_range(points.length, vertex_range, (void*)&adding, add_range)
+    for at in 0..<ranges:
+        if refused[at] >= 0: try build_vertex(work, (usize)refused[at])
+
+let vertex_range: usize = 1024
+
+struct Adding:
+    var work: Bevel*
+    ## Per range: its first vertex that refused, or -1.
+    var refused: i64[]
+
+func add_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let adding = (Adding*)context
+    let range = first // vertex_range
+    adding.refused[range] = -1
+    for slot in first..<end:
+        build_vertex(adding.work, slot) catch failure:
+            adding.refused[range] = (i64)slot
+            return
+
+## Build bevel vertex `slot` in its room: its halves round its point and
+## their widths.
+func build_vertex(work: Bevel*, slot: usize) -> !:
+    let topology = &work.topology
+    let point = work.vertices.items[slot].point
+    let half_first = (usize)work.vertices.items[slot].first_half
+    let room = (usize)work.vertices.items[slot].halves
     let edge_first = (usize)topology.point_edge_offsets[(usize)point]
     let edge_end = (usize)topology.point_edge_offsets[(usize)point + 1]
     var start: i64 = -1
@@ -101,7 +194,11 @@ func add_vertex(work: Bevel*, point: i32) -> !:
         for corner_at in first..<end:
             let corner = (usize)topology.edge_corners[corner_at]
             if start < 0 and topology.corners[corner] == point: start = (i64)corner
-    if start < 0: return
+    if start < 0:
+        # No face at the point: nothing bevels there.
+        work.vertices.items[slot].halves = 0
+        work.slot_of.items[(usize)point] = -1
+        return
     let limit = (edge_end - edge_first) * 2 + 2
     # Clockwise (across the edge each corner leaves along) to an open fan's
     # first corner, whose leaving edge is on the boundary.
@@ -113,42 +210,41 @@ func add_vertex(work: Bevel*, point: i32) -> !:
         if topology.corners[back] != point: try not_a_fan(point)
         if back == (usize)start: break
         first = back
-    let slot = (i32)work.vertices.count
-    let half_first = work.halves.count
+    let id = (i32)slot
     var corner = first
     var closed = false
-    var steps: usize = 0
+    var count: usize = 0
     while true:
-        try work.halves.push(new_half(work, slot, topology.corner_edges[corner], point, -1, topology.corner_faces[corner]))
-        steps += 1
-        if steps > limit: try not_a_fan(point)
+        if count >= room: try not_a_fan(point)
+        work.halves.items[half_first + count] = new_half(work, id, topology.corner_edges[corner], point, -1, topology.corner_faces[corner])
+        count += 1
         let previous = topology.previous(corner)
         let across = topology.twin(previous)
         if across < 0:
             # Open: the last half is the edge arriving in the last face.
-            try work.halves.push(new_half(work, slot, topology.corner_edges[previous], point, topology.corner_faces[corner], -1))
+            if count >= room: try not_a_fan(point)
+            work.halves.items[half_first + count] = new_half(work, id, topology.corner_edges[previous], point, topology.corner_faces[corner], -1)
+            count += 1
             break
         if topology.corners[(usize)across] != point: try not_a_fan(point)
         if (usize)across == first:
             closed = true
             break
         corner = (usize)across
-    let count = work.halves.count - half_first
-    if count != edge_end - edge_first: try not_a_fan(point)
+    if count != room: try not_a_fan(point)
     # Each half's face before is the face after the one before it.
     for at in 0..<count:
         let previous_at = half_first + (at + count - 1) % count
         if at > 0 or closed: work.halves.items[half_first + at].before = work.halves.items[previous_at].after
     var selected: u32 = 0
     var normal = Vector3()
-    for at in half_first..<work.halves.count:
+    for at in half_first..<half_first + count:
         if work.halves.items[at].beveled: selected += 1
         normal = normal.add(normal_of(work, work.halves.items[at].after))
     var width = work.width
     if work.settings.vertices: width *= point_weight(work, (usize)point)
-    work.slot_of.items[(usize)point] = slot
-    try work.vertices.push(BevelVertex(point, (u32)half_first, (u32)count, selected, closed, width, unit_of(normal), 0, 0, mesh_none, -1, false, -1, true, false))
-    for at in half_first..<work.halves.count: set_offsets(work, (i32)at)
+    work.vertices.items[slot] = BevelVertex(point, (u32)half_first, (u32)count, selected, closed, width, unit_of(normal), 0, 0, mesh_none, -1, false, -1, true, false)
+    for at in half_first..<half_first + count: set_offsets(work, (i32)at)
 
 func not_a_fan(point: i32) -> !:
     var buffer: u8[120]

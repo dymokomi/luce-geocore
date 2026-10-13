@@ -34,12 +34,12 @@ func case_at(index: usize) -> Case:
         5: return Case("Duplicate, 1k faces", "Duplicate", row, 3, 0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         6: return Case("Subdivide, everything to 2.8M faces", "Subdivide", "*", 0, 0, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         7: return Case("Fuse, 1k faces' points", "Fuse", row, 3, 0, [0.001, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        8: return Case("PolyExtrude, 1k faces as a region", "PolyExtrude", row, 3, 0, [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        9: return Case("PolyExtrude, 1k faces one by one, inset, 2 divisions", "PolyExtrude", row, 3, 0, [0.5, 0.1, 2.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        10: return Case("PolyExtrude, 100k faces as a region", "PolyExtrude", "0-99999", 3, 0, [0.5, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        11: return Case("PolyExtrude, 3 edges", "PolyExtrude", "p350000-350001-350002-350003", 2, 0, [0.5, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        12: return Case("Inset, 1k faces as a region", "Inset", row, 3, 0, [0.1, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        13: return Case("Inset, 100k faces as a region", "Inset", "0-99999", 3, 0, [0.1, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        8: return Case("PolyExtrude, 1k faces as a region", "PolyExtrude", row, 3, 0, [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        9: return Case("PolyExtrude, 1k faces one by one, inset, 2 divisions", "PolyExtrude", row, 3, 0, [0.5, 0.1, 2.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        10: return Case("PolyExtrude, 100k faces as a region", "PolyExtrude", "0-99999", 3, 0, [0.5, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        11: return Case("PolyExtrude, 3 edges", "PolyExtrude", "p350000-350001-350002-350003", 2, 0, [0.5, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        12: return Case("Inset, 1k faces as a region", "Inset", row, 3, 0, [0.1, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        13: return Case("Inset, 100k faces as a region", "Inset", "0-99999", 3, 0, [0.1, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         14: return Case("PolyBevel, 1k faces' inner edges", "PolyBevel", row, 3, 0, [0.1, 1.0, 0.5, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         15: return Case("PolyBevel, 100k faces' inner edges, 3 segments", "PolyBevel", "0-99999", 3, 0, [0.1, 3.0, 0.5, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         16: return Case("PolyBevel, every edge (1.4M)", "PolyBevel", "*", 0, 0, [0.1, 1.0, 0.5, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
@@ -56,6 +56,18 @@ func case_at(index: usize) -> Case:
         27: return Case("PolyDraw, a quad drawn onto the grid, its corners snapped", "PolyDraw", "", 0, 0, [0.001, 4.0, 135.5, 0.0, -1.5, 136.5, 0.0, -1.5, 136.5, 0.0, -0.5, 135.5, 0.0, -0.5, 0.0, 0.0])
         28: return Case("PolyDraw, through 4 selected points", "PolyDraw", "350000-350001 350838-350839", 1, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         _: return Case("Clean, everything", "Clean", "*", 0, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
+let no_numbers: f64[1] = [0.0]
+
+## How many of a case's 16 numbers its verb takes (the rest are left out:
+## a verb refuses numbers past its parameters, but PolyDraw takes its
+## corners after them).
+func numbers_taken(verb: str) -> usize:
+    if verb == "PolyDraw": return 16
+    let index = Verbs.index_of(verb)
+    var total: i64 = 0
+    for parm in 0..<Verbs.parm_count(index): total += Verbs.parm_components(index, parm)
+    return (usize)math.min(16.0, (f64)total)
 
 pub func main(arguments: str[]) -> i32!:
     std_parallel.warm()
@@ -76,7 +88,7 @@ pub func main(arguments: str[]) -> i32!:
     # edges), which every mesh with that topology shares.
     let meshes: interop.Reference[Mesh][3] = [grid, halves, holed]
     for mesh in meshes:
-        let warm = try Verbs.run("Dissolve", mesh, "0", 3, [0.0])
+        let warm = try Verbs.run("Dissolve", mesh, "0", 3, no_numbers[..<0])
         warm.release()
     for index in 0..<case_total:
         let case = case_at(index)
@@ -84,7 +96,7 @@ pub func main(arguments: str[]) -> i32!:
         if case.mesh == 1: source = halves
         if case.mesh == 2: source = holed
         let start = time.now()
-        let result = try Verbs.run(case.verb, source, case.group, case.group_type, case.numbers[..<16])
+        let result = try Verbs.run(case.verb, source, case.group, case.group_type, case.numbers[..<numbers_taken(case.verb)])
         let spent = (f64)time.since(start) / 1000000.0
         let mesh = try result.value().mesh()
         print(f"{case.name}\t{spent}\t{mesh.value().face_count()}\t{result.value().warning()}")

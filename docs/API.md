@@ -305,7 +305,11 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
   Edges with three or more faces, and bevel vertices whose faces are not one
   fan, refuse the run; boundary edges are left. Its keys (Blender's A, P, S,
   M, V, O, I, Z, N, C, H, U, K, L) are `Verb.keys`, which luced-3d's drag
-  reads.
+  reads. Every stage runs in parallel but numbering the bevel vertices and
+  walking the even-widths chains: the output is built in pieces (ranges of
+  faces, edges and vertices), each into its own `FaceBatch`, joined in order
+  by `append_batches` (`verbs/face_batch.lucb`), so the mesh is the same on
+  any number of threads.
 - **PolyExtrude** (faces or edges): regions or individual faces, with an inset
   across the region boundary and wall divisions; one front point per run of
   faces around a boundary point; a closed surface moves out. Edges extrude into
@@ -380,33 +384,33 @@ and attributes included):
 
 | Verb run | Time | Faces out | Warning |
 |---|---:|---:|---|
-| Transform Components, 1k faces | 21.9 ms | 700,569 |  |
-| Smooth, everything | 24.5 ms | 700,569 |  |
-| Delete, 1k faces | 9.7 ms | 699,569 |  |
-| Reverse, 1k faces | 20.8 ms | 700,569 |  |
-| Triangulate, half | 65.1 ms | 1,050,570 |  |
-| Duplicate, 1k faces | 20.5 ms | 701,569 |  |
-| Subdivide, everything to 2.8M faces | 662.5 ms | 2,802,276 |  |
-| Fuse, 1k faces' points | 43.5 ms | 700,569 |  |
-| PolyExtrude, 1k faces as a region | 29.4 ms | 702,247 |  |
-| PolyExtrude, 1k faces one by one, inset, 2 divisions | 35.1 ms | 708,569 |  |
-| PolyExtrude, 100k faces as a region | 53.5 ms | 702,483 |  |
-| PolyExtrude, 3 edges | 50.4 ms | 700,572 |  |
-| Inset, 1k faces as a region | 32.5 ms | 702,247 |  |
-| Inset, 100k faces as a region | 54.1 ms | 702,483 |  |
-| PolyBevel, 1k faces' inner edges | 97.7 ms | 705,240 |  |
-| PolyBevel, 100k faces' inner edges, 3 segments | 1038.0 ms | 2,197,462 |  |
-| PolyBevel, every edge (1.4M) | 1977.2 ms | 2,798,929 |  |
-| Loop Cut, one ring of 837 quads | 51.7 ms | 701,406 |  |
-| Loop Cut, every ring both ways | 420.5 ms | 1,401,138 |  |
-| Bridge, two facing 837-edge loops, 4 divisions | 35.6 ms | 703,080 |  |
-| Merge Points, a face's points at their center | 43.6 ms | 700,568 |  |
-| Merge Points, 250 pairs as islands | 45.8 ms | 700,569 |  |
-| Dissolve, 250 edges between face pairs | 60.9 ms | 700,278 |  |
-| Dissolve, 250 points | 52.0 ms | 699,821 |  |
-| Fill, a 22-edge hole | 22.2 ms | 700,560 | Some boundary runs in the group are not closed simple loops and were left open |
-| Fill, a 22-edge hole as a fan | 22.2 ms | 700,581 | Some boundary runs in the group are not closed simple loops and were left open |
-| Split, 1k faces | 19.7 ms | 700,569 |  |
-| PolyDraw, a quad drawn onto the grid, its corners snapped | 22.0 ms | 700,570 |  |
-| PolyDraw, through 4 selected points | 21.2 ms | 700,570 |  |
-| Clean, everything | 28.5 ms | 700,569 |  |
+| Transform Components, 1k faces | 16.9 ms | 700,569 |  |
+| Smooth, everything | 4.9 ms | 700,569 |  |
+| Delete, 1k faces | 5.7 ms | 699,569 |  |
+| Reverse, 1k faces | 12.3 ms | 700,569 |  |
+| Triangulate, half | 46.3 ms | 1,050,570 |  |
+| Duplicate, 1k faces | 11.2 ms | 701,569 |  |
+| Subdivide, everything to 2.8M faces | 516.8 ms | 2,802,276 |  |
+| Fuse, 1k faces' points | 25.4 ms | 700,569 |  |
+| PolyExtrude, 1k faces as a region | 22.2 ms | 702,247 |  |
+| PolyExtrude, 1k faces one by one, inset, 2 divisions | 24.7 ms | 708,569 |  |
+| PolyExtrude, 100k faces as a region | 50.6 ms | 702,483 |  |
+| PolyExtrude, 3 edges | 33.5 ms | 700,572 |  |
+| Inset, 1k faces as a region | 21.6 ms | 702,247 |  |
+| Inset, 100k faces as a region | 54.3 ms | 702,483 |  |
+| PolyBevel, 1k faces' inner edges | 31.1 ms | 705,240 |  |
+| PolyBevel, 100k faces' inner edges, 3 segments | 209.6 ms | 2,197,462 |  |
+| PolyBevel, every edge (1.4M) | 454.5 ms | 2,798,929 |  |
+| Loop Cut, one ring of 837 quads | 41.2 ms | 701,406 |  |
+| Loop Cut, every ring both ways | 375.2 ms | 1,401,138 |  |
+| Bridge, two facing 837-edge loops, 4 divisions | 17.1 ms | 703,080 |  |
+| Merge Points, a face's points at their center | 20.9 ms | 700,568 |  |
+| Merge Points, 250 pairs as islands | 20.7 ms | 700,569 |  |
+| Dissolve, 250 edges between face pairs | 36.2 ms | 700,278 |  |
+| Dissolve, 250 points | 27.0 ms | 699,821 |  |
+| Fill, a 22-edge hole | 14.1 ms | 700,561 |  |
+| Fill, a 22-edge hole as a fan | 11.3 ms | 703,929 |  |
+| Split, 1k faces | 10.7 ms | 700,569 |  |
+| PolyDraw, a quad drawn onto the grid, its corners snapped | 17.7 ms | 700,570 |  |
+| PolyDraw, through 4 selected points | 9.6 ms | 700,570 |  |
+| Clean, everything | 14.3 ms | 700,569 |  |

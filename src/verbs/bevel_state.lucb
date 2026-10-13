@@ -182,8 +182,9 @@ struct Bevel:
         if edge_index >= 0: work.edge_weights = try mesh.attribute_entry(edge_index)
         let point_index = mesh.attribute_on("bevel_weight", Domain.point)
         if point_index >= 0: work.point_weights = try mesh.attribute_entry(point_index)
-        try work.face_normals.fill(topology.faces(), Vector3())
-        for face in 0..<topology.faces(): work.face_normals.items[face] = newell_normal(&work, face)
+        try work.face_normals.reserve(topology.faces())
+        work.face_normals.count = topology.faces()
+        try parallel.for_each_range(topology.faces(), 4096, (void*)&work, normal_range)
         return work
 
     func close():
@@ -198,6 +199,10 @@ struct Bevel:
         self.grid.close()
         self.grid_links.close()
         self.grid_ids.close()
+
+func normal_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (Bevel*)context
+    for face in first..<end: work.face_normals.items[face] = newell_normal(work, face)
 
 ## Input point `point`, in world space.
 func input_point(work: const Bevel*, point: i32) -> Vector3:
