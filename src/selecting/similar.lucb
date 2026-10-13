@@ -1,0 +1,170 @@
+## Select Similar: every element like a selected one by a measure, as
+## Blender's editmesh_select_similar does: each selected element's value is
+## a reference, and an element is taken when it equals one within the
+## threshold, or is at least (Greater) or at most (Less) one. Scalars are
+## found by binary search in the sorted references; directions (normals,
+## edge directions) through a hash of the reference directions with cells
+## as wide as the threshold's chord.
+
+let similar_parms: ParmSpec[3] = [
+    ParmSpec("By", ParmKind.menu, 0.0, 0.0, 14.0, 1, "Normal|Area|Perimeter|Sides|Coplanar|Material|Group|Length|Direction|Face angle|Crease|Seam|Sharp|Edges|Faces",
+             "What is compared. Faces: Normal, Area, Perimeter, Sides, Coplanar, Material, Group. Edges: Length, Direction, Face angle, Crease, Seam, Sharp, Faces, Group. Points: Normal, Edges, Faces, Group."),
+    ParmSpec("Compare", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Equal|Greater|Less", "Equal within the threshold, or at least, or at most, a selected element's value."),
+    ParmSpec("Threshold", ParmKind.number, 0.01, 0.0, 1000.0, 1, "", "How far apart values still count as equal: in the value's units, degrees for Normal, Direction and Face angle.", soft = 1.0)]
+
+func similar_rule() -> SelectRule:
+    return SelectRule("Select Similar", "Similar", "similar", "Every element like a selected one by normal, area, perimeter, sides, plane, material, group, length, direction, face angle, crease, seam, sharpness or valence", "Similar", "filter",
+                      "points edges faces", any_picks, similar_parms, select_similar)
+
+## Which measures each domain has (Select Similar's By).
+func measure_fits(measure: usize, domain: Domain) -> bool:
+    if measure == 6: return true
+    if domain == Domain.face: return measure <= 5
+    if domain == Domain.edge: return measure >= 7 and measure <= 12 or measure == 14
+    return measure == 0 or measure == 13 or measure == 14
+
+func select_similar(input: const RuleInput*) -> RuleOutput!:
+    let measure = (usize)input.parms.at(0)
+    let compare = (usize)input.parms.at(1)
+    let threshold = math.max(0.0, input.parms.at(2))
+    if not measure_fits(measure, input.domain): error(errors.invalid, "Select Similar: this measure is not one of this component type's")
+    var out = try BitsBuilder.copy_of(input.group)
+    errdefer out.close()
+    if not input.group.any(): return same_domain(input, out)
+    let size = input.topology.size(input.domain)
+    if measure == 0 or measure == 8 or measure == 4:
+        try similar_directions(input, measure, threshold, &out)
+        return same_domain(input, out)
+    let values = try new f64[size] --- in memory.heap
+    defer free(values) in memory.heap
+    try measure_all(input, measure, values)
+    # Sorted references.
+    var references = Growing[f64]()
+    defer references.close()
+    try references.reserve(input.group.population())
+    for element in 0..<size:
+        if input.group.get(element):
+            references.items[references.count] = values[element]
+            references.count += 1
+    sort.sort(references.items[..<references.count])
+    let low = references.items[0]
+    let high = references.items[references.count - 1]
+    # Exact measures (sides, material, group, marks, counts) compare equal.
+    let exact = measure == 3 or measure == 5 or measure == 6 or measure == 11 or measure == 12 or measure == 13 or measure == 14
+    let reach = 0.0 if exact else threshold
+    for element in 0..<size:
+        let value = values[element]
+        var hit = false
+        if compare == 1 and not exact: hit = value >= low - reach
+        elif compare == 2 and not exact: hit = value <= high + reach
+        else: hit = near_sorted(references.view(), value, reach)
+        if hit: out.set(element)
+    return same_domain(input, out)
+
+## Whether a value of `sorted` lies within `reach` of `value`.
+func near_sorted(sorted: const f64[], value: f64, reach: f64) -> bool:
+    var low: usize = 0
+    var high = sorted.length
+    while low < high:
+        let middle = (low + high) // 2
+        if sorted[middle] < value: low = middle + 1
+        else: high = middle
+    if low < sorted.length and math.abs(sorted[low] - value) <= reach: return true
+    return low > 0 and math.abs(sorted[low - 1] - value) <= reach
+
+## Every element's value of scalar measure `measure`.
+func measure_all(input: const RuleInput*, measure: usize, values: f64[]) -> !:
+    let mesh = input.mesh
+    let topology = input.topology
+    if measure == 6:
+        try group_masks(mesh, input.domain, values)
+        return
+    let crease = try EdgeMark.of(mesh, "crease")
+    let seam = try EdgeMark.of(mesh, "seam")
+    let sharp = try EdgeMark.of(mesh, "sharp")
+    let material = try FaceValue.of(mesh, "material")
+    for element in 0..<values.length:
+        var value = 0.0
+        match measure:
+            1: value = face_area(mesh, topology, element)
+            2: value = face_perimeter(mesh, topology, element)
+            3: value = (f64)face_sides(topology, element)
+            5: value = material.value(element)
+            7: value = edge_length(mesh, topology, element)
+            9: value = face_angle(mesh, topology, element)
+            10: value = crease.value(element)
+            11: value = seam.value(element)
+            12: value = sharp.value(element)
+            13: value = (f64)topology.valence(element)
+            _: value = (f64)(edge_faces(topology, element) if input.domain == Domain.edge else faces_at(topology, element))
+        values[element] = value
+
+## Each element's membership in the mesh's named groups on `domain` (not
+## the hidden ones starting with "."), as a number: elements in the same
+## groups have the same.
+func group_masks(mesh: const Mesh*, domain: Domain, values: f64[]) -> !:
+    for at in 0..<values.length: values[at] = 0.0
+    var bit = 1.0
+    for index in 0..<(usize)mesh.attribute_count():
+        let entry = try mesh.attribute_entry((i64)index)
+        if not entry.is_group() or entry.domain != domain or entry.name().length == 0 or entry.name().bytes[0] == 46: continue
+        let bits = Bits.of_bytes(entry.data.view(), entry.elements)
+        for element in 0..<values.length:
+            if bits.get(element): values[element] += bit
+        bit *= 2.0
+        if bit > 9007199254740992.0: break
+
+## Normals (faces, points), edge directions (either way) and planes
+## (Coplanar: a matching normal and the center on its plane): an element
+## is taken when its direction is within `threshold` degrees of a
+## reference's.
+func similar_directions(input: const RuleInput*, measure: usize, threshold: f64, out: BitsBuilder*) -> !:
+    let mesh = input.mesh
+    let topology = input.topology
+    let size = topology.size(input.domain)
+    let point_faces = try mesh.point_face_span()
+    var directions = Growing[Vector3]()
+    defer directions.close()
+    try directions.reserve(size)
+    directions.count = size
+    for element in 0..<size:
+        var d = Vector3()
+        if measure == 8: d = edge_direction(mesh, topology, element)
+        elif input.domain == Domain.point: d = point_normal(mesh, point_faces.0, point_faces.1, element)
+        else: d = face_normal(mesh, element)
+        directions.items[element] = d
+    var references = Growing[Vector3]()
+    defer references.close()
+    var planes = Growing[f64]()
+    defer planes.close()
+    for element in 0..<size:
+        if not input.group.get(element): continue
+        try references.push(directions.items[element])
+        if measure == 4: try planes.push(directions.items[element].dot(face_center(mesh, topology, element)))
+    # A chord as long as the threshold's angle, never zero.
+    let chord = math.max(0.000001, 2.0 * math.sin(math.min(threshold, 180.0) * math.pi / 360.0))
+    var hash = try PointHash.build(references.view(), chord)
+    defer hash.close()
+    for element in 0..<size:
+        if out.view().get(element): continue
+        let d = directions.items[element]
+        var plane = 0.0
+        if measure == 4: plane = d.dot(face_center(mesh, topology, element))
+        if direction_match(&hash, references.view(), planes.view(), d, chord, measure == 4, plane, threshold) or (measure == 8 and direction_match(&hash, references.view(), planes.view(), d.multiply_scalar(-1.0), chord, false, 0.0, threshold)):
+            out.set(element)
+
+## Whether a reference direction lies within `chord` of `d` (and, for
+## planes, at `plane`'s offset within `threshold`), looking in the hash
+## cells around it.
+func direction_match(hash: const PointHash*, references: const Vector3[], planes: const f64[], d: Vector3, chord: f64, coplanar: bool, plane: f64, threshold: f64) -> bool:
+    let cell = hash.cell_of(d)
+    for dx in -1..<2:
+        for dy in -1..<2:
+            for dz in -1..<2:
+                var at = hash.first(cell.moved((i64)dx, (i64)dy, (i64)dz))
+                while at >= 0:
+                    let reference = references[(usize)at]
+                    if reference.subtract(d).length() <= chord:
+                        if not coplanar or math.abs(planes[(usize)at] - plane) <= threshold: return true
+                    at = hash.after(at)
+    return false

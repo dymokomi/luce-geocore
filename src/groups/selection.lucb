@@ -11,6 +11,9 @@ pub struct Selection:
     ## The connectivity hash of the mesh the bits index (a durable guard).
     var topology: u64
     var report: GroupReport
+    ## The element picked last (-1: none): where a shortest path starts, and
+    ## the loop a partial loop runs along.
+    var active_element: i64
 
     ## Nothing selected on `domain` of `mesh`.
     pub static func empty(mesh: interop.Reference[Mesh], domain: i64) -> interop.Reference[Selection]!:
@@ -37,6 +40,15 @@ pub struct Selection:
     ## rebuilding for an unchanged one).
     pub func key() -> u64:
         return self.bits.id() ^ (u64)self.elements
+
+    ## The element picked last, or -1.
+    pub func active() -> i64:
+        return self.active_element
+
+    ## The same bits with `element` as the active one (-1: none).
+    pub func with_active(element: i64) -> interop.Reference[Selection]!:
+        var bits = try BitsBuilder.copy_of(self.view())
+        return try adopt_selection(bits.finish(), self.elements, self.domain_value, self.topology, GroupReport(), element)
 
     ## Elements selected, and elements there are.
     pub func count() -> i64:
@@ -97,9 +109,11 @@ pub struct Selection:
     # -- New selections.
 
     ## With `element` set, cleared or flipped (op 0, 1, 2), or only it
-    ## selected (op 3). Elements out of range change nothing.
+    ## selected (op 3); an element set becomes the active one. Elements out
+    ## of range change nothing.
     pub func changed(element: i64, operation: i64) -> interop.Reference[Selection]!:
         var bits = try BitsBuilder.copy_of(self.view())
+        var active = self.active_element
         if element >= 0 and (usize)element < self.elements:
             let at = (usize)element
             if operation == 3:
@@ -108,7 +122,8 @@ pub struct Selection:
                 bits.set(at)
             elif operation == 0 or (operation == 2 and not self.view().get(at)): bits.set(at)
             else: bits.clear(at)
-        return try self.with_bits(bits.finish())
+            active = element if bits.view().get(at) else (-1 if active == element else active)
+        return try adopt_selection(bits.finish(), self.elements, self.domain_value, self.topology, GroupReport(), active)
 
     ## Every element, or none.
     pub func filled(all: bool) -> interop.Reference[Selection]!:
@@ -132,21 +147,28 @@ pub struct Selection:
         else: bits.intersect(other)
         return try self.with_bits(bits.finish())
 
-    ## Grown, shrunk, bordered or flood filled (op 0..3; `steps` for the
-    ## first two), or edge loops and rings (op 4, 5) of an edge selection.
-    pub func walked(mesh: interop.Reference[Mesh], operation: i64, steps: i64 = 1) -> interop.Reference[Selection]!:
-        let topology = try Topology.of(try mesh.get())
-        let count = (usize)(steps if steps > 0 else 0)
-        var bits = BitsBuilder()
-        match operation:
-            0: bits = try grown(&topology, self.view(), self.domain_value, count)
-            1: bits = try shrunk(&topology, self.view(), self.domain_value, count)
-            2: bits = try bordered(&topology, self.view(), self.domain_value)
-            3: bits = try connected(&topology, self.view(), self.domain_value)
-            _:
-                if self.domain_value != Domain.edge: error(errors.invalid, "loops and rings need an edge selection")
-                bits = (try looped(&topology, self.view())) if operation == 4 else (try ringed(&topology, self.view()))
+    ## Also `other`'s elements (0 add, 1 remove, 2 intersect); `other` is a
+    ## selection of the same domain and mesh. The active element is kept.
+    pub func joined(other: interop.Reference[Selection], operation: i64) -> interop.Reference[Selection]!:
+        let given = try other.get()
+        if given.domain_value != self.domain_value or given.elements != self.elements: error(errors.invalid, "selections of different components do not join")
+        var bits = try BitsBuilder.copy_of(self.view())
+        if operation == 0: bits.unite(given.view())
+        elif operation == 1: bits.subtract(given.view())
+        else: bits.intersect(given.view())
         return try self.with_bits(bits.finish())
+
+    ## Select rule `name` (its verb's name: "Select Loop") run on these
+    ## components with `numbers` as its parameters: the selection it makes,
+    ## on its own domain (Boundary Loop of faces gives edges), active
+    ## element kept. The Select tools and the viewport's gestures run this.
+    pub func ruled(mesh: interop.Reference[Mesh], name: str, numbers: const f64[]) -> interop.Reference[Selection]!:
+        let index = rule_named(name)
+        if index < 0: error(errors.invalid, "no such select rule")
+        let rule = rule_at((usize)index)
+        var made = try run_rule(&rule, try mesh.get(), self.view(), self.domain_value, numbers)
+        let count = made.bits.count
+        return try adopt_selection(made.bits.finish(), count, made.domain, self.topology, GroupReport(), self.active_element)
 
     ## The same components on another domain (see `converted` in convert:
     ## `all` needs every related element, else any).
@@ -224,7 +246,7 @@ pub struct Selection:
         return Bits(self.bits.view(), self.elements)
 
     func with_bits(column: Column[u64]) -> interop.Reference[Selection]!:
-        return try adopt_selection(column, self.elements, self.domain_value, self.topology, GroupReport())
+        return try adopt_selection(column, self.elements, self.domain_value, self.topology, GroupReport(), self.active_element)
 
     pub func close():
         self.bits.release()
@@ -232,12 +254,12 @@ pub struct Selection:
 pub let selection_type: interop.Type[Selection] = interop.Type[Selection]("Selection", Selection.close, closeable = true)
 
 ## A selection owning `column` (taken, released on failure).
-pub func adopt_selection(column: Column[u64], elements: usize, domain: Domain, topology: u64, report: GroupReport) -> interop.Reference[Selection]!:
+pub func adopt_selection(column: Column[u64], elements: usize, domain: Domain, topology: u64, report: GroupReport, active: i64 = -1) -> interop.Reference[Selection]!:
     var owned = column
     let storage = new Selection[1] --- in memory.heap catch failure:
         owned.release()
         error(failure.code, failure.message)
-    storage[0] = Selection(owned, elements, domain, topology, report)
+    storage[0] = Selection(owned, elements, domain, topology, report, active)
     return try interop.Reference[Selection].adopt(storage.data, selection_type, memory.heap)
 
 ## The bits of a selection, for Base kernels (verbs, overlays).

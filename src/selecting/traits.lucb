@@ -1,0 +1,176 @@
+## Rules that find elements by a trait, among the group (everything when
+## nothing is selected): Sharp Edges, By Sides, By Area, By Normal,
+## Non-manifold, Loose and Interior Faces. The same passes serve a mesh
+## check: "select non-manifold" and an overlay of it are one pass.
+
+let sharp_parms: ParmSpec[1] = [
+    ParmSpec("Angle", ParmKind.number, 30.0, 0.0, 180.0, 1, "", "Edges whose two faces meet at more than this, in degrees.")]
+let edge_picks: PickSpec[1] = [PickSpec("Edges", "edges")]
+
+func sharp_rule() -> SelectRule:
+    return SelectRule("Select Sharp Edges", "Sharp Edges", "sharp", "Edges whose faces meet at more than an angle", "Find", "bevel",
+                      "edges", edge_picks, sharp_parms, select_sharp, whole = true)
+
+func select_sharp(input: const RuleInput*) -> RuleOutput!:
+    var out = try BitsBuilder.zeros(input.topology.edges())
+    errdefer out.close()
+    let angle = input.parms.at(0)
+    for edge in 0..<input.topology.edges():
+        if input.group.get(edge) and face_angle(input.mesh, input.topology, edge) > angle: out.set(edge)
+    return same_domain(input, out)
+
+let sides_parms: ParmSpec[2] = [
+    ParmSpec("Sides", ParmKind.integer, 4.0, 3.0, 1000.0, 1, "", "The number of sides compared with.", soft = 12.0),
+    ParmSpec("Compare", ParmKind.menu, 0.0, 0.0, 3.0, 1, "Equal|Not equal|Less|Greater", "How a face's sides compare with Sides.")]
+
+func sides_rule() -> SelectRule:
+    return SelectRule("Select By Sides", "By Sides", "sides", "Faces by their number of sides: triangles, quads, n-gons", "Find", "polygon-select-tool",
+                      "faces", face_picks, sides_parms, select_sides, whole = true)
+
+func select_sides(input: const RuleInput*) -> RuleOutput!:
+    var out = try BitsBuilder.zeros(input.topology.faces())
+    errdefer out.close()
+    let wanted = (usize)input.parms.at(0)
+    let compare = (usize)input.parms.at(1)
+    for face in 0..<input.topology.faces():
+        if not input.group.get(face): continue
+        let sides = face_sides(input.topology, face)
+        let hit = sides == wanted if compare == 0 else (sides != wanted if compare == 1 else (sides < wanted if compare == 2 else sides > wanted))
+        if hit: out.set(face)
+    return same_domain(input, out)
+
+let area_parms: ParmSpec[2] = [
+    ParmSpec("Area", ParmKind.number, 0.01, 0.0, 1000000.0, 1, "", "The area compared with, in square units.", soft = 1.0),
+    ParmSpec("Compare", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Less|Greater", "Faces smaller than Area, or larger.")]
+
+func area_rule() -> SelectRule:
+    return SelectRule("Select By Area", "By Area", "area", "Faces smaller or larger than an area", "Find", "rectangle-tool",
+                      "faces", face_picks, area_parms, select_area, whole = true)
+
+func select_area(input: const RuleInput*) -> RuleOutput!:
+    var out = try BitsBuilder.zeros(input.topology.faces())
+    errdefer out.close()
+    let limit = input.parms.at(0)
+    let larger = input.parms.at(1) != 0.0
+    for face in 0..<input.topology.faces():
+        if not input.group.get(face): continue
+        let area = face_area(input.mesh, input.topology, face)
+        if (area > limit) == larger and area != limit: out.set(face)
+    return same_domain(input, out)
+
+let normal_parms: ParmSpec[2] = [
+    ParmSpec("Direction", ParmKind.vector, 0.0, -1.0, 1.0, 3, "", "The direction faces should face (a zero vector takes +Y)."),
+    ParmSpec("Spread", ParmKind.number, 30.0, 0.0, 180.0, 1, "", "How far a face's normal may lean from Direction, in degrees.")]
+
+func normal_rule() -> SelectRule:
+    return SelectRule("Select By Normal", "By Normal", "facing", "Faces facing a direction within a spread", "Find", "surface-normal",
+                      "faces", face_picks, normal_parms, select_facing, whole = true)
+
+func select_facing(input: const RuleInput*) -> RuleOutput!:
+    var out = try BitsBuilder.zeros(input.topology.faces())
+    errdefer out.close()
+    var wanted = Vector3(input.parms.at(0), input.parms.at(1), input.parms.at(2))
+    if wanted.length() == 0.0: wanted = Vector3(0.0, 1.0, 0.0)
+    wanted = wanted.multiply_scalar(1.0 / wanted.length())
+    let least = math.cos(input.parms.at(3) * math.pi / 180.0)
+    for face in 0..<input.topology.faces():
+        if input.group.get(face) and face_normal(input.mesh, face).dot(wanted) >= least - 0.0000001: out.set(face)
+    return same_domain(input, out)
+
+let manifold_parms: ParmSpec[4] = [
+    ParmSpec("Boundary", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Edges with one face."),
+    ParmSpec("Multiple faces", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Edges with three faces or more (a T-junction)."),
+    ParmSpec("Non contiguous", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Edges whose two faces wind opposite ways (a flipped neighbor)."),
+    ParmSpec("Pinched points", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Points where faces meet only at the point (at the Points level).")]
+let manifold_picks: PickSpec[1] = [PickSpec("Components", "edges points")]
+
+func manifold_rule() -> SelectRule:
+    return SelectRule("Select Non-manifold", "Non-manifold", "nonmanifold", "Boundary edges, edges of three faces or more, flipped neighbors and pinched points", "Find", "bug",
+                      "edges points", manifold_picks, manifold_parms, select_nonmanifold, whole = true)
+
+func select_nonmanifold(input: const RuleInput*) -> RuleOutput!:
+    let topology = input.topology
+    var edges = try BitsBuilder.zeros(topology.edges())
+    defer edges.close()
+    for edge in 0..<topology.edges():
+        let faces = edge_faces(topology, edge)
+        var odd = (faces == 1 and input.parms.at(0) != 0.0) or (faces > 2 and input.parms.at(1) != 0.0)
+        if faces == 2 and input.parms.at(2) != 0.0:
+            # Neighbors winding the same way along the edge are flipped.
+            let first = (usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge]]
+            let second = (usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge] + 1]
+            odd = odd or topology.corners[first] == topology.corners[second]
+        if odd: edges.set(edge)
+    if input.domain == Domain.edge:
+        edges.intersect(input.group)
+        return same_domain(input, try BitsBuilder.copy_of(edges.view()))
+    var points = try converted(topology, edges.view(), Domain.edge, Domain.point, false)
+    errdefer points.close()
+    if input.parms.at(3) != 0.0: try pinched(input.mesh, topology, &points)
+    points.intersect(input.group)
+    return same_domain(input, points)
+
+## Points whose faces fall apart into more than one fan joined by the
+## point's edges (two cones touching at their tips).
+func pinched(mesh: const Mesh*, topology: const Topology*, points: BitsBuilder*) -> !:
+    let around = try mesh.point_face_span()
+    var fan = Growing[u32]()
+    defer fan.close()
+    var joined = Growing[bool]()
+    defer joined.close()
+    for point in 0..<topology.points:
+        let first = (usize)around.0[point]
+        let count = (usize)around.0[point + 1] - first
+        if count < 2: continue
+        try joined.fill(count, false)
+        # Faces of this point joined from its first through shared edges
+        # at the point.
+        fan.clear()
+        try fan.push(0)
+        joined.items[0] = true
+        var head: usize = 0
+        while head < fan.count:
+            let face = (usize)around.1[first + (usize)fan.items[head]]
+            head += 1
+            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                let edge = (usize)topology.corner_edges[corner]
+                if (usize)topology.edge_points[edge * 2] != point and (usize)topology.edge_points[edge * 2 + 1] != point: continue
+                for side in 0..<edge_faces(topology, edge):
+                    let other = edge_face(topology, edge, side)
+                    for at in 0..<count:
+                        if not joined.items[at] and (usize)around.1[first + at] == other:
+                            joined.items[at] = true
+                            try fan.push((u32)at)
+        if fan.count < count: points.set(point)
+
+let loose_picks: PickSpec[1] = [PickSpec("Points", "points")]
+
+func loose_rule() -> SelectRule:
+    return SelectRule("Select Loose", "Loose", "loose", "Points no face uses", "Find", "vertex-select",
+                      "points", loose_picks, no_parms[..<0], select_loose, whole = true)
+
+func select_loose(input: const RuleInput*) -> RuleOutput!:
+    let around = try input.mesh.point_face_span()
+    var out = try BitsBuilder.zeros(input.topology.points)
+    errdefer out.close()
+    for point in 0..<input.topology.points:
+        if input.group.get(point) and around.0[point] == around.0[point + 1]: out.set(point)
+    return same_domain(input, out)
+
+func interior_rule() -> SelectRule:
+    return SelectRule("Select Interior Faces", "Interior Faces", "interior", "Faces all of whose edges have more than two faces (walls inside a solid)", "Find", "cube",
+                      "faces", face_picks, no_parms[..<0], select_interior, whole = true)
+
+func select_interior(input: const RuleInput*) -> RuleOutput!:
+    let topology = input.topology
+    var out = try BitsBuilder.zeros(topology.faces())
+    errdefer out.close()
+    for face in 0..<topology.faces():
+        if not input.group.get(face): continue
+        var inside = true
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            if edge_faces(topology, (usize)topology.corner_edges[corner]) <= 2:
+                inside = false
+                break
+        if inside: out.set(face)
+    return same_domain(input, out)

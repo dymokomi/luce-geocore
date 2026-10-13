@@ -1,0 +1,121 @@
+## Select rules: every selection tool as one Base declaration and kernel,
+## below the group language and the verbs, so the same rule is a Select verb
+## (verbs/select_verbs.lucb: a node, an Edit Mesh step, a D menu entry) and a
+## group function (`loop(p3-4)`, `sharp(*, 30)`, `sides(*, 4)`), which a
+## node's Group re-evaluates on every cook (Houdini's rule-based groups).
+##
+## A rule reads a group (bits on one domain) and returns a selection, on the
+## same domain or another (Boundary Loop turns faces into their outline
+## edges). Adding a select tool is one file here and a line in
+## registry.lucb's `rule_makers`; luced-3d needs no code for it.
+import memory
+import errors
+from luce_std import math
+from luce_std import parallel
+from luce_std import sort
+from core.growing import Growing
+from core.shared import Column
+from core.float3 import Float3
+from core.bits import Bits, BitsBuilder, popcount, trailing_zeros
+from core.attributes import Attribute, Domain, DataType, Storage
+from core.verb_specs import ParmKind, ParmSpec, PickSpec, Parms, filled_parms
+from math.vector import Vector3
+from geometries.polygon import Mesh
+from geometries.point_hash import PointHash
+from geometries.topology.connectivity import Topology
+
+## A rule with no parameters takes `no_parms[..<0]`.
+let no_parms: ParmSpec[1] = [ParmSpec("", ParmKind.number, 0.0, 0.0, 0.0)]
+
+## What a rule's kernel reads: the mesh, its connectivity, the group on
+## `domain` and the parameters (filled to every row).
+pub struct RuleInput:
+    pub let mesh: const Mesh*
+    pub let topology: const Topology*
+    pub let group: Bits
+    pub let domain: Domain
+    pub let parms: Parms
+
+## What it made: bits on `domain`.
+pub struct RuleOutput:
+    pub var bits: BitsBuilder
+    pub var domain: Domain
+
+pub struct SelectRule:
+    ## The verb and node kind ("Select Loop"), the tool's label ("Loop")
+    ## and the group function's name ("loop"; "" when it is none).
+    pub let name: str
+    pub let label: str
+    pub let function: str
+    pub let description: str
+    ## The family the Select menus group it under, and its icon.
+    pub let family: str
+    pub let icon: str
+    ## The levels it takes, space apart ("points edges faces"); a group
+    ## function evaluates its argument on the first when the expression's
+    ## domain is not among them.
+    pub let levels: str
+    pub let picks: const PickSpec[]
+    pub let parms: const ParmSpec[]
+    pub let kernel: func(const RuleInput*) -> RuleOutput!
+    ## Whether, with nothing selected, it looks at everything (Sharp
+    ## Edges, Non-manifold).
+    pub let whole: bool = false
+
+    ## Whether it works on `domain` as it is.
+    pub func takes(domain: Domain) -> bool:
+        return contains_word(self.levels, level_word(domain))
+
+    ## The domain its levels start with.
+    pub func first_domain() -> Domain:
+        let words: str[3] = ["points", "edges", "faces"]
+        let domains: Domain[3] = [Domain.point, Domain.edge, Domain.face]
+        var best: usize = 1000
+        var found = Domain.face
+        for at in 0..<(usize)3:
+            let place = word_place(self.levels, words[at])
+            if place >= 0 and (usize)place < best:
+                best = (usize)place
+                found = domains[at]
+        return found
+
+## Run `rule` on `group` (bits of `domain`) with `numbers` in parameter
+## order (missing ones take their initial values).
+pub func run_rule(rule: const SelectRule*, mesh: const Mesh*, group: Bits, domain: Domain, numbers: const f64[]) -> RuleOutput!:
+    if not rule.takes(domain): error(errors.invalid, "this selection tool does not work on this component type")
+    var values = try filled_parms(rule.parms, numbers)
+    defer values.close()
+    let topology = try Topology.of(mesh)
+    let input = RuleInput(mesh, &topology, group, domain, Parms(values.view()))
+    let kernel = rule.kernel
+    return try kernel(&input)
+
+## A rule's result on its input's domain.
+func same_domain(input: const RuleInput*, bits: BitsBuilder) -> RuleOutput:
+    return RuleOutput(bits, input.domain)
+
+## "points", "edges", "faces" (corners and the detail have no word).
+pub func level_word(domain: Domain) -> str:
+    match domain:
+        .point: return "points"
+        .edge: return "edges"
+        .face: return "faces"
+        _: return ""
+
+func contains_word(text: str, word: str) -> bool:
+    return word.length > 0 and word_place(text, word) >= 0
+
+## Where `word` starts in the space-separated `text`, or -1.
+func word_place(text: str, word: str) -> i64:
+    if word.length == 0 or text.length < word.length: return -1
+    for start in 0..<(text.length - word.length + 1):
+        if start > 0 and text.bytes[start - 1] != 32: continue
+        let end = start + word.length
+        if end < text.length and text.bytes[end] != 32: continue
+        var same = true
+        for at in 0..<word.length:
+            if text.bytes[start + at] != word.bytes[at]:
+                same = false
+                break
+        if same: return (i64)start
+    return -1

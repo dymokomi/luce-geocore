@@ -2,9 +2,10 @@
 ## from it: each verb is a node kind whose parameters are the verb's, plus
 ## Group and Group Type.
 
-## Every verb's constructor, in menu order: the array's length is the
-## registry's size, so a verb added here is counted.
-let makers: (func() -> Verb)[31] = [
+## Every modeling verb's constructor, in menu order: the array's length is
+## the registry's size, so a verb added here is counted. The select rules
+## (selecting/registry.lucb) follow them as the Select verbs.
+let makers: (func() -> Verb)[30] = [
     transform_verb,
     smooth_verb,
     mountain_verb,
@@ -34,18 +35,18 @@ let makers: (func() -> Verb)[31] = [
     edge_slide_verb,
     mirror_verb,
     spin_verb,
-    polydraw_verb,
-    checker_verb]
+    polydraw_verb]
 
-## Verb `index` in menu order.
+## Verb `index` in menu order: the modeling verbs, then the Select verbs.
 pub func verb_at(index: usize) -> Verb:
-    if index >= makers.length: trap("verb index out of range")
+    if index >= verb_count(): trap("verb index out of range")
+    if index >= makers.length: return rule_verb(index - makers.length)
     let make = makers[index]
     return make()
 
 ## How many mesh verbs the registry holds.
 pub func verb_count() -> usize:
-    return makers.length
+    return makers.length + rule_count()
 
 ## The mesh verb called `name`, if any.
 pub func find_verb(name: str) -> Verb?:
@@ -176,6 +177,12 @@ pub struct Verbs:
     ## Whether it runs on everything with nothing selected.
     pub static func whole(index: i64) -> bool:
         return verb_at(checked(index)).whole
+
+    ## A Select verb's group function ("loop": `loop(group, …)` in a
+    ## node's Group), or "".
+    pub static func function(index: i64) -> str:
+        let verb = verb_at(checked(index))
+        return rule_at((usize)verb.rule).function if verb.rule >= 0 else ""
 
     ## Run verb `name` on `mesh`: `group` (empty: everything) read on
     ## `group_type`'s domain (0 guess, 1 points, 2 edges, 3 faces,

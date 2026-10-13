@@ -1,0 +1,226 @@
+## Shortest Path: between the selected elements in turn (two clicked ones,
+## usually), on points along edges, edges through their points or faces
+## across their edges (with Face step: points and faces across faces, edges
+## around them). Dijkstra over element positions (points, edge middles,
+## face centers), as Blender's bmesh_path does; each step costs its length,
+## or 1 in Topology mode, plus a hundredth more for turning, so among equal
+## paths the straightest wins. Fill Region takes every element on any
+## shortest path in steps (Blender's region fill: two breadth-first
+## searches whose distances add up to the shortest).
+
+let path_parms: ParmSpec[3] = [
+    ParmSpec("Distance", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Length|Topology", "What a path measures: its length, or its steps."),
+    ParmSpec("Fill region", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Every element on any shortest path in steps between the two, not one path."),
+    ParmSpec("Face step", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Points and faces step across faces (diagonals), edges around their faces.")]
+let path_picks: PickSpec[1] = [PickSpec("Components", "points edges faces", "Select two components to join")]
+
+func path_rule() -> SelectRule:
+    return SelectRule("Select Shortest Path", "Shortest Path", "path", "The shortest path between the selected elements, taken in order; with Fill region every element on a shortest path", "Region", "path-tool",
+                      "points edges faces", path_picks, path_parms, select_path)
+
+## The element graph a path walks: its neighbors and positions.
+struct PathGraph:
+    let mesh: const Mesh*
+    let topology: const Topology*
+    let domain: Domain
+    let face_step: bool
+    let point_starts: const i32[]
+    let point_faces: const i32[]
+
+    func size() -> usize:
+        return self.topology.size(self.domain)
+
+    func place(element: usize) -> Vector3:
+        if self.domain == Domain.point: return position(self.mesh, element)
+        if self.domain == Domain.edge: return edge_middle(self.mesh, self.topology, element)
+        return face_center(self.mesh, self.topology, element)
+
+    ## `element`'s neighbors into `out` (cleared first; repeats are harmless).
+    func neighbors(element: usize, out: Growing[u32]*) -> !:
+        out.clear()
+        let topology = self.topology
+        if self.domain == Domain.point:
+            if self.face_step:
+                for at in (usize)self.point_starts[element]..<(usize)self.point_starts[element + 1]:
+                    let face = (usize)self.point_faces[at]
+                    for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                        if (usize)topology.corners[corner] != element: try out.push((u32)topology.corners[corner])
+                return
+            for at in (usize)topology.point_edge_offsets[element]..<(usize)topology.point_edge_offsets[element + 1]:
+                try out.push((u32)other_point(topology, (usize)topology.point_edges[at], element))
+            return
+        if self.domain == Domain.edge:
+            if self.face_step:
+                for side in 0..<edge_faces(topology, element):
+                    let face = edge_face(topology, element, side)
+                    for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                        let edge = (usize)topology.corner_edges[corner]
+                        if edge != element: try out.push((u32)edge)
+                return
+            for side in 0..<(usize)2:
+                let point = (usize)topology.edge_points[element * 2 + side]
+                for at in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+                    let edge = (usize)topology.point_edges[at]
+                    if edge != element: try out.push((u32)edge)
+            return
+        for corner in (usize)topology.offsets[element]..<(usize)topology.offsets[element + 1]:
+            if self.face_step:
+                let point = (usize)topology.corners[corner]
+                for at in (usize)self.point_starts[point]..<(usize)self.point_starts[point + 1]:
+                    if (usize)self.point_faces[at] != element: try out.push((u32)self.point_faces[at])
+                continue
+            let edge = (usize)topology.corner_edges[corner]
+            for at in 0..<edge_faces(topology, edge):
+                let face = edge_face(topology, edge, at)
+                if face != element: try out.push((u32)face)
+
+func select_path(input: const RuleInput*) -> RuleOutput!:
+    let faces = try input.mesh.point_face_span()
+    let graph = PathGraph(input.mesh, input.topology, input.domain, input.parms.at(2) != 0.0, faces.0, faces.1)
+    var out = try BitsBuilder.copy_of(input.group)
+    errdefer out.close()
+    var previous = first_member(input.group, 0)
+    if previous < 0: return same_domain(input, out)
+    var next = first_member(input.group, (usize)previous + 1)
+    while next >= 0:
+        if input.parms.at(1) != 0.0: try fill_region(&graph, (usize)previous, (usize)next, &out)
+        else: try shortest(&graph, (usize)previous, (usize)next, input.parms.at(0) != 0.0, &out)
+        previous = next
+        next = first_member(input.group, (usize)next + 1)
+    return same_domain(input, out)
+
+## A binary min-heap of (cost, element).
+struct Frontier:
+    var costs: Growing[f64]
+    var elements: Growing[u32]
+
+    func push(cost: f64, element: u32) -> !:
+        try self.costs.push(cost)
+        try self.elements.push(element)
+        var at = self.costs.count - 1
+        while at > 0:
+            let parent = (at - 1) // 2
+            if self.costs.items[parent] <= self.costs.items[at]: break
+            self.swap(at, parent)
+            at = parent
+
+    ## The cheapest entry, taken out.
+    func pop() -> (f64, u32):
+        let top = (self.costs.items[0], self.elements.items[0])
+        let last = self.costs.count - 1
+        self.swap(0, last)
+        self.costs.count = last
+        self.elements.count = last
+        var at: usize = 0
+        while true:
+            let left = at * 2 + 1
+            if left >= last: break
+            var child = left
+            if left + 1 < last and self.costs.items[left + 1] < self.costs.items[left]: child = left + 1
+            if self.costs.items[at] <= self.costs.items[child]: break
+            self.swap(at, child)
+            at = child
+        return top
+
+    func swap(a: usize, b: usize):
+        let cost = self.costs.items[a]
+        self.costs.items[a] = self.costs.items[b]
+        self.costs.items[b] = cost
+        let element = self.elements.items[a]
+        self.elements.items[a] = self.elements.items[b]
+        self.elements.items[b] = element
+
+    func close():
+        self.costs.close()
+        self.elements.close()
+
+## The cheapest path from `start` to `goal` into `out` (nothing when they
+## are not connected).
+func shortest(graph: const PathGraph*, start: usize, goal: usize, topological: bool, out: BitsBuilder*) -> !:
+    let size = graph.size()
+    let cost = try new f64[size] --- in memory.heap
+    defer free(cost) in memory.heap
+    let came = try new u32[size] --- in memory.heap
+    defer free(came) in memory.heap
+    let none_yet: u32 = 0xFFFFFFFF
+    for at in 0..<size:
+        cost[at] = math.infinity
+        came[at] = none_yet
+    var done = try BitsBuilder.zeros(size)
+    defer done.close()
+    var frontier = Frontier(Growing[f64](), Growing[u32]())
+    defer frontier.close()
+    var around = Growing[u32]()
+    defer around.close()
+    cost[start] = 0.0
+    try frontier.push(0.0, (u32)start)
+    while frontier.costs.count > 0:
+        let (spent, taken) = frontier.pop()
+        let element = (usize)taken
+        if done.view().get(element) or spent > cost[element]: continue
+        done.set(element)
+        if element == goal: break
+        let here = graph.place(element)
+        var heading = Vector3()
+        if came[element] != none_yet: heading = direction(graph.place((usize)came[element]), here)
+        try graph.neighbors(element, &around)
+        for neighbor in around.view():
+            let other = (usize)neighbor
+            if done.view().get(other): continue
+            let there = graph.place(other)
+            let length = 1.0 if topological else there.subtract(here).length()
+            # A hundredth more for turning: straight paths win ties.
+            let turn = 1.0 - math.abs(heading.dot(direction(here, there)))
+            let total = spent + length * (1.0 + 0.01 * turn)
+            if total < cost[other]:
+                cost[other] = total
+                came[other] = (u32)element
+                try frontier.push(total, (u32)other)
+    if came[goal] == none_yet and goal != start: return
+    var at = goal
+    out.set(at)
+    while at != start:
+        at = (usize)came[at]
+        out.set(at)
+
+func direction(a: Vector3, b: Vector3) -> Vector3:
+    let d = b.subtract(a)
+    let length = d.length()
+    return d.multiply_scalar(1.0 / length) if length > 0.0 else d
+
+## Steps from `start` to every element (u32 max: not reached), breadth
+## first.
+func steps_from(graph: const PathGraph*, start: usize, steps: u32[]) -> !:
+    let far: u32 = 0xFFFFFFFF
+    for at in 0..<steps.length: steps[at] = far
+    let queue = try new u32[steps.length] --- in memory.heap
+    defer free(queue) in memory.heap
+    var around = Growing[u32]()
+    defer around.close()
+    steps[start] = 0
+    queue[0] = (u32)start
+    var head: usize = 0
+    var tail: usize = 1
+    while head < tail:
+        let element = (usize)queue[head]
+        head += 1
+        try graph.neighbors(element, &around)
+        for neighbor in around.view():
+            if steps[(usize)neighbor] != far: continue
+            steps[(usize)neighbor] = steps[element] + 1
+            queue[tail] = neighbor
+            tail += 1
+
+## Every element on a shortest path in steps from `a` to `b`, into `out`.
+func fill_region(graph: const PathGraph*, a: usize, b: usize, out: BitsBuilder*) -> !:
+    let size = graph.size()
+    let from_a = try new u32[size] --- in memory.heap
+    defer free(from_a) in memory.heap
+    let from_b = try new u32[size] --- in memory.heap
+    defer free(from_b) in memory.heap
+    try steps_from(graph, a, from_a)
+    try steps_from(graph, b, from_b)
+    let length = from_a[b]
+    if length == 0xFFFFFFFF: return
+    for at in 0..<size:
+        if from_a[at] != 0xFFFFFFFF and from_b[at] != 0xFFFFFFFF and from_a[at] + from_b[at] == length: out.set(at)

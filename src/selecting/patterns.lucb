@@ -1,0 +1,116 @@
+## Pattern rules: Checker keeps a repeating pattern of the group (a run of
+## selected elements, then a run of deselected ones, counted outward across
+## each connected island of the group, Blender's Checker Deselect); Random
+## keeps a share of it.
+
+let checker_parms: ParmSpec[3] = [
+    ParmSpec("Selected", ParmKind.integer, 1.0, 1.0, 100.0, 1, "", "Elements kept selected in a row."),
+    ParmSpec("Deselected", ParmKind.integer, 1.0, 1.0, 100.0, 1, "", "Elements deselected in a row, after each selected run."),
+    ParmSpec("Offset", ParmKind.integer, 0.0, 0.0, 100.0, 1, "", "Shift the pattern along by this many elements.")]
+
+let checker_picks: PickSpec[1] = [PickSpec("Components", "points edges faces", "Select the region to thin out")]
+
+func checker_rule() -> SelectRule:
+    return SelectRule("Select Checker", "Checker", "checker", "Keep a checker pattern of the group: runs of selected and deselected elements across each island", "Pattern", "grid",
+                      "points edges faces", checker_picks, checker_parms, select_checker)
+
+## Each group element's step count from where its island starts (its lowest
+## element), walking only through the group: faces across their edges,
+## edges through their points, points along their edges. An element is
+## kept when (steps + offset) mod (selected + deselected) < selected.
+func select_checker(input: const RuleInput*) -> RuleOutput!:
+    let domain = input.domain
+    let kept = (usize)input.parms.at(0)
+    let period = kept + (usize)input.parms.at(1)
+    let offset = (usize)input.parms.at(2)
+    let topology = input.topology
+    let size = topology.size(domain)
+    let steps = try new u32[size] --- in memory.heap
+    defer free(steps) in memory.heap
+    let queue = try new u32[size] --- in memory.heap
+    defer free(queue) in memory.heap
+    var visited = try BitsBuilder.zeros(size)
+    defer visited.close()
+    var chosen = try BitsBuilder.zeros(size)
+    errdefer chosen.close()
+    let group = input.group
+    for word in 0..<group.words.length:
+        var pending = group.words[word]
+        while pending != 0:
+            let start = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            if visited.view().get(start): continue
+            # A breadth-first walk over the island from `start`.
+            visited.set(start)
+            steps[start] = 0
+            queue[0] = (u32)start
+            var head: usize = 0
+            var tail: usize = 1
+            while head < tail:
+                let element = (usize)queue[head]
+                head += 1
+                if (((usize)steps[element] + offset) % period) < kept: chosen.set(element)
+                tail = checker_neighbors(topology, group, domain, element, steps, queue, tail, &visited)
+    return RuleOutput(chosen, domain)
+
+## Queue `element`'s unvisited neighbors in the group one step further on;
+## the queue's new end.
+func checker_neighbors(topology: const Topology*, group: Bits, domain: Domain, element: usize, steps: u32[], queue: u32[], tail: usize, visited: BitsBuilder*) -> usize:
+    var end = tail
+    let next = steps[element] + 1
+    if domain == Domain.face:
+        for corner in (usize)topology.offsets[element]..<(usize)topology.offsets[element + 1]:
+            let edge = (usize)topology.corner_edges[corner]
+            for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                let face = (usize)topology.corner_faces[(usize)topology.edge_corners[at]]
+                end = reached(group, face, next, steps, queue, end, visited)
+        return end
+    # Points reach points along their edges; edges reach edges through
+    # their points.
+    let ends: usize[2] = [element, 0] if domain == Domain.point else [(usize)topology.edge_points[element * 2], (usize)topology.edge_points[element * 2 + 1]]
+    let count: usize = 1 if domain == Domain.point else 2
+    for side in 0..<count:
+        let point = ends[side]
+        for at in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+            let edge = (usize)topology.point_edges[at]
+            var other = edge
+            if domain == Domain.point:
+                let a = (usize)topology.edge_points[edge * 2]
+                other = (usize)topology.edge_points[edge * 2 + 1] if a == point else a
+            end = reached(group, other, next, steps, queue, end, visited)
+    return end
+
+## Queue `element` at `step` when it is in the group and not yet visited.
+func reached(group: Bits, element: usize, step: u32, steps: u32[], queue: u32[], tail: usize, visited: BitsBuilder*) -> usize:
+    if not group.get(element) or visited.view().get(element): return tail
+    visited.set(element)
+    steps[element] = step
+    queue[tail] = (u32)element
+    return tail + 1
+
+let random_parms: ParmSpec[2] = [
+    ParmSpec("Ratio", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "The share of the group kept selected."),
+    ParmSpec("Seed", ParmKind.integer, 0.0, 0.0, 100000.0, 1, "", "Another seed, another pattern.", soft = 100.0)]
+
+func random_rule() -> SelectRule:
+    return SelectRule("Select Random", "Random", "random", "A random share of the group: each element kept with the Ratio's chance, the same for the same seed", "Pattern", "noise",
+                      "points edges faces", checker_picks, random_parms, select_random)
+
+func select_random(input: const RuleInput*) -> RuleOutput!:
+    let size = input.topology.size(input.domain)
+    var out = try BitsBuilder.zeros(size)
+    errdefer out.close()
+    let ratio = input.parms.at(0)
+    let seed = (u64)input.parms.at(1)
+    for element in 0..<size:
+        if input.group.get(element) and chance(seed, (u64)element) < ratio: out.set(element)
+    return same_domain(input, out)
+
+## A number in 0..<1 from `seed` and `element` (SplitMix64's finalizer):
+## the same pair, the same number on every machine.
+func chance(seed: u64, element: u64) -> f64:
+    var z = element *% 0x9E3779B97F4A7C15 +% seed *% 0xBF58476D1CE4E5B9 +% 0x632BE59BD9B4E019
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB
+    z = z ^ (z >> 31)
+    return (f64)(z >> 11) / 9007199254740992.0

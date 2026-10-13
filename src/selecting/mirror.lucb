@@ -1,0 +1,95 @@
+## Positional symmetry: a mirror map pairs each element with the one at its
+## reflection across an axis plane through the origin (within a tolerance
+## scaled to the model), found through a PointHash; a group becomes
+## symmetric by adding the mirrors of its members. The Edit engine's
+## Symmetry row and Select Mirror use it.
+
+## The tolerance mirrors are matched within: a ten-thousandth of the
+## model's size.
+pub func mirror_tolerance(mesh: const Mesh*) -> f64:
+    let box = mesh.bounds()
+    return math.max(0.000000001, box.maximum.subtract(box.minimum).length() * 0.0001)
+
+## Where each element of `domain` sits, in f64: points, face centers, edge
+## midpoints.
+func element_positions(mesh: const Mesh*, topology: const Topology*, domain: Domain, out: Growing[Vector3]*) -> !:
+    let points = mesh.point_span()
+    let origin = mesh.position_origin()
+    let count = topology.size(domain)
+    try out.reserve(count)
+    out.count = count
+    for at in 0..<count:
+        var p = Vector3()
+        if domain == Domain.point:
+            p = points[at].vector()
+        elif domain == Domain.edge:
+            p = points[(usize)topology.edge_points[at * 2]].vector().add(points[(usize)topology.edge_points[at * 2 + 1]].vector()).multiply_scalar(0.5)
+        else:
+            let start = (usize)topology.offsets[at]
+            let end = (usize)topology.offsets[at + 1]
+            for corner in start..<end: p = p.add(points[(usize)topology.corners[corner]].vector())
+            p = p.multiply_scalar(1.0 / (f64)(end - start))
+        out.items[at] = p.add(origin)
+
+## Each element's mirror across `axis` (-1 when nothing sits there).
+pub func mirror_map(mesh: const Mesh*, domain: Domain, axis: i64, out: Growing[i32]*) -> !:
+    let topology = try Topology.of(mesh)
+    let tolerance = mirror_tolerance(mesh)
+    if domain == Domain.corner:
+        var points = Growing[i32]()
+        defer points.close()
+        try mirror_map(mesh, Domain.point, axis, &points)
+        var faces = Growing[i32]()
+        defer faces.close()
+        try mirror_map(mesh, Domain.face, axis, &faces)
+        try out.fill(topology.corners.length, -1)
+        for corner in 0..<topology.corners.length:
+            let face = faces.items[(usize)topology.corner_faces[corner]]
+            let point = points.items[(usize)topology.corners[corner]]
+            if face < 0 or point < 0: continue
+            for at in (usize)topology.offsets[(usize)face]..<(usize)topology.offsets[(usize)face + 1]:
+                if topology.corners[at] == point: out.items[corner] = (i32)at
+        return
+    var positions = Growing[Vector3]()
+    defer positions.close()
+    try element_positions(mesh, &topology, domain, &positions)
+    var grid = try PointHash.build(positions.view(), tolerance * 4.0)
+    defer grid.close()
+    try out.fill(positions.count, -1)
+    for at in 0..<positions.count:
+        out.items[at] = grid.nearest(positions.view(), positions.items[at].reflected((usize)(axis - 1)), tolerance)
+
+## `bits` with the mirror of every member added.
+pub func symmetric(mesh: const Mesh*, bits: Bits, domain: Domain, axis: i64) -> BitsBuilder!:
+    var result = try BitsBuilder.copy_of(bits)
+    errdefer result.close()
+    var mirrors = Growing[i32]()
+    defer mirrors.close()
+    try mirror_map(mesh, domain, axis, &mirrors)
+    for word in 0..<bits.words.length:
+        var pending = bits.words[word]
+        while pending != 0:
+            let element = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            let mirror = mirrors.items[element]
+            if mirror >= 0: result.set((usize)mirror)
+    return result
+
+let mirror_parms: ParmSpec[2] = [
+    ParmSpec("Axis", ParmKind.menu, 0.0, 0.0, 2.0, 1, "X|Y|Z", "The plane through the origin the selection is mirrored across."),
+    ParmSpec("Extend", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep the selection and add its mirror; off: only the mirror.")]
+
+func mirror_rule() -> SelectRule:
+    return SelectRule("Select Mirror", "Mirror Selection", "mirror", "The selection's mirror across X, Y or Z (elements with nothing at their mirror drop out)", "Symmetry", "mirror-modifier",
+                      "points edges faces", any_picks, mirror_parms, select_mirror)
+
+func select_mirror(input: const RuleInput*) -> RuleOutput!:
+    let size = input.topology.size(input.domain)
+    var mirrors = Growing[i32]()
+    defer mirrors.close()
+    try mirror_map(input.mesh, input.domain, (i64)input.parms.at(0) + 1, &mirrors)
+    var out = (try BitsBuilder.copy_of(input.group)) if input.parms.at(1) != 0.0 else (try BitsBuilder.zeros(size))
+    errdefer out.close()
+    for element in 0..<size:
+        if input.group.get(element) and mirrors.items[element] >= 0: out.set((usize)mirrors.items[element])
+    return same_domain(input, out)

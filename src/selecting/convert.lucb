@@ -1,8 +1,8 @@
 ## Selection kernels over a mesh's connectivity: converting bits between the
-## point, corner, face and edge domains, and growing, shrinking, bordering,
-## flood filling, edge loops and edge rings. They read the topology caches
-## (edges, point-face, point-edge and edge-corner lists), which every mesh
-## with the same connectivity shares, and write fresh bits.
+## point, corner, face and edge domains, and growing, shrinking, bordering
+## and flood filling (the walkers are walkers.lucb). They read the topology
+## caches (edges, point-face, point-edge and edge-corner lists), which every
+## mesh with the same connectivity shares, and write fresh bits.
 
 ## Bits of `source` elements converted to `destination` elements. With `all`, an element
 ## is selected when every related element is (a face whose points all are);
@@ -65,11 +65,20 @@ func element_of(topology: const Topology*, corner: usize, domain: Domain) -> usi
 func connector(domain: Domain) -> Domain:
     return Domain.edge if domain == Domain.face else Domain.point
 
+## Neighbors across faces instead (Blender's face step): faces through
+## their points, points and edges through their faces.
+func face_step_connector(domain: Domain) -> Domain:
+    return Domain.point if domain == Domain.face else Domain.face
+
 ## `bits` and every element next to one of them, `steps` times.
 pub func grown(topology: const Topology*, bits: Bits, domain: Domain, steps: usize) -> BitsBuilder!:
+    return try grown_through(topology, bits, domain, connector(domain), steps)
+
+## `bits` and every element sharing a `link` element with one, `steps`
+## times.
+pub func grown_through(topology: const Topology*, bits: Bits, domain: Domain, link: Domain, steps: usize) -> BitsBuilder!:
     var current = try BitsBuilder.copy_of(bits)
     errdefer current.close()
-    let link = connector(domain)
     for _ in 0..<steps:
         var linked = try converted(topology, current.view(), domain, link, false)
         defer linked.close()
@@ -80,13 +89,18 @@ pub func grown(topology: const Topology*, bits: Bits, domain: Domain, steps: usi
 
 ## `bits` without the elements next to an unselected one, `steps` times.
 pub func shrunk(topology: const Topology*, bits: Bits, domain: Domain, steps: usize) -> BitsBuilder!:
+    return try shrunk_through(topology, bits, domain, connector(domain), steps)
+
+## `bits` without the elements sharing a `link` element with an
+## unselected one, `steps` times.
+pub func shrunk_through(topology: const Topology*, bits: Bits, domain: Domain, link: Domain, steps: usize) -> BitsBuilder!:
     var current = try BitsBuilder.copy_of(bits)
     errdefer current.close()
     for _ in 0..<steps:
         var outside = try BitsBuilder.copy_of(current.view())
         defer outside.close()
         outside.invert()
-        var reach = try grown(topology, outside.view(), domain, 1)
+        var reach = try grown_through(topology, outside.view(), domain, link, 1)
         defer reach.close()
         current.subtract(reach.view())
     return current
@@ -153,78 +167,15 @@ pub func connected(topology: const Topology*, bits: Bits, domain: Domain) -> Bit
                         tail += 1
     return out
 
-## Edge loops through the selected edges: across each four-edge point to the
-## edge that shares no face, until a pole, a boundary or the loop closes.
-pub func looped(topology: const Topology*, edges: Bits) -> BitsBuilder!:
-    var out = try BitsBuilder.copy_of(edges)
-    errdefer out.close()
-    for word in 0..<edges.words.length:
-        var pending = edges.words[word]
-        while pending != 0:
-            let edge = word * 64 + (usize)trailing_zeros(pending)
-            pending = pending & (pending - 1)
-            let first = (usize)topology.edge_corner_offsets[edge]
-            if first == (usize)topology.edge_corner_offsets[edge + 1]: continue
-            let corner = (usize)topology.edge_corners[first]
-            walk_loop(topology, corner, &out, edge)
-            # The other direction: through the edge's first point.
-            walk_back(topology, corner, &out, edge)
-    return out
+let convert_parms: ParmSpec[2] = [
+    ParmSpec("To", ParmKind.menu, 2.0, 0.0, 2.0, 1, "Points|Edges|Faces", "The component type the selection becomes."),
+    ParmSpec("Rule", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Touching|Contained", "Touching: every element the selection touches. Contained: only those all of whose points, edges or faces are selected.")]
 
-## From half-edge `corner`, keep crossing its end point.
-func walk_loop(topology: const Topology*, start: usize, out: BitsBuilder*, seed: usize):
-    var corner = start
-    for _ in 0..<topology.edges():
-        let point = (usize)topology.corners[topology.next(corner)]
-        if topology.valence(point) != 4: return
-        let across = topology.twin(topology.next(corner))
-        if across < 0: return
-        corner = topology.next((usize)across)
-        let edge = (usize)topology.corner_edges[corner]
-        if edge == seed or out.view().get(edge): return
-        out.set(edge)
+func convert_rule() -> SelectRule:
+    return SelectRule("Select Convert", "Convert", "", "The selection as points, edges or faces: those it touches, or only those it contains (Maya's Convert Selection)", "Convert", "pivot",
+                      "points edges faces", any_picks, convert_parms, select_convert)
 
-## The same walk leaving through the edge's start point.
-func walk_back(topology: const Topology*, start: usize, out: BitsBuilder*, seed: usize):
-    let reverse = topology.twin(start)
-    if reverse >= 0:
-        walk_loop(topology, (usize)reverse, out, seed)
-        return
-    # A boundary edge: step back through its first point instead.
-    var corner = start
-    for _ in 0..<topology.edges():
-        let point = (usize)topology.corners[corner]
-        if topology.valence(point) != 4: return
-        let across = topology.twin(topology.previous(corner))
-        if across < 0: return
-        corner = topology.previous((usize)across)
-        let edge = (usize)topology.corner_edges[corner]
-        if edge == seed or out.view().get(edge): return
-        out.set(edge)
-
-## Edge rings through the selected edges: across each quad to its opposite
-## edge, until a face that is not a quad or a boundary.
-pub func ringed(topology: const Topology*, edges: Bits) -> BitsBuilder!:
-    var out = try BitsBuilder.copy_of(edges)
-    errdefer out.close()
-    for word in 0..<edges.words.length:
-        var pending = edges.words[word]
-        while pending != 0:
-            let edge = word * 64 + (usize)trailing_zeros(pending)
-            pending = pending & (pending - 1)
-            for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
-                walk_ring(topology, (usize)topology.edge_corners[at], &out, edge)
-    return out
-
-func walk_ring(topology: const Topology*, start: usize, out: BitsBuilder*, seed: usize):
-    var corner = start
-    for _ in 0..<topology.edges():
-        let face = (usize)topology.corner_faces[corner]
-        if topology.offsets[face + 1] - topology.offsets[face] != 4: return
-        let opposite = topology.next(topology.next(corner))
-        let edge = (usize)topology.corner_edges[opposite]
-        if edge == seed or out.view().get(edge): return
-        out.set(edge)
-        let across = topology.twin(opposite)
-        if across < 0: return
-        corner = (usize)across
+func select_convert(input: const RuleInput*) -> RuleOutput!:
+    let targets: Domain[3] = [Domain.point, Domain.edge, Domain.face]
+    let target = targets[(usize)math.clamp(input.parms.at(0), 0.0, 2.0)]
+    return RuleOutput(try converted(input.topology, input.group, input.domain, target, input.parms.at(1) != 0.0), target)

@@ -1,0 +1,49 @@
+## Every select rule, in menu order. A rule added here is a Select verb
+## (verbs/api.lucb lists the rules after the modeling verbs) and, when it
+## names a function, a group function.
+let rule_makers: (func() -> SelectRule)[22] = [
+    loop_rule,
+    ring_rule,
+    boundary_rule,
+    region_rule,
+    grow_rule,
+    shrink_rule,
+    border_rule,
+    connected_rule,
+    flat_rule,
+    path_rule,
+    similar_rule,
+    sharp_rule,
+    sides_rule,
+    area_rule,
+    normal_rule,
+    manifold_rule,
+    loose_rule,
+    interior_rule,
+    checker_rule,
+    random_rule,
+    mirror_rule,
+    convert_rule]
+
+pub func rule_count() -> usize:
+    return rule_makers.length
+
+## Rule `index` in menu order.
+pub func rule_at(index: usize) -> SelectRule:
+    if index >= rule_makers.length: trap("select rule index out of range")
+    let make = rule_makers[index]
+    return make()
+
+## The index of the rule whose group function is `function`, or -1.
+pub func rule_of_function(function: str) -> i64:
+    if function.length == 0: return -1
+    for index in 0..<rule_makers.length:
+        if rule_at(index).function == function: return (i64)index
+    return -1
+
+## The index of the rule called `name` (its verb's name, "Select Loop"),
+## or -1.
+pub func rule_named(name: str) -> i64:
+    for index in 0..<rule_makers.length:
+        if rule_at(index).name == name: return (i64)index
+    return -1

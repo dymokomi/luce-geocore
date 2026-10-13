@@ -10,6 +10,12 @@
 ##   p3  p3-4  p3-4-5  7e2                        edges: at a point, between
 ##                                                points, along a chain, of a face
 ##   grow(x, 2) shrink(x) border(x) connected(x) loop(x) ring(x) convert(x, 1)
+##   sharp(*, 30) sides(*, 4) path(p3 p40) similar(5, 1) nonmanifold(*) …
+##
+## Every select rule with a function name (selecting/registry.lucb) is a
+## function: its first argument is the group it reads, the numbers after it
+## its parameters in order (missing ones take their initial values), so
+## `sides(*, 3, 3)` is the faces of more than three sides.
 ##
 ## Terms combine left to right into an accumulator that starts empty. The
 ## text compiles once into a program (terms, numbers and text spans), which
@@ -34,6 +40,7 @@ from core.geometry import Bounds
 from geometry_set import append_text, append_number
 from geometries.polygon import Mesh, with_group_bits
 from geometries.topology.connectivity import Topology
+from selecting import SelectRule, rule_at, rule_of_function, rule_named, run_rule, converted, grown, shrunk, bordered, connected
 
 ## How a term combines with what the terms before it selected.
 pub enum Combine as u8:
@@ -101,6 +108,8 @@ pub enum Function as u8:
     loop = 4
     ring = 5
     convert = 6
+    ## Any other select rule (`rule` names it).
+    rule = 7
 
 pub struct Term:
     pub var combine: Combine = Combine.add
@@ -118,9 +127,14 @@ pub struct Term:
     pub var compare: Compare = Compare.exists
     pub var spans_first: u32 = 0
     pub var spans_count: u32 = 0
-    ## Calls: the function and its count argument.
+    ## Calls: the function, its first number (a count) and every number
+    ## after the group (`args_count` of them in `numbers`), and the select
+    ## rule it runs on polygons (-1: none).
     pub var function: Function = Function.grow
     pub var argument: f64 = 1.0
+    pub var args_first: u32 = 0
+    pub var args_count: u32 = 0
+    pub var rule: i32 = -1
 
 pub struct GroupProgram:
     pub var source: Growing[u8]
@@ -225,21 +239,25 @@ struct Parser:
         while not ends_word(self.peek()) and self.peek() != 40: self.at += 1
         let word = (str)self.program.source.items[start..<self.at]
         if self.peek() == 40:
-            if function_named(word) == none:
-                try self.fail("group syntax: unknown function (grow, shrink, border, connected, loop, ring, convert)")
-            let function = function_named(word) else Function.grow
+            let rule = rule_of_function(word)
+            var function = Function.rule
+            if let builtin = function_named(word): function = builtin
+            elif rule < 0: try self.fail("group syntax: unknown function (grow, shrink, border, connected, loop, ring, convert, or a select rule's)")
             self.at += 1
             let (first, count) = try self.expression(depth + 1)
             var argument = 1.0 if function != Function.convert else 0.0
+            let args_first = (u32)self.program.numbers.count
             self.skip_spaces()
-            if self.peek() == 44:
+            while self.peek() == 44:
                 self.at += 1
                 self.skip_spaces()
-                argument = try self.number()
+                let value = try self.signed_number()
+                if self.program.numbers.count == (usize)args_first: argument = value
+                try self.program.numbers.push(value)
                 self.skip_spaces()
             if self.peek() != 41: try self.fail("group syntax: expected ')'")
             self.at += 1
-            return Term(kind = AtomKind.call, first = first, count = count, function = function, argument = argument)
+            return Term(kind = AtomKind.call, first = first, count = count, function = function, argument = argument, args_first = args_first, args_count = (u32)self.program.numbers.count - args_first, rule = (i32)rule)
         if word.length == 0: try self.fail("group syntax: expected a term")
         return Term(kind = AtomKind.name, text = (u32)start, text_length = (u32)word.length)
 
@@ -387,6 +405,13 @@ struct Parser:
             return
         try self.program.spans.push((u32)start)
         try self.program.spans.push((u32)text.length)
+
+    ## A number with an optional leading minus (a call's argument).
+    func signed_number() -> f64!:
+        if self.peek() == 45:
+            self.at += 1
+            return -(try self.number())
+        return try self.number()
 
     func number() -> f64!:
         let start = self.at

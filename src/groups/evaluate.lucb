@@ -243,30 +243,24 @@ struct Evaluation:
             else: bits.set((usize)edge)
         return bits
 
+    ## A function: convert, or a select rule run on the argument group
+    ## (evaluated on the target domain when the rule takes it, else on the
+    ## rule's first level) and converted to the target.
     func call(term: const Term*, target: Domain) -> BitsBuilder!:
-        let steps = (usize)math.max(0.0, term.argument)
-        match term.function:
-            .loop, .ring:
-                var seeds = try self.terms(term.first, term.count, Domain.edge)
-                defer seeds.close()
-                let topology = try self.connectivity()
-                var walked = (try looped(&topology, seeds.view())) if term.function == Function.loop else (try ringed(&topology, seeds.view()))
-                defer walked.close()
-                return try self.convert(walked.view(), Domain.edge, target, strict_conversion(Domain.edge, target))
-            .convert:
-                let domain = self.guess(term.first, term.count, target)
-                var inner = try self.terms(term.first, term.count, domain)
-                defer inner.close()
-                return try self.convert(inner.view(), domain, target, term.argument == 0.0)
-            _:
-                var inner = try self.terms(term.first, term.count, target)
-                defer inner.close()
-                let topology = try self.connectivity()
-                match term.function:
-                    .grow: return try grown(&topology, inner.view(), target, steps)
-                    .shrink: return try shrunk(&topology, inner.view(), target, steps)
-                    .border: return try bordered(&topology, inner.view(), target)
-                    _: return try connected(&topology, inner.view(), target)
+        if term.function == Function.convert:
+            let domain = self.guess(term.first, term.count, target)
+            var inner = try self.terms(term.first, term.count, domain)
+            defer inner.close()
+            return try self.convert(inner.view(), domain, target, term.argument == 0.0)
+        if term.rule < 0: error(errors.invalid, "group syntax: this function has no polygon rule")
+        let rule = rule_at((usize)term.rule)
+        let domain = target if rule.takes(target) else rule.first_domain()
+        var inner = try self.terms(term.first, term.count, domain)
+        defer inner.close()
+        let numbers = self.program.numbers.view()[(usize)term.args_first..<(usize)(term.args_first + term.args_count)]
+        var made = try run_rule(&rule, self.mesh, inner.view(), domain, numbers)
+        defer made.bits.close()
+        return try self.convert(made.bits.view(), made.domain, target, strict_conversion(made.domain, target))
 
     ## The domain the first named group or attribute of some terms lives on.
     func guess(first: u32, count: u32, fallback: Domain) -> Domain:

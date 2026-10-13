@@ -1,0 +1,139 @@
+## Loop rules: Loop (edge loops, face loops, point loops; a run between
+## two), Ring, Boundary Loop (whole boundaries, or a face region's outline)
+## and Loop to Region (the faces a closed loop encloses).
+
+let loop_parms: ParmSpec[1] = [
+    ParmSpec("Only between", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "With two edges on one loop selected: only the run between them, the shorter way round.")]
+let loop_picks: PickSpec[1] = [PickSpec("Components", "edges faces points", "Select edges, two faces side by side, or two points on a loop")]
+
+func loop_rule() -> SelectRule:
+    return SelectRule("Select Loop", "Loop", "loop", "Edge loops through the selected edges, face loops through faces side by side, point loops through points along an edge", "Loops", "loop-cut",
+                      "edges faces points", loop_picks, loop_parms, select_loops)
+
+func select_loops(input: const RuleInput*) -> RuleOutput!:
+    let topology = input.topology
+    if input.domain == Domain.face:
+        var faces = try BitsBuilder.zeros(topology.faces())
+        errdefer faces.close()
+        # A face loop through each edge between two selected faces (each
+        # walk keeps to the faces it has not passed yet).
+        for edge in 0..<topology.edges():
+            if edge_faces(topology, edge) == 2 and input.group.get(edge_face(topology, edge, 0)) and input.group.get(edge_face(topology, edge, 1)):
+                face_loop(topology, edge, &faces)
+        faces.unite(input.group)
+        return same_domain(input, faces)
+    var edges = try BitsBuilder.zeros(topology.edges())
+    defer edges.close()
+    if input.domain == Domain.point:
+        var seeds = try converted(topology, input.group, Domain.point, Domain.edge, true)
+        defer seeds.close()
+        try loops_of(topology, seeds.view(), &edges)
+        var points = try converted(topology, edges.view(), Domain.edge, Domain.point, false)
+        points.unite(input.group)
+        return same_domain(input, points)
+    if input.parms.at(0) != 0.0 and input.group.population() == 2:
+        let a = (usize)first_member(input.group, 0)
+        let b = (usize)first_member(input.group, a + 1)
+        let ran = try loop_run(topology, a, b, &edges)
+        if ran: return same_domain(input, try BitsBuilder.copy_of(edges.view()))
+    try loops_of(topology, input.group, &edges)
+    return same_domain(input, try BitsBuilder.copy_of(edges.view()))
+
+## The first member of `bits` at or after `least` (-1: none).
+pub func first_member(bits: Bits, least: usize) -> i64:
+    var at = least
+    while at < bits.count:
+        let word = bits.words[at >> 6] >> (u64)(at & 63)
+        if word != 0: return (i64)(at + (usize)trailing_zeros(word))
+        at = (at | 63) + 1
+    return -1
+
+let ring_picks: PickSpec[1] = [PickSpec("Edges", "edges", "Select edges for Ring")]
+
+func ring_rule() -> SelectRule:
+    return SelectRule("Select Ring", "Ring", "ring", "Edge rings through the selected edges: across each quad to its opposite edge", "Loops", "edge-select",
+                      "edges", ring_picks, no_parms[..<0], select_rings)
+
+func select_rings(input: const RuleInput*) -> RuleOutput!:
+    var edges = try BitsBuilder.zeros(input.topology.edges())
+    errdefer edges.close()
+    rings_of(input.topology, input.group, &edges)
+    return same_domain(input, edges)
+
+let boundary_picks: PickSpec[1] = [PickSpec("Components", "edges faces", "Select boundary edges, or faces for their outline")]
+
+func boundary_rule() -> SelectRule:
+    return SelectRule("Select Boundary Loop", "Boundary Loop", "boundary", "Each selected boundary edge's whole boundary; selected faces' outline as edges", "Loops", "fill-hole",
+                      "edges faces", boundary_picks, no_parms[..<0], select_boundaries)
+
+func select_boundaries(input: const RuleInput*) -> RuleOutput!:
+    let topology = input.topology
+    var edges = try BitsBuilder.zeros(topology.edges())
+    errdefer edges.close()
+    if input.domain == Domain.edge:
+        try boundaries_of(topology, input.group, &edges)
+        return same_domain(input, edges)
+    # The outline: edges with one selected face beside them.
+    for edge in 0..<topology.edges():
+        var inside: usize = 0
+        for at in 0..<edge_faces(topology, edge):
+            if input.group.get(edge_face(topology, edge, at)): inside += 1
+        if inside == 1: edges.set(edge)
+    return RuleOutput(edges, Domain.edge)
+
+let region_parms: ParmSpec[1] = [
+    ParmSpec("Side", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Smaller|Bigger", "Which side of each closed loop: the one with fewer faces, or more.")]
+let region_picks: PickSpec[1] = [PickSpec("Edges", "edges", "Select a closed edge loop")]
+
+func region_rule() -> SelectRule:
+    return SelectRule("Select Loop to Region", "Loop to Region", "region", "The faces a closed loop of selected edges encloses (its smaller side, or bigger)", "Loops", "face-select",
+                      "edges", region_picks, region_parms, select_region)
+
+func select_region(input: const RuleInput*) -> RuleOutput!:
+    let topology = input.topology
+    let faces = topology.faces()
+    # Faces flooded into regions, never across a selected edge.
+    let region = try new u32[faces] --- in memory.heap
+    defer free(region) in memory.heap
+    let queue = try new u32[faces] --- in memory.heap
+    defer free(queue) in memory.heap
+    var sizes = Growing[u32]()
+    defer sizes.close()
+    let unset: u32 = 0xFFFFFFFF
+    for face in 0..<faces: region[face] = unset
+    for seed in 0..<faces:
+        if region[seed] != unset: continue
+        let id = (u32)sizes.count
+        region[seed] = id
+        queue[0] = (u32)seed
+        var head: usize = 0
+        var tail: usize = 1
+        while head < tail:
+            let face = (usize)queue[head]
+            head += 1
+            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                let edge = (usize)topology.corner_edges[corner]
+                if input.group.get(edge): continue
+                for at in 0..<edge_faces(topology, edge):
+                    let other = edge_face(topology, edge, at)
+                    if region[other] == unset:
+                        region[other] = id
+                        queue[tail] = (u32)other
+                        tail += 1
+        try sizes.push((u32)tail)
+    # Per selected edge between two regions: the smaller (or bigger).
+    let bigger = input.parms.at(0) != 0.0
+    var chosen = try BitsBuilder.zeros(sizes.count)
+    defer chosen.close()
+    for edge in 0..<topology.edges():
+        if not input.group.get(edge) or edge_faces(topology, edge) != 2: continue
+        let a = region[edge_face(topology, edge, 0)]
+        let b = region[edge_face(topology, edge, 1)]
+        if a == b: continue
+        let small = a if sizes.items[(usize)a] <= sizes.items[(usize)b] else b
+        let large = b if small == a else a
+        chosen.set((usize)(large if bigger else small))
+    var out = try BitsBuilder.zeros(faces)
+    for face in 0..<faces:
+        if chosen.view().get((usize)region[face]): out.set(face)
+    return RuleOutput(out, Domain.face)

@@ -1,0 +1,153 @@
+## Region rules: Grow and Shrink (by edges, or across faces with Face
+## step), Border, Connected (whole islands, delimited by seams, sharp
+## edges, materials, UV seams or face angles, as Blender's Select Linked)
+## and Linked Flat (faces flooded across edges flatter than an angle).
+
+let step_parms: ParmSpec[2] = [
+    ParmSpec("Steps", ParmKind.integer, 1.0, 1.0, 100.0, 1, "", "How many rings of neighbors to add or take away."),
+    ParmSpec("Face step", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Faces reach faces that share a point, points and edges reach across faces; off: faces across edges, points and edges along edges.")]
+let any_picks: PickSpec[1] = [PickSpec("Components", "points edges faces")]
+
+func grow_rule() -> SelectRule:
+    return SelectRule("Select Grow", "Grow Selection", "grow", "The selection and its neighbors, a ring at a time", "Region", "add-to-selection",
+                      "points edges faces", any_picks, step_parms, select_grow)
+
+func shrink_rule() -> SelectRule:
+    return SelectRule("Select Shrink", "Shrink Selection", "shrink", "The selection without its outer ring, a ring at a time", "Region", "subtract-from-selection",
+                      "points edges faces", any_picks, step_parms, select_shrink)
+
+## The link Grow and Shrink step through.
+func step_link(input: const RuleInput*) -> Domain:
+    return face_step_connector(input.domain) if input.parms.at(1) != 0.0 else connector(input.domain)
+
+func select_grow(input: const RuleInput*) -> RuleOutput!:
+    return same_domain(input, try grown_through(input.topology, input.group, input.domain, step_link(input), (usize)input.parms.at(0)))
+
+func select_shrink(input: const RuleInput*) -> RuleOutput!:
+    return same_domain(input, try shrunk_through(input.topology, input.group, input.domain, step_link(input), (usize)input.parms.at(0)))
+
+func border_rule() -> SelectRule:
+    return SelectRule("Select Border", "Border", "border", "The selected elements next to an unselected one", "Region", "selection-tool",
+                      "points edges faces", any_picks, no_parms[..<0], select_border)
+
+func select_border(input: const RuleInput*) -> RuleOutput!:
+    return same_domain(input, try bordered(input.topology, input.group, input.domain))
+
+let connected_parms: ParmSpec[6] = [
+    ParmSpec("Seams", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Stop at seam edges (the edge group or attribute `seam`)."),
+    ParmSpec("Sharp", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Stop at edges marked sharp (the edge group or attribute `sharp`)."),
+    ParmSpec("Materials", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Stop between faces of different materials (the face attribute `material`)."),
+    ParmSpec("UV seams", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Stop where the faces' `uv` values part along an edge."),
+    ParmSpec("Normals", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Stop at edges whose faces meet at more than Angle."),
+    ParmSpec("Angle", ParmKind.number, 30.0, 0.0, 180.0, 1, "", "The face angle Normals stops at, in degrees.")]
+
+func connected_rule() -> SelectRule:
+    return SelectRule("Select Connected", "Connected", "connected", "Whole islands touching the selection, optionally kept inside seams, sharp edges, materials, UV islands or face angles", "Region", "magic-wand-tool",
+                      "points edges faces", any_picks, connected_parms, select_connected)
+
+## Which edges a flood may not cross.
+struct Delimits:
+    let seams: EdgeMark
+    let sharp: EdgeMark
+    let materials: FaceValue
+    let uv: const Attribute*?
+    let use_seams: bool
+    let use_sharp: bool
+    let use_materials: bool
+    let use_uv: bool
+    let use_normals: bool
+    let angle: f64
+
+    func any() -> bool:
+        return self.use_seams or self.use_sharp or self.use_materials or self.use_uv or self.use_normals
+
+    ## Whether manifold edge `edge` stops the flood.
+    func stops(mesh: const Mesh*, topology: const Topology*, edge: usize) -> bool:
+        if self.use_seams and self.seams.marked(edge): return true
+        if self.use_sharp and self.sharp.marked(edge): return true
+        if edge_faces(topology, edge) != 2: return false
+        let a = edge_face(topology, edge, 0)
+        let b = edge_face(topology, edge, 1)
+        if self.use_materials and self.materials.value(a) != self.materials.value(b): return true
+        if self.use_normals and face_angle(mesh, topology, edge) > self.angle: return true
+        if self.use_uv:
+            if let uv = self.uv: return uv_parts(topology, uv, edge)
+        return false
+
+## Whether the two faces of manifold edge `edge` give either of its points
+## different corner `uv` values.
+func uv_parts(topology: const Topology*, uv: const Attribute*, edge: usize) -> bool:
+    let first = (usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge]]
+    let second = (usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge] + 1]
+    for side in 0..<(usize)2:
+        let point = (usize)topology.edge_points[edge * 2 + side]
+        let a = corner_at(topology, first, point)
+        let b = corner_at(topology, second, point)
+        for component in 0..<uv.width:
+            if math.abs(uv.number(a, component) - uv.number(b, component)) > 0.000001: return true
+    return false
+
+## The corner of `corner`'s face at `point`, one of its edge's ends.
+func corner_at(topology: const Topology*, corner: usize, point: usize) -> usize:
+    return corner if (usize)topology.corners[corner] == point else topology.next(corner)
+
+func delimits_of(input: const RuleInput*) -> Delimits!:
+    let mesh = input.mesh
+    let uv_index = mesh.attribute_on("uv", Domain.corner)
+    var uv: const Attribute*? = none
+    if uv_index >= 0: uv = try mesh.attribute_entry(uv_index)
+    return Delimits(try EdgeMark.of(mesh, "seam"), try EdgeMark.of(mesh, "sharp"), try FaceValue.of(mesh, "material"), uv,
+                    input.parms.at(0) != 0.0, input.parms.at(1) != 0.0, input.parms.at(2) != 0.0, input.parms.at(3) != 0.0, input.parms.at(4) != 0.0, input.parms.at(5))
+
+func select_connected(input: const RuleInput*) -> RuleOutput!:
+    let delimits = try delimits_of(input)
+    if not delimits.any(): return same_domain(input, try connected(input.topology, input.group, input.domain))
+    var faces = try converted(input.topology, input.group, input.domain, Domain.face, false)
+    defer faces.close()
+    try flood_faces(input.mesh, input.topology, &faces, &delimits, -1.0)
+    if input.domain == Domain.face: return same_domain(input, try BitsBuilder.copy_of(faces.view()))
+    var back = try converted(input.topology, faces.view(), Domain.face, input.domain, false)
+    back.unite(input.group)
+    return same_domain(input, back)
+
+## Flood `faces` across manifold edges the delimits let through and, when
+## `flat` is not negative, whose faces meet at no more than `flat` degrees.
+func flood_faces(mesh: const Mesh*, topology: const Topology*, faces: BitsBuilder*, delimits: const Delimits*, flat: f64) -> !:
+    let queue = try new u32[topology.faces()] --- in memory.heap
+    defer free(queue) in memory.heap
+    var tail: usize = 0
+    for word in 0..<faces.view().words.length:
+        var pending = faces.view().words[word]
+        while pending != 0:
+            queue[tail] = (u32)(word * 64 + (usize)trailing_zeros(pending))
+            tail += 1
+            pending = pending & (pending - 1)
+    var head: usize = 0
+    while head < tail:
+        let face = (usize)queue[head]
+        head += 1
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let edge = (usize)topology.corner_edges[corner]
+            if edge_faces(topology, edge) != 2 or delimits.stops(mesh, topology, edge): continue
+            if flat >= 0.0 and face_angle(mesh, topology, edge) > flat: continue
+            for at in 0..<(usize)2:
+                let other = edge_face(topology, edge, at)
+                if faces.view().get(other): continue
+                faces.set(other)
+                queue[tail] = (u32)other
+                tail += 1
+
+let flat_parms: ParmSpec[1] = [
+    ParmSpec("Angle", ParmKind.number, 1.0, 0.0, 180.0, 1, "", "The largest angle between two faces still counted flat, in degrees.", soft = 30.0)]
+let face_picks: PickSpec[1] = [PickSpec("Faces", "faces")]
+
+func flat_rule() -> SelectRule:
+    return SelectRule("Select Linked Flat", "Linked Flat", "flat", "Faces reached from the selection across edges flatter than an angle", "Region", "plane",
+                      "faces", face_picks, flat_parms, select_flat)
+
+func select_flat(input: const RuleInput*) -> RuleOutput!:
+    var faces = try BitsBuilder.copy_of(input.group)
+    errdefer faces.close()
+    let unlimited = Delimits(EdgeMark(none), EdgeMark(none), FaceValue(none), none, false, false, false, false, false, 0.0)
+    try flood_faces(input.mesh, input.topology, &faces, &unlimited, input.parms.at(0))
+    return same_domain(input, faces)

@@ -1,0 +1,358 @@
+## The select rules (POLY-MODELING.md Stage 2) on fixtures with known
+## counts: loops on a grid, a cylinder, a torus and a sphere (stopping at
+## poles and boundaries, Blender's way), partial loops, face and point
+## loops, rings, boundaries, Loop to Region, islands with delimits, shortest
+## paths and Fill region, Similar, Grow and Shrink, the traits (sharp, sides,
+## area, normal, non-manifold, loose, interior), Mirror, Convert, Random,
+## the rules as group functions and as Select verbs.
+## The 4 by 4 grid over -1..1 in XZ: point z*5+x, face z*4+x.
+import interop
+import memory
+from luce_geocore import geocore
+from luce_geocore.geocore import Mesh, MeshPrimitives, Selection, Groups, Verbs, Vector3, MaterialAssignment
+from luce_geocore.kernel import clear_group_cache
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    try grid_loops(grid)
+    try primitive_loops()
+    try islands(grid)
+    try paths(grid)
+    try similar(grid)
+    try regions(grid)
+    try traits(grid)
+    try nonmanifold(grid)
+    try patterns(grid)
+    try functions(grid)
+
+pub func run() -> !:
+    try exercise()
+    print("PASS select rules: loops (grid, cylinder hub, torus, sphere poles, boundaries, partial, face and point loops), rings, boundaries, loop to region, delimited islands, paths and fill, Similar, grow and shrink, sharp, sides, area, normal, non-manifold, loose, interior, mirror, convert, random, group functions and Select verbs")
+
+## Rule `name` with `numbers` on what `expression` names on `domain` (0
+## points, 2 faces, 4 edges): its selection's size, checked.
+func expect(mesh: interop.Reference[Mesh], expression: str, domain: i64, name: str, numbers: const f64[], count: i64) -> !:
+    let seed = try Selection.of(mesh, expression, domain)
+    defer seed.release()
+    let made = try seed.value().ruled(mesh, name, numbers)
+    defer made.release()
+    if made.value().count() != count:
+        print(f"{name} of {expression} on {domain}: {made.value().count()} selected, expected {count}")
+        assert(false)
+
+## Whether rule `name` of `expression` selects every element `members` names.
+func covers(mesh: interop.Reference[Mesh], expression: str, domain: i64, name: str, numbers: const f64[], members: str) -> bool!:
+    let seed = try Selection.of(mesh, expression, domain)
+    defer seed.release()
+    let made = try seed.value().ruled(mesh, name, numbers)
+    defer made.release()
+    let wanted = try Selection.of(mesh, members, made.value().domain())
+    defer wanted.release()
+    let both = try made.value().combined(mesh, members, 2)
+    defer both.release()
+    return both.value().count() == wanted.value().count()
+
+func none_given() -> const f64[]:
+    var empty: f64[]
+    return empty
+
+func grid_loops(grid: interop.Reference[Mesh]) -> !:
+    let plain = none_given()
+    # An interior edge's loop runs to the boundary on both sides (points
+    # of three edges end it).
+    try expect(grid, "p6-7", 4, "Select Loop", plain, 4)
+    assert(try covers(grid, "p6-7", 4, "Select Loop", plain, "p5-6 p8-9"))
+    # A boundary edge's loop runs along its side and stops at the corners;
+    # Boundary Loop takes the whole boundary.
+    try expect(grid, "p1-2", 4, "Select Loop", plain, 4)
+    try expect(grid, "p1-2", 4, "Select Boundary Loop", plain, 16)
+    # Only between: the run between two edges of one loop.
+    let between: f64[1] = [1.0]
+    try expect(grid, "p5-6 p8-9", 4, "Select Loop", between[..<1], 4)
+    try expect(grid, "p5-6 p7-8", 4, "Select Loop", between[..<1], 3)
+    # Rings: across the quads, five edges.
+    try expect(grid, "p6-7", 4, "Select Ring", plain, 5)
+    # A face loop through two faces side by side; a point loop through two
+    # points along an edge.
+    try expect(grid, "5 6", 2, "Select Loop", plain, 4)
+    assert(try covers(grid, "5 6", 2, "Select Loop", plain, "4 7"))
+    try expect(grid, "6 7", 0, "Select Loop", plain, 5)
+    # Faces' outline, and the faces a closed loop encloses: the middle
+    # four (smaller) or the twelve around them (bigger).
+    try expect(grid, "5 6 9 10", 2, "Select Boundary Loop", plain, 8)
+    try expect(grid, "p6-7-8-13-18-17-16-11-6", 4, "Select Loop to Region", plain, 4)
+    let bigger: f64[1] = [1.0]
+    try expect(grid, "p6-7-8-13-18-17-16-11-6", 4, "Select Loop to Region", bigger[..<1], 12)
+
+func primitive_loops() -> !:
+    let plain = none_given()
+    # A cylinder's rim edge loops round its cap (the n-gon is the hub); a
+    # side edge's loop ends at once (its points have three edges), its
+    # ring goes round.
+    let cylinder = try MeshPrimitives.cylinder(1.0, 2.0, 8)
+    defer cylinder.release()
+    try expect(cylinder, "p0-1", 4, "Select Loop", plain, 8)
+    try expect(cylinder, "p0-8", 4, "Select Loop", plain, 1)
+    try expect(cylinder, "p0-8", 4, "Select Ring", plain, 8)
+    # A torus: every loop and ring closes.
+    let torus = try MeshPrimitives.torus(1.0, 0.3, 8)
+    defer torus.release()
+    try expect(torus, "p0-1", 4, "Select Loop", plain, 8)
+    try expect(torus, "p0-8", 4, "Select Loop", plain, 8)
+    try expect(torus, "p0-1", 4, "Select Ring", plain, 8)
+    try expect(torus, "0 1", 2, "Select Loop", plain, 8)
+    # A sphere's meridian stops at both poles (eight edges there); a
+    # latitude's ring stops at the triangles round the poles.
+    let sphere = try MeshPrimitives.sphere(1.0, 8)
+    defer sphere.release()
+    try expect(sphere, "p1-9", 4, "Select Loop", plain, 4)
+    assert(try covers(sphere, "p1-9", 4, "Select Loop", plain, "p0-1 p17-25"))
+    try expect(sphere, "p9-10", 4, "Select Loop", plain, 8)
+    try expect(sphere, "p9-10", 4, "Select Ring", plain, 3)
+
+func islands(grid: interop.Reference[Mesh]) -> !:
+    let plain = none_given()
+    # Connected stays on its island: a cube beside the grid is not reached.
+    let cube = try Mesh.cube(1.0)
+    defer cube.release()
+    let moved = try cube.value().transformed(Vector3(5.0, 0.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer moved.release()
+    let both = try grid.value().merged(moved)
+    defer both.release()
+    try expect(both, "0", 2, "Select Connected", plain, 16)
+    try expect(both, "16", 2, "Select Connected", plain, 6)
+    try expect(both, "0", 0, "Select Connected", plain, 25)
+    # Delimits: a seam down the middle, materials on the first two rows,
+    # the cube's edges by angle.
+    let seamed = try Groups.with_group(grid, "seam", 4, "p2-7-12-17-22")
+    defer seamed.release()
+    let seams: f64[1] = [1.0]
+    try expect(seamed, "0", 2, "Select Connected", seams[..<1], 8)
+    try expect(seamed, "0", 2, "Select Connected", plain, 16)
+    let painted = try MaterialAssignment.faces(grid, "0-7", "material", "red")
+    defer painted.release()
+    let materials: f64[3] = [0.0, 0.0, 1.0]
+    try expect(painted, "0", 2, "Select Connected", materials[..<3], 8)
+    try expect(painted, "12", 2, "Select Connected", materials[..<3], 8)
+    let normals: f64[6] = [0.0, 0.0, 0.0, 0.0, 1.0, 30.0]
+    try expect(cube, "0", 2, "Select Connected", normals[..<6], 1)
+    let wide: f64[6] = [0.0, 0.0, 0.0, 0.0, 1.0, 100.0]
+    try expect(cube, "0", 2, "Select Connected", wide[..<6], 6)
+    # Linked Flat: the grid is flat, the cube's faces meet at 90 degrees.
+    try expect(grid, "0", 2, "Select Linked Flat", plain, 16)
+    try expect(cube, "0", 2, "Select Linked Flat", plain, 1)
+
+func paths(grid: interop.Reference[Mesh]) -> !:
+    let plain = none_given()
+    # Corner to corner: eight edges, nine points; along a row it keeps to
+    # the row (the turn cost); diagonals with Face step.
+    try expect(grid, "0 24", 0, "Select Shortest Path", plain, 9)
+    let topology: f64[1] = [1.0]
+    try expect(grid, "0 24", 0, "Select Shortest Path", topology[..<1], 9)
+    try expect(grid, "0 4", 0, "Select Shortest Path", plain, 5)
+    assert(try covers(grid, "0 4", 0, "Select Shortest Path", plain, "0-4"))
+    let diagonal: f64[3] = [0.0, 0.0, 1.0]
+    try expect(grid, "0 24", 0, "Select Shortest Path", diagonal[..<3], 5)
+    assert(try covers(grid, "0 24", 0, "Select Shortest Path", diagonal[..<3], "0 6 12 18 24"))
+    # Fill region: every point on a shortest path between the corners.
+    let fill: f64[2] = [1.0, 1.0]
+    try expect(grid, "0 24", 0, "Select Shortest Path", fill[..<2], 25)
+    try expect(grid, "0 4", 0, "Select Shortest Path", fill[..<2], 5)
+    # Faces corner to corner: seven; edges along the bottom row: four.
+    try expect(grid, "0 15", 2, "Select Shortest Path", plain, 7)
+    try expect(grid, "p0-1 p3-4", 4, "Select Shortest Path", plain, 4)
+
+func similar(grid: interop.Reference[Mesh]) -> !:
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    let moved = try cube.value().transformed(Vector3(5.0, 0.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer moved.release()
+    let mixed = try grid.value().merged(moved)
+    defer mixed.release()
+    # Area: the cube's six faces (4 each), not the grid's sixteen (0.25).
+    let area: f64[3] = [1.0, 0.0, 0.01]
+    try expect(mixed, "16", 2, "Select Similar", area[..<3], 6)
+    try expect(mixed, "0", 2, "Select Similar", area[..<3], 16)
+    # Greater than a grid face's area: everything; less than a cube's:
+    # everything too.
+    let greater: f64[3] = [1.0, 1.0, 0.01]
+    try expect(mixed, "0", 2, "Select Similar", greater[..<3], 22)
+    let less: f64[3] = [1.0, 2.0, 0.01]
+    try expect(mixed, "16", 2, "Select Similar", less[..<3], 22)
+    # Normal: one cube face; sides: every triangle of a sphere.
+    let normal: f64[3] = [0.0, 0.0, 1.0]
+    try expect(cube, "0", 2, "Select Similar", normal[..<3], 1)
+    let sphere = try MeshPrimitives.sphere(1.0, 8)
+    defer sphere.release()
+    let sides: f64[3] = [3.0, 0.0, 0.0]
+    try expect(sphere, "0", 2, "Select Similar", sides[..<3], 16)
+    # Perimeter: the cube's faces; length: every grid edge.
+    let perimeter: f64[3] = [2.0, 0.0, 0.01]
+    try expect(mixed, "16", 2, "Select Similar", perimeter[..<3], 6)
+    let length: f64[3] = [7.0, 0.0, 0.001]
+    try expect(grid, "p0-1", 4, "Select Similar", length[..<3], 40)
+    # Direction: the grid's edges along X (four rows of five... twenty).
+    let direction: f64[3] = [8.0, 0.0, 1.0]
+    try expect(grid, "p0-1", 4, "Select Similar", direction[..<3], 20)
+    # Edges at points: the grid's four corners have two.
+    let valence: f64[3] = [13.0, 0.0, 0.0]
+    try expect(grid, "0", 0, "Select Similar", valence[..<3], 4)
+    # A measure of another component type is an error.
+    let seed = try Selection.of(grid, "0", 0)
+    defer seed.release()
+    _ = seed.value().ruled(grid, "Select Similar", area[..<3]) catch failure:
+        return
+    trap("Select Similar by area took points")
+
+func regions(grid: interop.Reference[Mesh]) -> !:
+    let plain = none_given()
+    # Grow: a cross by edges, a square with Face step; two steps.
+    try expect(grid, "5", 2, "Select Grow", plain, 5)
+    let face_step: f64[2] = [1.0, 1.0]
+    try expect(grid, "5", 2, "Select Grow", face_step[..<2], 9)
+    let twice: f64[2] = [2.0, 0.0]
+    try expect(grid, "0", 2, "Select Grow", twice[..<2], 6)
+    # Shrink: the faces next to the missing corner go.
+    try expect(grid, "0-15 ^0", 2, "Select Shrink", plain, 13)
+    try expect(grid, "0-15 ^0", 2, "Select Shrink", face_step[..<2], 12)
+    try expect(grid, "0-15", 2, "Select Border", plain, 0)
+    try expect(grid, "5 6 9 10 1", 2, "Select Border", plain, 5)
+
+func traits(grid: interop.Reference[Mesh]) -> !:
+    let plain = none_given()
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    try expect(cube, "*", 4, "Select Sharp Edges", plain, 12)
+    try expect(grid, "*", 4, "Select Sharp Edges", plain, 0)
+    let sphere = try MeshPrimitives.sphere(1.0, 8)
+    defer sphere.release()
+    try expect(sphere, "*", 2, "Select By Sides", plain, 16)
+    let triangles: f64[2] = [3.0, 0.0]
+    try expect(sphere, "*", 2, "Select By Sides", triangles[..<2], 16)
+    let more: f64[2] = [3.0, 3.0]
+    try expect(sphere, "*", 2, "Select By Sides", more[..<2], 16)
+    let small: f64[2] = [1.0, 0.0]
+    try expect(cube, "*", 2, "Select By Area", small[..<2], 0)
+    let large: f64[2] = [1.0, 1.0]
+    try expect(cube, "*", 2, "Select By Area", large[..<2], 6)
+    let up: f64[4] = [0.0, 1.0, 0.0, 10.0]
+    try expect(cube, "*", 2, "Select By Normal", up[..<4], 1)
+    let side: f64[4] = [1.0, 0.0, 0.0, 95.0]
+    try expect(cube, "*", 2, "Select By Normal", side[..<4], 5)
+
+## A T of three quads on one edge, a flipped face, two triangles touching
+## at a point, a lone point, a box with a wall inside.
+func nonmanifold(grid: interop.Reference[Mesh]) -> !:
+    let plain = none_given()
+    let sizes: i64[3] = [4, 4, 4]
+    let tee_points: Vector3[8] = [Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0), Vector3(1.0, 1.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(1.0, 0.0, 1.0), Vector3(0.0, 0.0, 1.0), Vector3(1.0, 0.0, -1.0), Vector3(0.0, 0.0, -1.0)]
+    let tee_corners: i64[12] = [0, 1, 2, 3, 1, 0, 5, 4, 0, 1, 6, 7]
+    let tee = try interop.Reference[Mesh].adopt(try new Mesh(tee_points, sizes, tee_corners) in memory.heap, geocore.mesh_type, memory.heap)
+    defer tee.release()
+    # The shared edge has three faces; with boundaries, the nine others too.
+    try expect(tee, "*", 4, "Select Non-manifold", plain, 10)
+    let multiple: f64[4] = [0.0, 1.0, 0.0, 0.0]
+    try expect(tee, "*", 4, "Select Non-manifold", multiple[..<4], 1)
+    assert(try covers(tee, "*", 4, "Select Non-manifold", multiple[..<4], "p0-1"))
+    try expect(grid, "*", 4, "Select Non-manifold", plain, 16)
+    # A flipped face: its two inner edges wind against their neighbors'.
+    let flipped_result = try Verbs.run("Reverse", grid, "0", 3, plain)
+    defer flipped_result.release()
+    let flipped = try flipped_result.value().mesh()
+    defer flipped.release()
+    let contiguous: f64[4] = [0.0, 0.0, 1.0, 0.0]
+    try expect(flipped, "*", 4, "Select Non-manifold", contiguous[..<4], 2)
+    # Two triangles touching at a point: pinched; one point no face uses.
+    let pin_points: Vector3[6] = [Vector3(0.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0), Vector3(1.0, 1.0, 0.0), Vector3(-1.0, 0.0, 0.0), Vector3(-1.0, -1.0, 0.0), Vector3(5.0, 5.0, 5.0)]
+    let pin_sizes: i64[2] = [3, 3]
+    let pin_corners: i64[6] = [0, 1, 2, 0, 3, 4]
+    let pinch = try interop.Reference[Mesh].adopt(try new Mesh(pin_points, pin_sizes, pin_corners) in memory.heap, geocore.mesh_type, memory.heap)
+    defer pinch.release()
+    let pinched_only: f64[4] = [0.0, 0.0, 0.0, 1.0]
+    try expect(pinch, "*", 0, "Select Non-manifold", pinched_only[..<4], 1)
+    try expect(pinch, "*", 0, "Select Loose", plain, 1)
+    try expect(pinch, "*", 0, "Select Non-manifold", plain, 5)
+    # A box of two cells with a wall between them: the wall is inside, its
+    # four edges have three faces.
+    let box_points: Vector3[12] = [Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, 1.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 1.0, 1.0), Vector3(1.0, 0.0, 0.0), Vector3(1.0, 0.0, 1.0),
+                                  Vector3(1.0, 1.0, 0.0), Vector3(1.0, 1.0, 1.0), Vector3(2.0, 0.0, 0.0), Vector3(2.0, 0.0, 1.0), Vector3(2.0, 1.0, 0.0), Vector3(2.0, 1.0, 1.0)]
+    let box_sizes: i64[11] = [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+    let box_corners: i64[44] = [0, 1, 3, 2, 8, 10, 11, 9,
+                                0, 4, 5, 1, 4, 8, 9, 5, 2, 3, 7, 6, 6, 7, 11, 10,
+                                0, 2, 6, 4, 4, 6, 10, 8, 1, 5, 7, 3, 5, 9, 11, 7,
+                                4, 5, 7, 6]
+    let box = try interop.Reference[Mesh].adopt(try new Mesh(box_points, box_sizes, box_corners) in memory.heap, geocore.mesh_type, memory.heap)
+    defer box.release()
+    try expect(box, "*", 2, "Select Interior Faces", plain, 1)
+    try expect(box, "*", 4, "Select Non-manifold", multiple[..<4], 4)
+
+func patterns(grid: interop.Reference[Mesh]) -> !:
+    # Mirror across X: point 0 (x -1) is point 4's mirror; Extend keeps it.
+    let axis_x: f64[2] = [0.0, 0.0]
+    try expect(grid, "0", 0, "Select Mirror", axis_x[..<2], 1)
+    assert(try covers(grid, "0", 0, "Select Mirror", axis_x[..<2], "4"))
+    let extend: f64[2] = [0.0, 1.0]
+    try expect(grid, "0", 0, "Select Mirror", extend[..<2], 2)
+    try expect(grid, "0", 2, "Select Mirror", extend[..<2], 2)
+    # Convert: a face's points and edges; the face four points contain.
+    let to_points: f64[2] = [0.0, 0.0]
+    try expect(grid, "0", 2, "Select Convert", to_points[..<2], 4)
+    let to_edges: f64[2] = [1.0, 0.0]
+    try expect(grid, "0", 2, "Select Convert", to_edges[..<2], 4)
+    let contained: f64[2] = [2.0, 1.0]
+    try expect(grid, "0 1 5 6", 0, "Select Convert", contained[..<2], 1)
+    let touching: f64[2] = [2.0, 0.0]
+    try expect(grid, "0 1 5 6", 0, "Select Convert", touching[..<2], 4)
+    # Random: all, none, and the same share for the same seed.
+    let all: f64[2] = [1.0, 3.0]
+    try expect(grid, "*", 2, "Select Random", all[..<2], 16)
+    let nothing: f64[2] = [0.0, 3.0]
+    try expect(grid, "*", 2, "Select Random", nothing[..<2], 0)
+    let half: f64[2] = [0.5, 3.0]
+    let seed = try Selection.of(grid, "*", 2)
+    defer seed.release()
+    let first = try seed.value().ruled(grid, "Select Random", half[..<2])
+    defer first.release()
+    let again = try seed.value().ruled(grid, "Select Random", half[..<2])
+    defer again.release()
+    assert(first.value().count() == again.value().count() and first.value().count() > 2 and first.value().count() < 14)
+    # Checker: every other face.
+    try expect(grid, "*", 2, "Select Checker", none_given(), 8)
+
+## The rules as group functions (a node's Group), and as Select verbs.
+func functions(grid: interop.Reference[Mesh]) -> !:
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    assert((try Groups.count(grid, "loop(p6-7)", 4)) == 4)
+    assert((try Groups.count(grid, "ring(p6-7)", 4)) == 5)
+    assert((try Groups.count(grid, "boundary(p1-2)", 4)) == 16)
+    assert((try Groups.count(grid, "path(0 24)", 0)) == 9)
+    assert((try Groups.count(grid, "path(0 24, 0, 0, 1)", 0)) == 5)
+    assert((try Groups.count(grid, "sides(*, 4)", 2)) == 16)
+    assert((try Groups.count(grid, "sides(*, 4, 1)", 2)) == 0)
+    assert((try Groups.count(cube, "sharp(*, 30)", 4)) == 12)
+    assert((try Groups.count(grid, "nonmanifold(*)", 4)) == 16)
+    assert((try Groups.count(grid, "checker(*)", 2)) == 8)
+    assert((try Groups.count(grid, "grow(5, 1, 1)", 2)) == 9)
+    assert((try Groups.count(grid, "similar(p0-1, 8, 0, 1)", 4)) == 20)
+    assert((try Groups.count(grid, "mirror(0, 0, 1)", 0)) == 2)
+    assert((try Groups.count(grid, "region(p6-7-8-13-18-17-16-11-6)", 2)) == 4)
+    # A rule of another domain: its argument read on the rule's level, the
+    # result converted (a face loop's faces as their points).
+    assert((try Groups.count(grid, "loop(5 6)", 2)) == 4)
+    assert((try Groups.count(grid, "sides(*, 4)", 0)) == 25)
+    # As a Select verb: the mesh unchanged, the selection made.
+    let result = try Verbs.run("Select Loop", grid, "p6-7", 2, none_given())
+    defer result.release()
+    let selection = try result.value().selection()
+    defer selection.release()
+    let made = try result.value().mesh()
+    defer made.release()
+    assert(selection.value().count() == 4 and selection.value().domain() == 4 and made.value().face_count() == 16)
+    let outline = try Verbs.run("Select Boundary Loop", grid, "5", 3, none_given())
+    defer outline.release()
+    let edges = try outline.value().selection()
+    defer edges.release()
+    assert(edges.value().count() == 4 and edges.value().domain() == 4)

@@ -1,0 +1,120 @@
+## What the select rules measure per element: face areas, perimeters,
+## centers and normals, edge lengths, directions and face angles, point
+## normals and valences, and the edge marks (seam, sharp, crease) a delimit
+## or a Similar reads. Positions are f64 offsets from the mesh origin.
+
+## Point `point`'s position (relative to the origin).
+func position(mesh: const Mesh*, point: usize) -> Vector3:
+    return mesh.point_span()[point].vector()
+
+## Face `face`'s area vector (Newell's): its length is twice the area, its
+## direction the normal.
+func area_vector(mesh: const Mesh*, topology: const Topology*, face: usize) -> Vector3:
+    let start = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    var sum = Vector3()
+    let first = position(mesh, (usize)topology.corners[start])
+    for corner in start + 1..<end - 1:
+        let a = position(mesh, (usize)topology.corners[corner]).subtract(first)
+        let b = position(mesh, (usize)topology.corners[corner + 1]).subtract(first)
+        sum = sum.add(a.cross(b))
+    return sum
+
+pub func face_area(mesh: const Mesh*, topology: const Topology*, face: usize) -> f64:
+    return area_vector(mesh, topology, face).length() * 0.5
+
+pub func face_perimeter(mesh: const Mesh*, topology: const Topology*, face: usize) -> f64:
+    let start = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    var total = 0.0
+    for corner in start..<end:
+        let next = corner + 1 if corner + 1 < end else start
+        total += position(mesh, (usize)topology.corners[next]).subtract(position(mesh, (usize)topology.corners[corner])).length()
+    return total
+
+pub func face_center(mesh: const Mesh*, topology: const Topology*, face: usize) -> Vector3:
+    let start = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    var sum = Vector3()
+    for corner in start..<end: sum = sum.add(position(mesh, (usize)topology.corners[corner]))
+    return sum.multiply_scalar(1.0 / (f64)(end - start))
+
+## A unit normal (zero for a face without area).
+pub func face_normal(mesh: const Mesh*, face: usize) -> Vector3:
+    return mesh.face_normal_span()[face].vector()
+
+pub func face_sides(topology: const Topology*, face: usize) -> usize:
+    return (usize)(topology.offsets[face + 1] - topology.offsets[face])
+
+pub func edge_length(mesh: const Mesh*, topology: const Topology*, edge: usize) -> f64:
+    return position(mesh, (usize)topology.edge_points[edge * 2 + 1]).subtract(position(mesh, (usize)topology.edge_points[edge * 2])).length()
+
+pub func edge_middle(mesh: const Mesh*, topology: const Topology*, edge: usize) -> Vector3:
+    return position(mesh, (usize)topology.edge_points[edge * 2]).add(position(mesh, (usize)topology.edge_points[edge * 2 + 1])).multiply_scalar(0.5)
+
+## A unit direction from its first point to its second (zero for no length).
+pub func edge_direction(mesh: const Mesh*, topology: const Topology*, edge: usize) -> Vector3:
+    let d = position(mesh, (usize)topology.edge_points[edge * 2 + 1]).subtract(position(mesh, (usize)topology.edge_points[edge * 2]))
+    let length = d.length()
+    return d.multiply_scalar(1.0 / length) if length > 0.0 else d
+
+## How many faces use edge `edge`: 0 wire, 1 boundary, 2 manifold, more
+## non-manifold.
+pub func edge_faces(topology: const Topology*, edge: usize) -> usize:
+    return (usize)(topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge])
+
+## The point of edge `edge` that is not `point`.
+pub func other_point(topology: const Topology*, edge: usize, point: usize) -> usize:
+    let a = (usize)topology.edge_points[edge * 2]
+    return (usize)topology.edge_points[edge * 2 + 1] if a == point else a
+
+## The face of edge `edge`'s `at`-th corner.
+pub func edge_face(topology: const Topology*, edge: usize, at: usize) -> usize:
+    return (usize)topology.corner_faces[(usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge] + at]]
+
+## The angle between the normals of a manifold edge's two faces, in
+## degrees (0 flat); -1 for an edge without exactly two faces.
+pub func face_angle(mesh: const Mesh*, topology: const Topology*, edge: usize) -> f64:
+    if edge_faces(topology, edge) != 2: return -1.0
+    let a = face_normal(mesh, edge_face(topology, edge, 0))
+    let b = face_normal(mesh, edge_face(topology, edge, 1))
+    return math.acos(math.clamp(a.dot(b), -1.0, 1.0)) * 180.0 / math.pi
+
+## The mean of the normals of the faces around point `point` (unit, or
+## zero), from the point-face lists.
+pub func point_normal(mesh: const Mesh*, starts: const i32[], faces: const i32[], point: usize) -> Vector3:
+    var sum = Vector3()
+    for at in (usize)starts[point]..<(usize)starts[point + 1]: sum = sum.add(face_normal(mesh, (usize)faces[at]))
+    let length = sum.length()
+    return sum.multiply_scalar(1.0 / length) if length > 0.0 else sum
+
+## An edge mark read from the edge attribute or group `name` ("seam",
+## "sharp", "crease"): one value per edge, 0 where there is none.
+pub struct EdgeMark:
+    let entry: const Attribute*?
+
+    pub static func of(mesh: const Mesh*, name: str) -> EdgeMark!:
+        let index = mesh.attribute_on(name, Domain.edge)
+        if index < 0: return EdgeMark(none)
+        return EdgeMark(try mesh.attribute_entry(index))
+
+    pub func value(edge: usize) -> f64:
+        let entry = self.entry else return 0.0
+        return entry.number(edge, 0)
+
+    pub func marked(edge: usize) -> bool:
+        return self.value(edge) != 0.0
+
+## A face value read from the face attribute `name` (a text's table index,
+## so equal texts are equal values); -1 everywhere when there is none.
+pub struct FaceValue:
+    let entry: const Attribute*?
+
+    pub static func of(mesh: const Mesh*, name: str) -> FaceValue!:
+        let index = mesh.attribute_on(name, Domain.face)
+        if index < 0: return FaceValue(none)
+        return FaceValue(try mesh.attribute_entry(index))
+
+    pub func value(face: usize) -> f64:
+        let entry = self.entry else return -1.0
+        return entry.number(face, 0)

@@ -1,0 +1,248 @@
+## Loop and ring walkers over a mesh's corners, with the rules Blender's
+## edge-loop walker follows (read in its bmesh_walkers_impl.cc, written here
+## our own way):
+##
+## - Inside a mesh a loop crosses each point of four edges (or two) to the
+##   edge across it, past half the point's faces, every edge it crosses
+##   having two faces; any other point (a pole) ends it.
+## - A loop started on a boundary edge runs along the boundary, through the
+##   fan of faces at each point to the next boundary edge; it stops at a
+##   corner of two edges (an outer corner) and where it would leave or join
+##   an n-gon's side.
+## - A loop started on an n-gon's side whose ends have three edges and
+##   three faces (the n-gon is the hub) runs along the hub's sides while
+##   their points keep three edges.
+## - A ring crosses each quad to its opposite edge; it stops at faces that
+##   are not quads, boundaries and edges of more than two faces.
+## - A face loop is the quads a ring passes through.
+##
+## Corner `c`'s edge runs from its point to the next corner's point.
+
+## The corner of `corner`'s face whose edge is the other edge of that face
+## at `point` (the point is one of the corner's edge's ends).
+func other_at(topology: const Topology*, corner: usize, point: usize) -> usize:
+    return topology.previous(corner) if (usize)topology.corners[corner] == point else topology.next(corner)
+
+## How many faces meet at point `point` (each counts its two edges there).
+func faces_at(topology: const Topology*, point: usize) -> usize:
+    var total: usize = 0
+    for at in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+        total += edge_faces(topology, (usize)topology.point_edges[at])
+    return total // 2
+
+## The first corner of edge `edge` (-1 for an edge without faces).
+func first_corner(topology: const Topology*, edge: usize) -> i64:
+    let start = (usize)topology.edge_corner_offsets[edge]
+    if start == (usize)topology.edge_corner_offsets[edge + 1]: return -1
+    return (i64)topology.edge_corners[start]
+
+## The edge between points `a` and `b`, or -1.
+func edge_between(topology: const Topology*, a: usize, b: usize) -> i64:
+    for at in (usize)topology.point_edge_offsets[a]..<(usize)topology.point_edge_offsets[a + 1]:
+        let edge = (usize)topology.point_edges[at]
+        if other_point(topology, edge, a) == b: return (i64)edge
+    return -1
+
+## A boundary edge on an n-gon's side next to another boundary edge (the
+## n-gon delimit's test).
+func single_side(topology: const Topology*, edge: usize) -> bool:
+    if edge_faces(topology, edge) != 1: return false
+    let corner = (usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge]]
+    let face = (usize)topology.corner_faces[corner]
+    if face_sides(topology, face) <= 4: return false
+    return edge_faces(topology, (usize)topology.corner_edges[topology.next(corner)]) == 1 or edge_faces(topology, (usize)topology.corner_edges[topology.previous(corner)]) == 1
+
+## One walk along an edge loop: the edge it is on, the point it came from
+## and the rule it follows (set when it starts).
+struct LoopWalk:
+    var edge: usize
+    var last: usize
+    let boundary: bool
+    let single: bool
+    ## The n-gon it runs along the sides of (-1: none).
+    let hub: i64
+
+## The hub of a loop started on `edge`: its largest face when that has five
+## sides or more and an end of the edge has three edges and three faces.
+func hub_of(topology: const Topology*, edge: usize) -> i64:
+    if edge_faces(topology, edge) == 1: return -1
+    var hub_end = false
+    for side in 0..<(usize)2:
+        let point = (usize)topology.edge_points[edge * 2 + side]
+        if topology.valence(point) == 3 and faces_at(topology, point) == 3: hub_end = true
+    if not hub_end: return -1
+    var best: i64 = -1
+    var sides: usize = 0
+    for at in 0..<edge_faces(topology, edge):
+        let face = edge_face(topology, edge, at)
+        if face_sides(topology, face) > sides:
+            sides = face_sides(topology, face)
+            best = (i64)face
+    return best if sides > 4 else -1
+
+## The edge the walk steps onto from its edge across its far point, or -1.
+func loop_step(topology: const Topology*, walk: const LoopWalk*) -> i64:
+    let point = other_point(topology, walk.edge, walk.last)
+    let valence = topology.valence(point)
+    if walk.hub >= 0:
+        if valence != 3: return -1
+        # Along the hub's side: the edge from the point to its neighbor in
+        # the hub that is not where the walk came from.
+        let hub = (usize)walk.hub
+        for corner in (usize)topology.offsets[hub]..<(usize)topology.offsets[hub + 1]:
+            if (usize)topology.corners[corner] != point: continue
+            let before = (usize)topology.corners[topology.previous(corner)]
+            let after = (usize)topology.corners[topology.next(corner)]
+            let toward = after if before == walk.last else before
+            let next = edge_between(topology, point, toward)
+            if next < 0 or edge_faces(topology, (usize)next) == 1: return -1
+            return next
+        return -1
+    let start = first_corner(topology, walk.edge)
+    if start < 0: return -1
+    var corner = (usize)start
+    if not walk.boundary:
+        # Across a point of four (or two) edges: half its faces further.
+        if valence != 4 and valence != 2: return -1
+        for _ in 0..<valence // 2:
+            corner = other_at(topology, corner, point)
+            let twin = topology.twin(corner)
+            if edge_faces(topology, (usize)topology.corner_edges[corner]) != 2 or twin < 0: return -1
+            corner = (usize)twin
+        let next = (usize)topology.corner_edges[corner]
+        return -1 if next == walk.edge else (i64)next
+    # Along a boundary: an outer corner (two edges) ends it, unless the
+    # edge is an n-gon's side; else through the fan to the next boundary
+    # edge.
+    if valence == 2 and not walk.single: return -1
+    for _ in 0..<valence + 1:
+        corner = other_at(topology, corner, point)
+        let faces = edge_faces(topology, (usize)topology.corner_edges[corner])
+        if faces == 1:
+            let next = (usize)topology.corner_edges[corner]
+            if next == walk.edge or single_side(topology, next) != walk.single: return -1
+            return (i64)next
+        let twin = topology.twin(corner)
+        if faces != 2 or twin < 0: return -1
+        corner = (usize)twin
+    return -1
+
+## Walk the loop of `start` through its point `through` (its second point
+## when `forward`), setting each edge in `seen` and appending it to `order`
+## (when given) until the loop ends or closes.
+func walk_loop(topology: const Topology*, start: usize, forward: bool, seen: BitsBuilder*, order: Growing[u32]*?) -> !:
+    let boundary = edge_faces(topology, start) == 1
+    let behind = (usize)topology.edge_points[start * 2 + (0 if forward else 1)]
+    var walk = LoopWalk(start, behind, boundary, boundary and single_side(topology, start), hub_of(topology, start))
+    for _ in 0..<topology.edges():
+        let next = loop_step(topology, &walk)
+        if next < 0 or seen.view().get((usize)next): return
+        let edge = (usize)next
+        seen.set(edge)
+        if let list = order: try list.push((u32)edge)
+        walk.last = other_point(topology, walk.edge, walk.last)
+        walk.edge = edge
+
+## The edge loops of every edge in `edges`, added to `out`.
+pub func loops_of(topology: const Topology*, edges: Bits, out: BitsBuilder*) -> !:
+    for word in 0..<edges.words.length:
+        var pending = edges.words[word]
+        while pending != 0:
+            let edge = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            out.set(edge)
+            try walk_loop(topology, edge, true, out, none)
+            try walk_loop(topology, edge, false, out, none)
+
+## The run of the loop through `a` that reaches `b`, the shorter way round,
+## into `out`; false when `b` is not on `a`'s loop.
+pub func loop_run(topology: const Topology*, a: usize, b: usize, out: BitsBuilder*) -> bool!:
+    var best = Growing[u32]()
+    defer best.close()
+    var found = false
+    for pass in 0..<(usize)2:
+        let forward = pass == 0
+        var seen = try BitsBuilder.zeros(topology.edges())
+        defer seen.close()
+        seen.set(a)
+        var order = Growing[u32]()
+        defer order.close()
+        try walk_loop(topology, a, forward, &seen, &order)
+        for at in 0..<order.count:
+            if (usize)order.items[at] != b: continue
+            if not found or at + 1 < best.count:
+                try best.assign(order.items[..<at + 1])
+                found = true
+            break
+    if not found: return false
+    out.set(a)
+    for edge in best.view(): out.set((usize)edge)
+    return true
+
+## From corner `start` across its face to the opposite edge, and on through
+## the next face, while the faces are quads: each edge into `edges`, each
+## quad into `faces` (when given).
+func walk_ring(topology: const Topology*, start: usize, edges: BitsBuilder*?, faces: BitsBuilder*?, seed: usize):
+    var corner = start
+    for _ in 0..<topology.edges():
+        let face = (usize)topology.corner_faces[corner]
+        if face_sides(topology, face) != 4: return
+        if let quads = faces:
+            if quads.view().get(face): return
+            quads.set(face)
+        let opposite = topology.next(topology.next(corner))
+        let edge = (usize)topology.corner_edges[opposite]
+        if let ring = edges:
+            if edge == seed or ring.view().get(edge): return
+            ring.set(edge)
+        if edge_faces(topology, edge) != 2: return
+        let across = topology.twin(opposite)
+        if across < 0: return
+        corner = (usize)across
+
+## The edge rings of every edge in `edges`, added to `out`.
+pub func rings_of(topology: const Topology*, edges: Bits, out: BitsBuilder*):
+    for word in 0..<edges.words.length:
+        var pending = edges.words[word]
+        while pending != 0:
+            let edge = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            out.set(edge)
+            if edge_faces(topology, edge) > 2: continue
+            for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                walk_ring(topology, (usize)topology.edge_corners[at], out, none, edge)
+
+## The face loop crossing edge `edge` (the quads its ring passes through),
+## added to `faces`.
+pub func face_loop(topology: const Topology*, edge: usize, faces: BitsBuilder*):
+    if edge_faces(topology, edge) != 2: return
+    for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+        walk_ring(topology, (usize)topology.edge_corners[at], none, faces, edge)
+
+## Every boundary edge connected to a boundary edge of `edges` through
+## boundary points: whole boundaries (Blender's boundary walker).
+pub func boundaries_of(topology: const Topology*, edges: Bits, out: BitsBuilder*) -> !:
+    let queue = try new u32[topology.edges()] --- in memory.heap
+    defer free(queue) in memory.heap
+    var tail: usize = 0
+    for word in 0..<edges.words.length:
+        var pending = edges.words[word]
+        while pending != 0:
+            let edge = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            if edge_faces(topology, edge) != 1 or out.view().get(edge): continue
+            out.set(edge)
+            queue[tail] = (u32)edge
+            tail += 1
+    var head: usize = 0
+    while head < tail:
+        let edge = (usize)queue[head]
+        head += 1
+        for side in 0..<(usize)2:
+            let point = (usize)topology.edge_points[edge * 2 + side]
+            for at in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+                let next = (usize)topology.point_edges[at]
+                if edge_faces(topology, next) != 1 or out.view().get(next): continue
+                out.set(next)
+                queue[tail] = (u32)next
+                tail += 1

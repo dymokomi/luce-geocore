@@ -209,9 +209,13 @@ globs (`top`, `arm*`, `{arm* ^arm3*}`, `?*`), `!`, `^` and `&`, attribute tests
 (`@P.y>0`, `@Cd[2]<0.5`, `@id=1,2,90`, `@id="0-4 78"`, `@name=piece*`,
 `@flags&4`, `@ptnum<100`, `@primnum`, `@elemnum`) and edge forms (`p3`,
 `p3-4`, `p3-4-5`, `7e2`, and on an edge target a number names a face's
-edges). Our functions, which cannot clash with group names: `grow(x, n)`,
-`shrink(x, n)`, `border(x)`, `connected(x)`, `loop(x)`, `ring(x)` and
-`convert(x, n)` (n = 0: all related elements, 1: any). `groups/program.lucb`
+edges). Our functions, which cannot clash with group names: `convert(x, n)`
+(n = 0: all related elements, 1: any) and every select rule's function
+(Select, below): `rule(x, a, b, …)` runs the rule on group `x` with its
+parameters in order (`grow(x, 2)`, `loop(p3-4)`, `sharp(*, 30)`,
+`sides(*, 4, 3)`, `path(0 24, 1)`, `similar(5, 1)`, `nonmanifold(*)`). A rule
+of another component type reads `x` on its own first level and its result is
+converted (`sides(*, 4)` on points: the points of quads). `groups/program.lucb`
 states the grammar, and `tests/group_language_checks.lucb` checks every row of
 Houdini's table.
 
@@ -226,9 +230,11 @@ are converted (a face is in a point group when all its points are).
 
 `Selection` is the Luce-side selection: bits over one domain with the
 connectivity hash they index. `Selection.of(mesh, expression, domain)`,
-`count`, `contains`, `next`, `changed` (add, remove, toggle, only),
-`filled`, `inverted`, `combined`, `walked` (grow, shrink, border, flood,
-loop, ring), `on_domain`, `points`, `center`, `fits` and `expression`, the
+`count`, `contains`, `next`, `changed` (add, remove, toggle, only; sets the
+active element, the one picked last: `active`, `with_active`), `filled`,
+`inverted`, `combined` (with an expression), `joined` (with a selection),
+`ruled` (a select rule by its verb's name: `ruled(mesh, "Select Loop", [])`),
+`on_domain`, `points`, `center`, `fits` and `expression`, the
 encoder: runs (`0-5 12`), strides (`1-9:2`), a group's name when the bits are
 exactly its members, and edges as chained point pairs (`p3-4-5`), all read back
 to the same bits. `Groups.with_group` makes a flagged group from an
@@ -322,11 +328,19 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
   their best-fit plane. It winds against any face sharing one of its edges
   (a refilled hole faces like its surroundings), else like the faces around
   its points. The new face is the output selection.
-- **Select Checker** (points, edges or faces, native): no geometry change;
-  the output selection keeps runs of Selected elements and skips runs of
-  Deselected ones, counted in steps across each connected island of the
-  group from its lowest element (faces across edges, edges through points,
-  points along edges), shifted by Offset.
+- **Select verbs** (native: the group stays on its own domain): the select
+  rules of `selecting/` after the modeling verbs, one each. They change no
+  geometry; the output selection is what the rule made, on its own domain.
+  A rule is a `SelectRule` (name, label, group function, family, icon,
+  levels, picks, rows, `whole`, kernel) in its family's file and a line in
+  `selecting/registry.lucb`: Loop, Ring, Boundary Loop, Loop to Region,
+  Grow and Shrink Selection, Border, Connected, Linked Flat, Shortest Path,
+  Similar, Sharp Edges, By Sides, By Area, By Normal, Non-manifold, Loose,
+  Interior Faces, Checker, Random, Mirror Selection, Convert. Edge loops
+  follow Blender's walker rules (luced-3d docs/research/POLY-MODELING.md
+  §5.2); Checker keeps runs of Selected elements and skips runs of
+  Deselected ones, counted across each island of the group from its lowest
+  element, shifted by Offset.
 
 New corners inside a face blend that face's corners (the builder's mixed
 corners), so UVs follow insets, slides and cuts; every other attribute and

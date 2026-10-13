@@ -325,7 +325,7 @@ struct Cook:
         defer chosen.close()
         if domain != target:
             let topology = try Topology.of(source)
-            var moved = try groups.converted(&topology, chosen.view(), domain, target, groups.strict_conversion(domain, target))
+            var moved = try selecting.converted(&topology, chosen.view(), domain, target, groups.strict_conversion(domain, target))
             chosen.close()
             chosen = moved
         let mask = try self.scratch.bytes(self.lanes)

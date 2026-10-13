@@ -1,0 +1,72 @@
+## What a modeling operation declares about its inputs: its parameters (the
+## rows a node's pane shows, in the order a run receives their numbers) and
+## its picks (the selections it works on, and the levels they are picked
+## at). The mesh verbs (verbs/) and the select rules (selecting/) share them,
+## so a Select tool is a verb and a group function from one declaration.
+import errors
+from core.growing import Growing
+
+pub enum ParmKind as u8:
+    number = 0
+    integer = 1
+    toggle = 2
+    vector = 3
+    menu = 4
+
+## One parameter of a verb: what the node's parameter pane shows, and where
+## its values sit among the numbers a run receives.
+pub struct ParmSpec:
+    pub let label: str
+    pub let kind: ParmKind
+    pub let initial: f64
+    pub let minimum: f64
+    pub let maximum: f64
+    ## Vectors: components (each defaults to `initial`).
+    pub let components: usize = 1
+    ## Menus: `Label|Label` (values 0, 1, …).
+    pub let choices: str = ""
+    pub let doc: str = ""
+    ## A soft maximum for sliders (0: the maximum).
+    pub let soft: f64 = 0.0
+    ## Whether a tool's bar shows it after the tool runs (off for numbers a
+    ## gesture records: the knife's plane, PolyDraw's corners).
+    pub let bar: bool = true
+
+## One selection a tool works on (its first is the group the verb runs on):
+## what it is called, the selection levels it is picked at and what the
+## editor says while it waits for it.
+pub struct PickSpec:
+    pub let label: str
+    ## The levels it is picked at, space apart, from "objects" (whole
+    ## pieces), "points", "edges" and "faces"; "" takes every level.
+    pub let levels: str = ""
+    pub let prompt: str = ""
+
+## The values of one run: numbers in parameter order (a vector takes its
+## components), one per component of the verb's parameters (`filled_parms`).
+pub struct Parms:
+    pub let numbers: const f64[]
+
+    pub func at(index: usize) -> f64:
+        if index >= self.numbers.length: trap("a verb read past its parameters")
+        return self.numbers[index]
+
+## `numbers` completed with the initial values of the parameters they leave
+## out, one per component. More numbers than `specs` take is an error unless
+## the verb takes `trailing` numbers, which are kept after the parameters.
+pub func filled_parms(specs: const ParmSpec[], numbers: const f64[], trailing: bool = false) -> Growing[f64]!:
+    var total: usize = 0
+    for spec in specs: total += spec.components
+    if numbers.length > total and not trailing: error(errors.invalid, "more parameter values than the operation takes")
+    let length = numbers.length if numbers.length > total else total
+    var values = Growing[f64]()
+    try values.reserve(length)
+    var at: usize = 0
+    for spec in specs:
+        for _ in 0..<spec.components:
+            values.items[at] = numbers[at] if at < numbers.length else spec.initial
+            at += 1
+    for extra in total..<length: values.items[extra] = numbers[extra]
+    values.count = length
+    return values
+

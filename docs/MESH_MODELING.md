@@ -57,8 +57,9 @@ cusps) computed on first use.
   Split, Inset, PolyExtrude, Subdivide), topology verbs (PolyBevel, Loop Cut,
   Bridge, Fill, Dissolve, Fuse, Merge Points, Clean, Clip, Connect,
   PolyMirror, Spin, PolyDraw), display verbs (Subdivision, Crease) and
-  select verbs (Select Checker), each also declaring how it is offered as a
-  tool (API.md, Verbs).
+  select verbs (the select rules: loops, rings, regions, paths, Similar,
+  traits, patterns, mirror, convert), each also declaring how it is offered
+  as a tool (API.md, Verbs); the select rules are group functions too.
 - `without_faces` / `compacted` give face subsets and drop unused points;
   `dissolve_edge` and `DissolveWorkspace` join faces keeping their display
   triangles (CAD trim cells).
