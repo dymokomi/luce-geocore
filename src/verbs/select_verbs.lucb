@@ -1,0 +1,92 @@
+## Select verbs: they change no geometry; their output selection is a new
+## selection made from the group, on the group's own domain (points, edges
+## or faces), which the viewport adopts. Checker keeps a repeating pattern
+## of the group: a run of selected elements, then a run of deselected ones,
+## counted outward across each connected island of the group.
+
+let checker_parms: ParmSpec[3] = [
+    ParmSpec("Selected", ParmKind.integer, 1.0, 1.0, 100.0, 1, "", "Elements kept selected in a row."),
+    ParmSpec("Deselected", ParmKind.integer, 1.0, 1.0, 100.0, 1, "", "Elements deselected in a row, after each selected run."),
+    ParmSpec("Offset", ParmKind.integer, 0.0, 0.0, 100.0, 1, "", "Shift the pattern along by this many elements.")]
+
+let checker_picks: PickSpec[1] = [PickSpec("Components", "points edges faces", "Select the region to thin out")]
+
+func checker_verb() -> Verb:
+    return Verb("Select Checker", "Modeling", "Keep a checker pattern of the group: runs of selected and deselected elements across each island", Domain.face, true, checker_parms, false, cook_checker,
+                native = true, section = "Select", family = "Pattern", icon = "grid", picks = checker_picks)
+
+## Each group element's step count from where its island starts (its lowest
+## element), walking only through the group: faces across their edges,
+## edges through their points, points along their edges. An element is
+## kept when (steps + offset) mod (selected + deselected) < selected.
+func cook_checker(input: const VerbInput*, output: VerbOutput*) -> !:
+    let domain = input.domain
+    if domain != Domain.point and domain != Domain.edge and domain != Domain.face: error(errors.invalid, "Select Checker works on points, edges or faces")
+    let kept = (usize)input.parms.at(0)
+    let period = kept + (usize)input.parms.at(1)
+    let offset = (usize)input.parms.at(2)
+    let topology = try Topology.of(input.mesh)
+    let size = topology.size(domain)
+    let steps = try new u32[size] --- in memory.heap
+    defer free(steps) in memory.heap
+    let queue = try new u32[size] --- in memory.heap
+    defer free(queue) in memory.heap
+    var visited = try BitsBuilder.zeros(size)
+    defer visited.close()
+    var chosen = try BitsBuilder.zeros(size)
+    errdefer chosen.close()
+    let group = input.group
+    for word in 0..<group.words.length:
+        var pending = group.words[word]
+        while pending != 0:
+            let start = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            if visited.view().get(start): continue
+            # A breadth-first walk over the island from `start`.
+            visited.set(start)
+            steps[start] = 0
+            queue[0] = (u32)start
+            var head: usize = 0
+            var tail: usize = 1
+            while head < tail:
+                let element = (usize)queue[head]
+                head += 1
+                if (((usize)steps[element] + offset) % period) < kept: chosen.set(element)
+                tail = neighbors(&topology, group, domain, element, steps, queue, tail, &visited)
+    output.selection = chosen
+    output.selection_domain = domain
+
+## Queue `element`'s unvisited neighbors in the group one step further on;
+## the queue's new end.
+func neighbors(topology: const Topology*, group: Bits, domain: Domain, element: usize, steps: u32[], queue: u32[], tail: usize, visited: BitsBuilder*) -> usize:
+    var end = tail
+    let next = steps[element] + 1
+    if domain == Domain.face:
+        for corner in (usize)topology.offsets[element]..<(usize)topology.offsets[element + 1]:
+            let edge = (usize)topology.corner_edges[corner]
+            for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                let face = (usize)topology.corner_faces[(usize)topology.edge_corners[at]]
+                end = reached(group, face, next, steps, queue, end, visited)
+        return end
+    # Points reach points along their edges; edges reach edges through
+    # their points.
+    let ends: usize[2] = [element, 0] if domain == Domain.point else [(usize)topology.edge_points[element * 2], (usize)topology.edge_points[element * 2 + 1]]
+    let count: usize = 1 if domain == Domain.point else 2
+    for side in 0..<count:
+        let point = ends[side]
+        for at in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+            let edge = (usize)topology.point_edges[at]
+            var other = edge
+            if domain == Domain.point:
+                let a = (usize)topology.edge_points[edge * 2]
+                other = (usize)topology.edge_points[edge * 2 + 1] if a == point else a
+            end = reached(group, other, next, steps, queue, end, visited)
+    return end
+
+## Queue `element` at `step` when it is in the group and not yet visited.
+func reached(group: Bits, element: usize, step: u32, steps: u32[], queue: u32[], tail: usize, visited: BitsBuilder*) -> usize:
+    if not group.get(element) or visited.view().get(element): return tail
+    visited.set(element)
+    steps[element] = step
+    queue[tail] = (u32)element
+    return tail + 1

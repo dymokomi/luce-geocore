@@ -9,7 +9,7 @@ let subdivide_parms: ParmSpec[2] = [
     ParmSpec("Method", ParmKind.menu, 1.0, 0.0, 1.0, 1, "Linear|Catmull-Clark", "Catmull-Clark smooths as it splits; Linear keeps the shape.")]
 
 func subdivide_verb() -> Verb:
-    return Verb("Subdivide", "Modeling", "Split faces into quads, optionally with Catmull-Clark smoothing", Domain.face, true, subdivide_parms, true, cook_subdivide)
+    return Verb("Subdivide", "Modeling", "Split faces into quads, optionally with Catmull-Clark smoothing", Domain.face, true, subdivide_parms, true, cook_subdivide, section = "Modify", family = "Subdivide", icon = "subdivide", picks = pick_pieces, whole = true)
 
 func cook_subdivide(input: const VerbInput*, output: VerbOutput*) -> !:
     let levels = (usize)math.max(1.0, math.min(4.0, input.parms.at(0)))

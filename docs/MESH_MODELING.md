@@ -56,7 +56,9 @@ cusps) computed on first use.
   Snap, Edge Slide), face verbs (Delete, Reverse, Triangulate, Duplicate,
   Split, Inset, PolyExtrude, Subdivide), topology verbs (PolyBevel, Loop Cut,
   Bridge, Fill, Dissolve, Fuse, Merge Points, Clean, Clip, Connect,
-  PolyMirror, Spin, PolyDraw) and display verbs (Subdivision, Crease).
+  PolyMirror, Spin, PolyDraw), display verbs (Subdivision, Crease) and
+  select verbs (Select Checker), each also declaring how it is offered as a
+  tool (API.md, Verbs).
 - `without_faces` / `compacted` give face subsets and drop unused points;
   `dissolve_edge` and `DissolveWorkspace` join faces keeping their display
   triangles (CAD trim cells).

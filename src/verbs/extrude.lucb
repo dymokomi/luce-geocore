@@ -20,8 +20,10 @@ let extrude_parms: ParmSpec[5] = [
     ParmSpec("Individual faces", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Extrude each face on its own instead of each connected region."),
     ParmSpec("Clamp inset", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep each inset within half of the boundary edges beside it.")]
 
+let extrude_picks: PickSpec[1] = [PickSpec("Faces or edges", "faces edges")]
+
 func extrude_verb() -> Verb:
-    return Verb("PolyExtrude", "Modeling", "Extrude faces (as regions or one by one) or edges", Domain.face, true, extrude_parms, true, cook_extrude, false, Domain.edge)
+    return Verb("PolyExtrude", "Modeling", "Extrude faces (as regions or one by one) or edges", Domain.face, true, extrude_parms, true, cook_extrude, false, Domain.edge, label = "Extrude", section = "Modify", family = "Extrude", icon = "extrude", picks = extrude_picks, drag = 0)
 
 let inset_parms: ParmSpec[4] = [
     ParmSpec("Thickness", ParmKind.number, 0.1, 0.0, 100000.0, 1, "", "How far the inner faces' boundaries move inward.", 1.0),
@@ -30,7 +32,7 @@ let inset_parms: ParmSpec[4] = [
     ParmSpec("Clamp", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Keep each inset within half of the boundary edges beside it.")]
 
 func inset_verb() -> Verb:
-    return Verb("Inset", "Modeling", "Inset faces by a distance, as regions or one by one", Domain.face, true, inset_parms, true, cook_inset)
+    return Verb("Inset", "Modeling", "Inset faces by a distance, as regions or one by one", Domain.face, true, inset_parms, true, cook_inset, section = "Modify", family = "Extrude", icon = "inset", picks = pick_faces, drag = 0)
 
 ## One extrusion's settings.
 struct Extrusion:

@@ -6,24 +6,24 @@
 let delete_parms: ParmSpec[1] = [ParmSpec("Keep group", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "On: keep only the group. Off: delete it.")]
 
 func delete_verb() -> Verb:
-    return Verb("Delete", "Modeling", "Remove the group's faces (points delete every face using them) and the points left unused", Domain.face, true, delete_parms, true, cook_delete, true)
+    return Verb("Delete", "Modeling", "Remove the group's faces (points delete every face using them) and the points left unused", Domain.face, true, delete_parms, true, cook_delete, true, section = "Modify", family = "Delete", icon = "trash")
 
 ## Verbs without parameters take an empty slice of this.
 let placeholder_parms: ParmSpec[1] = [ParmSpec("", ParmKind.number, 0.0, 0.0, 0.0)]
 
 func reverse_verb() -> Verb:
-    return Verb("Reverse", "Modeling", "Flip the winding of the group's faces", Domain.face, true, placeholder_parms[..<0], true, cook_reverse)
+    return Verb("Reverse", "Modeling", "Flip the winding of the group's faces", Domain.face, true, placeholder_parms[..<0], true, cook_reverse, section = "Modify", family = "Normals", icon = "reverse-normals", picks = pick_pieces)
 
 func triangulate_verb() -> Verb:
-    return Verb("Triangulate", "Modeling", "Split the group's faces into their triangles", Domain.face, true, placeholder_parms[..<0], true, cook_triangulate)
+    return Verb("Triangulate", "Modeling", "Split the group's faces into their triangles", Domain.face, true, placeholder_parms[..<0], true, cook_triangulate, section = "Modify", family = "Subdivide", icon = "triangulate", picks = pick_pieces)
 
 let duplicate_parms: ParmSpec[1] = [ParmSpec("Offset", ParmKind.number, 0.2, -100000.0, 100000.0, 1, "", "Distance of the copies along their face normals.", 2.0)]
 
 func duplicate_verb() -> Verb:
-    return Verb("Duplicate", "Modeling", "Copy the group's faces, offset along their normals", Domain.face, true, duplicate_parms, true, cook_duplicate)
+    return Verb("Duplicate", "Modeling", "Copy the group's faces, offset along their normals", Domain.face, true, duplicate_parms, true, cook_duplicate, section = "Modify", family = "Extrude", icon = "duplicate", picks = pick_pieces, drag = 0)
 
 func split_verb() -> Verb:
-    return Verb("Split", "Modeling", "Detach the group's faces: they get their own points", Domain.face, true, placeholder_parms[..<0], true, cook_split)
+    return Verb("Split", "Modeling", "Detach the group's faces: they get their own points", Domain.face, true, placeholder_parms[..<0], true, cook_split, section = "Modify", family = "Split", icon = "split-mesh", picks = pick_faces)
 
 func cook_delete(input: const VerbInput*, output: VerbOutput*) -> !:
     var keep = try BitsBuilder.copy_of(input.group)

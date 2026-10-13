@@ -9,7 +9,7 @@ let edge_slide_parms: ParmSpec[1] = [
     ParmSpec("Amount", ParmKind.number, 0.5, -1.0, 1.0, 1, "", "How far along the rails, as a fraction of each rail; the sign picks the side.")]
 
 func edge_slide_verb() -> Verb:
-    return Verb("Edge Slide", "Deform", "Slide the group's edges along the faces beside them", Domain.edge, true, edge_slide_parms, false, cook_edge_slide)
+    return Verb("Edge Slide", "Deform", "Slide the group's edges along the faces beside them", Domain.edge, true, edge_slide_parms, false, cook_edge_slide, section = "Modify", family = "Cut", icon = "distribute-horizontal", picks = pick_edges, drag = 0)
 
 func cook_edge_slide(input: const VerbInput*, output: VerbOutput*) -> !:
     let amount = input.parms.at(0)

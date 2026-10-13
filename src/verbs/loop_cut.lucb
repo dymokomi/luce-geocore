@@ -12,7 +12,7 @@ let loop_cut_parms: ParmSpec[3] = [
     ParmSpec("Whole ring", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Cut the whole ring through each of the group's edges; off: only across the group's edges.")]
 
 func loop_cut_verb() -> Verb:
-    return Verb("Loop Cut", "Modeling", "Cut edge loops across the rings of the group's edges", Domain.edge, true, loop_cut_parms, true, cook_loop_cut)
+    return Verb("Loop Cut", "Modeling", "Cut edge loops across the rings of the group's edges", Domain.edge, true, loop_cut_parms, true, cook_loop_cut, section = "Modify", family = "Cut", icon = "loop-cut", picks = pick_edges, drag = 1)
 
 struct Rings:
     ## Per edge: the point its ring direction starts from, or -1 off the

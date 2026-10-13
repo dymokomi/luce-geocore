@@ -49,6 +49,29 @@ pub struct ParmSpec:
     pub let doc: str = ""
     ## A soft maximum for sliders (0: the maximum).
     pub let soft: f64 = 0.0
+    ## Whether a tool's bar shows it after the tool runs (off for numbers a
+    ## gesture records: the knife's plane, PolyDraw's corners).
+    pub let bar: bool = true
+
+## One selection a tool works on (its first is the group the verb runs on):
+## what it is called, the selection levels it is picked at and what the
+## editor says while it waits for it.
+pub struct PickSpec:
+    pub let label: str
+    ## The levels it is picked at, space apart, from "objects" (whole
+    ## pieces), "points", "edges" and "faces"; "" takes every level.
+    pub let levels: str = ""
+    pub let prompt: str = ""
+
+## A verb with no pick declared takes one, at every level.
+let no_picks: PickSpec[1] = [PickSpec("")]
+
+## The picks many tools share: faces, edges, whole pieces or their faces,
+## and points, edges or faces.
+let pick_faces: PickSpec[1] = [PickSpec("Faces", "faces")]
+let pick_edges: PickSpec[1] = [PickSpec("Edges", "edges")]
+let pick_pieces: PickSpec[1] = [PickSpec("Faces", "objects faces")]
+let pick_components: PickSpec[1] = [PickSpec("Components", "points edges faces")]
 
 ## The values of one run: numbers in parameter order (a vector takes its
 ## components), one per component of the verb's parameters (`filled_parms`).
@@ -169,6 +192,32 @@ pub struct Verb:
     pub let strict: bool = false
     ## Whether numbers may follow the parameters (PolyDraw's drawn corners).
     pub let trailing: bool = false
+    ## Whether the group stays on its own domain, whichever it is (the
+    ## Select verbs: a pattern of selected points, edges or faces).
+    pub let native: bool = false
+
+    # How the verb is offered as a modeling tool. luced-3d builds its tool
+    # registry from these, so a verb added to `makers` reaches the node
+    # menu, the Edit Mesh tools, the menus, the marking menus, the
+    # right-click menu and the docs with no other edit.
+
+    ## The tool's label ("Bevel" for PolyBevel; "": the name).
+    pub let label: str = ""
+    ## "Create", "Modify" or "Select"; "" when the verb is a node only.
+    pub let section: str = ""
+    ## The group menus list it under ("Extrude", "Cut", "Shape", …).
+    pub let family: str = ""
+    ## A luciaos-assets icon name.
+    pub let icon: str = ""
+    ## What it works on; none declared is one pick at every level.
+    pub let picks: const PickSpec[] = no_picks[..<0]
+    ## The parameter a drag in the viewport sets after it runs (-1: none).
+    pub let drag: i64 = -1
+    ## Viewport input it takes besides the selection: "" none, "stroke"
+    ## (the knife), "place" (PolyDraw's clicked corners).
+    pub let gesture: str = ""
+    ## Whether, with nothing selected, it runs on everything.
+    pub let whole: bool = false
 
 ## A run's product: the output mesh, its selection and the warning.
 pub struct VerbRun:
@@ -193,7 +242,7 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
     let named = try GroupType.of(group_type)
     var domain = named.domain(verb.domain)
     if named == GroupType.guess: domain = try guess_domain(mesh, expression, verb.domain)
-    let target = domain if domain == verb.also and verb.also != Domain.detail else verb.domain
+    let target = domain if verb.native or (domain == verb.also and verb.also != Domain.detail) else verb.domain
     if not verb.converts and domain != target: error(errors.invalid, "this operation works on another component type")
     if symmetry < 0 or symmetry > 3: error(errors.invalid, "symmetry is 0 (none), 1 (X), 2 (Y) or 3 (Z)")
     var result = try group_bits(mesh, expression, domain)

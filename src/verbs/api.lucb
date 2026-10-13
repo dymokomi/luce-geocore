@@ -4,7 +4,7 @@
 
 ## Every verb's constructor, in menu order: the array's length is the
 ## registry's size, so a verb added here is counted.
-let makers: (func() -> Verb)[30] = [
+let makers: (func() -> Verb)[31] = [
     transform_verb,
     smooth_verb,
     mountain_verb,
@@ -14,10 +14,10 @@ let makers: (func() -> Verb)[30] = [
     delete_verb,
     reverse_verb,
     triangulate_verb,
+    extrude_verb,
+    inset_verb,
     duplicate_verb,
     split_verb,
-    inset_verb,
-    extrude_verb,
     subdivide_verb,
     fuse_verb,
     clean_verb,
@@ -34,7 +34,8 @@ let makers: (func() -> Verb)[30] = [
     edge_slide_verb,
     mirror_verb,
     spin_verb,
-    polydraw_verb]
+    polydraw_verb,
+    checker_verb]
 
 ## Verb `index` in menu order.
 pub func verb_at(index: usize) -> Verb:
@@ -129,6 +130,53 @@ pub struct Verbs:
     pub static func parm_doc(index: i64, parm: i64) -> str:
         return parm_of(index, parm).doc
 
+    ## Whether parameter `parm` shows on a tool's bar.
+    pub static func parm_bar(index: i64, parm: i64) -> bool:
+        return parm_of(index, parm).bar
+
+    # How verb `index` is offered as a tool (Verb's tool fields).
+
+    ## Its tool label: `label`, else its name.
+    pub static func label(index: i64) -> str:
+        let verb = verb_at(checked(index))
+        return verb.label if verb.label.length > 0 else verb.name
+
+    ## "Create", "Modify", "Select", or "" for a node only.
+    pub static func section(index: i64) -> str:
+        return verb_at(checked(index)).section
+
+    pub static func family(index: i64) -> str:
+        return verb_at(checked(index)).family
+
+    pub static func icon(index: i64) -> str:
+        return verb_at(checked(index)).icon
+
+    ## How many picks it declares (0: one, at every level).
+    pub static func pick_count(index: i64) -> i64:
+        return (i64)verb_at(checked(index)).picks.length
+
+    pub static func pick_label(index: i64, pick: i64) -> str:
+        return pick_of(index, pick).label
+
+    ## The levels pick `pick` takes, space apart ("": every level).
+    pub static func pick_levels(index: i64, pick: i64) -> str:
+        return pick_of(index, pick).levels
+
+    pub static func pick_prompt(index: i64, pick: i64) -> str:
+        return pick_of(index, pick).prompt
+
+    ## The parameter a viewport drag sets after it runs (-1: none).
+    pub static func drag(index: i64) -> i64:
+        return verb_at(checked(index)).drag
+
+    ## Its viewport gesture: "", "stroke" or "place".
+    pub static func gesture(index: i64) -> str:
+        return verb_at(checked(index)).gesture
+
+    ## Whether it runs on everything with nothing selected.
+    pub static func whole(index: i64) -> bool:
+        return verb_at(checked(index)).whole
+
     ## Run verb `name` on `mesh`: `group` (empty: everything) read on
     ## `group_type`'s domain (0 guess, 1 points, 2 edges, 3 faces,
     ## 4 corners), the parameter values in order.
@@ -146,6 +194,11 @@ pub struct Verbs:
 func checked(index: i64) -> usize:
     if index < 0 or (usize)index >= verb_count(): trap("verb index out of range")
     return (usize)index
+
+func pick_of(index: i64, pick: i64) -> PickSpec:
+    let verb = verb_at(checked(index))
+    if pick < 0 or (usize)pick >= verb.picks.length: trap("verb pick out of range")
+    return verb.picks[(usize)pick]
 
 func parm_of(index: i64, parm: i64) -> ParmSpec:
     let verb = verb_at(checked(index))

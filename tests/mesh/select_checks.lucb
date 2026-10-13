@@ -1,0 +1,70 @@
+## Select verbs and the verbs' tool facts. Select Checker on the 4 by 4
+## grid over -1..1 in XZ (point z*5+x, face z*4+x): runs of selected and
+## deselected faces, edges and points counted across each island, the mesh
+## left as it was. Then what luced-3d's tool registry reads: labels,
+## sections, families, icons, picks, drags, gestures and bar rows.
+import interop
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs
+from luce_geocore.kernel import clear_group_cache
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    try checker_checks(grid)
+
+pub func run() -> !:
+    try exercise()
+    try tool_facts()
+    print("PASS Select verbs: Checker on faces, edges and points, per island, mesh unchanged; every tool verb's label, section, family, icon and picks")
+
+## Select Checker's output selection: its size, and whether element
+## `first` is the first selected (-1: any).
+func checked(mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[], selected: i64, first: i64) -> !:
+    let result = try Verbs.run("Select Checker", mesh, group, group_type, numbers)
+    defer result.release()
+    let selection = try result.value().selection()
+    defer selection.release()
+    let made = try result.value().mesh()
+    defer made.release()
+    assert(made.value().point_count() == mesh.value().point_count() and made.value().face_count() == mesh.value().face_count())
+    if selection.value().count() != selected or (first >= 0 and selection.value().next(-1) != first):
+        print(f"Select Checker {group}: selected {selection.value().count()} from {selection.value().next(-1)}, expected {selected} from {first}")
+        assert(false)
+
+func checker_checks(grid: interop.Reference[Mesh]) -> !:
+    # Every face: the faces an even number of steps from face 0 (x + z even).
+    let plain: f64[3] = [1.0, 1.0, 0.0]
+    try checked(grid, "*", 3, plain[..<3], 8, 0)
+    let shifted: f64[3] = [1.0, 1.0, 1.0]
+    try checked(grid, "*", 3, shifted[..<3], 8, 1)
+    # Two kept, one skipped: x + z of 2 or 5 is skipped (five faces).
+    let pairs: f64[3] = [2.0, 1.0, 0.0]
+    try checked(grid, "*", 3, pairs[..<3], 11, 0)
+    # A row of four edges keeps every other (counted from its lowest edge,
+    # which need not be at an end); five points keep three.
+    try checked(grid, "p0-1-2-3-4", 2, plain[..<3], 2, -1)
+    try checked(grid, "0 1 2 3 4", 1, plain[..<3], 3, 0)
+    # Two islands each start their own count.
+    try checked(grid, "0 15", 3, plain[..<3], 2, 0)
+
+func tool_facts() -> !:
+    let bevel = Verbs.index_of("PolyBevel")
+    assert(Verbs.label(bevel) == "Bevel" and Verbs.section(bevel) == "Modify" and Verbs.family(bevel) == "Bevel" and Verbs.icon(bevel) == "bevel")
+    assert(Verbs.pick_count(bevel) == 1 and Verbs.pick_levels(bevel, 0) == "edges" and Verbs.drag(bevel) == 0)
+    let clip = Verbs.index_of("Clip")
+    assert(Verbs.label(clip) == "Knife" and Verbs.gesture(clip) == "stroke" and Verbs.parm_bar(clip, 0) and not Verbs.parm_bar(clip, 4))
+    let transform = Verbs.index_of("Transform Components")
+    assert(Verbs.section(transform) == "" and Verbs.label(transform) == "Transform Components" and Verbs.pick_count(transform) == 0)
+    assert(Verbs.whole(Verbs.index_of("Subdivide")) and not Verbs.whole(bevel))
+    assert(Verbs.gesture(Verbs.index_of("PolyDraw")) == "place" and Verbs.section(Verbs.index_of("PolyDraw")) == "Create")
+    # Every tool verb is in a section with a family and an icon, under a
+    # label no other tool has, and its drag names one of its parameters.
+    for index in 0..<Verbs.count():
+        let section = Verbs.section(index)
+        if section == "": continue
+        assert(section == "Create" or section == "Modify" or section == "Select")
+        assert(Verbs.family(index).length > 0 and Verbs.icon(index).length > 0)
+        assert(Verbs.drag(index) < Verbs.parm_count(index))
+        for other in 0..<index:
+            if Verbs.section(other) != "": assert(Verbs.label(other) != Verbs.label(index))

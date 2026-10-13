@@ -11,11 +11,13 @@
 
 let fill_parms: ParmSpec[1] = [ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Single face|Fan", "One face per loop, or triangles around a new point at its center.")]
 
+let fill_picks: PickSpec[1] = [PickSpec("Boundary edges", "edges", "Select the boundary edges around each hole")]
+
 func fill_verb() -> Verb:
-    return Verb("Fill", "Modeling", "Cap each closed loop of the group's boundary edges", Domain.edge, true, fill_parms, true, cook_fill)
+    return Verb("Fill", "Modeling", "Cap each closed loop of the group's boundary edges", Domain.edge, true, fill_parms, true, cook_fill, section = "Modify", family = "Fill", icon = "fill-hole", picks = fill_picks)
 
 func dissolve_verb() -> Verb:
-    return Verb("Dissolve", "Modeling", "Join the faces across the group's interior edges (or around its points), one face per region", Domain.edge, true, placeholder_parms[..<0], true, cook_dissolve, false, Domain.point, true)
+    return Verb("Dissolve", "Modeling", "Join the faces across the group's interior edges (or around its points), one face per region", Domain.edge, true, placeholder_parms[..<0], true, cook_dissolve, false, Domain.point, true, section = "Modify", family = "Delete", icon = "dissolve", picks = pick_components)
 
 func cook_fill(input: const VerbInput*, output: VerbOutput*) -> !:
     let mesh = input.mesh

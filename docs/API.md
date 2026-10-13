@@ -251,6 +251,23 @@ selection and a warning. `Verbs.count`, `name`, `category`, `description`,
 `domain` and `parm_*` describe the verbs, and luced-3d generates its node
 catalog from them.
 
+A verb also says how it is offered as a modeling tool, and luced-3d builds
+its tool registry from that alone, so a verb added to `makers` reaches the
+node menu, the Edit Mesh tools, the menus, the marking menus, the
+right-click menu and the generated tool docs with no other edit:
+`label` ("Bevel" for PolyBevel), `section` (Create, Modify or Select; empty
+for a node only, such as Transform Components), `family` (the group menus
+list it under), `icon` (a luciaos-assets name), `picks` (`PickSpec`: what it
+works on, the selection levels it is picked at, as `objects points edges
+faces`, and the prompt while it waits; none declared is one pick at every
+level), `drag` (the parameter a drag in the viewport sets after it runs),
+`gesture` (`stroke` for the knife, `place` for PolyDraw's clicked corners)
+and `whole` (with nothing selected it runs on everything). A parameter with
+`bar` off stays off the tool's bar (numbers a gesture records). `Verbs.label`,
+`section`, `family`, `icon`, `pick_*`, `drag`, `gesture`, `whole` and
+`parm_bar` read them. A `native` verb keeps the group on its own domain,
+whichever it is (the Select verbs).
+
 `Verbs.run(name, mesh, group, group_type, numbers, symmetry=0, keep=false)`
 also carries the Edit engine's options: `symmetry` (1..3) adds the mirror of
 every group member across the X, Y or Z plane through the origin, and `keep`
@@ -305,6 +322,11 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
   their best-fit plane. It winds against any face sharing one of its edges
   (a refilled hole faces like its surroundings), else like the faces around
   its points. The new face is the output selection.
+- **Select Checker** (points, edges or faces, native): no geometry change;
+  the output selection keeps runs of Selected elements and skips runs of
+  Deselected ones, counted in steps across each connected island of the
+  group from its lowest element (faces across edges, edges through points,
+  points along edges), shifted by Offset.
 
 New corners inside a face blend that face's corners (the builder's mixed
 corners), so UVs follow insets, slides and cuts; every other attribute and

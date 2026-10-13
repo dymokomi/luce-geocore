@@ -11,11 +11,11 @@ let clip_parms: ParmSpec[6] = [
     ParmSpec("Offset", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "Where the plane crosses its axis (Custom: how far it moves along its normal).", 5.0),
     ParmSpec("Through centroid", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Put the plane through the group's centroid (Offset then moves it from there)."),
     ParmSpec("Keep", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Above|Below|Both", "The side of the plane kept; Both cuts and keeps everything."),
-    ParmSpec("Plane point", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "Custom: a point on the plane."),
-    ParmSpec("Plane normal", ParmKind.vector, 0.0, -1.0, 1.0, 3, "", "Custom: the plane's normal; above is the side it points to.")]
+    ParmSpec("Plane point", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "Custom: a point on the plane.", bar = false),
+    ParmSpec("Plane normal", ParmKind.vector, 0.0, -1.0, 1.0, 3, "", "Custom: the plane's normal; above is the side it points to.", bar = false)]
 
 func clip_verb() -> Verb:
-    return Verb("Clip", "Modeling", "Cut the group's faces with a plane; keep one side, or both", Domain.face, true, clip_parms, true, cook_clip)
+    return Verb("Clip", "Modeling", "Cut the group's faces with a plane; keep one side, or both", Domain.face, true, clip_parms, true, cook_clip, label = "Knife", section = "Modify", family = "Cut", icon = "line-tool", gesture = "stroke")
 
 ## The plane's signed distance at each point and the cut points on edges.
 struct Cut:
