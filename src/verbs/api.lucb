@@ -395,11 +395,15 @@ pub struct Verbs:
     ## is the second pick's group (Bridge's second loop), read on the
     ## domain its levels name; `reference` the surface a verb of two inputs
     ## reads (Shrinkwrap's target).
-    pub static func run(name: str, mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false, second: str = "", reference: interop.Reference[Mesh]? = none) -> interop.Reference[VerbResult]!:
+    ## `over`: a mesh the result may be made over when it differs from it
+    ## only in positions (a drag's last frame; see finish).
+    pub static func run(name: str, mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false, second: str = "", reference: interop.Reference[Mesh]? = none, over: interop.Reference[Mesh]? = none) -> interop.Reference[VerbResult]!:
         let verb = find_verb(name) else error(errors.invalid, "unknown operation")
         var surface: const Mesh*? = none
         if let given = reference: surface = try given.get()
-        var product = try run_verb(&verb, try mesh.get(), group, group_type, numbers, symmetry, keep, second, surface)
+        var last: const Mesh*? = none
+        if let given = over: last = try given.get()
+        var product = try run_verb(&verb, try mesh.get(), group, group_type, numbers, symmetry, keep, second, surface, last)
         let storage = new VerbResult[1] --- in memory.heap catch failure:
             product.close()
             error(failure.code, failure.message)

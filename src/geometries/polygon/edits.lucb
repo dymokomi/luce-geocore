@@ -139,6 +139,26 @@ extend Mesh:
                 written += 1
         return try self.repositioned(fresh, self.origin, moved[..<written], false)
 
+    ## Whether this mesh differs from `previous` only in its positions and
+    ## its output selection: a verb's moved positions can then be made over
+    ## `previous` (verbs' finish, a drag's last frame).
+    pub func repositions(previous: const Mesh*) -> bool:
+        if previous.corners.id() != self.corners.id() or previous.offsets.id() != self.offsets.id() or previous.origin != self.origin: return false
+        if self.is_precise() or previous.is_precise() or previous.positions.count() != self.positions.count(): return false
+        var kept: usize = 0
+        for index in 0..<self.attributes.count():
+            let entry = self.attributes.entry(index)
+            if entry.name() == ".selection": continue
+            let found = previous.attributes.find(entry.name(), entry.domain)
+            if found < 0: return false
+            let other = previous.attributes.entry((usize)found)
+            if other.data.id() != entry.data.id() or other.table.id() != entry.table.id(): return false
+            kept += 1
+        var before: usize = 0
+        for index in 0..<previous.attributes.count():
+            if previous.attributes.entry(index).name() != ".selection": before += 1
+        return kept == before
+
     ## Share `fresh` (positions relative to `origin`) whose points `moved`
     ## changed; the caller keeps its own reference. `rigid` promises an orientation-preserving affine map: no
     ## triangle folds and shading normals stay valid.
@@ -154,7 +174,9 @@ extend Mesh:
         errdefer owned.release()
         let incidence = try self.incidence()
         let shape = position_edit.Shape(self.positions.view(), owned.view(), origin, self.offsets.view(), self.corners.view(), self.triangles.view(), incidence.0, incidence.1)
-        var edit = try position_edit.reposition(&shape, self.normals, moved, rigid)
+        # The bounds grow from this mesh's when the origin stays.
+        let before: Bounds? = self.extent if origin == self.origin else none
+        var edit = try position_edit.reposition(&shape, self.normals, moved, rigid, before)
         errdefer edit.close()
         var attributes = try self.attributes.shared()
         errdefer attributes.close()
@@ -339,21 +361,55 @@ func narrowed(parents: const i64[]) -> i32[]!:
 
 ## The points whose stored positions differ between `previous` and `next`.
 ## The caller frees the list.
-func changed_points(previous: const Float3[], next: const Float3[]) -> u32[]!:
-    var count: usize = 0
-    for at in 0..<next.length:
-        let a = previous[at]
-        let b = next[at]
-        if a.x != b.x or a.y != b.y or a.z != b.z: count += 1
-    let moved = try new u32[count] --- in memory.heap
-    var written: usize = 0
-    for at in 0..<next.length:
-        let a = previous[at]
-        let b = next[at]
-        if a.x != b.x or a.y != b.y or a.z != b.z:
-            moved[written] = (u32)at
-            written += 1
+pub func changed_points(previous: const Float3[], next: const Float3[]) -> u32[]!:
+    # Counted per chunk in parallel, then written per chunk at its offset.
+    let chunks = (next.length + 65535) // 65536
+    let counts = try new usize[chunks + 1] --- in memory.heap
+    defer free(counts) in memory.heap
+    var none_yet: u32[]
+    var work = ChangedWork(previous, next, counts, none_yet)
+    try parallel.for_each_range(chunks, 1, (void*)&work, count_changed)
+    var total: usize = 0
+    for chunk in 0..<chunks:
+        let count = counts[chunk]
+        counts[chunk] = total
+        total += count
+    let moved = try new u32[total] --- in memory.heap
+    errdefer free(moved) in memory.heap
+    work.moved = moved
+    try parallel.for_each_range(chunks, 1, (void*)&work, write_changed)
     return moved
+
+struct ChangedWork:
+    let previous: const Float3[]
+    let next: const Float3[]
+    let counts: usize[]
+    var moved: u32[]
+
+func count_changed(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ChangedWork*)context
+    for chunk in first..<end:
+        let start = chunk * 65536
+        let stop = start + 65536 if work.next.length - start > 65536 else work.next.length
+        var count: usize = 0
+        for at in start..<stop:
+            let a = work.previous[at]
+            let b = work.next[at]
+            if a.x != b.x or a.y != b.y or a.z != b.z: count += 1
+        work.counts[chunk] = count
+
+func write_changed(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ChangedWork*)context
+    for chunk in first..<end:
+        let start = chunk * 65536
+        let stop = start + 65536 if work.next.length - start > 65536 else work.next.length
+        var written = work.counts[chunk]
+        for at in start..<stop:
+            let a = work.previous[at]
+            let b = work.next[at]
+            if a.x != b.x or a.y != b.y or a.z != b.z:
+                work.moved[written] = (u32)at
+                written += 1
 
 func min_of(values: const u32[]) -> u32:
     var least = values[0]

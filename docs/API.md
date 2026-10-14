@@ -670,6 +670,18 @@ first build of the mesh's triangle tree (Intersecting faces reads it).
 | Mesh Check, the sphere, without Intersecting | 57.5 ms | 1,048,352 |  |
 | Select Intersecting, the sphere (its tree built) | 295.7 ms | 1,048,352 |  |
 
+Moves are O(what moved) (an Edit Mesh drag runs one each frame): a few
+faces' or edges' points are found from their corners rather than a pass
+over every corner, the bounds grow from the last mesh's unless a moved
+point stood on them, the faces round the moved points are read off bits,
+and the degenerate-face check looks only round them. `Verbs.run` takes
+`over`, a mesh the result is made over when it differs from it only in
+positions and its output selection (a drag's last frame), so normals,
+shading and GPU copies change only where points moved since; a shading
+cache whose mesh is gone gives its column to the next one instead of a
+copy. Transform Components of 1,000 faces of the 1024² grid: 14.1 ms
+before, 1.5 ms now.
+
 Intersecting faces was 1,046 ms on the grid with one tree query per
 triangle; one query per tree leaf with its candidates' boxes and points
 gathered once brought it to 296 ms. Pinched points (94 ms serial) and the

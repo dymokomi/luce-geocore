@@ -22,6 +22,11 @@ pub func converted(topology: const Topology*, bits: Bits, source: Domain, destin
     if destination == Domain.detail:
         if (all and bits.population() == bits.count) or (not all and bits.any()): out.set(0)
         return out
+    # A few faces or edges to their points (a drag's group on a big mesh):
+    # walk the set bits alone.
+    if not all and destination == Domain.point and (source == Domain.face or source == Domain.edge) and bits.population() * 16 < bits.count:
+        try sparse_points(topology, bits, source, &out)
+        return out
     let hits = try new u32[size] --- in memory.heap
     defer free(hits) in memory.heap
     let totals = try new u32[size] --- in memory.heap
@@ -44,6 +49,21 @@ pub func converted(topology: const Topology*, bits: Bits, source: Domain, destin
     for element in 0..<size:
         if totals[element] > 0 and (hits[element] == totals[element] if all else hits[element] > 0): out.set(element)
     return out
+
+## The points of the set faces (by their corners) or edges, into `out`:
+## O(the set elements), not O(the mesh).
+func sparse_points(topology: const Topology*, bits: Bits, source: Domain, out: BitsBuilder*) -> !:
+    for word in 0..<bits.words.length:
+        var pending = bits.words[word]
+        while pending != 0:
+            let element = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            if source == Domain.edge:
+                out.set((usize)topology.edge_points[element * 2])
+                out.set((usize)topology.edge_points[element * 2 + 1])
+                continue
+            for corner in (usize)topology.offsets[element]..<(usize)topology.offsets[element + 1]:
+                out.set((usize)topology.corners[corner])
 
 ## Count one (point, edge) relation in the direction of the conversion.
 func relate(bits: Bits, point_first: bool, point: usize, edge: usize, hits: u32[], totals: u32[]):

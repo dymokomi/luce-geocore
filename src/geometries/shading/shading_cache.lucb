@@ -96,12 +96,20 @@ pub struct ShadingCache:
     ## point, a point that gained a cusp turns the storage per corner: the
     ## other points had none, so their corners copy their point's normal.
     ## Under the lock.
-    func update_from(source: const ShadingCache*, shape: const Surface*) -> !:
+    func update_from(source: ShadingCache*, shape: const Surface*) -> !:
         let affected = try affected_points(shape, self.moved)
         defer free(affected) in memory.heap
-        var column = try Column[Float3].allocate(source.smooth.count())
+        # A source whose mesh is gone (a drag's last frame) gives up its
+        # column instead of a copy.
+        var column = source.surrender()
+        let taken = not column.is_empty()
+        if not taken:
+            column = try Column[Float3].allocate(source.smooth.count())
         errdefer column.release()
-        memory.copy(column.span(), source.smooth.view(), column.count())
+        if taken:
+            _ = try column.writable()
+        else:
+            memory.copy(column.span(), source.smooth.view(), column.count())
         if source.per_corner:
             refresh_corners(shape, affected, column.span())
         else:
@@ -117,8 +125,10 @@ pub struct ShadingCache:
                 self.per_corner = true
                 return
         # Provenance: GPU copies of the old normals update in place, just the
-        # range around the moved points.
-        column.set_parent(source.smooth.id())
+        # range around the moved points (a surrendered column took its new
+        # id with the old one as its parent).
+        if not taken:
+            column.set_parent(source.smooth.id())
         let range = changed_range(shape, affected, source.per_corner)
         column.set_changed(range.0, range.1)
         self.smooth = column
@@ -145,6 +155,17 @@ pub struct ShadingCache:
 
     pub func curvature_id() -> u64:
         return self.curvature.id()
+
+    ## This cache's column, given up, when only the one cache built over it
+    ## still holds it (its mesh is gone): it is then not built. An empty
+    ## column otherwise.
+    func surrender() -> Column[Float3]:
+        self.lock.lock()
+        defer self.lock.unlock()
+        if self.ready.load(.acquire) == 0 or self.owners.load(.acquire) != 1 or not self.smooth.unique():
+            return Column[Float3]()
+        self.ready.store(0, .release)
+        return self.smooth.take()
 
     func drop_source():
         if let source = self.source:

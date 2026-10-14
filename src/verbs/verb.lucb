@@ -22,7 +22,7 @@ from core.attributes import Attribute, AttributeStore, Domain, DataType, Storage
 from core.geometry import Bounds
 from math.vector import Vector3
 from math.matrix import Matrix4
-from geometries.polygon import with_group_bits, Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute, edge_bits_from_pairs, concatenated, MeshPart
+from geometries.polygon import changed_points, with_group_bits, Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute, edge_bits_from_pairs, concatenated, MeshPart
 from geometries.triangle_index import TriangleIndex
 from primitives import placement, grid_mesh, box_mesh, quad_sphere_mesh, uv_sphere_mesh, capsule_mesh, cylinder_mesh, tube_mesh, disc_mesh, torus_mesh, helix_mesh, platonic_mesh, icosphere_mesh
 from geometries.triangulation.polygon_triangulation import area_normal
@@ -244,7 +244,7 @@ pub struct VerbRun:
 ## the verb's domain. With `keep`, the output
 ## selection is the group carried through the verb (a new element is
 ## selected when all its parents were) instead of what the verb made.
-pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false, second: str = "", reference: const Mesh*? = none) -> VerbRun!:
+pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false, second: str = "", reference: const Mesh*? = none, over: const Mesh*? = none) -> VerbRun!:
     if verb.second_required and reference == none: error(errors.invalid, "this operation needs a reference surface: connect one to its second input")
     var resolved = try resolve_group(verb, mesh, group, group_type, symmetry)
     defer resolved.close()
@@ -278,7 +278,7 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
     else:
         let cook = verb.cook
         try cook(&input, &output)
-    let product = try finish(source, &output)
+    let product = try finish(source, &output, over if not keep else none)
     # Edges the kernel selected by their points: found on the output.
     if output.built and output.builder.selected_edges.count > 0:
         select_edges(product, &output) catch failure:
@@ -391,8 +391,12 @@ func resolve_group(verb: const Verb*, mesh: const Mesh*, group: str, group_type:
     return Resolved(chosen, domain, bits, target, result.report.misses)
 
 ## The kernel's output as a mesh: moved positions share everything else, a
-## built topology carries every attribute through its provenance.
-func finish(source: const Mesh*, output: VerbOutput*) -> Mesh*!:
+## built topology carries every attribute through its provenance. Moved
+## positions are made over `over` instead when it differs from the source
+## only in positions and its output selection (a drag's last frame, the
+## same action run again): its normals, shading and GPU copies then change
+## only where points moved since.
+func finish(source: const Mesh*, output: VerbOutput*, over: const Mesh*? = none) -> Mesh*!:
     if let made = output.mesh:
         output.mesh = none
         return made
@@ -414,6 +418,13 @@ func finish(source: const Mesh*, output: VerbOutput*) -> Mesh*!:
         output.builder.selected_edges.clear()
         return try mesh_share(source)
     if not output.positions.is_empty():
+        if let previous = over:
+            if source.repositions(previous):
+                let moved = try changed_points(previous.point_span(), output.positions.view())
+                defer free(moved) in memory.heap
+                let made = try moved_storage(previous, output.positions, moved)
+                if (try degenerate_around(made, moved)) <= (try degenerate_around(previous, moved)): return made
+                mesh_dispose(made)
         # Meshes keep faces without an area, but a modeling verb that collapses
         # faces (points moved onto each other) has nothing sensible to make: the
         # input passes through with a warning, as for built faces above.
@@ -422,7 +433,8 @@ func finish(source: const Mesh*, output: VerbOutput*) -> Mesh*!:
             output.warning = "The operation would collapse faces; the input passes through"
             recover none
         if let made = moved:
-            if degenerate_faces(made) <= degenerate_faces(source): return made
+            # Only the faces round the moved points can have lost their area.
+            if (try degenerate_around(made, output.moved.view())) <= (try degenerate_around(source, output.moved.view())): return made
             mesh_dispose(made)
             output.warning = "The operation would collapse faces; the input passes through"
     return try mesh_share(source)
@@ -450,6 +462,18 @@ func mark_selection(mesh: Mesh*, bits: Column[u64]*, domain: Domain) -> !:
         *bits = empty.finish()
     if bits.count() != (count + 63) // 64: trap("a verb's selection does not cover its domain")
     try put_attribute(mesh, try Attribute.group_of(".selection", domain, count, bits.view()))
+
+## How many faces round points `points` have no area (a zero normal),
+## counting a face once per point it is round.
+func degenerate_around(mesh: const Mesh*, points: const u32[]) -> usize!:
+    let around = try mesh.point_face_span()
+    let normals = mesh.face_normal_span()
+    var count: usize = 0
+    for point in points:
+        for slot in (usize)around.0[(usize)point]..<(usize)around.0[(usize)point + 1]:
+            let normal = normals[(usize)around.1[slot]]
+            if normal.x == 0.0 and normal.y == 0.0 and normal.z == 0.0: count += 1
+    return count
 
 ## How many faces have no area (a zero normal).
 func degenerate_faces(mesh: const Mesh*) -> usize:

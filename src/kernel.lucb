@@ -52,6 +52,9 @@ pub type TableBuilder = strings.TableBuilder
 pub type PathFilter = paths.PathFilter
 ## Column block ids already counted (memory footprints).
 pub type IdSet = idset.IdSet
+## Bytes of a set's arrays an IdSet has not counted yet (an editor's undo
+## history counts what its held results take, each shared array once).
+pub let set_bytes = geometry_set.set_bytes
 
 ## A text attribute of `elements` whose element i is string `values[i]` of
 ## `texts` (-1: "").

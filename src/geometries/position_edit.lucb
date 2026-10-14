@@ -11,6 +11,7 @@ from luce_std import parallel
 from core.geometry import Bounds
 from core.float3 import Float3
 from core.shared import Column
+from core.bits import BitsBuilder, trailing_zeros
 from core.attributes import AttributeStore, DataType, Role, Storage
 from core.attribute_ops import typed_mut
 from math.vector import Vector3
@@ -88,11 +89,37 @@ func chunk_extent(context: void*, first: usize, end: usize, worker: usize):
             hi = Float3(p.x if p.x > hi.x else hi.x, p.y if p.y > hi.y else hi.y, p.z if p.z > hi.z else hi.z)
         work.results[chunk] = Extent(lo.vector(), hi.vector(), finite)
 
+## The bounds after `moved` points moved, from the bounds `before` when they
+## are given and stay exact: on each axis where no moved point stood on a
+## bound, the points that stayed still reach it, so the new bound is it
+## grown by the moved points. Otherwise every point is scanned.
+func moved_bounds(shape: const Shape*, moved: const u32[], before: Bounds?) -> Bounds!:
+    let old = before else return try bounds_of(shape.positions, shape.origin)
+    if moved.length * 8 > shape.positions.length or moved.length == 0: return try bounds_of(shape.positions, shape.origin)
+    let lo = old.minimum.subtract(shape.origin)
+    let hi = old.maximum.subtract(shape.origin)
+    var low = lo
+    var high = hi
+    for point in moved:
+        let was = shape.previous[(usize)point].vector()
+        # A moved point on a bound may have been what held it there.
+        if was.x <= lo.x or was.y <= lo.y or was.z <= lo.z or was.x >= hi.x or was.y >= hi.y or was.z >= hi.z: return try bounds_of(shape.positions, shape.origin)
+        let p = shape.positions[(usize)point]
+        if not (p.x - p.x == 0.0 and p.y - p.y == 0.0 and p.z - p.z == 0.0): error(errors.invalid, "mesh points must be finite and bounded to 1e6")
+        let v = p.vector()
+        low = Vector3(math.min(low.x, v.x), math.min(low.y, v.y), math.min(low.z, v.z))
+        high = Vector3(math.max(high.x, v.x), math.max(high.y, v.y), math.max(high.z, v.z))
+    let minimum = low.add(shape.origin)
+    let maximum = high.add(shape.origin)
+    if math.max(math.abs(minimum.x), math.abs(maximum.x)) > 1000000.0 or math.max(math.abs(minimum.y), math.abs(maximum.y)) > 1000000.0 or math.max(math.abs(minimum.z), math.abs(maximum.z)) > 1000000.0:
+        error(errors.invalid, "mesh points must be finite and bounded to 1e6")
+    return Bounds(minimum, maximum)
+
 ## New normals, bounds and (when a face folded) triangles for `shape`, whose
 ## points `moved` changed. `rigid` promises an orientation-preserving affine
 ## map, under which no triangle can fold.
-pub func reposition(shape: const Shape*, normals: Column[Float3], moved: const u32[], rigid: bool) -> Repositioned!:
-    let extent = try bounds_of(shape.positions, shape.origin)
+pub func reposition(shape: const Shape*, normals: Column[Float3], moved: const u32[], rigid: bool, before: Bounds? = none) -> Repositioned!:
+    let extent = try moved_bounds(shape, moved, before)
     let faces = shape.offsets.length - 1
     # Every point moved: every face gets a new normal, into a fresh column (nothing of
     # the old one survives, so nothing is copied) with no face list to build.
@@ -121,24 +148,23 @@ pub func reposition(shape: const Shape*, normals: Column[Float3], moved: const u
             try retriangulate(shape, face, output[face].vector(), copy)
     return Repositioned(fresh, triangles, extent)
 
-## The faces around the `moved` points, ascending.
+## The faces around the `moved` points, ascending: marked in bits, then
+## read off the bits' set words (no pass over every face).
 func touched_faces(shape: const Shape*, moved: const u32[], faces: usize) -> u32[]!:
-    let touched = try new bool[faces] --- in memory.heap
-    defer free(touched) in memory.heap
-    memory.set(u8[]((u8*)touched.data, touched.length), 0)
-    var count: usize = 0
+    var touched = try BitsBuilder.zeros(faces)
+    defer touched.close()
     for point in moved:
         for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
-            let face = (usize)shape.incident_faces[at]
-            if not touched[face]:
-                touched[face] = true
-                count += 1
-    let list = try new u32[count] --- in memory.heap
+            touched.set((usize)shape.incident_faces[at])
+    let bits = touched.view()
+    let list = try new u32[bits.population()] --- in memory.heap
     var written: usize = 0
-    for face in 0..<faces:
-        if touched[face]:
-            list[written] = (u32)face
+    for word in 0..<bits.words.length:
+        var pending = bits.words[word]
+        while pending != 0:
+            list[written] = (u32)(word * 64 + (usize)trailing_zeros(pending))
             written += 1
+            pending = pending & (pending - 1)
     return list
 
 struct NormalWork:
