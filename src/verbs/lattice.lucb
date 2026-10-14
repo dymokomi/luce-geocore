@@ -19,7 +19,7 @@ let lattice_parms: ParmSpec[3] = [
 
 func lattice_verb() -> Verb:
     return Verb("Lattice", "Deform", "Deform the group by moving the points of a cage round it", Domain.point, true, lattice_parms, false, cook_lattice,
-                section = "Modify", family = "Deform", icon = "grid", picks = pick_pieces_points, gesture = "lattice", whole = true, trailing = true)
+                section = "Modify", family = "Deform", icon = "lattice", picks = pick_pieces_points, gesture = "lattice", whole = true, trailing = true)
 
 ## Cage points along an axis, at most.
 let most_cage_points: usize = 16

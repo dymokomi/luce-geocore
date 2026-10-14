@@ -19,7 +19,7 @@ let corrective_picks: PickSpec[1] = [PickSpec("Components", "objects points edge
 
 func corrective_smooth_verb() -> Verb:
     return Verb("Corrective Smooth", "Deform", "Smooth the group and give back the rest shape's detail (its second input)", Domain.point, true, corrective_parms, false, cook_corrective_smooth,
-                section = "Modify", family = "Deform", icon = "smooth-tool", picks = corrective_picks, drag = 0, drag_mode = "amount", wheel = 1, whole = true, inputs = 2, second_required = true)
+                section = "Modify", family = "Deform", icon = "corrective-smooth", picks = corrective_picks, drag = 0, drag_mode = "amount", wheel = 1, whole = true, inputs = 2, second_required = true)
 
 ## One round over the group: each point `factor` of the way to its
 ## neighbors' mean, read from `from`, written to `to` (the rest copied).

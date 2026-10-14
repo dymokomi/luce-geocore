@@ -33,7 +33,7 @@ let bend_keys: KeySpec[2] = [KeySpec("M", 0, "cycle"), KeySpec("A", 2, "cycle")]
 
 func bend_verb() -> Verb:
     return Verb("Bend", "Deform", "Bend, twist, taper or squash the group along an axis", Domain.point, true, bend_parms, false, cook_bend,
-                section = "Modify", family = "Deform", icon = "stretch-curve", picks = pick_pieces_points, drag = 1, drag_mode = "angle", keys = bend_keys, whole = true)
+                section = "Modify", family = "Deform", icon = "bend", picks = pick_pieces_points, drag = 1, drag_mode = "angle", keys = bend_keys, whole = true)
 
 ## The deformation's frame and settings, as every point reads them.
 struct BendWork:

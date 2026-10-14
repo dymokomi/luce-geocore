@@ -58,7 +58,7 @@ let soft_parms: ParmSpec[7] = [
 
 func soft_transform_verb() -> Verb:
     return Verb("Soft Transform", "Deform", "Move, turn and scale the group, the points near it following with a falloff", Domain.point, true, soft_parms, false, cook_transform,
-                section = "Modify", family = "Deform", icon = "transform-gizmo")
+                section = "Modify", family = "Deform", icon = "soft-transform")
 
 let mountain_parms: ParmSpec[2] = [
     ParmSpec("Height", ParmKind.number, 0.2, 0.0, 100000.0, 1, "", "Largest displacement of the noise.", 2.0),

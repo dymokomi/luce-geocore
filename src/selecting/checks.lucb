@@ -11,7 +11,7 @@ let pole_parms: ParmSpec[3] = [
 let point_picks: PickSpec[1] = [PickSpec("Points", "points")]
 
 func poles_rule() -> SelectRule:
-    return SelectRule("Select Poles", "Poles", "poles", "Points by how many edges meet there: the poles of a quad mesh", "Find", "vertex-select",
+    return SelectRule("Select Poles", "Poles", "poles", "Points by how many edges meet there: the poles of a quad mesh", "Find", "select-poles",
                       "points", point_picks, pole_parms, select_poles, whole = true)
 
 func select_poles(input: const RuleInput*) -> RuleOutput!:
@@ -42,7 +42,7 @@ let degenerate_parms: ParmSpec[1] = [
 let degenerate_picks: PickSpec[1] = [PickSpec("Components", "faces edges")]
 
 func degenerate_rule() -> SelectRule:
-    return SelectRule("Select Degenerate", "Degenerate", "degenerate", "Faces without area and edges without length", "Find", "select-by-area",
+    return SelectRule("Select Degenerate", "Degenerate", "degenerate", "Faces without area and edges without length", "Find", "select-degenerate",
                       "faces edges", degenerate_picks, degenerate_parms, select_degenerate, whole = true)
 
 func select_degenerate(input: const RuleInput*) -> RuleOutput!:
@@ -83,7 +83,7 @@ func degenerate_elements(context: void*, first: usize, end: usize, worker: usize
 let intersecting_picks: PickSpec[1] = [PickSpec("Faces", "faces")]
 
 func intersecting_rule() -> SelectRule:
-    return SelectRule("Select Intersecting", "Intersecting", "intersecting", "Faces that pass through other faces of the mesh", "Find", "boolean-intersect",
+    return SelectRule("Select Intersecting", "Intersecting", "intersecting", "Faces that pass through other faces of the mesh", "Find", "select-intersecting",
                       "faces", intersecting_picks, no_parms[..<0], select_intersecting, whole = true)
 
 func select_intersecting(input: const RuleInput*) -> RuleOutput!:
@@ -166,7 +166,7 @@ let problem_parms: ParmSpec[10] = [
 let problem_picks: PickSpec[1] = [PickSpec("Components", "points edges faces")]
 
 func problems_rule() -> SelectRule:
-    return SelectRule("Mesh Check", "Mesh Check", "problems", "Select the mesh's defects: non-manifold, flipped, loose, n-gons, poles, degenerate and intersecting; the viewport's Mesh Check overlay shows them", "Find", "surface-analysis",
+    return SelectRule("Mesh Check", "Mesh Check", "problems", "Select the mesh's defects: non-manifold, flipped, loose, n-gons, poles, degenerate and intersecting; the viewport's Mesh Check overlay shows them", "Find", "mesh-check",
                       "points edges faces", problem_picks, problem_parms, select_problems, whole = true)
 
 ## Every finding turned on, on the group's domain (a face finding at

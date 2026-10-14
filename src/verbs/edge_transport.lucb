@@ -14,7 +14,7 @@ let transport_picks: PickSpec[1] = [PickSpec("Start", "points edges faces")]
 
 func edge_transport_verb() -> Verb:
     return Verb("Edge Transport", "Attributes", "Each point's distance from the group along the edges, as the point attribute dist", Domain.point, true, transport_parms, false, cook_edge_transport,
-                section = "Modify", family = "Shape", icon = "edge-select", picks = transport_picks)
+                section = "Modify", family = "Shape", icon = "edge-transport", picks = transport_picks)
 
 ## A binary heap of (distance, point), nearest first.
 struct Frontier:
