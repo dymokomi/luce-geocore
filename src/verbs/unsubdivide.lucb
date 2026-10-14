@@ -30,14 +30,24 @@ func unsubdivide(input: const VerbInput*, output: VerbOutput*, iterations: usize
         let next = level.builder.finish(current) catch failure:
             mesh_dispose(current)
             error(failure.code, failure.message)
+        # The level's bits move to `group`: its empty builder is made first,
+        # so a failure leaves each owned once.
+        let emptied = BitsBuilder.zeros(0) catch failure:
+            mesh_dispose(next)
+            mesh_dispose(current)
+            error(failure.code, failure.message)
         mesh_dispose(current)
         current = next
         group.close()
         group = level.selection
-        level.selection = try BitsBuilder.zeros(0)
+        level.selection = emptied
+    let emptied = BitsBuilder.zeros(0) catch failure:
+        mesh_dispose(current)
+        error(failure.code, failure.message)
     output.mesh = current
+    output.selection.close()
     output.selection = group
-    group = try BitsBuilder.zeros(0)
+    group = emptied
     output.selection_domain = Domain.face
 
 ## One level: the coarse faces built into `level.builder` (and its

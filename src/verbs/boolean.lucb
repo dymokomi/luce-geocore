@@ -124,11 +124,14 @@ func cook_boolean(input: const VerbInput*, output: VerbOutput*) -> !:
         next_tags = Growing[i32]()
     if name.count > 0:
         if let made = current: try one_piece(made, result.view(), (str)name.view())
+    # The empty builder left in `result` is made first: once the output
+    # owns the mesh and the bits, nothing may fail.
+    let emptied = try BitsBuilder.zeros(0)
     output.mesh = current
     current = none
     output.selection.close()
     output.selection = result
-    result = try BitsBuilder.zeros(0)
+    result = emptied
     output.selection_domain = Domain.face
 
 ## One boolean of the faces tagged `a` and `b` on `source`: the new mesh,
