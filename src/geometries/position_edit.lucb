@@ -95,7 +95,7 @@ func chunk_extent(context: void*, first: usize, end: usize, worker: usize):
 ## so the new bound is it grown by the moved points. Otherwise (a point
 ## that held a bound moved in) every point is scanned. A drag outward of a
 ## face on the bounds (a box's top pulled up) then costs the moved points.
-func moved_bounds(shape: const Shape*, moved: const u32[], before: Bounds?) -> Bounds!:
+pub func moved_bounds(shape: const Shape*, moved: const u32[], before: Bounds?) -> Bounds!:
     let old = before else return try bounds_of(shape.positions, shape.origin)
     if moved.length * 8 > shape.positions.length or moved.length == 0: return try bounds_of(shape.positions, shape.origin)
     let lo = old.minimum.subtract(shape.origin)

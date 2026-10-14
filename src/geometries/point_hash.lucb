@@ -60,13 +60,15 @@ pub struct PointHash:
     pub func nearest(positions: const Vector3[], point: Vector3, reach: f64) -> i32:
         let home = self.cell_of(point)
         var found: i32 = -1
-        var best = reach
+        # Squared distances: no square root per candidate.
+        var best = reach * reach
         for dx in (i64)-1..<(i64)2:
             for dy in (i64)-1..<(i64)2:
                 for dz in (i64)-1..<(i64)2:
                     var candidate = self.first(home.moved(dx, dy, dz))
                     while candidate >= 0:
-                        let distance = positions[(usize)candidate].subtract(point).length()
+                        let offset = positions[(usize)candidate].subtract(point)
+                        let distance = offset.dot(offset)
                         if distance <= best:
                             best = distance
                             found = candidate

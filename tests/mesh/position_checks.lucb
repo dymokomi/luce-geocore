@@ -4,7 +4,7 @@ import interop
 from luce_std import math
 import memory
 from luce_geocore import geocore
-from luce_geocore.geocore import Vector3, Matrix4, Mesh
+from luce_geocore.geocore import Vector3, Matrix4, Mesh, MeshPrimitives, Verbs
 from verb_run import verb_mesh
 
 func index(mesh: const Mesh*, at: i64) -> i64!:
@@ -80,6 +80,7 @@ pub func exercise() -> !:
     defer smoothed.release()
     try same_triangles(smoothed.value(), display)
     try folding()
+    try drag_frames()
 
 ## Ordinary meshes still re-triangulate a face whose kept triangles fold.
 func folding() -> !:
@@ -99,3 +100,42 @@ func folding() -> !:
             let b = try edited.point(try edited.corner_point(try index(edited, triangle * 3 + 1)))
             let c = try edited.point(try edited.corner_point(try index(edited, triangle * 3 + 2)))
             assert(b.subtract(a).cross(c.subtract(a)).dot(normal) > 0.0)
+
+## A drag's frames, each made over the last (as the viewport cooks them):
+## the selection moving to another point puts the first back, and every
+## frame equals the same move made from the input alone, normals too; with
+## a soft radius (weighed once per input) and under X symmetry (the mirror
+## map kept with the input) as well.
+func drag_frames() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let groups: str[4] = ["3", "3", "7", "7-8"]
+    let lifts: f64[4] = [0.5, 0.75, 0.25, -0.5]
+    for mode in 0..<(usize)3:
+        let radius = 0.6 if mode == 1 else 0.0
+        let symmetry: i64 = 1 if mode == 2 else 0
+        var last: interop.Reference[Mesh]? = none
+        defer:
+            if let held = last: held.release()
+        for frame in 0..<(usize)4:
+            let shift: f64[15] = [0.0, lifts[frame], 0.1, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, radius, 1.0]
+            let over = try Verbs.run("Transform Components", grid, groups[frame], 1, shift[..<15], symmetry, over = last)
+            defer over.release()
+            let fresh = try grid.value().transformed(Vector3(), Vector3(), Vector3(1.0, 1.0, 1.0))
+            defer fresh.release()
+            let alone = try Verbs.run("Transform Components", fresh, groups[frame], 1, shift[..<15], symmetry)
+            defer alone.release()
+            let made = try over.value().mesh()
+            let expected = try alone.value().mesh()
+            defer expected.release()
+            for point in 0..<made.value().point_count():
+                let a = try made.value().point(point)
+                let b = try expected.value().point(point)
+                assert(a.x == b.x and a.y == b.y and a.z == b.z, "a frame over the last moves what the move alone does")
+            for face in 0..<made.value().face_count():
+                let a = try made.value().face_normal(face)
+                let b = try expected.value().face_normal(face)
+                assert(math.abs(a.x - b.x) + math.abs(a.y - b.y) + math.abs(a.z - b.z) < 1e-6, "and its normals")
+            assert(made.value().bounds().maximum.y == expected.value().bounds().maximum.y)
+            if let held = last: held.release()
+            last = made

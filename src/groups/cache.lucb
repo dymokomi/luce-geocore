@@ -1,9 +1,12 @@
 ## Evaluated groups, cached by what they read: the expression, the target
-## domain, the change ids of the topology and positions, and every
-## attribute's name, domain and ids. Equal ids are equal bytes, so a cached
-## result is valid exactly while all of those are; a Move leaves `top` and
-## `0-99` valid, and anything sharing the columns (snapshots, worker results)
-## shares the entries. A few recent results are kept, process-wide.
+## domain, the change ids of the topology, and only what the expression
+## reads besides: positions and normals for `@P`, `@N` and select rules,
+## every attribute's name, domain and ids for group names and attributes.
+## Equal ids are equal bytes, so a cached result is valid exactly while all
+## of those are. A drag's frames change only positions, so `0-99`, `*` or a
+## named group stays one entry over the whole drag instead of a new one per
+## frame; anything sharing the columns (snapshots, worker results) shares
+## the entries. A few recent results are kept, process-wide.
 
 let cache_size: usize = 16
 
@@ -39,9 +42,11 @@ pub struct GroupResult:
 
 ## The bits of `text` on `target`, evaluated or cached.
 pub func group_bits(mesh: const Mesh*, text: str, target: Domain) -> GroupResult!:
+    var program = try GroupProgram.parse(text)
+    defer program.close()
     var wanted = FullKey()
     defer wanted.close()
-    try signature(mesh, text, target, &wanted)
+    try signature(mesh, &program, text, target, &wanted)
     let key = wanted.hash()
     cache_lock.lock()
     let slots = entries() catch failure:
@@ -55,8 +60,6 @@ pub func group_bits(mesh: const Mesh*, text: str, target: Domain) -> GroupResult
             cache_lock.unlock()
             return found
     cache_lock.unlock()
-    var program = try GroupProgram.parse(text)
-    defer program.close()
     var report = GroupReport()
     var bits = try evaluate(&program, mesh, target, &report)
     let column = bits.finish()
@@ -83,19 +86,46 @@ pub func clear_group_cache():
     free(slots) in memory.heap
     cached = none
 
-## What evaluating `text` on `target` reads: the text, the target, the ids
-## of the topology, positions and normals, and each attribute's name, domain
-## and column ids (a renamed attribute keeps its column).
-func signature(mesh: const Mesh*, text: str, target: Domain, into: FullKey*) -> !:
+## What evaluating `program` (`text`) on `target` reads: the text, the
+## target, the ids of the topology, and as `reads` finds, the positions and
+## normals and each attribute's name, domain and column ids (a renamed
+## attribute keeps its column).
+func signature(mesh: const Mesh*, program: const GroupProgram*, text: str, target: Domain, into: FullKey*) -> !:
+    let (attributes, geometry) = reads(program)
     try into.text(text)
     try into.word((u64)(u8)target)
     try into.word(mesh.corners_id())
     try into.word(mesh.offsets_id())
-    try into.word(mesh.points_id())
-    try into.word(mesh.normals_id())
+    try into.word((u64)mesh.point_count())
+    if geometry:
+        try into.word(mesh.points_id())
+        try into.word(mesh.normals_id())
+    if not attributes: return
     for index in 0..<(usize)mesh.attribute_count():
         let entry = try mesh.attribute_entry((i64)index)
         try into.text(entry.name())
         try into.word((u64)(u8)entry.domain)
         try into.word(entry.data.id())
         try into.word(entry.table.id())
+
+## Whether `program` reads attributes (group names, `@name`) and whether it
+## reads positions or normals (`@P`, `@N`, and calls, whose select rules
+## may measure); numbers, ranges and edges read only the topology.
+func reads(program: const GroupProgram*) -> (bool, bool):
+    var attributes = false
+    var geometry = false
+    for term in program.terms.view():
+        match term.kind:
+            .name, .names: attributes = true
+            .attribute:
+                let name = program.text(&term)
+                if name == "P": geometry = true
+                elif name == "N":
+                    geometry = true
+                    attributes = true
+                elif name != "ptnum" and name != "primnum" and name != "vtxnum" and name != "elemnum" and name != "intrinsic:indexorder": attributes = true
+            .call:
+                attributes = true
+                geometry = true
+            _: continue
+    return (attributes, geometry)

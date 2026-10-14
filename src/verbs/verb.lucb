@@ -22,7 +22,7 @@ from core.attributes import Attribute, AttributeStore, Domain, DataType, Storage
 from core.geometry import Bounds
 from math.vector import Vector3
 from math.matrix import Matrix4
-from geometries.polygon import changed_points, with_group_bits, Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute, edge_bits_from_pairs, concatenated, MeshPart
+from geometries.polygon import set_trail, trail_from, changed_points, with_group_bits, Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute, edge_bits_from_pairs, concatenated, MeshPart
 from geometries.triangle_index import TriangleIndex
 from primitives import placement, grid_mesh, box_mesh, quad_sphere_mesh, uv_sphere_mesh, capsule_mesh, cylinder_mesh, tube_mesh, disc_mesh, torus_mesh, helix_mesh, platonic_mesh, icosphere_mesh
 from geometries.triangulation.polygon_triangulation import area_normal
@@ -426,12 +426,22 @@ func finish(source: const Mesh*, output: VerbOutput*, over: const Mesh*? = none)
         output.builder.selected_edges.clear()
         return try mesh_share(source)
     if not output.positions.is_empty():
+        let base = mesh_positions_id(source)
         if let previous = over:
             if source.repositions(previous):
-                let moved = try changed_points(previous.point_span(), output.positions.view())
+                # The points that changed since the last frame: among those it
+                # moved and those this one moved when it says what it moved
+                # (a drag: O(moved)), else found by comparing every point.
+                var moved: u32[]
+                if let trail = trail_from(previous, base): moved = try changed_among(previous.point_span(), output.positions.view(), trail, output.moved.view())
+                else: moved = try changed_points(previous.point_span(), output.positions.view())
                 defer free(moved) in memory.heap
                 let made = try moved_storage(previous, output.positions, moved)
-                if (try degenerate_around(made, moved)) <= (try degenerate_around(previous, moved)): return made
+                if (try degenerate_around(made, moved)) <= (try degenerate_around(previous, moved)):
+                    set_trail(made, base, output.moved.view()) catch failure:
+                        mesh_dispose(made)
+                        error(failure.code, failure.message)
+                    return made
                 mesh_dispose(made)
         # Meshes keep faces without an area, but a modeling verb that collapses
         # faces (points moved onto each other) has nothing sensible to make: the
@@ -442,10 +452,39 @@ func finish(source: const Mesh*, output: VerbOutput*, over: const Mesh*? = none)
             recover none
         if let made = moved:
             # Only the faces round the moved points can have lost their area.
-            if (try degenerate_around(made, output.moved.view())) <= (try degenerate_around(source, output.moved.view())): return made
+            if (try degenerate_around(made, output.moved.view())) <= (try degenerate_around(source, output.moved.view())):
+                set_trail(made, base, output.moved.view()) catch failure:
+                    mesh_dispose(made)
+                    error(failure.code, failure.message)
+                return made
             mesh_dispose(made)
             output.warning = "The operation would collapse faces; the input passes through"
     return try mesh_share(source)
+
+## The points in `last` or `now` (either order, repeats allowed) whose
+## stored positions differ between `previous` and `next`, ascending; the
+## caller frees the list.
+func changed_among(previous: const Float3[], next: const Float3[], last: const u32[], now: const u32[]) -> u32[]!:
+    let all = try new u32[last.length + now.length] --- in memory.heap
+    defer free(all) in memory.heap
+    memory.copy(all[..<last.length], last, last.length)
+    memory.copy(all[last.length..], now, now.length)
+    sort.stable(all, point_before)
+    var count: usize = 0
+    for at in 0..<all.length:
+        let point = all[at]
+        if at > 0 and all[at - 1] == point: continue
+        let a = previous[(usize)point]
+        let b = next[(usize)point]
+        if a.x != b.x or a.y != b.y or a.z != b.z:
+            all[count] = point
+            count += 1
+    let moved = try new u32[count] --- in memory.heap
+    memory.copy(moved, all[..<count], count)
+    return moved
+
+func point_before(a: u32, b: u32) -> bool:
+    return a < b
 
 ## The output selection as the edges between the builder's selected point
 ## pairs.

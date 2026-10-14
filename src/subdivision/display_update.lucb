@@ -24,36 +24,40 @@ struct Reach:
         self.points.close()
 
 func reach(topology: const Topology*, moved: const u32[], out: Reach*) -> !:
+    # Bits only say what is listed already; the lists are built as elements
+    # are met, so no level is scanned whole for a few moved points.
     var faces = try BitsBuilder.zeros(topology.faces())
     defer faces.close()
     var edges = try BitsBuilder.zeros(topology.edges())
     defer edges.close()
     var points = try BitsBuilder.zeros(topology.points)
     defer points.close()
+    out.faces.clear()
+    out.edges.clear()
+    out.points.clear()
     for point in moved:
-        points.set((usize)point)
+        try met(&points, (usize)point, &out.points)
         for slot in (usize)topology.point_edge_offsets[(usize)point]..<(usize)topology.point_edge_offsets[(usize)point + 1]:
             let edge = (usize)topology.point_edges[slot]
-            edges.set(edge)
+            try met(&edges, edge, &out.edges)
             for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
-                faces.set((usize)topology.corner_faces[(usize)topology.edge_corners[at]])
-    let face_bits = faces.view()
-    for face in 0..<topology.faces():
-        if not face_bits.get(face): continue
-        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
-            edges.set((usize)topology.corner_edges[corner])
-            points.set((usize)topology.corners[corner])
-    try listed(face_bits, &out.faces)
-    try listed(edges.view(), &out.edges)
-    try listed(points.view(), &out.points)
+                try met(&faces, (usize)topology.corner_faces[(usize)topology.edge_corners[at]], &out.faces)
+    for face in out.faces.view():
+        for corner in (usize)topology.offsets[(usize)face]..<(usize)topology.offsets[(usize)face + 1]:
+            try met(&edges, (usize)topology.corner_edges[corner], &out.edges)
+            try met(&points, (usize)topology.corners[corner], &out.points)
+    sort.stable(out.faces.items[..<out.faces.count], ascending)
+    sort.stable(out.edges.items[..<out.edges.count], ascending)
+    sort.stable(out.points.items[..<out.points.count], ascending)
 
-func listed(bits: Bits, out: Growing[u32]*) -> !:
-    out.clear()
-    try out.reserve(bits.population())
-    for index in 0..<bits.count:
-        if bits.get(index):
-            out.items[out.count] = (u32)index
-            out.count += 1
+## List `index` the first time it is met.
+func met(bits: BitsBuilder*, index: usize, out: Growing[u32]*) -> !:
+    if bits.view().get(index): return
+    bits.set(index)
+    try out.push((u32)index)
+
+func ascending(a: u32, b: u32) -> bool:
+    return a < b
 
 ## The previous display `previous` updated to `mesh`'s positions, or none
 ## when a full evaluation is due.

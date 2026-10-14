@@ -7,6 +7,7 @@
 import sync
 import memory
 from core.float3 import Float3
+from core.shared import Column
 from geometries.triangle_index import TriangleIndex
 
 pub struct QueryCache:
@@ -17,6 +18,21 @@ pub struct QueryCache:
     ## The cache of the same faces before the positions moved, held until
     ## this one is built.
     var source: QueryCache*? = none
+    ## Mirror maps of this geometry (selecting/mirror.lucb), by domain and
+    ## axis: built on first use, kept with the geometry, so a symmetric drag
+    ## pairs its input's elements once, not on every frame. Never carried
+    ## to moved positions (`after` starts empty).
+    var mirror_lock: sync.Mutex
+    var mirrors: Column[i32][15]
+    ## The last soft selection weighed on this geometry (Transform
+    ## Components' soft radius): its group's words, radius and falloff, and
+    ## the points it reaches with their weights. One, replaced when another
+    ## is asked for: a drag changes only the transform, so it weighs once.
+    var soft_group: Column[u64]
+    var soft_radius: f64
+    var soft_falloff: i64
+    var soft_points: Column[u32]
+    var soft_weights: Column[f32]
 
     ## A cache for a mesh whose positions moved over the faces and triangle
     ## slots of `previous`'s mesh; it holds `previous` until it is built.
@@ -59,11 +75,54 @@ pub struct QueryCache:
                     release_query(source)
         return self.index else trap("unpublished polygon query index")
 
+    ## Mirror map `slot` (see `mirrors`), shared, or none before it is kept.
+    pub func mirror(slot: usize) -> Column[i32]?:
+        self.mirror_lock.lock()
+        defer self.mirror_lock.unlock()
+        if self.mirrors[slot].is_empty(): return none
+        return self.mirrors[slot].share()
+
+    ## Keep `map` (shared) as mirror map `slot`, unless one is kept already.
+    pub func keep_mirror(slot: usize, map: const Column[i32]*):
+        self.mirror_lock.lock()
+        defer self.mirror_lock.unlock()
+        if self.mirrors[slot].is_empty(): self.mirrors[slot] = map.share()
+
+    ## The points and weights kept for soft selection of `group` (its words)
+    ## at `radius` with `falloff`, shared, or none.
+    pub func soft(group: const u64[], radius: f64, falloff: i64) -> (Column[u32], Column[f32])?:
+        self.mirror_lock.lock()
+        defer self.mirror_lock.unlock()
+        if self.soft_group.is_empty() or self.soft_radius != radius or self.soft_falloff != falloff: return none
+        let kept = self.soft_group.view()
+        if kept.length != group.length: return none
+        for at in 0..<kept.length:
+            if kept[at] != group[at]: return none
+        return (self.soft_points.share(), self.soft_weights.share())
+
+    ## Keep the soft selection weighed for `group` (copied), replacing any.
+    pub func keep_soft(group: const u64[], radius: f64, falloff: i64, points: const Column[u32]*, weights: const Column[f32]*) -> !:
+        var words = try Column[u64].copy_of(group)
+        self.mirror_lock.lock()
+        defer self.mirror_lock.unlock()
+        self.soft_group.release()
+        self.soft_points.release()
+        self.soft_weights.release()
+        self.soft_group = words
+        self.soft_radius = radius
+        self.soft_falloff = falloff
+        self.soft_points = points.share()
+        self.soft_weights = weights.share()
+
     pub func is_ready() -> bool:
         return self.ready.load(.acquire) != 0
 
     ## Called by the last owner, after every reader.
     func close():
+        for at in 0..<(usize)15: self.mirrors[at].release()
+        self.soft_group.release()
+        self.soft_points.release()
+        self.soft_weights.release()
         if let index = self.index:
             index.close()
             free(index) in memory.heap

@@ -31,47 +31,73 @@ func element_positions(mesh: const Mesh*, topology: const Topology*, domain: Dom
             p = p.multiply_scalar(1.0 / (f64)(end - start))
         out.items[at] = p.add(origin)
 
-## Each element's mirror across `axis` (-1 when nothing sits there).
-pub func mirror_map(mesh: const Mesh*, domain: Domain, axis: i64, out: Growing[i32]*) -> !:
+## Each element's mirror across `axis` (-1 when nothing sits there),
+## shared (the caller releases it). Built once per geometry, domain and axis
+## and kept with the geometry: a symmetric drag reads its input's map on
+## every frame without pairing a point again.
+pub func mirror_map(mesh: const Mesh*, domain: Domain, axis: i64) -> Column[i32]!:
+    let slot = (usize)(u8)domain * 3 + (usize)(axis - 1)
+    if slot >= 15 or axis < 1: return try built_mirror_map(mesh, domain, axis)
+    if let kept = mesh.kept_mirror(slot): return kept
+    var made = try built_mirror_map(mesh, domain, axis)
+    mesh.keep_mirror(slot, &made)
+    return made
+
+func built_mirror_map(mesh: const Mesh*, domain: Domain, axis: i64) -> Column[i32]!:
     let topology = try Topology.of(mesh)
     let tolerance = mirror_tolerance(mesh)
     if domain == Domain.corner:
-        var points = Growing[i32]()
-        defer points.close()
-        try mirror_map(mesh, Domain.point, axis, &points)
-        var faces = Growing[i32]()
-        defer faces.close()
-        try mirror_map(mesh, Domain.face, axis, &faces)
-        try out.fill(topology.corners.length, -1)
+        var points = try mirror_map(mesh, Domain.point, axis)
+        defer points.release()
+        var faces = try mirror_map(mesh, Domain.face, axis)
+        defer faces.release()
+        let point_mirror = points.view()
+        let face_mirror = faces.view()
+        var made = try Column[i32].filled(topology.corners.length, -1)
+        let out = made.span()
         for corner in 0..<topology.corners.length:
-            let face = faces.items[(usize)topology.corner_faces[corner]]
-            let point = points.items[(usize)topology.corners[corner]]
+            let face = face_mirror[(usize)topology.corner_faces[corner]]
+            let point = point_mirror[(usize)topology.corners[corner]]
             if face < 0 or point < 0: continue
             for at in (usize)topology.offsets[(usize)face]..<(usize)topology.offsets[(usize)face + 1]:
-                if topology.corners[at] == point: out.items[corner] = (i32)at
-        return
+                if topology.corners[at] == point: out[corner] = (i32)at
+        return made
     var positions = Growing[Vector3]()
     defer positions.close()
     try element_positions(mesh, &topology, domain, &positions)
     var grid = try PointHash.build(positions.view(), tolerance * 4.0)
     defer grid.close()
-    try out.fill(positions.count, -1)
-    for at in 0..<positions.count:
-        out.items[at] = grid.nearest(positions.view(), positions.items[at].reflected((usize)(axis - 1)), tolerance)
+    var made = try Column[i32].allocate(positions.count)
+    errdefer made.release()
+    var work = MirrorWork(&grid, positions.view(), axis, tolerance, made.span())
+    try parallel.for_each_range(positions.count, 8192, (void*)&work, find_mirrors)
+    return made
+
+struct MirrorWork:
+    let grid: const PointHash*
+    let positions: const Vector3[]
+    let axis: i64
+    let tolerance: f64
+    let out: i32[]
+
+func find_mirrors(context: void*, first: usize, end: usize, worker: usize):
+    let work = (MirrorWork*)context
+    for at in first..<end:
+        work.out[at] = work.grid.nearest(work.positions, work.positions[at].reflected((usize)(work.axis - 1)), work.tolerance)
 
 ## `bits` with the mirror of every member added.
 pub func symmetric(mesh: const Mesh*, bits: Bits, domain: Domain, axis: i64) -> BitsBuilder!:
     var result = try BitsBuilder.copy_of(bits)
     errdefer result.close()
-    var mirrors = Growing[i32]()
-    defer mirrors.close()
-    try mirror_map(mesh, domain, axis, &mirrors)
+    var mirrors = try mirror_map(mesh, domain, axis)
+    defer mirrors.release()
+    let map = mirrors.view()
     for word in 0..<bits.words.length:
         var pending = bits.words[word]
         while pending != 0:
             let element = word * 64 + (usize)trailing_zeros(pending)
             pending = pending & (pending - 1)
-            let mirror = mirrors.items[element]
+            let mirror = map[element]
             if mirror >= 0: result.set((usize)mirror)
     return result
 
@@ -85,11 +111,11 @@ func mirror_rule() -> SelectRule:
 
 func select_mirror(input: const RuleInput*) -> RuleOutput!:
     let size = input.topology.size(input.domain)
-    var mirrors = Growing[i32]()
-    defer mirrors.close()
-    try mirror_map(input.mesh, input.domain, (i64)input.parms.at(0) + 1, &mirrors)
+    var mirrors = try mirror_map(input.mesh, input.domain, (i64)input.parms.at(0) + 1)
+    defer mirrors.release()
+    let map = mirrors.view()
     var out = (try BitsBuilder.copy_of(input.group)) if input.parms.at(1) != 0.0 else (try BitsBuilder.zeros(size))
     errdefer out.close()
     for element in 0..<size:
-        if input.group.get(element) and mirrors.items[element] >= 0: out.set((usize)mirrors.items[element])
+        if input.group.get(element) and map[element] >= 0: out.set((usize)map[element])
     return same_domain(input, out)

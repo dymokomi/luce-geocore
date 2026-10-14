@@ -93,7 +93,7 @@ extend Mesh:
     ## keep theirs (normal_refresh.lucb).
     pub func with_positions(points: const Vector3[]) -> interop.Reference[Mesh]!:
         if points.length != self.positions.count(): error(errors.invalid, "a position edit keeps the point count")
-        if self.is_precise(): return try self.rebuilt(points, false)
+        if self.is_precise(): return try self.precise_moved(points, self.origin, false)
         let previous = self.positions.view()
         var fresh = try Column[Float3].allocate(points.length)
         defer fresh.release()
@@ -119,12 +119,29 @@ extend Mesh:
                 marked[(usize)index] = true
                 unique += 1
         if self.is_precise():
-            # Moved in f64: a displacement below f32 spacing stays.
-            let points = try self.world_points(Matrix4())
-            defer free(points) in memory.heap
+            # Moved in f64 (a displacement below f32 spacing stays): the f64
+            # and f32 columns copied, only the marked points written.
+            var standing = try self.exact_points()
+            defer standing.release()
+            var exact = try Column[Vector3].copy_of(standing.view())
+            defer exact.release()
+            var positions = self.positions.share()
+            defer positions.release()
+            let rounded = try positions.writable()
+            let world = exact.span()
+            let changed = try new u32[unique] --- in memory.heap
+            defer free(changed) in memory.heap
+            var listed: usize = 0
             for point in 0..<count:
-                if marked[point]: points[point] = points[point].add(delta)
-            return try self.rebuilt(points, false)
+                if not marked[point]: continue
+                world[point] = world[point].add(delta)
+                if not world[point].is_finite(): error(errors.invalid, "mesh points must be finite and bounded to 1e6")
+                let next = Float3.of(world[point].subtract(self.origin))
+                if next.x != rounded[point].x or next.y != rounded[point].y or next.z != rounded[point].z:
+                    rounded[point] = next
+                    changed[listed] = (u32)point
+                    listed += 1
+            return try self.with_precise(&exact, &positions, self.origin, changed[..<listed], false)
         var fresh = self.positions.share()
         defer fresh.release()
         let output = try fresh.writable()
@@ -200,6 +217,12 @@ extend Mesh:
             owned.set_changed((usize)min_of(moved), (usize)max_of(moved) + 1)
         storage[0].positions.release()
         storage[0].positions = owned
+        # New positions: the trail (if any) described the old ones.
+        storage[0].trail.release()
+        var no_trail: Column[u32]
+        storage[0].trail = no_trail
+        storage[0].trail_base = 0
+        storage[0].trail_of = 0
         storage[0].origin = origin
         storage[0].normals.release()
         storage[0].normals = edit.normals
@@ -225,20 +248,29 @@ extend Mesh:
         var normals = self.normals.share()
         errdefer normals.release()
         let output = try normals.writable()
+        # The faces around the moved points, listed as they are met.
         let faces = self.offsets.count() - 1
         var touched = try BitsBuilder.zeros(faces)
         defer touched.close()
+        var list = Growing[u32]()
+        defer list.close()
         for point in moved:
-            for at in (usize)incidence.0[(usize)point]..<(usize)incidence.0[(usize)point + 1]: touched.set((usize)incidence.1[at])
-        var work = DisplayNormals(owned.view(), self.offsets.view(), self.corners.view(), touched.view(), output)
-        try parallel.for_each_range(faces, 4096, (void*)&work, display_normals)
+            for at in (usize)incidence.0[(usize)point]..<(usize)incidence.0[(usize)point + 1]:
+                let face = (usize)incidence.1[at]
+                if touched.view().get(face): continue
+                touched.set(face)
+                try list.push((u32)face)
+        var work = DisplayNormals(owned.view(), self.offsets.view(), self.corners.view(), list.view(), output)
+        try parallel.for_each_range(list.count, 4096, (void*)&work, display_normals)
         var attributes = try self.attributes.shared()
         errdefer attributes.close()
         let queries = try QueryCache.after(self.queries)
         errdefer release_query(queries)
         let shading = try ShadingCache.after(self.shading, moved)
         errdefer release_shading(shading)
-        let extent = try position_edit.bounds_of(owned.view(), self.origin)
+        # The bounds grow from this mesh's unless a point that held one moved in.
+        let shape = position_edit.Shape(self.positions.view(), owned.view(), self.origin, self.offsets.view(), self.corners.view(), self.triangles.view(), incidence.0, incidence.1)
+        let extent = try position_edit.moved_bounds(&shape, moved, self.extent)
         let storage = try new Mesh[1] --- in memory.heap
         storage[0] = self.shared_columns()
         owned.set_parent(self.positions.id())
@@ -246,6 +278,12 @@ extend Mesh:
             owned.set_changed((usize)min_of(moved), (usize)max_of(moved) + 1)
         storage[0].positions.release()
         storage[0].positions = owned
+        # New positions: the trail (if any) described the old ones.
+        storage[0].trail.release()
+        var no_trail: Column[u32]
+        storage[0].trail = no_trail
+        storage[0].trail_base = 0
+        storage[0].trail_of = 0
         storage[0].normals.release()
         storage[0].normals = normals
         storage[0].extent = extent
@@ -271,7 +309,7 @@ extend Mesh:
         if matrix.determinant() > 0.0 and self.is_precise():
             let points = try self.world_points(matrix)
             defer free(points) in memory.heap
-            let result = try self.rebuilt(points, true)
+            let result = try self.precise_moved(points, matrix.transform_point(self.origin), true)
             errdefer result.release()
             try position_edit.transform_normals(&result.value().attributes, matrix)
             return result
@@ -329,28 +367,36 @@ extend Mesh:
             points[at] = matrix.transform_point(self.point_at(at))
         return points
 
-    ## This topology over new `points`, rebuilt through `remapped`: the
-    ## position edit of a precise mesh, whose f64 points need a full
-    ## construction. The triangles are kept unless one of them folds.
-    func rebuilt(points: const Vector3[], preserve_normals: bool) -> interop.Reference[Mesh]!:
-        let offsets = self.offsets.view()
-        let old_corners = self.corners.view()
-        let old_triangles = self.triangles.view()
-        let sizes = try new i64[offsets.length - 1] --- in memory.heap
-        defer free(sizes) in memory.heap
-        for face in 0..<sizes.length: sizes[face] = (i64)(offsets[face + 1] - offsets[face])
-        let corners = try new i64[old_corners.length] --- in memory.heap
-        defer free(corners) in memory.heap
-        for at in 0..<corners.length: corners[at] = (i64)old_corners[at]
-        let display = try new i64[old_triangles.length] --- in memory.heap
-        defer free(display) in memory.heap
-        for at in 0..<display.length: display[at] = (i64)old_triangles[at]
-        var unchanged: i64[]
-        let kept: interop.Reference[Mesh]? = self.remapped(points, sizes, corners, unchanged, unchanged, unchanged, preserve_normals, display) catch failure:
-            if failure.code != errors.invalid: error(failure.code, failure.message)
-            recover none
-        if let result = kept: return result
-        return try self.remapped(points, sizes, corners, unchanged, unchanged, unchanged, preserve_normals)
+    ## A precise mesh over new f64 `points` (world), its f32 positions their
+    ## rounding relative to `origin`: a position edit like any other (the
+    ## topology, its caches and the triangles shared, normals redone around
+    ## the points that moved), with a new f64 column. `rigid` as for
+    ## `repositioned`.
+    func precise_moved(points: const Vector3[], origin: Vector3, rigid: bool) -> interop.Reference[Mesh]!:
+        var exact = try Column[Vector3].copy_of(points)
+        defer exact.release()
+        var fresh = try Column[Float3].allocate(points.length)
+        defer fresh.release()
+        let output = fresh.span()
+        for at in 0..<points.length:
+            if not points[at].is_finite(): error(errors.invalid, "mesh points must be finite and bounded to 1e6")
+            output[at] = Float3.of(points[at].subtract(origin))
+        var moved: u32[]
+        if origin == self.origin:
+            moved = try changed_points(self.positions.view(), output)
+        else:
+            moved = try new u32[points.length] --- in memory.heap
+            for at in 0..<moved.length: moved[at] = (u32)at
+        defer free(moved) in memory.heap
+        return try self.with_precise(&exact, &fresh, origin, moved, rigid)
+
+    ## `fresh` positions (relative to `origin`) whose points `moved` changed,
+    ## over this mesh's topology, with `exact` as the f64 points.
+    func with_precise(exact: const Column[Vector3]*, fresh: const Column[Float3]*, origin: Vector3, moved: const u32[], rigid: bool) -> interop.Reference[Mesh]!:
+        let storage = try self.repositioned_storage(*fresh, origin, moved, rigid)
+        storage.precise.release()
+        storage.precise = exact.share()
+        return try adopt_storage(storage)
 
     ## This mesh's points and faces, then `other`'s (see concatenated).
     pub func merged(other: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
@@ -429,13 +475,13 @@ struct DisplayNormals:
     let positions: const Float3[]
     let offsets: const i32[]
     let corners: const i32[]
-    let touched: Bits
+    let faces: const u32[]
     let normals: Float3[]
 
 func display_normals(context: void*, first: usize, end: usize, worker: usize):
     let work = (DisplayNormals*)context
-    for face in first..<end:
-        if not work.touched.get(face): continue
+    for listed in first..<end:
+        let face = (usize)work.faces[listed]
         let start = (usize)work.offsets[face]
         let size = (usize)work.offsets[face + 1] - start
         var normal = Vector3()

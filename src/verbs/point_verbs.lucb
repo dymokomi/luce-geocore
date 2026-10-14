@@ -108,8 +108,8 @@ func centroid(points: const Float3[], moved: const u32[]) -> Vector3:
     for point in moved: sum = sum.add(points[(usize)point].vector())
     return sum.multiply_scalar(1.0 / (f64)(moved.length if moved.length > 0 else 1))
 
-## Apply `matrix` to the listed points, each by its weight (all of it
-## without weights), in parallel.
+## Apply `matrix` to the listed points, each by its weight (`weights[n]`
+## for `moved[n]`; all of it without weights), in parallel.
 struct PlaceWork:
     let positions: Float3[]
     let moved: const u32[]
@@ -122,7 +122,7 @@ func place_points(context: void*, first: usize, end: usize, worker: usize):
         let point = (usize)work.moved[at]
         let original = work.positions[point].vector()
         let target = work.matrix.transform_point(original)
-        let weight = (f64)work.weights[point] if work.weights.length > 0 else 1.0
+        let weight = (f64)work.weights[at] if work.weights.length > 0 else 1.0
         work.positions[point] = Float3.of(original.add(target.subtract(original).multiply_scalar(weight)))
 
 func cook_transform(input: const VerbInput*, output: VerbOutput*) -> !:
@@ -142,23 +142,50 @@ func cook_transform(input: const VerbInput*, output: VerbOutput*) -> !:
     # Positions are relative to the origin: so is the matrix.
     let whole = transform.matrix(transform.translation)
     let matrix = Matrix4(whole.x, whole.y, whole.z, whole.transform_point(origin).subtract(origin))
-    # Soft selection: every point within the radius moves by its weight.
-    var affected = Growing[u32]()
-    defer affected.close()
-    var weights = Growing[f32]()
-    defer weights.close()
+    # Soft selection: every point within the radius moves by its weight
+    # (weighed once per input, group, radius and falloff: see soft_reach).
+    var affected: Column[u32]
+    defer affected.release()
+    var weights: Column[f32]
+    defer weights.release()
     if radius > 0.0:
-        try weights.fill(positions.length, 0.0)
-        try soft_weights(input.mesh, input.group, radius, (i64)p.at(14), weights.items[..<positions.length])
-        for point in 0..<positions.length:
-            if weights.items[point] > 0.0: try affected.push((u32)point)
+        let reach = try soft_reach(input.mesh, input.group, radius, (i64)p.at(14))
+        affected = reach.0
+        weights = reach.1
     else:
-        try affected.assign(group)
+        affected = try Column[u32].copy_of(group)
     var work = PlaceWork(positions, affected.view(), weights.view(), matrix)
-    try parallel.for_each_range(affected.count, 16384, (void*)&work, place_points)
+    try parallel.for_each_range(affected.count(), 16384, (void*)&work, place_points)
     if axis > 0: try mirror_points(input.mesh, positions, affected.view(), origin, axis, tolerance)
     output.moved.clear()
     try output.moved.assign(affected.view())
+
+## The points a soft selection of `group` reaches and their weights (one
+## per point listed), shared: kept with the input's geometry, so a drag
+## weighs them on its first frame only.
+func soft_reach(mesh: const Mesh*, group: Bits, radius: f64, falloff: i64) -> (Column[u32], Column[f32])!:
+    if let kept = mesh.kept_soft(group.words, radius, falloff): return kept
+    let count = (usize)mesh.point_count()
+    let all = try new f32[count] in memory.heap
+    defer free(all) in memory.heap
+    try soft_weights(mesh, group, radius, falloff, all)
+    var reached: usize = 0
+    for weight in all:
+        if weight > 0.0: reached += 1
+    var points = try Column[u32].allocate(reached)
+    errdefer points.release()
+    var weights = try Column[f32].allocate(reached)
+    errdefer weights.release()
+    let listed = points.span()
+    let weighed = weights.span()
+    var at: usize = 0
+    for point in 0..<count:
+        if all[point] > 0.0:
+            listed[at] = (u32)point
+            weighed[at] = all[point]
+            at += 1
+    try mesh.keep_soft(group.words, radius, falloff, &points, &weights)
+    return (points, weights)
 
 ## The centroid of the group's points (relative to the origin); under
 ## symmetry, of those on the positive side of the plane.
@@ -175,9 +202,9 @@ func centroid_of(positions: const Float3[], group: const u32[], origin: Vector3,
 ## Symmetry: points on the negative side take the reflection of their
 ## mirror's new position; points on the plane stay on it.
 func mirror_points(mesh: const Mesh*, positions: Float3[], affected: const u32[], origin: Vector3, axis: i64, tolerance: f64) -> !:
-    var mirrors = Growing[i32]()
-    defer mirrors.close()
-    try mirror_map(mesh, Domain.point, axis, &mirrors)
+    var mirrors = try mirror_map(mesh, Domain.point, axis)
+    defer mirrors.release()
+    let map = mirrors.view()
     let before = mesh.point_span()
     for point in affected:
         let original = before[(usize)point].vector().add(origin)
@@ -187,7 +214,7 @@ func mirror_points(mesh: const Mesh*, positions: Float3[], affected: const u32[]
             positions[(usize)point] = Float3.of(moved.with_coordinate((usize)(axis - 1), 0.0).subtract(origin))
             continue
         if coordinate > 0.0: continue
-        let mirror = mirrors.items[(usize)point]
+        let mirror = map[(usize)point]
         if mirror < 0: continue
         let partner = positions[(usize)mirror].vector().add(origin)
         positions[(usize)point] = Float3.of(partner.reflected((usize)(axis - 1)).subtract(origin))

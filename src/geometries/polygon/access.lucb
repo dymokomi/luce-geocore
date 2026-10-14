@@ -452,6 +452,22 @@ extend Mesh:
     pub func point_face_span() -> (const i32[], const i32[])!:
         return try self.incidence()
 
+    ## This geometry's kept mirror map `slot` (see QueryCache.mirrors),
+    ## shared, or none; and keeping one.
+    pub func kept_mirror(slot: usize) -> Column[i32]?:
+        return self.queries.mirror(slot)
+
+    pub func keep_mirror(slot: usize, map: const Column[i32]*):
+        self.queries.keep_mirror(slot, map)
+
+    ## This geometry's kept soft selection (see QueryCache.soft), and
+    ## keeping one.
+    pub func kept_soft(group: const u64[], radius: f64, falloff: i64) -> (Column[u32], Column[f32])?:
+        return self.queries.soft(group, radius, falloff)
+
+    pub func keep_soft(group: const u64[], radius: f64, falloff: i64, points: const Column[u32]*, weights: const Column[f32]*) -> !:
+        try self.queries.keep_soft(group, radius, falloff, points, weights)
+
     ## Every face's part (faces joined through shared points, numbered by
     ## their lowest faces) and each part's face count, built once per
     ## connectivity and shared like the other topology caches.

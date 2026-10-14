@@ -82,6 +82,13 @@ pub struct Mesh: PolygonTopology:
     var queries: QueryCache*
     ## Smooth shading normals, lazy and shared like `queries`.
     var shading: ShadingCache*
+    ## The points that may differ from the positions whose column id is
+    ## `trail_base`, while this mesh's positions are the column `trail_of`
+    ## (a verb's moved points over its input): a drag's next frame compares
+    ## only these and its own against this one. Empty (and 0s) otherwise.
+    var trail: Column[u32]
+    var trail_base: u64
+    var trail_of: u64
 
     ## Optional display indices are grouped by polygon, 3*(size-2) entries each.
     ## A wholly -1 face requests ordinary triangulation. Explicit triangles are
@@ -153,6 +160,10 @@ pub struct Mesh: PolygonTopology:
         self.topology = topology
         self.queries = queries
         self.shading = shading
+        var no_trail: Column[u32]
+        self.trail = no_trail
+        self.trail_base = 0
+        self.trail_of = 0
 
     ## This mesh with every column shared. Its `attributes`, `topology`,
     ## `queries` and `shading` still name this mesh's: the caller replaces or
@@ -165,6 +176,7 @@ pub struct Mesh: PolygonTopology:
         copy.normals = self.normals.share()
         copy.triangles = self.triangles.share()
         copy.precise = self.precise.share()
+        copy.trail = self.trail.share()
         return copy
 
     ## After attribute `name` on `domain` changed on this mesh (a snapshot
@@ -212,6 +224,7 @@ pub struct Mesh: PolygonTopology:
         self.normals.release()
         self.triangles.release()
         self.precise.release()
+        self.trail.release()
         release_query(self.queries)
         release_shading(self.shading)
         if self.topology.users.sub(1, .acq_rel) == 1:

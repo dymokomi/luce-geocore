@@ -5,7 +5,8 @@ import interop
 from luce_std import math
 import memory
 from luce_geocore.geocore import Mesh, MeshPrimitives, Selection, Groups
-from luce_geocore.kernel import clear_group_cache
+from luce_geocore.kernel import clear_group_cache, group_bits_of, Domain
+from luce_geocore.geocore import Vector3
 
 struct Row:
     let expression: str
@@ -19,6 +20,7 @@ pub func exercise() -> !:
     try members()
     try round_trips()
     try errors_and_reports()
+    try moves_keep_groups()
 
 func grid() -> interop.Reference[Mesh]!:
     let base = try MeshPrimitives.grid(2.0, 4)
@@ -180,3 +182,24 @@ func errors_and_reports() -> !:
     _ = Selection.of(mesh, "@nothing>0", 2) catch failure:
         failed = true
     assert(failed)
+
+## A move changes only positions: a range, everything and a named group are
+## the cached entries they were (the same bits), while `@P` is evaluated
+## again; a drag adds no entry per frame.
+func moves_keep_groups() -> !:
+    let mesh = try grid()
+    defer mesh.release()
+    let moved = try mesh.value().moved_points([5], Vector3(0.0, 0.25, 0.0))
+    defer moved.release()
+    let texts: str[3] = ["0-9", "*", "top"]
+    for text in texts:
+        var before = try group_bits_of(try mesh.get(), text, Domain.face)
+        defer before.bits.release()
+        var after = try group_bits_of(try moved.get(), text, Domain.face)
+        defer after.bits.release()
+        assert(before.bits.id() == after.bits.id(), "a move keeps a group that does not read positions")
+    var high = try group_bits_of(try mesh.get(), "@P.y>0.1", Domain.point)
+    defer high.bits.release()
+    var lifted = try group_bits_of(try moved.get(), "@P.y>0.1", Domain.point)
+    defer lifted.bits.release()
+    assert(high.bits.id() != lifted.bits.id(), "a group reading positions is evaluated again")

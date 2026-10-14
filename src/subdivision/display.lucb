@@ -193,7 +193,18 @@ func placed_display(base: const Mesh*, limit: const Vector3[], normals: const Ve
                 attribute.release()
                 error(failure.code, failure.message)
             let source = typed[f32](entry.data.view())
-            if source.length == values.length: memory.copy(values, source, values.length)
+            if source.length == values.length:
+                memory.copy(values, source, values.length)
+                # Only the moved points' normals differ from the last ones:
+                # caches keyed on the old column (GPU copies) update those.
+                if moved.length > 0:
+                    var low = moved[0]
+                    var high = moved[0]
+                    for point in moved:
+                        if point < low: low = point
+                        if point > high: high = point
+                    attribute.data.set_parent(entry.data.id())
+                    attribute.data.set_changed((usize)low * 12, ((usize)high + 1) * 12)
     for at in 0..<moved.length:
         let point = (usize)moved[at]
         let n = normals[at]
