@@ -58,6 +58,28 @@ pub struct PickSpec:
     pub let levels: str = ""
     pub let prompt: str = ""
 
+## How the viewport's interactive creation sets a primitive's rows
+## (Verb.place), after Modo's and Maya's interactive primitives: a drag on
+## the ground or a surface draws the base, then (with a rise) the pointer
+## raises it; where the base lands and the way that surface faces set the
+## Position and Up rows.
+pub struct PlaceSpec:
+    ## "rect": the drag's two corners set the base's width and depth (a
+    ## vector parameter's X and Z, or two numbers: width, then depth);
+    ## "radius": the drag out from the center sets a radius.
+    pub let base: str
+    pub let size: i64
+    ## The parameter the second stage sets (-1: none), its component (a
+    ## vector's), and how: "height" along Up from the base, "radius" the
+    ## distance off the base's circle (a torus's tube).
+    pub let rise: i64 = -1
+    pub let rise_component: i64 = 0
+    pub let rise_mode: str = "height"
+    ## The Position and Up parameters (vectors); Turn and Name piece follow
+    ## Up (verbs/create.lucb's rows).
+    pub let position: i64 = -1
+    pub let up: i64 = -1
+
 ## A key that changes a tool while its drag lasts, as Blender's modal keys
 ## do: `action` "drag" makes the drag set parameter `parm` instead (moved
 ## by `mode`, one of Verb.drag_mode's words), "cycle" steps a menu

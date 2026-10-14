@@ -56,6 +56,8 @@ import shape_checks
 import large_face_checks
 import contract_checks
 import unit_checks
+import primitive_checks
+import retopology_checks
 from luce_geocore.kernel import set_small_faces
 
 ## Counts live blocks and fails the allocation after `remaining` more.
@@ -288,6 +290,12 @@ func checks(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 200, unit_checks.exercise)
     try unit_checks.run()
+    settle(&tracker)
+    inject(&tracker, 300, primitive_checks.exercise)
+    try primitive_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, retopology_checks.exercise)
+    try retopology_checks.exercise()
     settle(&tracker)
     print("ok polygon meshes, operators, queries and allocation failures")
     return 0

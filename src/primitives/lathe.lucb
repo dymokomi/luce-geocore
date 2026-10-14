@@ -1,0 +1,114 @@
+## Surfaces of revolution closed by poles: the UV sphere and the capsule.
+## Both are a lathe about Y: `sides` points round each ring, rings top to
+## bottom, a pole above the first and below the last. Points: the top pole,
+## the rings in order (each from +X toward +Z), the bottom pole. Faces
+## column by column, as Blender's UV sphere and our first sphere order them:
+## the top pole's triangle, the quads down the column, the bottom pole's
+## triangle.
+
+## The most points round a ring and rings a primitive takes.
+pub let most_sides: usize = 4096
+pub let most_rows: usize = 2048
+
+## The UV sphere of `radius` standing on the origin: `columns` points round,
+## `rows` bands from pole to pole (rows - 1 rings).
+pub func uv_sphere_mesh(radius: f64, columns: usize, rows: usize) -> Mesh*!:
+    if not (radius > 0.0 and radius <= 100000.0): error(errors.invalid, "a sphere's radius must be in (0, 100000]")
+    if columns < 3 or columns > most_sides or rows < 2 or rows > most_rows: error(errors.invalid, "a sphere takes 3..4096 columns and 2..2048 rows")
+    let rings = rows - 1
+    let radii = try new f64[rings] --- in memory.heap
+    defer free(radii) in memory.heap
+    let heights = try new f64[rings] --- in memory.heap
+    defer free(heights) in memory.heap
+    for k in 0..<rings:
+        let theta = (f64)(k + 1) * math.pi / (f64)rows
+        radii[k] = math.sin(theta) * radius
+        heights[k] = (math.cos(theta) + 1.0) * radius
+    return try lathe_mesh(columns, radii, heights, 2.0 * radius, 0.0)
+
+## The capsule of `radius` and overall `height` standing on the origin:
+## `sides` points round, `cap_rows` bands from each pole to its equator and
+## `rows` bands along the straight part between them (none when the height
+## is twice the radius: a sphere).
+pub func capsule_mesh(radius: f64, height: f64, sides: usize, cap_rows: usize, rows: usize) -> Mesh*!:
+    if not (radius > 0.0 and radius <= 100000.0 and height <= 100000.0): error(errors.invalid, "a capsule's radius must be in (0, 100000]")
+    if not (height >= 2.0 * radius): error(errors.invalid, "a capsule is at least twice its radius tall")
+    if sides < 3 or sides > most_sides or cap_rows < 1 or cap_rows > most_rows or rows < 1 or rows > most_rows: error(errors.invalid, "a capsule takes 3..4096 sides and 1..2048 rows")
+    let straight = height - 2.0 * radius
+    let middle = rows - 1 if straight > 0.0 else 0
+    # Upper rings to the equator, the straight part's, then from the lower
+    # equator down (that equator is the upper one when nothing is straight).
+    let rings = cap_rows + middle + (cap_rows if straight > 0.0 else cap_rows - 1)
+    let radii = try new f64[rings] --- in memory.heap
+    defer free(radii) in memory.heap
+    let heights = try new f64[rings] --- in memory.heap
+    defer free(heights) in memory.heap
+    var at: usize = 0
+    for k in 1..<(cap_rows + 1):
+        let theta = (f64)k * math.pi / (2.0 * (f64)cap_rows)
+        radii[at] = math.sin(theta) * radius
+        heights[at] = height - radius + math.cos(theta) * radius
+        at += 1
+    for k in 1..<(middle + 1):
+        radii[at] = radius
+        heights[at] = height - radius - (f64)k * straight / (f64)rows
+        at += 1
+    let lower_first: usize = 0 if straight > 0.0 else 1
+    for k in lower_first..<cap_rows:
+        let theta = math.pi / 2.0 + (f64)k * math.pi / (2.0 * (f64)cap_rows)
+        radii[at] = math.sin(theta) * radius
+        heights[at] = radius + math.cos(theta) * radius
+        at += 1
+    return try lathe_mesh(sides, radii[..<at], heights[..<at], height, 0.0)
+
+## The lathe of `sides` points round rings `radii` at `heights`, top pole at
+## `top`, bottom pole at `bottom`.
+pub func lathe_mesh(sides: usize, radii: const f64[], heights: const f64[], top: f64, bottom: f64) -> Mesh*!:
+    let rings = radii.length
+    if rings < 1: error(errors.invalid, "a lathe needs a ring")
+    let column_faces = rings + 1
+    let column_corners = 4 * rings + 2
+    var arrays = try Arrays.allocate(2 + rings * sides, sides * column_faces, sides * column_corners)
+    defer arrays.close()
+    var work = LatheWork(sides, radii, heights, arrays.points(), arrays.face_offsets(), arrays.face_corners())
+    arrays.put(0, Vector3(0.0, top, 0.0))
+    arrays.put(1 + rings * sides, Vector3(0.0, bottom, 0.0))
+    ranges.each_range(rings, 16, (void*)&work, lathe_rings)
+    ranges.each_range(sides, 64, (void*)&work, lathe_columns)
+    return try arrays.finish()
+
+struct LatheWork:
+    let sides: usize
+    let radii: const f64[]
+    let heights: const f64[]
+    let positions: Float3[]
+    let offsets: i32[]
+    let corners: i32[]
+
+func lathe_rings(context: void*, first: usize, end: usize, worker: usize):
+    let work = (LatheWork*)context
+    for k in first..<end:
+        for s in 0..<work.sides:
+            let phi = (f64)s * 2.0 * math.pi / (f64)work.sides
+            work.positions[1 + k * work.sides + s] = Float3.of(Vector3(math.cos(phi) * work.radii[k], work.heights[k], math.sin(phi) * work.radii[k]))
+
+## Columns `first..<end`: the top triangle, the quads, the bottom triangle.
+func lathe_columns(context: void*, first: usize, end: usize, worker: usize):
+    let work = (LatheWork*)context
+    let rings = work.radii.length
+    let n = work.sides
+    let bottom = 1 + rings * n
+    for s in first..<end:
+        let next = (s + 1) % n
+        var face = s * (rings + 1)
+        var corner = s * (4 * rings + 2)
+        put_triangle(work.offsets, work.corners, face, corner, 0, 1 + next, 1 + s)
+        face += 1
+        corner += 3
+        for k in 0..<rings - 1:
+            let a = 1 + k * n
+            put_quad(work.offsets, work.corners, face, corner, a + s, a + next, a + n + next, a + n + s)
+            face += 1
+            corner += 4
+        let last = 1 + (rings - 1) * n
+        put_triangle(work.offsets, work.corners, face, corner, bottom, last + s, last + next)

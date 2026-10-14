@@ -1,0 +1,83 @@
+## The primitive verbs (Create › Primitives), after Blender's, Maya's, Modo's
+## and Houdini's primitives. Each builds its shape with its kernel
+## (primitives/), standing on the ground, places it (Position, Up and Turn:
+## primitives/placement.lucb) and adds it to the input as a piece of its
+## own: its faces are the output selection and, with Name piece on (Edit
+## Mesh's steps turn it on), take the `path` /<stem>1, /<stem>2, … (the
+## first no face has yet), Edit Mesh's Object level's pieces. As a node a
+## primitive has no input (Verb.inputs 0) and names nothing; as an Edit
+## Mesh step it adds to the edited mesh.
+## Its `place` tells the viewport's interactive creation which rows a drag
+## on the ground or a surface sets.
+##
+## Every primitive's rows end with the same four, behind More options.
+
+let up_initials: f64[3] = [0.0, 1.0, 0.0]
+let position_parm: ParmSpec = ParmSpec("Position", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "Where the base's center sits: the shape stands on it along Up.", more = true)
+let up_parm: ParmSpec = ParmSpec("Up", ParmKind.vector, 0.0, -1.0, 1.0, 3, "", "The way the shape stands; placed on a surface, its normal there.", more = true, initials = up_initials)
+let turn_parm: ParmSpec = ParmSpec("Turn", ParmKind.number, 0.0, -360.0, 360.0, 1, "", "Degrees the shape is turned about Up.", more = true)
+let piece_parm: ParmSpec = ParmSpec("Name piece", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Name its faces' path /box1, /box2, …: a piece of its own (Edit Mesh's steps name theirs).", bar = false, more = true)
+
+## The caps menus (round.lucb's kinds: None 0, N-gon 1, Fan 2, Grid 3).
+let cap_choices: str = "None|N-gon|Fan|Grid"
+
+## Add `shape` (taken: released here) to the input, placed by the placement
+## parameters from number `at` (Position, Up, Turn), named /<stem>n with
+## Name piece (the number after them) on.
+func add_piece(input: const VerbInput*, output: VerbOutput*, shape: Mesh*, stem: str, at: usize) -> !:
+    defer mesh_dispose(shape)
+    let p = input.parms
+    let frame = try placement(Vector3(p.at(at), p.at(at + 1), p.at(at + 2)), Vector3(p.at(at + 3), p.at(at + 4), p.at(at + 5)), p.at(at + 6))
+    let parts: MeshPart[2] = [MeshPart(input.mesh, Matrix4()), MeshPart(shape, frame)]
+    let joined = try concatenated(parts)
+    defer joined.release()
+    let made = try mesh_share(joined.value())
+    errdefer mesh_dispose(made)
+    let first = (usize)input.mesh.face_count()
+    let total = (usize)made.face_count()
+    if p.at(at + 7) != 0.0:
+        try name_piece(made, first, stem)
+    var selection = try BitsBuilder.zeros(total)
+    selection.set_range(first, total)
+    # Nothing fails past here: the output owns the mesh.
+    output.selection.close()
+    output.selection = selection
+    output.selection_domain = Domain.face
+    output.mesh = made
+
+## Faces `first..` of `mesh` named /<stem>n, the first n no earlier face's
+## `path` has; earlier faces keep theirs.
+func name_piece(mesh: Mesh*, first: usize, stem: str) -> !:
+    let faces = (usize)mesh.face_count()
+    let index = mesh.attribute_on("path", Domain.face)
+    var old: const Attribute*? = none
+    if index >= 0:
+        let entry = try mesh.attribute_entry(index)
+        if entry.kind == DataType.text: old = entry
+    var table = TableBuilder()
+    defer table.close()
+    let values = try new i32[faces] --- in memory.heap
+    defer free(values) in memory.heap
+    for face in 0..<first:
+        var text = ""
+        if let entry = old: text = entry.text_at(face)
+        values[face] = try table.intern(text)
+    var room: u8[256]
+    var name = ""
+    for number in 1..<(usize)100000:
+        name = strings.format(room[..<256], f"/{stem}{number}") else error(errors.limit, "a piece's path is too long")
+        var taken = false
+        for at in 0..<table.count():
+            if table.text(at) == name: taken = true
+        if not taken: break
+    let named = try table.intern(name)
+    for face in first..<faces: values[face] = named
+    var column = try table.finish()
+    defer column.release()
+    remove_attribute(mesh, "path", Domain.face)
+    try put_attribute(mesh, try Attribute.text("path", Domain.face, faces, column, values[..<faces]))
+
+## A count parameter as a size, checked to be whole and in range.
+func count_of(value: f64, low: f64, high: f64) -> usize!:
+    if not (value >= low and value <= high) or math.floor(value) != value: error(errors.invalid, "a primitive's counts must be whole numbers in range")
+    return (usize)value

@@ -67,3 +67,43 @@ pub func triangle_distance(p: Vector3, a: Vector3, b: Vector3, c: Vector3) -> f6
             # projection is numerically ambiguous beside a very short side.
             return math.min(boundary,height*height/area2)
     return boundary
+
+## The point of triangle (a, b, c) nearest `p` (Ericson's regions: a
+## corner, a side, or inside), for a degenerate triangle the nearest point
+## of its sides.
+pub func triangle_nearest_point(p: Vector3, a: Vector3, b: Vector3, c: Vector3) -> Vector3:
+    let ab = b.subtract(a)
+    let ac = c.subtract(a)
+    let ap = p.subtract(a)
+    let d1 = ab.dot(ap)
+    let d2 = ac.dot(ap)
+    if d1 <= 0.0 and d2 <= 0.0: return a
+    let bp = p.subtract(b)
+    let d3 = ab.dot(bp)
+    let d4 = ac.dot(bp)
+    if d3 >= 0.0 and d4 <= d3: return b
+    let vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0 and d1 - d3 > 0.0: return a.add(ab.multiply_scalar(d1 / (d1 - d3)))
+    let cp = p.subtract(c)
+    let d5 = ab.dot(cp)
+    let d6 = ac.dot(cp)
+    if d6 >= 0.0 and d5 <= d6: return c
+    let vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0 and d2 - d6 > 0.0: return a.add(ac.multiply_scalar(d2 / (d2 - d6)))
+    let va = d3 * d6 - d5 * d4
+    if va <= 0.0 and d4 - d3 >= 0.0 and d5 - d6 >= 0.0 and (d4 - d3) + (d5 - d6) > 0.0:
+        return b.add(c.subtract(b).multiply_scalar((d4 - d3) / ((d4 - d3) + (d5 - d6))))
+    let total = va + vb + vc
+    if total > 0.0 and math.is_finite(total):
+        return a.add(ab.multiply_scalar(vb / total)).add(ac.multiply_scalar(vc / total))
+    # Degenerate: the nearest of its sides' points.
+    var best = nearest_on_segment(p, a, b)
+    for other in [nearest_on_segment(p, b, c), nearest_on_segment(p, c, a)]:
+        if other.subtract(p).length() < best.subtract(p).length(): best = other
+    return best
+
+func nearest_on_segment(p: Vector3, a: Vector3, b: Vector3) -> Vector3:
+    let ab = b.subtract(a)
+    let length = ab.dot(ab)
+    let t = math.clamp(p.subtract(a).dot(ab) / length, 0.0, 1.0) if length > 0.0 else 0.0
+    return a.add(ab.multiply_scalar(t))

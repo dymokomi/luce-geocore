@@ -13,7 +13,10 @@ from luce_std import parallel as std_parallel
 
 ## One case: what it runs, on which mesh (0 grid, 1 tube cut in two, 2 grid
 ## with a ten-face hole, 3 the grid in triangles, 4 a 418×418 grid
-## subdivided once: 836×836 quads), its numbers and its second pick.
+## subdivided once: 836×836 quads, 5 nothing: a primitive), its numbers,
+## its second pick and whether it reads the reference: the grid in
+## triangles, a little turned and lifted 0.3 (a scan just above a
+## retopology's points).
 struct Case:
     let name: str
     let verb: str
@@ -22,8 +25,9 @@ struct Case:
     let mesh: u8
     let numbers: f64[16]
     let second: str = ""
+    let reference: bool = false
 
-let case_total: usize = 60
+let case_total: usize = 74
 
 ## The Knife's numbers: a stroke straight across the grid's middle row,
 ## seen from above, cutting through.
@@ -62,7 +66,7 @@ func case_at(index: usize) -> Case:
         27: return Case("PolyDraw, a quad drawn onto the grid, its corners snapped", "PolyDraw", "", 0, 0, [0.001, 4.0, 135.5, 0.0, -1.5, 136.5, 0.0, -1.5, 136.5, 0.0, -0.5, 135.5, 0.0, -0.5, 0.0, 0.0])
         28: return Case("PolyDraw, through 4 selected points", "PolyDraw", "350000-350001 350838-350839", 1, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         29: return Case("Clean, everything", "Clean", "*", 0, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        _: return stage5_case(index - 30)
+        _: return stage5_case(index - 30) if index < 60 else stage6_case(index - 60)
 
 ## The Stage 5 tools.
 func stage5_case(index: usize) -> Case:
@@ -100,6 +104,26 @@ func stage5_case(index: usize) -> Case:
         28: return Case("Decimate, un-subdivide 836×836 quads", "PolyReduce", "*", 3, 4, [1.0, 0.5, 1.0, 5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         _: return Case("Collapse, every edge of 100k faces", "Collapse", "0-99999", 3, 0, zero)
 
+## The Stage 6 tools: primitives of about a million faces, Shrinkwrap and
+## Relax onto the reference sphere, Poly Pen on the grid.
+func stage6_case(index: usize) -> Case:
+    let zero: f64[16] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    match index:
+        0: return Case("Grid, 1024 × 1024 (1M faces)", "Grid", "", 0, 5, [2.0, 2.0, 1024.0, 1024.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        1: return Case("Box, 409 divisions each way (1M faces)", "Box", "", 0, 5, [2.0, 2.0, 2.0, 409.0, 409.0, 409.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+        2: return Case("Box, 32 divisions, every edge rounded at 4 segments", "Box", "", 0, 5, [2.0, 2.0, 2.0, 32.0, 32.0, 32.0, 0.2, 4.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
+        3: return Case("Sphere, 1448 × 724 (1M faces)", "Sphere", "", 0, 5, [1.0, 1448.0, 724.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        4: return Case("Icosphere, 8 subdivisions (1.3M faces)", "Icosphere", "", 0, 5, [1.0, 8.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        5: return Case("Quad Sphere, 409 divisions (1M faces)", "Quad Sphere", "", 0, 5, [1.0, 409.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        6: return Case("Cylinder, 1024 sides × 1024 rows, grid caps (1.2M faces)", "Cylinder", "", 0, 5, [1.0, 2.0, 1024.0, 1024.0, 3.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        7: return Case("Torus, 1024 × 1024 (1M faces)", "Torus", "", 0, 5, [1.0, 0.3, 1024.0, 1024.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        8: return Case("Capsule, 1024 sides, 256 cap rows, 512 rows (1M faces)", "Capsule", "", 0, 5, [0.5, 2.0, 1024.0, 256.0, 512.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        9: return Case("Helix, 40 turns of 512 steps, 48 sides (1M faces)", "Helix", "", 0, 5, [1.0, 0.05, 40.0, 8.0, 512.0, 48.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+        10: return Case("Shrinkwrap, every point (702k) onto a scan just above (1.4M triangles)", "Shrinkwrap", "*", 1, 0, [0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], reference = true)
+        11: return Case("Shrinkwrap, every point along a vector onto that scan", "Shrinkwrap", "*", 1, 0, [2.0, 0.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], reference = true)
+        12: return Case("Relax, every point, 5 rounds kept on that scan", "Relax", "*", 1, 0, [0.5, 5.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], reference = true)
+        _: return Case("Poly Pen, a boundary edge extended", "Poly Pen", "p0-1", 2, 0, [0.0, 0.00001, 2.0, -418.5, 0.0, -419.5, -417.5, 0.0, -419.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
 let no_numbers: f64[1] = [0.0]
 let fixed_split: f64[2] = [1.0, 0.0]
 let linear_once: f64[3] = [1.0, 0.0, 0.0]
@@ -108,7 +132,7 @@ let linear_once: f64[3] = [1.0, 0.0, 0.0]
 ## a verb refuses numbers past its parameters, but PolyDraw takes its
 ## corners after them).
 func numbers_taken(verb: str) -> usize:
-    if verb == "PolyDraw" or verb == "Knife": return 16
+    if verb == "PolyDraw" or verb == "Knife" or verb == "Poly Pen": return 16
     let index = Verbs.index_of(verb)
     var total: i64 = 0
     for parm in 0..<Verbs.parm_count(index): total += Verbs.parm_components(index, parm)
@@ -145,6 +169,11 @@ pub func main(arguments: str[]) -> i32!:
     for mesh in meshes:
         let warm = try Verbs.run("Dissolve", mesh, "0", 3, no_numbers[..<0])
         warm.release()
+    let empty = try Mesh.empty()
+    defer empty.release()
+    let ball = try triangles.value().transformed(Vector3(0.0, 0.3, 0.0), Vector3(0.0, 0.05, 0.0), Vector3(1.0, 1.0, 1.0))
+    defer ball.release()
+    try ball.value().prepare_queries()
     for index in 0..<case_total:
         let case = case_at(index)
         var source = grid
@@ -152,8 +181,11 @@ pub func main(arguments: str[]) -> i32!:
         if case.mesh == 2: source = holed
         if case.mesh == 3: source = triangles
         if case.mesh == 4: source = fine
+        if case.mesh == 5: source = empty
+        var reference: interop.Reference[Mesh]? = none
+        if case.reference: reference = ball
         let start = time.now()
-        let result = try Verbs.run(case.verb, source, case.group, case.group_type, case.numbers[..<numbers_taken(case.verb)], 0, false, case.second)
+        let result = try Verbs.run(case.verb, source, case.group, case.group_type, case.numbers[..<numbers_taken(case.verb)], 0, false, case.second, reference)
         let spent = (f64)time.since(start) / 1000000.0
         let mesh = try result.value().mesh()
         print(f"{case.name}\t{spent}\t{mesh.value().face_count()}\t{result.value().warning()}")

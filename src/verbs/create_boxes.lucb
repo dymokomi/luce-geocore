@@ -1,0 +1,70 @@
+## Box (divisions along each axis, edges rounded by a bevel), Grid and
+## Plane. A box's bevel is PolyBevel run on its outer edges (every edge
+## whose faces meet square), so its rounded edges and corner patches are
+## Bevel's own (grid corners, all quads but the corner triangles at odd
+## segments).
+
+let box_parms: ParmSpec[10] = [
+    ParmSpec("Size", ParmKind.vector, 2.0, 0.001, 100000.0, 3, "", "Width (X), height (Y) and depth (Z).", 10.0),
+    ParmSpec("X divisions", ParmKind.integer, 1.0, 1.0, 1024.0, 1, "", "Faces across the width."),
+    ParmSpec("Y divisions", ParmKind.integer, 1.0, 1.0, 1024.0, 1, "", "Faces up the height."),
+    ParmSpec("Z divisions", ParmKind.integer, 1.0, 1.0, 1024.0, 1, "", "Faces across the depth."),
+    ParmSpec("Bevel", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "Round every edge to this radius (0: sharp edges).", 1.0),
+    ParmSpec("Bevel segments", ParmKind.integer, 3.0, 1.0, 64.0, 1, "", "Faces across each rounded edge."),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+let box_place: PlaceSpec = PlaceSpec("rect", 0, rise = 0, rise_component = 1, position = 6, up = 7)
+
+func box_verb() -> Verb:
+    return Verb("Box", "Primitives", "A box of divisions along each axis, its edges rounded by a bevel", Domain.face, false, box_parms, true, cook_box, section = "Create", family = "Primitives", icon = "cube", inputs = 0, gesture = "create", place = box_place)
+
+func cook_box(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    let size = Vector3(p.at(0), p.at(1), p.at(2))
+    let shape = try box_mesh(size, try count_of(p.at(3), 1.0, 1024.0), try count_of(p.at(4), 1.0, 1024.0), try count_of(p.at(5), 1.0, 1024.0))
+    let radius = p.at(6)
+    if radius == 0.0: return try add_piece(input, output, shape, "box", 8)
+    defer mesh_dispose(shape)
+    if not (radius > 0.0 and math.is_finite(radius)): error(errors.invalid, "a box's bevel must not be negative")
+    # Bevel's own rows at their starts, but for Width and Segments.
+    let bevel = bevel_verb()
+    var numbers = try filled_parms(bevel.parms, no_parms[..<0])
+    defer numbers.close()
+    numbers.items[0] = radius
+    numbers.items[1] = (f64)(try count_of(p.at(7), 1.0, 64.0))
+    var rounded = try run_verb(&bevel, shape, "sharp(*, 30)", 2, numbers.view())
+    defer rounded.close()
+    if rounded.warning.length > 0: error(errors.invalid, "a box's bevel must leave every face an area: make it smaller")
+    try add_piece(input, output, try mesh_share(rounded.mesh), "box", 8)
+
+let no_parms: f64[1] = [0.0]
+
+let grid_parms: ParmSpec[8] = [
+    ParmSpec("Width", ParmKind.number, 2.0, 0.001, 100000.0, 1, "", "Its size along X.", 10.0),
+    ParmSpec("Depth", ParmKind.number, 2.0, 0.001, 100000.0, 1, "", "Its size along Z.", 10.0),
+    ParmSpec("Columns", ParmKind.integer, 4.0, 1.0, 2048.0, 1, "", "Faces across the width (up to 2048: 4.2 million points with the rows)."),
+    ParmSpec("Rows", ParmKind.integer, 4.0, 1.0, 2048.0, 1, "", "Faces across the depth."),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+let grid_shape: PlaceSpec = PlaceSpec("rect", 0, position = 4, up = 5)
+
+func grid_verb() -> Verb:
+    return Verb("Grid", "Primitives", "A flat grid of rows and columns of quads", Domain.face, false, grid_parms, true, cook_grid, section = "Create", family = "Primitives", icon = "grid", inputs = 0, wheel = 2, gesture = "create", place = grid_shape)
+
+func cook_grid(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    try add_piece(input, output, try grid_mesh(p.at(0), p.at(1), try count_of(p.at(2), 1.0, 2048.0), try count_of(p.at(3), 1.0, 2048.0)), "grid", 4)
+
+let plane_parms: ParmSpec[6] = [
+    ParmSpec("Width", ParmKind.number, 2.0, 0.001, 100000.0, 1, "", "Its size along X.", 10.0),
+    ParmSpec("Depth", ParmKind.number, 2.0, 0.001, 100000.0, 1, "", "Its size along Z.", 10.0),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+let plane_place: PlaceSpec = PlaceSpec("rect", 0, position = 2, up = 3)
+
+func plane_verb() -> Verb:
+    return Verb("Plane", "Primitives", "One flat quad", Domain.face, false, plane_parms, true, cook_plane, section = "Create", family = "Primitives", icon = "plane", inputs = 0, gesture = "create", place = plane_place)
+
+func cook_plane(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    try add_piece(input, output, try grid_mesh(p.at(0), p.at(1), 1, 1), "plane", 2)

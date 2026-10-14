@@ -1,0 +1,16 @@
+## Platonic: the five Platonic solids (Houdini's Platonic Solids), each
+## resting on a face.
+
+let platonic_parms: ParmSpec[6] = [
+    ParmSpec("Type", ParmKind.menu, 0.0, 0.0, 4.0, 1, "Tetrahedron|Cube|Octahedron|Dodecahedron|Icosahedron", "Which solid."),
+    ParmSpec("Radius", ParmKind.number, 1.0, 0.001, 100000.0, 1, "", "From its center to its corners.", 10.0),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+let platonic_place: PlaceSpec = PlaceSpec("radius", 1, position = 2, up = 3)
+
+func platonic_verb() -> Verb:
+    return Verb("Platonic", "Primitives", "A Platonic solid: tetrahedron, cube, octahedron, dodecahedron or icosahedron", Domain.face, false, platonic_parms, true, cook_platonic, label = "Platonic Solid", section = "Create", family = "Primitives", icon = "cube", inputs = 0, gesture = "create", place = platonic_place)
+
+func cook_platonic(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    try add_piece(input, output, try platonic_mesh((i64)(try count_of(p.at(0), 0.0, 4.0)), p.at(1)), "solid", 2)

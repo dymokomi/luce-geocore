@@ -248,7 +248,7 @@ func entry(index: usize) -> Entry:
     if index < verb_count():
         let verb = verb_at(index)
         var rows: const TextRow[]
-        return Entry(verb.name, verb.category, verb.description, 1, false, true, verb.parms, verb.trailing, rows)
+        return Entry(verb.name, verb.category, verb.description, verb.inputs, verb.second_required, verb.inputs > 0, verb.parms, verb.trailing, rows)
     let verb = set_verb_at(index - verb_count())
     return Entry(verb.name, verb.category, verb.description, verb.inputs, verb.second_required, verb.grouped, verb.parms, false, verb.text_rows)
 

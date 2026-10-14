@@ -1,0 +1,301 @@
+## The polyhedra: the five Platonic solids and the icosphere (the
+## icosahedron's faces divided and pushed onto the sphere, as Blender's Ico
+## Sphere: 10 × 4ⁿ + 2 points and 20 × 4ⁿ faces at n subdivisions). The
+## icosahedron stands with a point straight up and one straight down; the
+## dodecahedron is its dual (a point at each of its face centers, a face
+## round each of its points). Every face is wound outward.
+
+## The golden ratio.
+let golden: f64 = 1.618033988749895
+
+## The icosahedron's corners (before turning a point up) and faces.
+let ico_points: f64[36] = [-1.0, golden, 0.0, 1.0, golden, 0.0, -1.0, -golden, 0.0, 1.0, -golden, 0.0,
+                           0.0, -1.0, golden, 0.0, 1.0, golden, 0.0, -1.0, -golden, 0.0, 1.0, -golden,
+                           golden, 0.0, -1.0, golden, 0.0, 1.0, -golden, 0.0, -1.0, -golden, 0.0, 1.0]
+let ico_faces: usize[60] = [0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
+                            3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9, 8, 1]
+
+## The Platonic solids, as Platonic's Type menu numbers them.
+pub let tetrahedron: i64 = 0
+pub let cube: i64 = 1
+pub let octahedron: i64 = 2
+pub let dodecahedron: i64 = 3
+pub let icosahedron: i64 = 4
+
+## The most subdivisions an icosphere takes (5,242,880 faces).
+pub let most_subdivisions: usize = 9
+
+## A solid's points on the unit sphere and its faces (`sizes` corners each,
+## `corners` in order), wound outward.
+struct Solid:
+    var points: Vector3[20]
+    var point_count: usize
+    var sizes: usize[20]
+    var face_count: usize
+    var corners: usize[60]
+    var corner_count: usize
+
+    func add_point(p: Vector3) -> !:
+        self.points[self.point_count] = try p.normalized()
+        self.point_count += 1
+
+    func add_face(size: usize, a: usize, b: usize, c: usize, d: usize = 0, e: usize = 0):
+        let given: usize[5] = [a, b, c, d, e]
+        self.sizes[self.face_count] = size
+        self.face_count += 1
+        for at in 0..<size:
+            self.corners[self.corner_count + at] = given[at]
+        self.corner_count += size
+
+    ## Face `face`'s first corner.
+    func first(face: usize) -> usize:
+        var at: usize = 0
+        for earlier in 0..<face: at += self.sizes[earlier]
+        return at
+
+    ## Face `face`'s center.
+    func center(face: usize) -> Vector3:
+        let start = self.first(face)
+        var sum = Vector3()
+        for at in start..<start + self.sizes[face]: sum = sum.add(self.points[self.corners[at]])
+        return sum.multiply_scalar(1.0 / (f64)self.sizes[face])
+
+    ## Every face wound so its normal points away from the center.
+    func wind_outward():
+        for face in 0..<self.face_count:
+            let start = self.first(face)
+            let size = self.sizes[face]
+            let a = self.points[self.corners[start]]
+            let normal = self.points[self.corners[start + 1]].subtract(a).cross(self.points[self.corners[start + 2]].subtract(a))
+            if normal.dot(self.center(face)) >= 0.0: continue
+            for at in 0..<size // 2:
+                let kept = self.corners[start + at]
+                self.corners[start + at] = self.corners[start + size - 1 - at]
+                self.corners[start + size - 1 - at] = kept
+
+## The icosahedron on the unit sphere, a point straight up (turned about Z
+## so its corner (1, φ, 0) points along +Y).
+func icosahedron_solid() -> Solid!:
+    var solid: Solid = ---
+    solid.point_count = 0
+    solid.face_count = 0
+    solid.corner_count = 0
+    let angle = math.atan2(1.0, golden)
+    for at in 0..<(usize)12:
+        let x = ico_points[at * 3]
+        let y = ico_points[at * 3 + 1]
+        try solid.add_point(Vector3(x * math.cos(angle) - y * math.sin(angle), x * math.sin(angle) + y * math.cos(angle), ico_points[at * 3 + 2]))
+    for face in 0..<(usize)20:
+        solid.add_face(3, ico_faces[face * 3], ico_faces[face * 3 + 1], ico_faces[face * 3 + 2])
+    solid.wind_outward()
+    return solid
+
+## Platonic solid `kind` on the unit sphere, wound outward.
+func platonic_solid(kind: i64) -> Solid!:
+    if kind == icosahedron: return try icosahedron_solid()
+    var solid: Solid = ---
+    solid.point_count = 0
+    solid.face_count = 0
+    solid.corner_count = 0
+    if kind == tetrahedron:
+        try solid.add_point(Vector3(1.0, 1.0, 1.0))
+        try solid.add_point(Vector3(1.0, -1.0, -1.0))
+        try solid.add_point(Vector3(-1.0, 1.0, -1.0))
+        try solid.add_point(Vector3(-1.0, -1.0, 1.0))
+        solid.add_face(3, 0, 1, 2)
+        solid.add_face(3, 0, 2, 3)
+        solid.add_face(3, 0, 3, 1)
+        solid.add_face(3, 1, 3, 2)
+    elif kind == cube:
+        for at in 0..<(usize)8:
+            try solid.add_point(Vector3(1.0 if at % 2 == 1 else -1.0, 1.0 if (at // 2) % 2 == 1 else -1.0, 1.0 if at >= 4 else -1.0))
+        solid.add_face(4, 0, 1, 3, 2)
+        solid.add_face(4, 4, 6, 7, 5)
+        solid.add_face(4, 0, 4, 5, 1)
+        solid.add_face(4, 2, 3, 7, 6)
+        solid.add_face(4, 0, 2, 6, 4)
+        solid.add_face(4, 1, 5, 7, 3)
+    elif kind == octahedron:
+        try solid.add_point(Vector3(1.0, 0.0, 0.0))
+        try solid.add_point(Vector3(-1.0, 0.0, 0.0))
+        try solid.add_point(Vector3(0.0, 1.0, 0.0))
+        try solid.add_point(Vector3(0.0, -1.0, 0.0))
+        try solid.add_point(Vector3(0.0, 0.0, 1.0))
+        try solid.add_point(Vector3(0.0, 0.0, -1.0))
+        for at in 0..<(usize)8:
+            solid.add_face(3, at % 2, 2 + (at // 2) % 2, 4 + at // 4)
+    elif kind == dodecahedron:
+        let ico = try icosahedron_solid()
+        for face in 0..<(usize)20: try solid.add_point(ico.center(face))
+        # A face round each icosahedron point: the faces about it in turn.
+        for point in 0..<(usize)12:
+            let axis = ico.points[point]
+            var side = Vector3(1.0, 0.0, 0.0)
+            if math.abs(axis.x) > 0.9: side = Vector3(0.0, 1.0, 0.0)
+            let u = try side.subtract(axis.multiply_scalar(side.dot(axis))).normalized()
+            let v = axis.cross(u)
+            var around: usize[5] = [0, 0, 0, 0, 0]
+            var angles: f64[5] = [0.0, 0.0, 0.0, 0.0, 0.0]
+            var found: usize = 0
+            for face in 0..<(usize)20:
+                if ico.corners[face * 3] != point and ico.corners[face * 3 + 1] != point and ico.corners[face * 3 + 2] != point: continue
+                let c = ico.center(face)
+                around[found] = face
+                angles[found] = math.atan2(c.dot(v), c.dot(u))
+                found += 1
+            for at in 1..<(usize)5:
+                var place = at
+                while place > 0 and angles[place - 1] > angles[place]:
+                    let angle = angles[place - 1]
+                    angles[place - 1] = angles[place]
+                    angles[place] = angle
+                    let face = around[place - 1]
+                    around[place - 1] = around[place]
+                    around[place] = face
+                    place -= 1
+            solid.add_face(5, around[0], around[1], around[2], around[3], around[4])
+    else:
+        error(errors.invalid, "Platonic's type is Tetrahedron, Cube, Octahedron, Dodecahedron or Icosahedron")
+    solid.wind_outward()
+    return solid
+
+## Platonic solid `kind` of circumradius `radius`, turned to rest on a face
+## on the ground.
+pub func platonic_mesh(kind: i64, radius: f64) -> Mesh*!:
+    if not (radius > 0.0 and radius <= 100000.0): error(errors.invalid, "a solid's radius must be in (0, 100000]")
+    let solid = try platonic_solid(kind)
+    # Turn face 0's normal straight down, then lift the lowest point to 0.
+    let a = solid.points[solid.corners[0]]
+    let normal = try solid.points[solid.corners[1]].subtract(a).cross(solid.points[solid.corners[2]].subtract(a)).normalized()
+    let down = Vector3(0.0, -1.0, 0.0)
+    let axis = normal.cross(down)
+    let angle = math.atan2(axis.length(), normal.dot(down))
+    var placed: Vector3[20] = ---
+    var lowest = 1.0e30
+    for at in 0..<solid.point_count:
+        var p = solid.points[at]
+        if axis.length() > 0.000000001: p = p.rotated_about(axis, angle)
+        elif normal.dot(down) < 0.0: p = Vector3(p.x, -p.y, -p.z)
+        placed[at] = p.multiply_scalar(radius)
+        lowest = math.min(lowest, placed[at].y)
+    var arrays = try Arrays.allocate(solid.point_count, solid.face_count, solid.corner_count)
+    defer arrays.close()
+    for at in 0..<solid.point_count: arrays.put(at, placed[at].subtract(Vector3(0.0, lowest, 0.0)))
+    let offsets = arrays.face_offsets()
+    let corners = arrays.face_corners()
+    var corner: usize = 0
+    for face in 0..<solid.face_count:
+        offsets[face] = (i32)corner
+        corner += solid.sizes[face]
+    for at in 0..<solid.corner_count: corners[at] = (i32)solid.corners[at]
+    return try arrays.finish()
+
+## The icosphere of `radius` standing on the origin, at `subdivisions`
+## (0: the icosahedron): each face divided into 4ⁿ triangles by a lattice
+## of 2ⁿ along each side, its points pushed onto the sphere. Points: the
+## twelve corners, each edge's inner points (from its lower corner), then
+## each face's inner points; faces face by face, row by row.
+pub func icosphere_mesh(radius: f64, subdivisions: usize) -> Mesh*!:
+    if not (radius > 0.0 and radius <= 100000.0): error(errors.invalid, "a sphere's radius must be in (0, 100000]")
+    if subdivisions > most_subdivisions: error(errors.invalid, "an icosphere takes 0..9 subdivisions")
+    let solid = try icosahedron_solid()
+    let f = (usize)1 << subdivisions
+    # The thirty edges, each from its lower corner.
+    var edges: usize[60] = ---
+    var edge_count: usize = 0
+    for face in 0..<(usize)20:
+        for side in 0..<(usize)3:
+            let p = solid.corners[face * 3 + side]
+            let q = solid.corners[face * 3 + (side + 1) % 3]
+            let low = p if p < q else q
+            let high = q if p < q else p
+            var known = false
+            for at in 0..<edge_count:
+                if edges[at * 2] == low and edges[at * 2 + 1] == high: known = true
+            if known: continue
+            edges[edge_count * 2] = low
+            edges[edge_count * 2 + 1] = high
+            edge_count += 1
+    let inner = (f - 1) * (f - 2) // 2 if f > 1 else 0
+    let points = 12 + 30 * (f - 1) + 20 * inner
+    var arrays = try Arrays.allocate(points, 20 * f * f, 60 * f * f)
+    defer arrays.close()
+    var work = IcoWork(solid, edges, f, radius, inner, arrays.points(), arrays.face_offsets(), arrays.face_corners())
+    for at in 0..<(usize)12: arrays.put(at, work.on_sphere(solid.points[at]))
+    ranges.each_range(30, 1, (void*)&work, ico_edges)
+    ranges.each_range(20, 1, (void*)&work, ico_faces_fill)
+    return try arrays.finish()
+
+struct IcoWork:
+    let solid: Solid
+    let edges: usize[60]
+    let f: usize
+    let radius: f64
+    let inner: usize
+    let positions: Float3[]
+    let offsets: i32[]
+    let corners: i32[]
+
+    ## A unit direction's point on the sphere standing on the origin.
+    func on_sphere(direction: Vector3) -> Vector3:
+        let along = direction.multiply_scalar(1.0 / direction.length())
+        return Vector3(along.x * self.radius, (along.y + 1.0) * self.radius, along.z * self.radius)
+
+    ## The edge between corners p and q.
+    func edge_of(p: usize, q: usize) -> usize:
+        let low = p if p < q else q
+        let high = q if p < q else p
+        for at in 0..<(usize)30:
+            if self.edges[at * 2] == low and self.edges[at * 2 + 1] == high: return at
+        trap("an icosahedron edge was not found")
+
+    ## The point `t` of `f` along from corner p to corner q.
+    func on_edge(p: usize, q: usize, t: usize) -> usize:
+        if t == 0: return p
+        if t == self.f: return q
+        let edge = self.edge_of(p, q)
+        return 12 + edge * (self.f - 1) + (t - 1 if p < q else self.f - t - 1)
+
+    ## Lattice point (i, j) of face `face` (corners A, B, C: i along AB, j
+    ## along AC).
+    func index(face: usize, i: usize, j: usize) -> usize:
+        let a = self.solid.corners[face * 3]
+        let b = self.solid.corners[face * 3 + 1]
+        let c = self.solid.corners[face * 3 + 2]
+        if j == 0: return self.on_edge(a, b, i)
+        if i == 0: return self.on_edge(a, c, j)
+        if i + j == self.f: return self.on_edge(b, c, j)
+        return 12 + 30 * (self.f - 1) + face * self.inner + (j - 1) * (self.f - 1) - (j - 1) * j // 2 + (i - 1)
+
+## Edges `first..<end`: their inner points, from the lower corner.
+func ico_edges(context: void*, first: usize, end: usize, worker: usize):
+    let work = (IcoWork*)context
+    for edge in first..<end:
+        let low = work.solid.points[work.edges[edge * 2]]
+        let high = work.solid.points[work.edges[edge * 2 + 1]]
+        for t in 1..<work.f:
+            let p = low.add(high.subtract(low).multiply_scalar((f64)t / (f64)work.f))
+            work.positions[12 + edge * (work.f - 1) + t - 1] = Float3.of(work.on_sphere(p))
+
+## Faces `first..<end`: their inner points and their triangles, row by row:
+## along each row an upward triangle at every step and a downward one
+## between them.
+func ico_faces_fill(context: void*, first: usize, end: usize, worker: usize):
+    let work = (IcoWork*)context
+    let f = work.f
+    for face in first..<end:
+        let a = work.solid.points[work.solid.corners[face * 3]]
+        let b = work.solid.points[work.solid.corners[face * 3 + 1]]
+        let c = work.solid.points[work.solid.corners[face * 3 + 2]]
+        for j in 1..<f:
+            for i in 1..<f - j:
+                let p = a.add(b.subtract(a).multiply_scalar((f64)i / (f64)f)).add(c.subtract(a).multiply_scalar((f64)j / (f64)f))
+                work.positions[work.index(face, i, j)] = Float3.of(work.on_sphere(p))
+        var made = face * f * f
+        for j in 0..<f:
+            for i in 0..<f - j:
+                put_triangle(work.offsets, work.corners, made, made * 3, work.index(face, i, j), work.index(face, i + 1, j), work.index(face, i, j + 1))
+                made += 1
+                if i + 1 < f - j:
+                    put_triangle(work.offsets, work.corners, made, made * 3, work.index(face, i + 1, j), work.index(face, i + 1, j + 1), work.index(face, i, j + 1))
+                    made += 1

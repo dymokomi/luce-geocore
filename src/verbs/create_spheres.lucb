@@ -1,0 +1,62 @@
+## Sphere (Blender's UV Sphere), Icosphere, Quad Sphere (Houdini's sphere
+## of polygon mesh type: a divided cube on the sphere) and Capsule. Each
+## stands on its base: Position is its lowest point, the sphere's center is
+## a radius up.
+
+let sphere_parms: ParmSpec[7] = [
+    ParmSpec("Radius", ParmKind.number, 1.0, 0.001, 100000.0, 1, "", "Distance from the center to the surface.", 10.0),
+    ParmSpec("Columns", ParmKind.integer, 24.0, 3.0, 4096.0, 1, "", "Points round each ring (Blender's segments)."),
+    ParmSpec("Rows", ParmKind.integer, 12.0, 2.0, 2048.0, 1, "", "Bands from pole to pole (Blender's rings)."),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+let radius_place: PlaceSpec = PlaceSpec("radius", 0, position = 3, up = 4)
+
+func sphere_verb() -> Verb:
+    return Verb("Sphere", "Primitives", "A UV sphere: rings of quads between two poles of triangles", Domain.face, false, sphere_parms, true, cook_sphere, section = "Create", family = "Primitives", icon = "sphere", inputs = 0, wheel = 1, gesture = "create", place = radius_place)
+
+func cook_sphere(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    try add_piece(input, output, try uv_sphere_mesh(p.at(0), try count_of(p.at(1), 3.0, 4096.0), try count_of(p.at(2), 2.0, 2048.0)), "sphere", 3)
+
+let icosphere_parms: ParmSpec[6] = [
+    ParmSpec("Radius", ParmKind.number, 1.0, 0.001, 100000.0, 1, "", "Distance from the center to the surface.", 10.0),
+    ParmSpec("Subdivisions", ParmKind.integer, 2.0, 0.0, 9.0, 1, "", "Times each triangle of the icosahedron is split into four (0: the icosahedron; 9: 5.2 million triangles)."),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+let icosphere_place: PlaceSpec = PlaceSpec("radius", 0, position = 2, up = 3)
+
+func icosphere_verb() -> Verb:
+    return Verb("Icosphere", "Primitives", "A sphere of even triangles: the icosahedron subdivided", Domain.face, false, icosphere_parms, true, cook_icosphere, section = "Create", family = "Primitives", icon = "sphere", inputs = 0, wheel = 1, gesture = "create", place = icosphere_place)
+
+func cook_icosphere(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    try add_piece(input, output, try icosphere_mesh(p.at(0), try count_of(p.at(1), 0.0, 9.0)), "icosphere", 2)
+
+let quad_sphere_parms: ParmSpec[6] = [
+    ParmSpec("Radius", ParmKind.number, 1.0, 0.001, 100000.0, 1, "", "Distance from the center to the surface.", 10.0),
+    ParmSpec("Divisions", ParmKind.integer, 6.0, 1.0, 1024.0, 1, "", "Quads along each edge of the cube it is made from."),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+func quad_sphere_verb() -> Verb:
+    return Verb("Quad Sphere", "Primitives", "A sphere of quads with no poles: a divided cube on the sphere", Domain.face, false, quad_sphere_parms, true, cook_quad_sphere, section = "Create", family = "Primitives", icon = "sphere", inputs = 0, wheel = 1, gesture = "create", place = icosphere_place)
+
+func cook_quad_sphere(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    try add_piece(input, output, try quad_sphere_mesh(p.at(0), try count_of(p.at(1), 1.0, 1024.0)), "quadsphere", 2)
+
+let capsule_parms: ParmSpec[9] = [
+    ParmSpec("Radius", ParmKind.number, 0.5, 0.001, 100000.0, 1, "", "The radius of its body and its round ends.", 10.0),
+    ParmSpec("Height", ParmKind.number, 2.0, 0.002, 100000.0, 1, "", "From end to end, the round ends included (at least twice the radius).", 10.0),
+    ParmSpec("Sides", ParmKind.integer, 24.0, 3.0, 4096.0, 1, "", "Points round each ring."),
+    ParmSpec("Cap rows", ParmKind.integer, 6.0, 1.0, 2048.0, 1, "", "Bands from each pole to its round end's equator."),
+    ParmSpec("Rows", ParmKind.integer, 1.0, 1.0, 2048.0, 1, "", "Bands along the straight body."),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+let capsule_place: PlaceSpec = PlaceSpec("radius", 0, rise = 1, position = 5, up = 6)
+
+func capsule_verb() -> Verb:
+    return Verb("Capsule", "Primitives", "A cylinder with round ends, closed", Domain.face, false, capsule_parms, true, cook_capsule, section = "Create", family = "Primitives", icon = "capsule", inputs = 0, wheel = 2, gesture = "create", place = capsule_place)
+
+func cook_capsule(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    try add_piece(input, output, try capsule_mesh(p.at(0), p.at(1), try count_of(p.at(2), 3.0, 4096.0), try count_of(p.at(3), 1.0, 2048.0), try count_of(p.at(4), 1.0, 2048.0)), "capsule", 5)

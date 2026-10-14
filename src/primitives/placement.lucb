@@ -1,0 +1,24 @@
+## Where a primitive goes: every primitive is built standing on the ground
+## (its base's center at the origin, its height along +Y, flat ones in the
+## XZ plane), then placed with its base at Position, standing along Up,
+## turned Turn degrees about Up. The frame's X is world X made square to Up
+## (world -Z when Up runs close to X), turned about Up; Z is X × Up, so Up +Y
+## with Turn 0 keeps the world's axes. The viewport's interactive creation
+## draws its base in the same frame (Verbs.placement_axis).
+
+## The frame's axes for `up` turned `turn` degrees about it, at `position`.
+pub func placement(position: Vector3, up: Vector3, turn: f64) -> Matrix4!:
+    if not position.is_finite(): error(errors.invalid, "a primitive's position must be finite")
+    if not up.is_finite() or up.length() < 0.000000000001: error(errors.invalid, "a primitive's Up must be a direction")
+    if not math.is_finite(turn): error(errors.invalid, "a primitive's turn must be finite")
+    let y = try up.normalized()
+    var reference = Vector3(1.0, 0.0, 0.0)
+    if math.abs(y.x) > 0.9: reference = Vector3(0.0, 0.0, -1.0)
+    let x0 = try reference.subtract(y.multiply_scalar(reference.dot(y))).normalized()
+    let z0 = x0.cross(y)
+    let angle = turn * math.pi / 180.0
+    let c = math.cos(angle)
+    let s = math.sin(angle)
+    let x = x0.multiply_scalar(c).subtract(z0.multiply_scalar(s))
+    let z = x0.multiply_scalar(s).add(z0.multiply_scalar(c))
+    return Matrix4(x, y, z, position)

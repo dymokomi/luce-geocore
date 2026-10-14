@@ -1,0 +1,74 @@
+## A primitive's mesh built in place: its points, face offsets and corners
+## allocated at their final counts (every primitive knows them from its
+## options), filled by ranges on the pool, then assembled, which triangulates
+## the faces and finds their normals in parallel too.
+import interop
+import memory
+import errors
+from luce_std import math
+from core.shared import Column
+from core.float3 import Float3
+import core.ranges
+from math.vector import Vector3
+from math.matrix import Matrix4
+from geometries.polygon import Mesh, assembled, mesh_adopt
+from core.limits import check_mesh_size
+
+pub struct Arrays:
+    pub var positions: Column[Float3]
+    pub var offsets: Column[i32]
+    pub var corners: Column[i32]
+
+    ## Columns for `points` points and `faces` faces of `corners` corners in
+    ## all; the last offset is set.
+    pub static func allocate(points: usize, faces: usize, corners: usize) -> Arrays!:
+        try check_mesh_size(points, faces, corners)
+        var positions = try Column[Float3].allocate(points)
+        errdefer positions.release()
+        var offsets = try Column[i32].allocate(faces + 1)
+        errdefer offsets.release()
+        let corner_points = try Column[i32].allocate(corners)
+        offsets.span()[faces] = (i32)corners
+        return Arrays(positions, offsets, corner_points)
+
+    pub func points() -> Float3[]:
+        return self.positions.span()
+
+    pub func face_offsets() -> i32[]:
+        return self.offsets.span()
+
+    pub func face_corners() -> i32[]:
+        return self.corners.span()
+
+    ## Point `at` at `p`.
+    pub func put(at: usize, p: Vector3):
+        self.positions.span()[at] = Float3.of(p)
+
+    ## The mesh; the columns are handed over (also when it fails).
+    pub func finish() -> Mesh*!:
+        let corners = self.corners.count()
+        let faces = self.offsets.count() - 1
+        var triangles = try Column[i32].filled(3 * (corners - 2 * faces), -1)
+        errdefer triangles.release()
+        return try assembled(self.positions.take(), Vector3(), self.offsets.take(), self.corners.take(), triangles.take(), Column[Float3](), Column[Vector3]())
+
+    ## Release whatever was not handed over.
+    pub func close():
+        self.positions.release()
+        self.offsets.release()
+        self.corners.release()
+
+## Quad `face` from corner `first`: its offset and corners.
+pub func put_quad(offsets: i32[], corners: i32[], face: usize, first: usize, a: usize, b: usize, c: usize, d: usize):
+    offsets[face] = (i32)first
+    corners[first] = (i32)a
+    corners[first + 1] = (i32)b
+    corners[first + 2] = (i32)c
+    corners[first + 3] = (i32)d
+
+## Triangle `face` from `first`.
+pub func put_triangle(offsets: i32[], corners: i32[], face: usize, first: usize, a: usize, b: usize, c: usize):
+    offsets[face] = (i32)first
+    corners[first] = (i32)a
+    corners[first + 1] = (i32)b
+    corners[first + 2] = (i32)c

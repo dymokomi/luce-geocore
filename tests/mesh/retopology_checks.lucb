@@ -1,0 +1,202 @@
+## Retopology checks (POLY-MODELING.md Stage 6): Shrinkwrap onto a sphere
+## (nearest: every point on it; an offset that far off it; half strength
+## halfway; along a vector straight down, the points past its edge staying
+## with a warning; along normals out to a bigger sphere), refused without a
+## reference; Relax on a reference keeping every point on it; Poly Pen on
+## the 4 by 4 grid over -1..1 in XZ (point z*5+x, face z*4+x): a boundary
+## edge extended into a quad (its positions in either order) and into a
+## triangle, an inner edge refused, a corner filled back after its face was
+## deleted, an edge split in both its faces.
+import interop
+import memory
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import counts, near, near_point, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try shrinkwrap_checks()
+    try relax_checks()
+    try pen_checks()
+    print("PASS retopology: Shrinkwrap nearest, offset, strength, along a vector and along normals onto a reference, refused without one; Relax kept on a reference; Poly Pen extends an edge into a quad or a triangle, fills a corner, splits an edge")
+
+## Verb `name` on `mesh` with `reference`: its mesh and its warning.
+func wrapped(name: str, mesh: interop.Reference[Mesh], group: str, numbers: const f64[], reference: interop.Reference[Mesh]) -> (interop.Reference[Mesh], str)!:
+    let result = try Verbs.run(name, mesh, group, 1, numbers, 0, false, "", reference)
+    defer result.release()
+    return (try result.value().mesh(), result.value().warning())
+
+## A grid of 9 by 9 points over -0.8..0.8 in XZ, at height `y`.
+func raised(y: f64) -> interop.Reference[Mesh]!:
+    let grid = try MeshPrimitives.grid(1.6, 8)
+    defer grid.release()
+    return try grid.value().transformed(Vector3(0.0, y, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+
+func shrinkwrap_checks() -> !:
+    let ball = try MeshPrimitives.sphere(1.0, 64)
+    defer ball.release()
+    let center = Vector3(0.0, 1.0, 0.0)
+    let grid = try raised(3.0)
+    defer grid.release()
+    # Nearest: on the sphere's facets (within their sag below the radius).
+    let nearest: f64[3] = [0.0, 0.0, 1.0]
+    let (onto, quiet) = try wrapped("Shrinkwrap", grid, "", nearest[..<3], ball)
+    defer onto.release()
+    assert(quiet == "")
+    for at in 0..<onto.value().point_count():
+        let p = try onto.value().point(at)
+        near(try ball.value().surface_distance(p), 0.0, 0.00001)
+        assert(p.subtract(center).length() > 0.997 and p.subtract(center).length() < 1.00001)
+    # Offset 0.25 off the surface, along its normal there.
+    let offset: f64[3] = [0.0, 0.25, 1.0]
+    let (off, _) = try wrapped("Shrinkwrap", grid, "", offset[..<3], ball)
+    defer off.release()
+    for at in 0..<off.value().point_count():
+        near(try ball.value().surface_distance(try off.value().point(at)), 0.25, 0.00001)
+    # Half strength: halfway there.
+    let half: f64[3] = [0.0, 0.0, 0.5]
+    let (halfway, _) = try wrapped("Shrinkwrap", grid, "", half[..<3], ball)
+    defer halfway.release()
+    for at in 0..<halfway.value().point_count():
+        let p = try grid.value().point(at)
+        let q = try onto.value().point(at)
+        near_point(try halfway.value().point(at), p.add(q).multiply_scalar(0.5), 0.00001)
+    # Straight down: x and z kept, onto the top of the sphere; the points
+    # past its edge (x² + z² > 1) stay, and the warning says so.
+    let down: f64[6] = [2.0, 0.0, 1.0, 0.0, -1.0, 0.0]
+    let wide = try raised(3.0)
+    defer wide.release()
+    let scaled = try wide.value().transformed(Vector3(), Vector3(), Vector3(1.5, 1.0, 1.5))
+    defer scaled.release()
+    let (dropped, warning) = try wrapped("Shrinkwrap", scaled, "", down[..<6], ball)
+    defer dropped.release()
+    assert(warning.length > 0)
+    for at in 0..<dropped.value().point_count():
+        let before = try scaled.value().point(at)
+        let after = try dropped.value().point(at)
+        near(after.x, before.x, 0.000001)
+        near(after.z, before.z, 0.000001)
+        if before.x * before.x + before.z * before.z < 0.9:
+            near(try ball.value().surface_distance(after), 0.0, 0.00001)
+            assert(after.y > 1.0)
+        elif before.x * before.x + before.z * before.z > 1.0:
+            near(after.y, 3.0, 0.000001)
+    # Along normals: a small sphere's points out onto a bigger one.
+    let small = try MeshPrimitives.sphere(0.5, 16)
+    defer small.release()
+    let lifted = try small.value().transformed(Vector3(0.0, 0.5, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer lifted.release()
+    let along: f64[3] = [1.0, 0.0, 1.0]
+    let (outward, _) = try wrapped("Shrinkwrap", lifted, "", along[..<3], ball)
+    defer outward.release()
+    for at in 0..<outward.value().point_count():
+        let distance = (try outward.value().point(at)).subtract(center).length()
+        assert(distance > 0.997 and distance < 1.00001)
+    # A group moves only its points.
+    let (some, _) = try wrapped("Shrinkwrap", grid, "0-8", nearest[..<3], ball)
+    defer some.release()
+    near_point(try some.value().point(9), try grid.value().point(9))
+    assert((try some.value().point(0)).y < 2.0)
+    # No reference: refused, as the node's missing second input.
+    assert(try unreferenced(grid, nearest[..<3]))
+
+## Whether Shrinkwrap without a reference refuses (memory propagates).
+func unreferenced(mesh: interop.Reference[Mesh], numbers: const f64[]) -> bool!:
+    let result = Verbs.run("Shrinkwrap", mesh, "", 1, numbers) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
+        return true
+    result.release()
+    return false
+
+func relax_checks() -> !:
+    # A quad sphere's points relaxed over a finer sphere stay on it.
+    let reference = try MeshPrimitives.sphere(1.0, 48)
+    defer reference.release()
+    let numbers: f64[2] = [1.0, 4.0]
+    let empty = try Mesh.empty()
+    defer empty.release()
+    let made = try Verbs.run("Quad Sphere", empty, "", 0, numbers[..<2])
+    defer made.release()
+    let quads = try made.value().mesh()
+    defer quads.release()
+    let relax: f64[3] = [0.5, 5.0, 0.0]
+    let (relaxed, _) = try wrapped("Relax", quads, "", relax[..<3], reference)
+    defer relaxed.release()
+    var moved = false
+    for at in 0..<relaxed.value().point_count():
+        let p = try relaxed.value().point(at)
+        near(try reference.value().surface_distance(p), 0.0, 0.00001)
+        if p.subtract(try quads.value().point(at)).length() > 0.001: moved = true
+    assert(moved)
+    try surface(relaxed, true)
+
+## Poly Pen's action `action` on `group` (on `group_type`) with positions.
+func pen(mesh: interop.Reference[Mesh], action: f64, group: str, group_type: i64, positions: const Vector3[]) -> interop.Reference[Mesh]!:
+    var numbers: f64[9] = [action, 0.00001, (f64)positions.length, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    for at in 0..<positions.length:
+        numbers[3 + at * 3] = positions[at].x
+        numbers[4 + at * 3] = positions[at].y
+        numbers[5 + at * 3] = positions[at].z
+    let result = try Verbs.run("Poly Pen", mesh, group, group_type, numbers[..<3 + positions.length * 3])
+    defer result.release()
+    assert(result.value().warning().length == 0)
+    return try result.value().mesh()
+
+func pen_refuses(mesh: interop.Reference[Mesh], action: f64, group: str, group_type: i64, positions: const Vector3[]) -> bool!:
+    let made = pen(mesh, action, group, group_type, positions) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
+        return true
+    made.release()
+    return false
+
+func pen_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    # Edge 0-1 (z = -1) grows a quad out to z = -1.5, facing up as the grid.
+    let outward: Vector3[2] = [Vector3(-1.0, 0.0, -1.5), Vector3(-0.5, 0.0, -1.5)]
+    let quad = try pen(grid, 0.0, "p0-1", 2, outward[..<2])
+    defer quad.release()
+    try counts(quad, 27, 17)
+    try surface(quad, false)
+    assert((try quad.value().face_normal(16)).y > 0.99)
+    # The positions in the other order make the same face.
+    let swapped: Vector3[2] = [Vector3(-0.5, 0.0, -1.5), Vector3(-1.0, 0.0, -1.5)]
+    let same = try pen(grid, 0.0, "p0-1", 2, swapped[..<2])
+    defer same.release()
+    for corner in 0..<(i64)4: near_point(try same.value().point(try same.value().face_point(16, corner)), try quad.value().point(try quad.value().face_point(16, corner)))
+    # Edge 1-2 beside it, extended onto the quad's new corner (it snaps):
+    # one new point, the two quads sharing an edge.
+    let beside: Vector3[2] = [Vector3(-0.5, 0.0, -1.5), Vector3(0.0, 0.0, -1.5)]
+    let strip = try pen(quad, 0.0, "p1-2", 2, beside[..<2])
+    defer strip.release()
+    try counts(strip, 28, 18)
+    try surface(strip, false)
+    # One position: a triangle.
+    let tip: Vector3[1] = [Vector3(-0.75, 0.0, -1.5)]
+    let triangle = try pen(grid, 0.0, "p0-1", 2, tip[..<1])
+    defer triangle.release()
+    try counts(triangle, 26, 17)
+    assert((try triangle.value().face_size(16)) == 3 and (try triangle.value().face_normal(16)).y > 0.99)
+    # An inner edge has a face on each side: refused.
+    assert(try pen_refuses(grid, 0.0, "p6-7", 2, tip[..<1]))
+    # Face 0 deleted (and its unused point 0: the others number one less):
+    # point 5, once 6, sits where two boundary edges meet; its corner filled
+    # at point 0's old place gives the face back.
+    let opened = try Verbs.run("Delete", grid, "0", 3, [0.0])
+    defer opened.release()
+    let holed = try opened.value().mesh()
+    defer holed.release()
+    let corner_at: Vector3[1] = [Vector3(-1.0, 0.0, -1.0)]
+    let filled = try pen(holed, 1.0, "5", 1, corner_at[..<1])
+    defer filled.release()
+    try counts(filled, 25, 16)
+    try surface(filled, false)
+    assert((try filled.value().face_normal(15)).y > 0.99)
+    # Edge 6-7 split at its middle: a point more, both its faces five-sided.
+    let middle: Vector3[1] = [Vector3(-0.25, 0.0, -0.5)]
+    let split = try pen(grid, 2.0, "p6-7", 2, middle[..<1])
+    defer split.release()
+    try counts(split, 26, 16)
+    assert((try split.value().face_size(1)) == 5 and (try split.value().face_size(5)) == 5)
+    try surface(split, false)

@@ -1,0 +1,216 @@
+## Poly Pen: one action of the Poly Pen tool (after Blender's Poly Build and
+## Cinema 4D's Polygon Pen), recorded as positions so a node replays it:
+## - Extend: the group's boundary edge grows a face to the positions after
+##   the parameters: one makes a triangle, two a quad (each of the two goes
+##   to the edge's point it pairs with without crossing);
+## - Fill corner: the group's point, where exactly two boundary edges meet,
+##   closes the corner with a quad through the position (Blender's quad from
+##   an edge pair);
+## - Split: the group's edge gets a point at the position (its place along
+##   the edge sets its values), in every face using the edge.
+## A position within Snap distance of an existing point uses that point, so
+## faces join what is there. A new face winds against the face beside its
+## edge, continuing that surface. The tool draws free faces with PolyDraw
+## and deletes and moves with Delete, Dissolve and Transform Components; it
+## records only these three as Poly Pen steps. The new face (Split: the new
+## point) is the output selection.
+
+let poly_pen_parms: ParmSpec[3] = [
+    ParmSpec("Action", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Extend|Fill corner|Split", "Extend a boundary edge into a face, fill the corner at a point between two boundary edges, or split an edge."),
+    ParmSpec("Snap distance", ParmKind.number, 0.00001, 0.0, 100000.0, 1, "", "Positions this close to an existing point use it.", 1.0, bar = false),
+    ParmSpec("Positions", ParmKind.integer, 0.0, 0.0, 2.0, 1, "", "How many positions follow (x, y, z each).", bar = false)]
+
+let poly_pen_picks: PickSpec[1] = [PickSpec("Element", "edges points", "Click a boundary edge to extend, a corner point to fill, or an edge to split")]
+
+func poly_pen_verb() -> Verb:
+    return Verb("Poly Pen", "Modeling", "Grow faces from boundary edges and corners, or split edges, at drawn positions", Domain.point, true, poly_pen_parms, true, cook_poly_pen, trailing = true, native = true, section = "Create", family = "Draw", icon = "pen-tool", picks = poly_pen_picks, gesture = "pen")
+
+func cook_poly_pen(input: const VerbInput*, output: VerbOutput*) -> !:
+    let action = (i64)input.parms.at(0)
+    let snap = input.parms.at(1)
+    let count = input.parms.at(2)
+    if not (snap >= 0.0 and math.is_finite(snap)): error(errors.invalid, "Poly Pen's snap distance must be finite and not negative")
+    # A node not drawn yet (Poly Pen's tool records its positions).
+    if count == 0.0 or input.group.population() == 0:
+        output.warning = "Nothing drawn: Poly Pen's tool draws in the viewport; the input passes through"
+        return
+    if not (count == 1.0 or count == 2.0) or 3 + (usize)count * 3 > input.parms.numbers.length: error(errors.invalid, "Poly Pen takes one or two positions after its parameters")
+    let positions = (usize)count
+    var places: Vector3[2] = [Vector3(), Vector3()]
+    for at in 0..<positions:
+        places[at] = Vector3(input.parms.at(3 + at * 3), input.parms.at(4 + at * 3), input.parms.at(5 + at * 3))
+        if not places[at].is_finite(): error(errors.invalid, "Poly Pen's positions must be finite")
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var builder = &output.builder
+    try builder.begin(mesh)
+    try builder.copy_points(mesh)
+    output.built = true
+    if action == 2:
+        if input.domain != Domain.edge or input.group.population() != 1: error(errors.invalid, "Split takes one edge")
+        return try split_edge(input, &topology, builder, output, places[0])
+    if action == 0:
+        if input.domain != Domain.edge or input.group.population() != 1: error(errors.invalid, "Extend takes one boundary edge")
+    elif action == 1:
+        if input.domain != Domain.point or input.group.population() != 1 or positions != 1: error(errors.invalid, "Fill corner takes one point and one position")
+    else:
+        error(errors.invalid, "Poly Pen's action is Extend, Fill corner or Split")
+    try builder.copy_faces(mesh, 0, topology.faces())
+    var ring: i32[4] = [0, 0, 0, 0]
+    var size: usize = 0
+    var beside: i32 = -1
+    if action == 0:
+        let edge = first_set(input.group)
+        if topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge] != 1: error(errors.invalid, "Extend takes a boundary edge (one face beside it)")
+        let a = topology.edge_points[edge * 2]
+        let b = topology.edge_points[edge * 2 + 1]
+        beside = topology.corner_faces[(usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge]]]
+        # The new face runs the edge the other way from its face.
+        let forward = try runs(&topology, (usize)beside, a, b)
+        let first = b if forward else a
+        let second = a if forward else b
+        ring[0] = first
+        ring[1] = second
+        size = 2
+        if positions == 1:
+            ring[2] = try pen_point(input, builder, places[0], snap)
+            size = 3
+        else:
+            # Each position to the edge point it pairs with, sides not crossed.
+            let pa = builder.position(second)
+            let pb = builder.position(first)
+            let direct = places[0].subtract(pa).length() + places[1].subtract(pb).length()
+            let swapped = places[1].subtract(pa).length() + places[0].subtract(pb).length()
+            let near_second = places[0] if direct <= swapped else places[1]
+            let near_first = places[1] if direct <= swapped else places[0]
+            ring[2] = try pen_point(input, builder, near_second, snap)
+            ring[3] = try pen_point(input, builder, near_first, snap)
+            size = 4
+    else:
+        let point = (i32)first_set(input.group)
+        var others: i32[2] = [-1, -1]
+        var found: usize = 0
+        var edge_found: usize = 0
+        for slot in (usize)topology.point_edge_offsets[(usize)point]..<(usize)topology.point_edge_offsets[(usize)point + 1]:
+            let edge = (usize)topology.point_edges[slot]
+            if topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge] != 1: continue
+            if found < 2:
+                others[found] = topology.edge_points[edge * 2] if topology.edge_points[edge * 2 + 1] == point else topology.edge_points[edge * 2 + 1]
+                if found == 0: edge_found = edge
+            found += 1
+        if found != 2: error(errors.invalid, "Fill corner takes a point where exactly two boundary edges meet")
+        beside = topology.corner_faces[(usize)topology.edge_corners[(usize)topology.edge_corner_offsets[edge_found]]]
+        # Point, first neighbor, the position, second neighbor: wound so the
+        # first edge runs against its face.
+        let forward = try runs(&topology, (usize)beside, point, others[0])
+        ring[0] = point
+        ring[1] = others[1] if forward else others[0]
+        ring[2] = try pen_point(input, builder, places[0], snap)
+        ring[3] = others[0] if forward else others[1]
+        size = 4
+    for at in 0..<size:
+        for other in at + 1..<size:
+            if ring[at] == ring[other]: error(errors.invalid, "Poly Pen's face would use one point twice")
+    try builder.face(beside)
+    for at in 0..<size: try builder.corner(ring[at], -1)
+    try builder.end_face()
+    output.selection = try BitsBuilder.zeros(builder.face_count())
+    output.selection.set(builder.face_count() - 1)
+    output.selection_domain = Domain.face
+
+## The first element of `bits` (one is set).
+func first_set(bits: Bits) -> usize:
+    for word in 0..<bits.words.length:
+        if bits.words[word] != 0: return word * 64 + (usize)trailing_zeros(bits.words[word])
+    trap("an empty group")
+
+## Whether face `face` runs from point a straight to point b.
+func runs(topology: const Topology*, face: usize, a: i32, b: i32) -> bool!:
+    let start = (usize)topology.offsets[face]
+    let size = (usize)topology.offsets[face + 1] - start
+    for at in 0..<size:
+        if topology.corners[start + at] == a and topology.corners[start + (at + 1) % size] == b: return true
+        if topology.corners[start + at] == b and topology.corners[start + (at + 1) % size] == a: return false
+    error(errors.invalid, "the edge is not on its face")
+
+## A position's point: an existing one within `snap`, else a new one.
+func pen_point(input: const VerbInput*, builder: TopologyBuilder*, position: Vector3, snap: f64) -> i32!:
+    let target = position.subtract(builder.origin)
+    let points = builder.positions.items
+    var best = snap * snap
+    var found: i32 = -1
+    for candidate in 0..<(usize)input.mesh.point_count():
+        let p = points[candidate]
+        let dx = p.x - target.x
+        let dy = p.y - target.y
+        let dz = p.z - target.z
+        let distance = dx * dx + dy * dy + dz * dz
+        if distance <= best:
+            best = distance
+            found = (i32)candidate
+    if found >= 0: return found
+    return try builder.point(position, -1)
+
+## Split: the edge's new point at `position` in every face using the edge,
+## its values mixed from the edge's two points by where it falls along it.
+func split_edge(input: const VerbInput*, topology: const Topology*, builder: TopologyBuilder*, output: VerbOutput*, position: Vector3) -> !:
+    let edge = first_set(input.group)
+    let a = topology.edge_points[edge * 2]
+    let b = topology.edge_points[edge * 2 + 1]
+    let pa = builder.position(a)
+    let pb = builder.position(b)
+    let along = pb.subtract(pa)
+    let length = along.dot(along)
+    let t = math.clamp(position.subtract(pa).dot(along) / length, 0.0, 1.0) if length > 0.0 else 0.5
+    let parents: i32[2] = [a, b]
+    let weights: f32[2] = [(f32)(1.0 - t), (f32)t]
+    let made = try builder.mixed_point(position, parents, weights)
+    var run: usize = 0
+    for face in 0..<topology.faces():
+        let start = (usize)topology.offsets[face]
+        let size = (usize)topology.offsets[face + 1] - start
+        var after: usize = size
+        for at in 0..<size:
+            let here = topology.corners[start + at]
+            let next = topology.corners[start + (at + 1) % size]
+            if (here == a and next == b) or (here == b and next == a): after = at
+        if after == size: continue
+        try builder.copy_faces(input.mesh, run, face)
+        run = face + 1
+        try builder.face((i32)face)
+        for at in 0..<size:
+            try builder.corner(topology.corners[start + at], (i32)(start + at))
+            if at != after: continue
+            # The new corner's values: the two corners beside it, mixed.
+            let here = start + at
+            let next = start + (at + 1) % size
+            let towards_b = topology.corners[here] == a
+            let corner_parents: i32[2] = [(i32)here, (i32)next]
+            let corner_weights: f32[2] = [weights[0] if towards_b else weights[1], weights[1] if towards_b else weights[0]]
+            try builder.mixed_corner(made, corner_parents, corner_weights)
+        try builder.end_face()
+    try builder.copy_faces(input.mesh, run, topology.faces())
+    output.selection = try BitsBuilder.zeros(builder.point_count())
+    output.selection.set((usize)made)
+    output.selection_domain = Domain.point
+
+## The boundary edge (one face beside it) of `mesh` whose segment passes
+## nearest `point` (-1: none): the edge Poly Pen's Ctrl-click extends.
+pub func boundary_edge_near(mesh: const Mesh*, point: Vector3) -> i64!:
+    let topology = try Topology.of(mesh)
+    let target = point.subtract(mesh.position_origin())
+    let positions = mesh.point_span()
+    var best = 1.0e300
+    var found: i64 = -1
+    for edge in 0..<topology.edges():
+        if topology.edge_corner_offsets[edge + 1] - topology.edge_corner_offsets[edge] != 1: continue
+        let a = positions[(usize)topology.edge_points[edge * 2]].vector()
+        let b = positions[(usize)topology.edge_points[edge * 2 + 1]].vector()
+        let along = b.subtract(a)
+        let length = along.dot(along)
+        let t = math.clamp(target.subtract(a).dot(along) / length, 0.0, 1.0) if length > 0.0 else 0.0
+        let distance = a.add(along.multiply_scalar(t)).subtract(target).length()
+        if distance < best:
+            best = distance
+            found = (i64)edge
+    return found

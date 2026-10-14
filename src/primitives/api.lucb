@@ -1,0 +1,35 @@
+## Luce's view of the primitive kernels: plain shapes standing on the
+## origin, for scripts, tests and code that needs a mesh to work on. The
+## primitive verbs (verbs/create_*.lucb) place them and add them to a mesh
+## as pieces of their own.
+
+pub struct MeshPrimitives:
+    let reserved: u8 = 0
+
+    ## A flat square grid in XZ of `divisions` squared quads (1..2048: up to
+    ## 4.2M points, as Houdini's Grid builds wrangle-sized inputs).
+    pub static func grid(size: f64 = 2.0, divisions: i64 = 4) -> interop.Reference[Mesh]!:
+        if divisions < 1 or divisions > 2048: error(errors.invalid, "grid divisions are 1..2048")
+        return try mesh_adopt(try grid_mesh(size, size, (usize)divisions, (usize)divisions))
+
+    ## A box of `size` (width, height, depth) standing on the origin, its
+    ## divisions along X, Y and Z.
+    pub static func box(size: Vector3, nx: i64 = 1, ny: i64 = 1, nz: i64 = 1) -> interop.Reference[Mesh]!:
+        if nx < 1 or ny < 1 or nz < 1: error(errors.invalid, "box divisions are 1..1024")
+        return try mesh_adopt(try box_mesh(size, (usize)nx, (usize)ny, (usize)nz))
+
+    ## A UV sphere standing on the origin: `segments` round, half as many
+    ## bands from pole to pole.
+    pub static func sphere(radius: f64 = 1.0, segments: i64 = 16) -> interop.Reference[Mesh]!:
+        if segments < 4: error(errors.invalid, "Sphere needs at least four segments")
+        return try mesh_adopt(try uv_sphere_mesh(radius, (usize)segments, (usize)(segments // 2)))
+
+    ## A cylinder (or with `cone`, a cone) standing on the origin, n-gon caps.
+    pub static func cylinder(radius: f64 = 1.0, height: f64 = 2.0, segments: i64 = 16, cone: bool = false) -> interop.Reference[Mesh]!:
+        if segments < 3: error(errors.invalid, "Cylinder needs positive height and at least three sides")
+        return try mesh_adopt(try cylinder_mesh(radius, 0.0 if cone else radius, height, (usize)segments, 1, cap_ngon, 1))
+
+    ## A torus resting on the ground, `segments` round both ways.
+    pub static func torus(radius: f64 = 1.0, tube: f64 = 0.3, segments: i64 = 16) -> interop.Reference[Mesh]!:
+        if segments < 3: error(errors.invalid, "Torus needs at least three segments")
+        return try mesh_adopt(try torus_mesh(radius, tube, (usize)segments, (usize)segments, 0))

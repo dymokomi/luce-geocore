@@ -5,9 +5,11 @@
 ## with a step back (Taubin's λ|μ), so a closed surface does not shrink;
 ## Keep boundary holds points on the mesh's boundary. Relax keeps the shape:
 ## only the part of each move along the surface goes (square to the
-## point's normal), so the points even out where they lie. Each round
-## reads the last and writes every point in parallel. The output selection
-## is the group.
+## point's normal), so the points even out where they lie; given a
+## reference surface (a node's second input, an Edit Mesh's Reference: a
+## retopology's scan) every round ends with the points pulled back onto it,
+## so they even out over that surface. Each round reads the last and writes
+## every point in parallel. The output selection is the group.
 
 let smooth_parms: ParmSpec[5] = [
     ParmSpec("Amount", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "How far each point moves toward the mean of its neighbors in a round."),
@@ -25,7 +27,7 @@ let relax_parms: ParmSpec[3] = [
     ParmSpec("Keep boundary", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Hold the points on the mesh's boundary.")]
 
 func relax_verb() -> Verb:
-    return Verb("Relax", "Deform", "Even out the group's points along the surface, keeping its shape", Domain.point, true, relax_parms, false, cook_relax, section = "Modify", family = "Shape", icon = "smudge-tool", drag = 0, drag_mode = "amount", wheel = 1)
+    return Verb("Relax", "Deform", "Even out the group's points along the surface, keeping its shape (on the reference surface, given one)", Domain.point, true, relax_parms, false, cook_relax, section = "Modify", family = "Shape", icon = "smudge-tool", drag = 0, drag_mode = "amount", wheel = 1, inputs = 2)
 
 ## What a round reads: the positions, the group's points, the edges round
 ## each point, the held points and the axes, or the normals for Relax.
@@ -41,9 +43,16 @@ struct SmoothWork:
     let axes: Vector3
     ## Relax: each point's normal (empty for Smooth).
     let normals: const Vector3[]
+    ## Relax on a reference: the surface each point is pulled back onto, and
+    ## what takes a point into its frame (this mesh's origin less its).
+    let surface: const TriangleIndex*? = none
+    let shift: Vector3 = Vector3()
 
 func smooth_points(context: void*, first: usize, end: usize, worker: usize):
     let work = (SmoothWork*)context
+    # On a surface each point's search starts from the last one's distance.
+    var last = Vector3()
+    var reach = 1.0e150
     for at in first..<end:
         let point = (usize)work.moved[at]
         let p = work.positions[point].vector()
@@ -64,7 +73,15 @@ func smooth_points(context: void*, first: usize, end: usize, worker: usize):
             step = step.subtract(normal.multiply_scalar(step.dot(normal)))
         else:
             step = Vector3(step.x * work.axes.x, step.y * work.axes.y, step.z * work.axes.z)
-        work.next[at] = Float3.of(p.add(step))
+        var moved = p.add(step)
+        if let surface = work.surface:
+            let q = moved.add(work.shift)
+            let bound = reach + q.subtract(last).length() * 1.000001 + 0.000000001 if reach < 1.0e150 else reach
+            let hit = surface.nearest_point_within(q, bound)
+            last = q
+            reach = hit.distance if hit.face >= 0 else 1.0e150
+            moved = hit.position.subtract(work.shift)
+        work.next[at] = Float3.of(moved)
 
 ## Points on a boundary edge.
 func boundary_points(mesh: const Mesh*) -> BitsBuilder!:
@@ -78,14 +95,14 @@ func boundary_points(mesh: const Mesh*) -> BitsBuilder!:
 
 ## `rounds` rounds over the group's points: each moves `amount` (and, with
 ## `back`, then `back` the other way: Taubin's μ), held points staying.
-func smooth_rounds(input: const VerbInput*, output: VerbOutput*, amount: f64, back: f64, rounds: usize, held: Bits, axes: Vector3, normals: const Vector3[]) -> !:
+func smooth_rounds(input: const VerbInput*, output: VerbOutput*, amount: f64, back: f64, rounds: usize, held: Bits, axes: Vector3, normals: const Vector3[], surface: const TriangleIndex*? = none, shift: Vector3 = Vector3()) -> !:
     let moved = try begin_points(input, output)
     let edges = try input.mesh.edge_span()
     let around = try input.mesh.point_edge_span()
     let positions = output.positions.span()
     let next = try new Float3[moved.length] --- in memory.heap
     defer free(next) in memory.heap
-    var work = SmoothWork(positions, moved, edges, around.0, around.1, held, next, amount, axes, normals)
+    var work = SmoothWork(positions, moved, edges, around.0, around.1, held, next, amount, axes, normals, surface, shift)
     for _ in 0..<rounds:
         work.amount = amount
         try parallel.for_each_range(moved.length, 4096, (void*)&work, smooth_points)
@@ -122,11 +139,21 @@ func cook_relax(input: const VerbInput*, output: VerbOutput*) -> !:
     if input.parms.at(2) != 0.0:
         held.close()
         held = try boundary_points(input.mesh)
-    # Each point's normal: the mean of its faces'.
     let mesh = input.mesh
     let points = (usize)mesh.point_count()
-    let normals = try new Vector3[points] --- in memory.heap
+    let normals = try mean_point_normals(mesh)
     defer free(normals) in memory.heap
+    var surface: const TriangleIndex*? = none
+    var shift = Vector3()
+    if let reference = input.reference:
+        surface = try reference.query_index()
+        shift = mesh.position_origin().subtract(reference.position_origin())
+    try smooth_rounds(input, output, amount, 0.0, rounds, held.view(), Vector3(1.0, 1.0, 1.0), normals[..<points], surface, shift)
+
+## Every point's normal: the mean of its faces' (heap; the caller frees it).
+func mean_point_normals(mesh: const Mesh*) -> Vector3[]!:
+    let points = (usize)mesh.point_count()
+    let normals = try new Vector3[points] --- in memory.heap
     for at in 0..<points: normals[at] = Vector3()
     let offsets = mesh.offset_span()
     let corners = mesh.corner_span()
@@ -137,4 +164,4 @@ func cook_relax(input: const VerbInput*, output: VerbOutput*) -> !:
     for at in 0..<points:
         let length = normals[at].length()
         if length > 0.0: normals[at] = normals[at].multiply_scalar(1.0 / length)
-    try smooth_rounds(input, output, amount, 0.0, rounds, held.view(), Vector3(1.0, 1.0, 1.0), normals[..<points])
+    return normals

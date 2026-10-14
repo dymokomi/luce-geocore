@@ -1,0 +1,99 @@
+## Shrinkwrap: the group's points moved onto a reference surface (a node's
+## second input; an Edit Mesh's Reference, the scan a retopology is drawn
+## on), after Blender's Shrinkwrap modifier and Houdini's Ray SOP.
+## - Nearest: to the nearest point of the surface;
+## - Along normals: along each point's normal, either way, to the nearer
+##   hit;
+## - Along vector: along Direction, either way.
+## Offset keeps the points that far off the surface, along its face's
+## normal there (outward for a closed surface wound outward); Strength moves
+## them that share of the way. A point whose line meets nothing stays, and
+## the warning counts them. Points are projected in parallel against the
+## reference's spatial index.
+
+let shrinkwrap_parms: ParmSpec[4] = [
+    ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Nearest|Along normals|Along vector", "Where each point goes: the nearest place on the surface, or where its normal (or Direction) meets it."),
+    ParmSpec("Offset", ParmKind.number, 0.0, -100000.0, 100000.0, 1, "", "How far off the surface the points stay, along its normal.", 1.0),
+    ParmSpec("Strength", ParmKind.number, 1.0, 0.0, 1.0, 1, "", "The share of the way each point moves."),
+    ParmSpec("Direction", ParmKind.vector, 0.0, -1.0, 1.0, 3, "", "Along vector: the line each point moves along, either way.", more = true, initials = down_initials)]
+
+let down_initials: f64[3] = [0.0, -1.0, 0.0]
+
+## Whole pieces too: a retopology's piece wrapped at once.
+let shrinkwrap_picks: PickSpec[1] = [PickSpec("Components", "objects points edges faces")]
+
+func shrinkwrap_verb() -> Verb:
+    return Verb("Shrinkwrap", "Deform", "Move the group's points onto the reference surface (its second input)", Domain.point, true, shrinkwrap_parms, false, cook_shrinkwrap, section = "Modify", family = "Shape", icon = "shrink-surface", picks = shrinkwrap_picks, drag = 2, drag_mode = "amount", whole = true, inputs = 2, second_required = true)
+
+struct WrapWork:
+    let positions: Float3[]
+    let moved: const u32[]
+    let surface: const TriangleIndex*
+    let normals: const Float3[]
+    ## Each point's normal (Along normals).
+    let point_normals: const Vector3[]
+    let mode: i64
+    let direction: Vector3
+    let offset: f64
+    let strength: f64
+    ## This mesh's origin less the reference's.
+    let shift: Vector3
+    var missed: @usize
+
+func cook_shrinkwrap(input: const VerbInput*, output: VerbOutput*) -> !:
+    let reference = input.reference else error(errors.invalid, "Shrinkwrap needs a reference surface: connect one to its second input")
+    let mode = (i64)input.parms.at(0)
+    let offset = input.parms.at(1)
+    let strength = input.parms.at(2)
+    let direction = Vector3(input.parms.at(3), input.parms.at(4), input.parms.at(5))
+    if not (strength >= 0.0 and strength <= 1.0) or not math.is_finite(offset): error(errors.invalid, "Shrinkwrap's strength is 0..1 and its offset finite")
+    if mode == 2 and not (direction.is_finite() and direction.length() > 0.000000001): error(errors.invalid, "Shrinkwrap's direction must be a direction")
+    let moved = try begin_points(input, output)
+    let surface = try reference.query_index()
+    let owned = try mean_point_normals(input.mesh) if mode == 1 else no_normals[..<0]
+    defer:
+        if mode == 1: free(owned) in memory.heap
+    let normals: const Vector3[] = owned
+    let along = direction.multiply_scalar(1.0 / direction.length()) if mode == 2 else Vector3()
+    var work = WrapWork(output.positions.span(), moved, surface, reference.face_normal_span(), normals, mode, along, offset, strength, input.mesh.position_origin().subtract(reference.position_origin()))
+    work.missed.store(0, .relaxed)
+    try parallel.for_each_range(moved.length, 2048, (void*)&work, wrap_points)
+    let missed = work.missed.load(.acquire)
+    if missed > 0:
+        output.warning = "Some points' lines miss the reference surface; they stay where they were"
+        output.skipped = missed
+
+func wrap_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (WrapWork*)context
+    # The range's points run along the mesh: each one's search starts from
+    # the last one's distance.
+    var last = Vector3()
+    var reach = 1.0e150
+    for at in first..<end:
+        let point = (usize)work.moved[at]
+        let p = work.positions[point].vector().add(work.shift)
+        var face: i64 = -1
+        var target = p
+        if work.mode == 0:
+            let bound = reach + p.subtract(last).length() * 1.000001 + 0.000000001 if reach < 1.0e150 else reach
+            let hit = work.surface.nearest_point_within(p, bound)
+            face = hit.face
+            target = hit.position
+            last = p
+            reach = hit.distance if face >= 0 else 1.0e150
+        else:
+            let way = work.point_normals[point] if work.mode == 1 else work.direction
+            if way.length() > 0.0:
+                let ahead = work.surface.ray(p, way)
+                let behind = work.surface.ray(p, way.multiply_scalar(-1.0))
+                if ahead.face >= 0 and (behind.face < 0 or ahead.distance <= behind.distance):
+                    face = ahead.face
+                    target = p.add(way.multiply_scalar(ahead.distance))
+                elif behind.face >= 0:
+                    face = behind.face
+                    target = p.subtract(way.multiply_scalar(behind.distance))
+        if face < 0:
+            _ = work.missed.add(1, .relaxed)
+            continue
+        if work.offset != 0.0: target = target.add(work.normals[(usize)face].vector().multiply_scalar(work.offset))
+        work.positions[point] = Float3.of(p.add(target.subtract(p).multiply_scalar(work.strength)).subtract(work.shift))

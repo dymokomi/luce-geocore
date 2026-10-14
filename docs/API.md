@@ -24,7 +24,7 @@ attribute domains, topology operators, primitive generators and BVH picking.
 | `GeometrySet` | A node's result: typed components, at most one per family (`mesh`, `points`, `instances`, and families other packages register, such as luce-cad's `cad`). Immutable; copies share every column. `of_mesh`, `mesh`, `with_mesh`, `with_instance(set, translation, rotation, scale, visible)`, `instance*`, `with_cloud_of(mesh)`, `cloud_*`, `merged`, `transformed`, `realized` (every polygon, instances baked, in one pass), `blasted(paths, keep)`, `paths`, `bounds`, `footprint` (shared arrays once), `description`. |
 | Groups and text | `with_group(name, domain, members)`, `attribute_group`, `group_size`, `find_edge(a, b)`; text attributes (`with_text`, `with_text_values`, `attribute_text`, `attribute_string*`) store an i32 per element into a shared string table. |
 | `without_faces(faces, keep)` / `compacted()` | A face subset gathered in parallel: kept faces keep corners, triangles, normals and attributes; unused points go. `compacted` keeps every face and drops only unused points. |
-| `Verbs`, `MeshNormals`, `MeshPrimitives` | Every modeling operation is a verb (see Verbs below); grouped corner normals; grid, sphere, cylinder, torus. |
+| `Verbs`, `MeshNormals`, `MeshPrimitives` | Every modeling operation is a verb (see Verbs below); grouped corner normals; grid, box, sphere, cylinder, torus standing on the origin (the primitive verbs have every option). |
 
 ## Storage and precision
 
@@ -268,8 +268,17 @@ works on, the selection levels it is picked at, as `objects points edges
 faces`, and the prompt while it waits; none declared is one pick at every
 level), `drag` (the parameter a drag in the viewport sets after it runs),
 `gesture` (`stroke` for Bisect's line, `place` for PolyDraw's clicked
-corners, `hover` for Loop Cut's ring, `knife` for the Knife's points)
-and `whole` (with nothing selected it runs on everything). A parameter with
+corners, `hover` for Loop Cut's ring, `knife` for the Knife's points,
+`create` for a primitive drawn in the viewport, `pen` for Poly Pen)
+and `whole` (with nothing selected it runs on everything). `inputs` is a
+node's inputs: 0 for a primitive (no group; as an Edit step it adds to the
+edited mesh), 2 for a verb that reads a reference surface second
+(`VerbInput.reference`; `second_required` when it cannot do without one).
+A primitive's `place` (`PlaceSpec`) names the rows the viewport's
+interactive creation sets: its base (`rect` corner to corner, or `radius`),
+its rise (`height` along Up, or `radius` off the base's circle), Position
+and Up; `Verbs.place_*` read it and `Verbs.placement_axis(up, degrees,
+axis)` gives the frame a base is drawn in. A parameter with
 `bar` off stays off the tool's bar (numbers a gesture records). `Verbs.label`,
 `section`, `family`, `icon`, `pick_*`, `drag`, `gesture`, `whole` and
 `parm_bar` read them. A `native` verb keeps the group on its own domain,
@@ -279,7 +288,7 @@ center, its average normal and a slide's rails; `Verbs.frame_at(center,
 axis)` is a frame of a center and an axis alone, for a tool that is no verb
 (luced-3d's CAD tools, measured on their own geometry).
 
-`Verbs.run(name, mesh, group, group_type, numbers, symmetry=0, keep=false, second="")`
+`Verbs.run(name, mesh, group, group_type, numbers, symmetry=0, keep=false, second="", reference=none)`
 also carries the Edit engine's options: `symmetry` (1..3) adds the mirror of
 every group member across the X, Y or Z plane through the origin, and `keep`
 makes the output selection the group carried through the verb instead of what
@@ -420,6 +429,37 @@ so the editor asks for it.
   their best-fit plane. It winds against any face sharing one of its edges
   (a refilled hole faces like its surroundings), else like the faces around
   its points. The new face is the output selection.
+- **The primitives** (Create › Primitives; `primitives/` builds them in
+  place on the pool, `verbs/create*.lucb` declares them): **Box** (size and
+  divisions per axis; Bevel rounds every outer edge with PolyBevel at Bevel
+  segments; one division each way is `Mesh.cube`, point for point),
+  **Grid** (width, depth, columns, rows) and **Plane**, **Sphere** (UV:
+  columns and rows), **Icosphere** (0–9 subdivisions: 10 × 4ⁿ + 2 points,
+  20 × 4ⁿ faces), **Quad Sphere** (a divided cube on the sphere: 6d² quads),
+  **Cylinder** and **Cone** (top radius 0 an apex, more a frustum; rows;
+  caps None, N-gon, Fan or Grid in Cap rings bands), **Pipe** (a wall of a
+  thickness, or one open wall), **Disc** (N-gon, Fan or Grid fill in
+  rings), **Torus** (major and minor segments, Twist), **Capsule** (cap
+  rows and body rows), **Platonic Solid** (the five, resting on a face) and
+  **Helix** (a spring: radius, wire, turns, height, steps a turn, sides,
+  caps). Each stands on its base at Position along Up, turned by Turn
+  (`primitives/placement.lucb`); with Name piece on (Edit Mesh's steps) its
+  faces take the path /box1, /box2, …. The new faces are the output
+  selection. As a node a primitive has no input.
+- **Shrinkwrap** (points; `inputs` 2, the reference required): the group's
+  points onto the reference surface, Nearest, Along normals or Along
+  vector (either way), Offset off it along its normal, Strength of the way;
+  points whose line misses stay, with a warning. **Relax** given a
+  reference keeps its points on it (each round ends with them pulled back).
+  Both query the reference's spatial index (`TriangleIndex.nearest_point`,
+  seeded with the neighboring point's distance) in parallel.
+- **Poly Pen** (edges or points, native; positions after its parameters):
+  one action of the Poly Pen tool, replayable: Extend a boundary edge into a
+  triangle (one position) or a quad (two, each paired with the edge point
+  it does not cross to), Fill corner at a point between exactly two
+  boundary edges, Split an edge at a position. New faces wind against the
+  face beside their edge. `Verbs.nearest_boundary_edge(mesh, point)` is the
+  edge its Ctrl-click extends.
 - **Select verbs** (native: the group stays on its own domain): the select
   rules of `selecting/` after the modeling verbs, one each. They change no
   geometry; the output selection is what the rule made, on its own domain.
@@ -451,7 +491,9 @@ Faces a builder copies keep their triangles (CAD cut cells survive); runs of
 untouched faces copy in one pass (`copy_faces`), and only new faces are ear
 clipped. `tests/bench/run.py --base <luce-base>` times every verb on the 837×837
 grid (one `--native --opt 3` run each, connectivity caches warm, output mesh
-and attributes included):
+and attributes included; the primitives run on nothing, and Shrinkwrap and
+Relax read the grid in triangles, turned a little and lifted 0.3, as their
+reference):
 
 | Verb run | Time | Faces out | Warning |
 |---|---:|---:|---|
@@ -515,3 +557,17 @@ and attributes included):
 | Decimate, 100k triangles collapsed to half | 88.1 ms | 1,351,137 |  |
 | Decimate, un-subdivide 836×836 quads | 76.0 ms | 174,724 |  |
 | Collapse, every edge of 100k faces | 23.5 ms | 600,568 |  |
+| Grid, 1024 × 1024 (1M faces) | 23.2 ms | 1,048,576 |  |
+| Box, 409 divisions each way (1M faces) | 21.7 ms | 1,003,686 |  |
+| Box, 32 divisions, every edge rounded at 4 segments | 2.8 ms | 7,776 |  |
+| Sphere, 1448 × 724 (1M faces) | 23.5 ms | 1,048,352 |  |
+| Icosphere, 8 subdivisions (1.3M faces) | 21.3 ms | 1,310,720 |  |
+| Quad Sphere, 409 divisions (1M faces) | 23.3 ms | 1,003,686 |  |
+| Cylinder, 1024 sides × 1024 rows, grid caps (1.2M faces) | 27.9 ms | 1,179,648 |  |
+| Torus, 1024 × 1024 (1M faces) | 22.0 ms | 1,048,576 |  |
+| Capsule, 1024 sides, 256 cap rows, 512 rows (1M faces) | 23.6 ms | 1,048,576 |  |
+| Helix, 40 turns of 512 steps, 48 sides (1M faces) | 20.6 ms | 983,042 |  |
+| Shrinkwrap, every point (702k) onto a scan just above (1.4M triangles) | 62.8 ms | 700,569 |  |
+| Shrinkwrap, every point along a vector onto that scan | 36.6 ms | 700,569 | Some points' lines miss the reference surface; they stay where they were |
+| Relax, every point, 5 rounds kept on that scan | 247.0 ms | 700,569 |  |
+| Poly Pen, a boundary edge extended | 14.5 ms | 700,570 |  |

@@ -21,7 +21,9 @@ from core.attributes import Attribute, AttributeStore, Domain, DataType, Storage
 from core.geometry import Bounds
 from math.vector import Vector3
 from math.matrix import Matrix4
-from geometries.polygon import with_group_bits, Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute, edge_bits_from_pairs
+from geometries.polygon import with_group_bits, Mesh, mesh_share, mesh_dispose, mesh_adopt, assembled, kept_faces, edge_parents, moved_storage, put_attribute, precise_span, mesh_positions, remove_attribute, edge_bits_from_pairs, concatenated, MeshPart
+from geometries.triangle_index import TriangleIndex
+from primitives import placement, grid_mesh, box_mesh, quad_sphere_mesh, uv_sphere_mesh, capsule_mesh, cylinder_mesh, tube_mesh, disc_mesh, torus_mesh, helix_mesh, platonic_mesh, icosphere_mesh
 from geometries.triangulation.polygon_triangulation import area_normal
 import geometries.triangulation.face_scratch
 from geometries.point_hash import PointHash
@@ -29,7 +31,7 @@ from geometries.topology.connectivity import Topology
 from groups import GroupType, is_blank, guess_domain, GroupResult, GroupReport, group_bits, Selection, adopt_selection, strict_conversion, selection_bits
 from selecting import converted, rule_at, rule_count, run_rule, mirror_tolerance, mirror_map, symmetric, Delimits, delimits_for
 from core.limits import max_points, check_mesh_size
-from core.verb_specs import ParmKind, ParmSpec, PickSpec, KeySpec, Parms, filled_parms
+from core.verb_specs import ParmKind, ParmSpec, PickSpec, KeySpec, PlaceSpec, Parms, filled_parms
 from luce_std import ramp
 from luce_std import sort
 
@@ -80,6 +82,10 @@ pub struct VerbInput:
     ## The second pick's elements (Bridge's second loop, Target Weld's
     ## target), on the domain its levels name, when one was given.
     pub let second: Bits? = none
+    ## The reference surface of a verb that takes one (Verb.inputs 2: a
+    ## node's second input, an Edit Mesh's Reference): Shrinkwrap's target,
+    ## the surface Relax keeps its points on.
+    pub let reference: const Mesh*? = none
 
 ## What a kernel returns: new positions over the same topology, a topology
 ## built with parents, or a finished mesh; and the output selection.
@@ -146,6 +152,12 @@ pub struct Verb:
     ## Whether the group stays on its own domain, whichever it is (the
     ## Select verbs: a pattern of selected points, edges or faces).
     pub let native: bool = false
+    ## The inputs its node has: 1, or 0 for a primitive (made from nothing:
+    ## no group; as an Edit step it adds to the edited mesh), or 2 for a
+    ## verb that reads a reference surface (VerbInput.reference), which
+    ## `second_required` says it cannot do without.
+    pub let inputs: usize = 1
+    pub let second_required: bool = false
 
     # How the verb is offered as a modeling tool. luced-3d builds its tool
     # registry from these, so a verb added to `makers` reaches the node
@@ -188,8 +200,12 @@ pub struct Verb:
     pub let rails: (func(const VerbInput*, Rails*) -> unit!)? = none
     ## Viewport input it takes besides the selection: "" none, "stroke"
     ## (the knife), "place" (PolyDraw's clicked corners), "hover" (Loop
-    ## Cut's ring under the pointer, placed by a click).
+    ## Cut's ring under the pointer, placed by a click), "create" (a
+    ## primitive drawn on the ground or a surface: `place`), "pen" (Poly
+    ## Pen's faces built under the pointer).
     pub let gesture: str = ""
+    ## How the "create" gesture sets a primitive's rows.
+    pub let place: PlaceSpec? = none
     ## Whether, with nothing selected, it runs on everything.
     pub let whole: bool = false
     ## The select rule it runs instead of `cook` (selecting/registry.lucb's
@@ -225,7 +241,8 @@ pub struct VerbRun:
 ## the verb's domain. With `keep`, the output
 ## selection is the group carried through the verb (a new element is
 ## selected when all its parents were) instead of what the verb made.
-pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false, second: str = "") -> VerbRun!:
+pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false, second: str = "", reference: const Mesh*? = none) -> VerbRun!:
+    if verb.second_required and reference == none: error(errors.invalid, "this operation needs a reference surface: connect one to its second input")
     var resolved = try resolve_group(verb, mesh, group, group_type, symmetry)
     defer resolved.close()
     var picked = try second_pick(verb, mesh, second, group_type)
@@ -248,7 +265,7 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
     defer output.close()
     var second_bits: Bits? = none
     if not is_blank(second) and verb.picks.length > 1: second_bits = picked.view()
-    let input = VerbInput(source, bits, Parms(values.view()), symmetry, target, second_bits)
+    let input = VerbInput(source, bits, Parms(values.view()), symmetry, target, second_bits, reference)
     if verb.rule >= 0:
         let rule = rule_at((usize)verb.rule)
         let made = try run_rule(&rule, source, bits, target, values.view())

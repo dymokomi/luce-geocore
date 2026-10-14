@@ -1,0 +1,112 @@
+## Tubes swept round a path: the Torus (a circle swept round a circle,
+## resting on the ground) and the Helix (a spring: a circle swept along a
+## helix about Y, its ends capped). Built in place on the pool.
+
+## Torus: the tube of radius `minor` swept round the circle of radius
+## `major` about Y, resting on the ground: `segments` rings round, `sides`
+## points round each, ring i's point j at i * sides + j (our first torus's
+## numbering). `twist` turns the rings by that many of their points over the
+## whole way round, so a ring's points meet the next ones one by one and the
+## last ring meets the first `twist` points on.
+pub func torus_mesh(major: f64, minor: f64, segments: usize, sides: usize, twist: usize) -> Mesh*!:
+    if not (major > 0.0 and major <= 100000.0 and minor > 0.0 and minor < major): error(errors.invalid, "a torus's minor radius must be positive and below its major radius")
+    if segments < 3 or segments > most_sides or sides < 3 or sides > most_sides: error(errors.invalid, "a torus takes 3..4096 segments and sides")
+    if twist >= sides: error(errors.invalid, "a torus's twist is below its sides")
+    var arrays = try Arrays.allocate(segments * sides, segments * sides, segments * sides * 4)
+    defer arrays.close()
+    var work = TorusWork(major, minor, segments, sides, twist, arrays.points(), arrays.face_offsets(), arrays.face_corners())
+    ranges.each_range(segments, 16, (void*)&work, torus_rings)
+    return try arrays.finish()
+
+struct TorusWork:
+    let major: f64
+    let minor: f64
+    let segments: usize
+    let sides: usize
+    let twist: usize
+    let positions: Float3[]
+    let offsets: i32[]
+    let corners: i32[]
+
+## Rings `first..<end`: their points, and the quads to the next ring.
+func torus_rings(context: void*, first: usize, end: usize, worker: usize):
+    let work = (TorusWork*)context
+    let b = work.sides
+    for i in first..<end:
+        let phi = (f64)i * 2.0 * math.pi / (f64)work.segments
+        let turned = (f64)work.twist * (f64)i / (f64)work.segments
+        for j in 0..<b:
+            let theta = ((f64)j + turned) * 2.0 * math.pi / (f64)b
+            let r = work.major + math.cos(theta) * work.minor
+            work.positions[i * b + j] = Float3.of(Vector3(r * math.cos(phi), math.sin(theta) * work.minor + work.minor, r * math.sin(phi)))
+        let last = i + 1 == work.segments
+        let next_ring = 0 if last else i + 1
+        let shift = work.twist if last else 0
+        for j in 0..<b:
+            let face = i * b + j
+            put_quad(work.offsets, work.corners, face, face * 4, i * b + j, i * b + (j + 1) % b, next_ring * b + (j + 1 + shift) % b, next_ring * b + (j + shift) % b)
+
+## Helix: a wire of radius `wire` swept along the helix of radius `radius`
+## about Y through `turns` turns rising `height`, `steps` rings a turn and
+## `sides` points round each, resting on the ground; with `caps` its two
+## ends are closed by n-gons. Ring i's point j is i * sides + j.
+pub func helix_mesh(radius: f64, wire: f64, turns: f64, height: f64, steps: usize, sides: usize, caps: bool) -> Mesh*!:
+    if not (radius > 0.0 and radius <= 100000.0 and wire > 0.0 and wire <= 100000.0): error(errors.invalid, "a helix's radius and wire must be in (0, 100000]")
+    if not (turns > 0.0 and turns <= 1000.0): error(errors.invalid, "a helix takes 0..1000 turns")
+    if not (height >= 0.0 and height <= 100000.0): error(errors.invalid, "a helix's height must be in 0..100000")
+    if steps < 3 or steps > most_rows or sides < 3 or sides > most_sides: error(errors.invalid, "a helix takes 3..2048 steps a turn and 3..4096 sides")
+    let rings = (usize)math.max(2.0, math.round(turns * (f64)steps)) + 1
+    let cap_faces: usize = 2 if caps else 0
+    var arrays = try Arrays.allocate(rings * sides, (rings - 1) * sides + cap_faces, (rings - 1) * sides * 4 + cap_faces * sides)
+    defer arrays.close()
+    var work = HelixWork(radius, wire, turns, height, rings, sides, cap_faces * sides, arrays.points(), arrays.face_offsets(), arrays.face_corners())
+    ranges.each_range(rings, 64, (void*)&work, helix_rings)
+    if caps:
+        # The start faces back along the path, the end forward along it.
+        let offsets = arrays.face_offsets()
+        let corners = arrays.face_corners()
+        let last = (rings - 1) * sides
+        offsets[0] = 0
+        offsets[1] = (i32)sides
+        for j in 0..<sides:
+            corners[j] = (i32)(sides - 1 - j)
+            corners[sides + j] = (i32)(last + j)
+    return try arrays.finish()
+
+struct HelixWork:
+    let radius: f64
+    let wire: f64
+    let turns: f64
+    let height: f64
+    let rings: usize
+    let sides: usize
+    ## Faces and corners the caps take first.
+    let first_corner: usize
+    let positions: Float3[]
+    let offsets: i32[]
+    let corners: i32[]
+
+## Rings `first..<end`: each on the helix's frame (its tangent, the normal
+## toward the axis, and their cross), and the quads to the next ring, wound
+## so they face out of the wire.
+func helix_rings(context: void*, first: usize, end: usize, worker: usize):
+    let work = (HelixWork*)context
+    let b = work.sides
+    let cap_faces = work.first_corner // b
+    for i in first..<end:
+        let u = (f64)i / (f64)(work.rings - 1)
+        let angle = u * work.turns * 2.0 * math.pi
+        let center = Vector3(math.cos(angle) * work.radius, work.wire + u * work.height, math.sin(angle) * work.radius)
+        let tangent = Vector3(-math.sin(angle) * work.radius * work.turns * 2.0 * math.pi, work.height, math.cos(angle) * work.radius * work.turns * 2.0 * math.pi)
+        let along = tangent.multiply_scalar(1.0 / tangent.length())
+        let inward = Vector3(-math.cos(angle), 0.0, -math.sin(angle))
+        let binormal = along.cross(inward)
+        for j in 0..<b:
+            let beta = (f64)j * 2.0 * math.pi / (f64)b
+            let offset = inward.multiply_scalar(math.cos(beta) * work.wire).add(binormal.multiply_scalar(math.sin(beta) * work.wire))
+            work.positions[i * b + j] = Float3.of(center.add(offset))
+        if i + 1 == work.rings: continue
+        for j in 0..<b:
+            let face = cap_faces + i * b + j
+            let corner = work.first_corner + (i * b + j) * 4
+            put_quad(work.offsets, work.corners, face, corner, i * b + j, i * b + (j + 1) % b, (i + 1) * b + (j + 1) % b, (i + 1) * b + j)

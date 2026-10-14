@@ -1,0 +1,330 @@
+## Primitive checks (POLY-MODELING.md Stage 6): every primitive verb run on
+## an empty mesh, by closed forms. Counts per option; every sphere's points
+## on its sphere (UV, ico at each subdivision, quad); boxes with divisions
+## (one each way is Mesh.cube itself) and rounded by a bevel; caps of every
+## kind with rings, cones, frustums and tubes by their polygon volumes;
+## discs by their polygon area; tori and twisted tori on their tube; the
+## capsule a closed surface within its radius of its axis; the Platonic
+## solids resting on a face; the helix closed by its caps; placement by
+## Position, Up and Turn; pieces named /box1, /box2 with Name piece, and
+## their faces selected.
+import interop
+import memory
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import counts, near, near_point, volume, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try box_checks()
+    try grid_checks()
+    try sphere_checks()
+    try round_checks()
+    try torus_checks()
+    try solid_checks()
+    print("PASS primitives: box divisions and bevel, grid and plane, UV/ico/quad spheres on their spheres, capsule, cylinder caps (none, n-gon, fan, grid, rings), cone, frustum, tube, disc, torus and twist, Platonic solids, helix; placement and pieces")
+
+## Primitive `name` with `numbers` on an empty mesh (or on `onto`).
+func primitive(name: str, numbers: const f64[], onto: interop.Reference[Mesh]? = none) -> interop.Reference[Mesh]!:
+    let empty = try Mesh.empty()
+    defer empty.release()
+    let input = onto else empty
+    let result = try Verbs.run(name, input, "", 0, numbers)
+    defer result.release()
+    assert(result.value().warning().length == 0)
+    let product = try result.value().mesh()
+    errdefer product.release()
+    # The new faces are the output selection.
+    let selection = try result.value().selection()
+    defer selection.release()
+    assert(selection.value().count() == product.value().face_count() - input.value().face_count())
+    return product
+
+## Whether primitive `name` refuses `numbers` (memory propagates).
+func refuses(name: str, numbers: const f64[]) -> bool!:
+    let empty = try Mesh.empty()
+    defer empty.release()
+    let result = Verbs.run(name, empty, "", 0, numbers) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
+        return true
+    result.release()
+    return false
+
+## V - E + F.
+func euler(mesh: interop.Reference[Mesh]) -> i64!:
+    return mesh.value().point_count() - (try mesh.value().edge_count()) + mesh.value().face_count()
+
+## Every point `distance` from `center` (within f32 rounding).
+func on_sphere(mesh: interop.Reference[Mesh], center: Vector3, distance: f64) -> !:
+    for at in 0..<mesh.value().point_count():
+        near((try mesh.value().point(at)).subtract(center).length(), distance, 0.000002 * distance + 0.0000002)
+
+## The area of a regular n-gon of circumradius r.
+func ngon(sides: i64, r: f64) -> f64:
+    return (f64)sides * 0.5 * r * r * math.sin(2.0 * math.pi / (f64)sides)
+
+## How many faces have `size` corners.
+func sized(mesh: interop.Reference[Mesh], size: i64) -> i64!:
+    var count: i64 = 0
+    for face in 0..<mesh.value().face_count():
+        if (try mesh.value().face_size(face)) == size: count += 1
+    return count
+
+func path_of(mesh: interop.Reference[Mesh], face: i64) -> str!:
+    return try mesh.value().attribute_text(mesh.value().find_attribute("path", 2), face)
+
+func box_checks() -> !:
+    # One division each way: Mesh.cube, point for point and face for face.
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    let plain = try primitive("Box", no_numbers[..<0])
+    defer plain.release()
+    try counts(plain, 8, 6)
+    for at in 0..<(i64)8: near_point(try plain.value().point(at), try cube.value().point(at))
+    for face in 0..<(i64)6:
+        for corner in 0..<(i64)4: assert((try plain.value().face_point(face, corner)) == (try cube.value().face_point(face, corner)))
+    # A node's shape names nothing; with Name piece on (Edit Mesh's steps),
+    # /box1, then /box2 beside it.
+    assert(plain.value().find_attribute("path", 2) < 0)
+    let named = try primitive("Box", named_box[..<16])
+    defer named.release()
+    assert((try path_of(named, 0)) == "/box1")
+    # Divisions 2, 3, 4: the 3×4×5 lattice's 54 surface points.
+    let divided_numbers: f64[6] = [2.0, 3.0, 4.0, 2.0, 3.0, 4.0]
+    let divided = try primitive("Box", divided_numbers[..<6])
+    defer divided.release()
+    try counts(divided, 54, 52)
+    try surface(divided, true)
+    near(try volume(divided), 24.0, 0.00001)
+    assert((try euler(divided)) == 2)
+    # A second box on the first: its own piece, its faces selected.
+    let twice = try primitive("Box", named_box[..<16], divided)
+    defer twice.release()
+    try counts(twice, 62, 58)
+    assert((try path_of(twice, 0)) == "" and (try path_of(twice, 57)) == "/box1")
+    let third = try primitive("Box", named_box[..<16], twice)
+    defer third.release()
+    assert((try path_of(third, 57)) == "/box1" and (try path_of(third, 63)) == "/box2")
+    # Rounded edges at 3 segments: Bevel's corners, 8 triangles, the rest quads.
+    let round_numbers: f64[8] = [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 0.25, 3.0]
+    let rounded = try primitive("Box", round_numbers[..<8])
+    defer rounded.release()
+    try surface(rounded, true)
+    assert((try sized(rounded, 3)) == 8 and (try sized(rounded, 4)) == rounded.value().face_count() - 8)
+    let box = rounded.value().bounds()
+    near_point(box.minimum, Vector3(-1.0, 0.0, -1.0), 0.00001)
+    near_point(box.maximum, Vector3(1.0, 2.0, 1.0), 0.00001)
+    assert((try volume(rounded)) < 7.75 and (try volume(rounded)) > 7.5)
+    # Placed: standing along +X from (1, 2, 3); the frame's X is world -Z.
+    let placed_numbers: f64[15] = [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 0.0, 3.0, 1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0]
+    let placed = try primitive("Box", placed_numbers[..<15])
+    defer placed.release()
+    near_point(placed.value().bounds().minimum, Vector3(1.0, 1.0, 2.0), 0.00001)
+    near_point(placed.value().bounds().maximum, Vector3(3.0, 3.0, 4.0), 0.00001)
+    near(try volume(placed), 8.0, 0.00001)
+    # Turned 90° about Up (+Y): a 4 by 2 base becomes 2 by 4.
+    let turned_numbers: f64[15] = [4.0, 1.0, 2.0, 1.0, 1.0, 1.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 90.0]
+    let turned = try primitive("Box", turned_numbers[..<15])
+    defer turned.release()
+    near_point(turned.value().bounds().maximum, Vector3(1.0, 1.0, 2.0), 0.00001)
+
+let no_numbers: f64[1] = [0.0]
+let named_box: f64[16] = [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+
+func grid_checks() -> !:
+    let first = try MeshPrimitives.grid(2.0, 4)
+    defer first.release()
+    let grid = try primitive("Grid", no_numbers[..<0])
+    defer grid.release()
+    try counts(grid, 25, 16)
+    for at in 0..<(i64)25: near_point(try grid.value().point(at), try first.value().point(at))
+    assert((try grid.value().face_normal(0)).y > 0.99)
+    let wide_numbers: f64[4] = [3.0, 1.0, 3.0, 2.0]
+    let wide = try primitive("Grid", wide_numbers[..<4])
+    defer wide.release()
+    try counts(wide, 12, 6)
+    try surface(wide, false)
+    near_point(wide.value().bounds().maximum, Vector3(1.5, 0.0, 0.5))
+    let plane = try primitive("Plane", no_numbers[..<0])
+    defer plane.release()
+    try counts(plane, 4, 1)
+    near(try area(plane, 0), 4.0)
+
+func sphere_checks() -> !:
+    # UV: the first sphere's points, then any columns and rows.
+    let old = try MeshPrimitives.sphere(1.0, 8)
+    defer old.release()
+    let eight_numbers: f64[3] = [1.0, 8.0, 4.0]
+    let eight = try primitive("Sphere", eight_numbers[..<3])
+    defer eight.release()
+    try counts(eight, old.value().point_count(), old.value().face_count())
+    for at in 0..<old.value().point_count(): near_point(try eight.value().point(at), try old.value().point(at))
+    let uv_numbers: f64[3] = [1.5, 7.0, 5.0]
+    let uv = try primitive("Sphere", uv_numbers[..<3])
+    defer uv.release()
+    try counts(uv, 30, 35)
+    try on_sphere(uv, Vector3(0.0, 1.5, 0.0), 1.5)
+    try surface(uv, true)
+    assert((try volume(uv)) > 0.0 and (try volume(uv)) < 4.0 / 3.0 * math.pi * 3.375)
+    # Ico: 10 × 4ⁿ + 2 points and 20 × 4ⁿ faces at each subdivision.
+    var before = 0.0
+    for n in 0..<(i64)5:
+        let numbers: f64[2] = [1.0, (f64)n]
+        let ico = try primitive("Icosphere", numbers[..<2])
+        defer ico.release()
+        let power = (i64)math.pow(4.0, (f64)n)
+        try counts(ico, 10 * power + 2, 20 * power)
+        try on_sphere(ico, Vector3(0.0, 1.0, 0.0), 1.0)
+        try surface(ico, true)
+        assert((try euler(ico)) == 2)
+        let held = try volume(ico)
+        assert(held > before and held < 4.0 / 3.0 * math.pi)
+        before = held
+        # A point straight up and one straight down.
+        near(ico.value().bounds().maximum.y, 2.0, 0.000002)
+        near(ico.value().bounds().minimum.y, 0.0, 0.000002)
+    # Quad: 6d² + 2 points, 6d² quads.
+    for d in 1..<(i64)6:
+        let numbers: f64[2] = [2.0, (f64)d]
+        let quad = try primitive("Quad Sphere", numbers[..<2])
+        defer quad.release()
+        try counts(quad, 6 * d * d + 2, 6 * d * d)
+        try on_sphere(quad, Vector3(0.0, 2.0, 0.0), 2.0)
+        try surface(quad, true)
+        assert((try sized(quad, 4)) == 6 * d * d)
+    # Capsule: 4 cap rows each end and 3 rows between: 10 rings of 16.
+    let capsule_numbers: f64[5] = [0.5, 2.0, 16.0, 4.0, 3.0]
+    let capsule = try primitive("Capsule", capsule_numbers[..<5])
+    defer capsule.release()
+    try counts(capsule, 162, 176)
+    try surface(capsule, true)
+    assert((try euler(capsule)) == 2)
+    for at in 0..<capsule.value().point_count():
+        let p = try capsule.value().point(at)
+        let along = math.max(0.5, math.min(1.5, p.y))
+        near(p.subtract(Vector3(0.0, along, 0.0)).length(), 0.5, 0.000002)
+    # As tall as it is wide: a sphere (the two equators are one).
+    let round_numbers: f64[5] = [0.5, 1.0, 16.0, 4.0, 3.0]
+    let ball = try primitive("Capsule", round_numbers[..<5])
+    defer ball.release()
+    try counts(ball, 2 + 7 * 16, 8 * 16)
+    try on_sphere(ball, Vector3(0.0, 0.5, 0.0), 0.5)
+
+func round_checks() -> !:
+    # Caps of each kind on 8 sides and 2 rows: the side's 16 quads and 24 points.
+    let kinds: i64[8] = [0, 1, 1, 2, 2, 3, 3, 1]
+    let rings: i64[8] = [1, 1, 2, 1, 2, 1, 2, 3]
+    let points: i64[8] = [24, 24, 40, 26, 42, 26, 42, 56]
+    let faces: i64[8] = [16, 18, 34, 32, 48, 24, 40, 50]
+    for at in 0..<(usize)8:
+        let numbers: f64[6] = [1.0, 2.0, 8.0, 2.0, (f64)kinds[at], (f64)rings[at]]
+        let cylinder = try primitive("Cylinder", numbers[..<6])
+        defer cylinder.release()
+        try counts(cylinder, points[at], faces[at])
+        try surface(cylinder, kinds[at] != 0)
+        if kinds[at] != 0:
+            near(try volume(cylinder), 2.0 * ngon(8, 1.0), 0.00001)
+            assert((try euler(cylinder)) == 2)
+    # A grid cap needs the sides in fours.
+    let odd: f64[6] = [1.0, 2.0, 6.0, 1.0, 3.0, 1.0]
+    assert(try refuses("Cylinder", odd[..<6]))
+    # A cone closes to its apex; a frustum's volume is h/3 (A + a + √(Aa)).
+    let cone_numbers: f64[7] = [1.0, 0.0, 2.0, 12.0, 3.0, 2.0, 1.0]
+    let cone = try primitive("Cone", cone_numbers[..<7])
+    defer cone.release()
+    try counts(cone, 12 * 3 + 1 + 1, 36 + 12)
+    try surface(cone, true)
+    near(try volume(cone), 2.0 / 3.0 * ngon(12, 1.0), 0.00001)
+    let frustum_numbers: f64[7] = [1.0, 0.5, 2.0, 12.0, 1.0, 1.0, 1.0]
+    let frustum = try primitive("Cone", frustum_numbers[..<7])
+    defer frustum.release()
+    try surface(frustum, true)
+    let big = ngon(12, 1.0)
+    let small = ngon(12, 0.5)
+    near(try volume(frustum), 2.0 / 3.0 * (big + small + math.sqrt(big * small)), 0.00001)
+    # A tube's wall: the ring between its polygons, times the height.
+    let tube_numbers: f64[5] = [1.0, 0.25, 2.0, 10.0, 3.0]
+    let tube = try primitive("Pipe", tube_numbers[..<5])
+    defer tube.release()
+    try counts(tube, 80, 80)
+    try surface(tube, true)
+    near(try volume(tube), 2.0 * (ngon(10, 1.0) - ngon(10, 0.75)), 0.00001)
+    let open_numbers: f64[5] = [1.0, 0.0, 2.0, 10.0, 3.0]
+    let open = try primitive("Pipe", open_numbers[..<5])
+    defer open.release()
+    try counts(open, 40, 30)
+    try surface(open, false)
+    # Discs: every fill covers the n-gon, facing up.
+    let fills: i64[3] = [0, 1, 2]
+    let disc_faces: i64[3] = [13, 24, 21]
+    for at in 0..<(usize)3:
+        let numbers: f64[4] = [1.0, 12.0, (f64)fills[at], 2.0]
+        let disc = try primitive("Disc", numbers[..<4])
+        defer disc.release()
+        assert(disc.value().face_count() == disc_faces[at])
+        var total = 0.0
+        for face in 0..<disc.value().face_count():
+            total += try area(disc, face)
+            assert((try disc.value().face_normal(face)).y > 0.99)
+        near(total, ngon(12, 1.0), 0.00001)
+        try surface(disc, false)
+
+func torus_checks() -> !:
+    for twist in 0..<(i64)3:
+        let numbers: f64[5] = [1.0, 0.25, 12.0, 6.0, (f64)twist]
+        let torus = try primitive("Torus", numbers[..<5])
+        defer torus.release()
+        try counts(torus, 72, 72)
+        try surface(torus, true)
+        assert((try euler(torus)) == 0)
+        for at in 0..<torus.value().point_count():
+            let p = try torus.value().point(at)
+            let out = math.sqrt(p.x * p.x + p.z * p.z) - 1.0
+            near(math.sqrt(out * out + (p.y - 0.25) * (p.y - 0.25)), 0.25, 0.000002)
+        assert((try volume(torus)) > 0.0)
+    # The first torus's numbering.
+    let old = try MeshPrimitives.torus(1.0, 0.3, 8)
+    defer old.release()
+    let same_numbers: f64[5] = [1.0, 0.3, 8.0, 8.0, 0.0]
+    let same = try primitive("Torus", same_numbers[..<5])
+    defer same.release()
+    for face in 0..<old.value().face_count():
+        for corner in 0..<(i64)4: assert((try same.value().face_point(face, corner)) == (try old.value().face_point(face, corner)))
+
+func solid_checks() -> !:
+    let points: i64[5] = [4, 8, 6, 20, 12]
+    let faces: i64[5] = [4, 6, 8, 12, 20]
+    let sizes: i64[5] = [3, 4, 3, 5, 3]
+    for kind in 0..<(usize)5:
+        let numbers: f64[2] = [(f64)kind, 1.5]
+        let solid = try primitive("Platonic", numbers[..<2])
+        defer solid.release()
+        try counts(solid, points[kind], faces[kind])
+        assert((try sized(solid, sizes[kind])) == faces[kind])
+        try surface(solid, true)
+        assert((try euler(solid)) == 2 and (try volume(solid)) > 0.0)
+        # Every corner the radius from the center; resting on a face.
+        var center = Vector3()
+        for at in 0..<solid.value().point_count(): center = center.add(try solid.value().point(at))
+        center = center.multiply_scalar(1.0 / (f64)solid.value().point_count())
+        try on_sphere(solid, center, 1.5)
+        near(solid.value().bounds().minimum.y, 0.0, 0.000002)
+        var resting: i64 = 0
+        for at in 0..<solid.value().point_count():
+            if (try solid.value().point(at)).y < 0.00001: resting += 1
+        assert(resting == sizes[kind])
+    # Helix: 2 turns of 8 steps, 6 sides: 17 rings, capped.
+    let helix_numbers: f64[7] = [1.0, 0.1, 2.0, 1.0, 8.0, 6.0, 1.0]
+    let helix = try primitive("Helix", helix_numbers[..<7])
+    defer helix.release()
+    try counts(helix, 102, 98)
+    try surface(helix, true)
+    assert((try euler(helix)) == 2 and (try volume(helix)) > 0.0)
+    # Its wire's middle rises from Wire to Wire + Height.
+    assert(helix.value().bounds().minimum.y > -0.000001 and helix.value().bounds().maximum.y < 1.2 + 0.000001)
+    let open_numbers: f64[7] = [1.0, 0.1, 2.0, 1.0, 8.0, 6.0, 0.0]
+    let open = try primitive("Helix", open_numbers[..<7])
+    defer open.release()
+    try counts(open, 102, 96)
+    try surface(open, false)

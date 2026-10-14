@@ -1,0 +1,273 @@
+## The round primitives about Y: Cylinder and Cone (one shape: a cone is a
+## cylinder whose top radius is 0, closed by an apex), Tube (a wall of a
+## thickness, or an open one) and Disc (a cap alone). Side rings go from
+## the bottom up, each from +X toward +Z; faces are the bottom cap's, the
+## top cap's, then the side's row by row, as our first cylinder had them.
+##
+## A cap fills a ring with `rings` bands: rings - 1 bands of quads (inner
+## rings at even steps toward the middle), then the middle: an n-gon, a fan
+## of triangles round a center point, or a grid of quads (sides in fours: a
+## (sides / 4)² grid whose inner points are the Coons patch of its four
+## quarters of the ring, Blender's Grid Fill on a circle).
+
+## Cap kinds, as the Caps menus number them.
+pub let cap_none: i64 = 0
+pub let cap_ngon: i64 = 1
+pub let cap_fan: i64 = 2
+pub let cap_grid: i64 = 3
+
+## The most bands a cap takes.
+pub let most_cap_rings: usize = 1024
+
+## Cylinder (or cone): `bottom` and `top` radii (top 0: a cone's apex),
+## `height`, `sides` round, `rows` bands up the side, caps of kind `caps`
+## in `rings` bands.
+pub func cylinder_mesh(bottom: f64, top: f64, height: f64, sides: usize, rows: usize, caps: i64, rings: usize) -> Mesh*!:
+    if not (bottom > 0.0 and bottom <= 100000.0 and top >= 0.0 and top <= 100000.0): error(errors.invalid, "a cylinder's radii must be in (0, 100000] (the top's may be 0)")
+    if not (height > 0.0 and height <= 100000.0): error(errors.invalid, "a cylinder's height must be in (0, 100000]")
+    try check_round(sides, rows)
+    try check_caps(sides, caps, rings)
+    let apex = top == 0.0
+    let side_rings = rows if apex else rows + 1
+    let low = cap_size(sides, caps, rings)
+    let high = cap_size(sides, cap_none if apex else caps, rings)
+    let side_corners = (rows - 1) * sides * 4 + sides * 3 if apex else rows * sides * 4
+    let first_cap_point = side_rings * sides + (1 if apex else 0)
+    var arrays = try Arrays.allocate(first_cap_point + low.points + high.points, low.faces + high.faces + rows * sides, low.corners + high.corners + side_corners)
+    defer arrays.close()
+    var work = SideWork(sides, rows, side_rings, bottom, top, height, low.faces + high.faces, low.corners + high.corners, 0, false, arrays.points(), arrays.face_offsets(), arrays.face_corners())
+    ranges.each_range(side_rings, 16, (void*)&work, side_ring_points)
+    ranges.each_range(rows, 16, (void*)&work, side_faces)
+    if apex:
+        arrays.put(side_rings * sides, Vector3(0.0, height, 0.0))
+    var cap = Cap(sides, caps, rings, 0, bottom, 0.0, false, first_cap_point, 0, 0)
+    try fill_cap(&arrays, cap)
+    if not apex:
+        cap = Cap(sides, caps, rings, rows * sides, top, height, true, first_cap_point + low.points, low.faces, low.corners)
+        try fill_cap(&arrays, cap)
+    return try arrays.finish()
+
+## Tube: an outer wall of `radius` and, with a `thickness`, an inner wall
+## and the rims between them (closed); thickness 0 is the outer wall alone,
+## open at both ends.
+pub func tube_mesh(radius: f64, thickness: f64, height: f64, sides: usize, rows: usize) -> Mesh*!:
+    if not (radius > 0.0 and radius <= 100000.0): error(errors.invalid, "a tube's radius must be in (0, 100000]")
+    if not (thickness >= 0.0 and thickness < radius): error(errors.invalid, "a tube's thickness must be at least 0 and less than its radius")
+    if not (height > 0.0 and height <= 100000.0): error(errors.invalid, "a tube's height must be in (0, 100000]")
+    try check_round(sides, rows)
+    let walls: usize = 2 if thickness > 0.0 else 1
+    let rims: usize = 2 * sides if thickness > 0.0 else 0
+    let ring_points = (rows + 1) * sides
+    var arrays = try Arrays.allocate(walls * ring_points, rims + walls * rows * sides, 4 * (rims + walls * rows * sides))
+    defer arrays.close()
+    var outer = SideWork(sides, rows, rows + 1, radius, radius, height, rims, 4 * rims, 0, false, arrays.points(), arrays.face_offsets(), arrays.face_corners())
+    ranges.each_range(rows + 1, 16, (void*)&outer, side_ring_points)
+    ranges.each_range(rows, 16, (void*)&outer, side_faces)
+    if thickness == 0.0:
+        return try arrays.finish()
+    let inside = radius - thickness
+    var inner = SideWork(sides, rows, rows + 1, inside, inside, height, rims + rows * sides, 4 * (rims + rows * sides), ring_points, true, arrays.points(), arrays.face_offsets(), arrays.face_corners())
+    ranges.each_range(rows + 1, 16, (void*)&inner, side_ring_points)
+    ranges.each_range(rows, 16, (void*)&inner, side_faces)
+    # The rims: the bottom one facing down, the top one up.
+    let offsets = arrays.face_offsets()
+    let corners = arrays.face_corners()
+    let top = rows * sides
+    for s in 0..<sides:
+        let next = (s + 1) % sides
+        put_quad(offsets, corners, s, 4 * s, s, next, ring_points + next, ring_points + s)
+        put_quad(offsets, corners, sides + s, 4 * (sides + s), ring_points + top + s, ring_points + top + next, top + next, top + s)
+    return try arrays.finish()
+
+## Disc: a cap of kind `fill` in `rings` bands over a circle of `radius`
+## and `sides`, facing +Y.
+pub func disc_mesh(radius: f64, sides: usize, fill: i64, rings: usize) -> Mesh*!:
+    if not (radius > 0.0 and radius <= 100000.0): error(errors.invalid, "a disc's radius must be in (0, 100000]")
+    try check_round(sides, 1)
+    if fill == cap_none: error(errors.invalid, "a disc is filled: N-gon, Fan or Grid")
+    try check_caps(sides, fill, rings)
+    let size = cap_size(sides, fill, rings)
+    var arrays = try Arrays.allocate(sides + size.points, size.faces, size.corners)
+    defer arrays.close()
+    for s in 0..<sides:
+        let angle = (f64)s * 2.0 * math.pi / (f64)sides
+        arrays.put(s, Vector3(math.cos(angle) * radius, 0.0, math.sin(angle) * radius))
+    let cap = Cap(sides, fill, rings, 0, radius, 0.0, true, sides, 0, 0)
+    try fill_cap(&arrays, cap)
+    return try arrays.finish()
+
+func check_round(sides: usize, rows: usize) -> !:
+    if sides < 3 or sides > most_sides: error(errors.invalid, "a round primitive takes 3..4096 sides")
+    if rows < 1 or rows > most_rows: error(errors.invalid, "a round primitive takes 1..2048 rows")
+
+func check_caps(sides: usize, kind: i64, rings: usize) -> !:
+    if kind < cap_none or kind > cap_grid: error(errors.invalid, "caps are None, N-gon, Fan or Grid")
+    if rings < 1 or rings > most_cap_rings: error(errors.invalid, "a cap takes 1..1024 rings")
+    if kind == cap_grid and sides % 4 != 0: error(errors.invalid, "grid caps need the sides in fours (8, 12, 16, …)")
+
+## One wall's rings and quads: rings at radii from `bottom` to `top` (the
+## last ring left out for a cone, whose apex follows them), its points from
+## `first_point`, its faces and corners after those before it; `inward`
+## faces the axis (a tube's inner wall).
+struct SideWork:
+    let sides: usize
+    let rows: usize
+    let rings: usize
+    let bottom: f64
+    let top: f64
+    let height: f64
+    let first_face: usize
+    let first_corner: usize
+    let first_point: usize
+    let inward: bool
+    let positions: Float3[]
+    let offsets: i32[]
+    let corners: i32[]
+
+func side_ring_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (SideWork*)context
+    for k in first..<end:
+        let t = (f64)k / (f64)work.rows
+        let radius = work.bottom + (work.top - work.bottom) * t
+        for s in 0..<work.sides:
+            let angle = (f64)s * 2.0 * math.pi / (f64)work.sides
+            work.positions[work.first_point + k * work.sides + s] = Float3.of(Vector3(math.cos(angle) * radius, t * work.height, math.sin(angle) * radius))
+
+## Rows `first..<end`: quads between ring k and k + 1, the top row of a
+## cone triangles to its apex (the point after the rings).
+func side_faces(context: void*, first: usize, end: usize, worker: usize):
+    let work = (SideWork*)context
+    let n = work.sides
+    let base = work.first_point
+    for k in first..<end:
+        for s in 0..<n:
+            let next = (s + 1) % n
+            let face = work.first_face + k * n + s
+            let apex_row = k + 1 == work.rings
+            let corner = work.first_corner + k * n * 4 + s * (3 if apex_row else 4)
+            if apex_row:
+                put_triangle(work.offsets, work.corners, face, corner, base + k * n + s, base + work.rings * n, base + k * n + next)
+            elif work.inward:
+                put_quad(work.offsets, work.corners, face, corner, base + k * n + s, base + k * n + next, base + (k + 1) * n + next, base + (k + 1) * n + s)
+            else:
+                put_quad(work.offsets, work.corners, face, corner, base + k * n + s, base + (k + 1) * n + s, base + (k + 1) * n + next, base + k * n + next)
+
+## What a cap adds: its own points, faces and corners.
+struct CapSize:
+    let points: usize
+    let faces: usize
+    let corners: usize
+
+func cap_size(sides: usize, kind: i64, rings: usize) -> CapSize:
+    if kind == cap_none: return CapSize(0, 0, 0)
+    let bands = (rings - 1) * sides
+    if kind == cap_ngon: return CapSize(bands, bands + 1, bands * 4 + sides)
+    if kind == cap_fan: return CapSize(bands + 1, bands + sides, bands * 4 + sides * 3)
+    let g = sides // 4
+    return CapSize(bands + (g - 1) * (g - 1), bands + g * g, (bands + g * g) * 4)
+
+## One cap: its kind and bands over the ring of `sides` points from
+## `outer`, of `radius` at height `y`, facing up (+Y) or down; its own
+## points from `point`, its faces from `face` and corners from `corner`.
+struct Cap:
+    let sides: usize
+    let kind: i64
+    let rings: usize
+    let outer: usize
+    let radius: f64
+    let y: f64
+    let up: bool
+    let point: usize
+    let face: usize
+    let corner: usize
+
+    ## The first point of ring `k` (0 the outer ring).
+    func ring(k: usize) -> usize:
+        return self.outer if k == 0 else self.point + (k - 1) * self.sides
+
+## Fill cap `cap` into `arrays` (the outer ring's points placed already).
+func fill_cap(arrays: Arrays*, cap: Cap) -> !:
+    if cap.kind == cap_none: return
+    let n = cap.sides
+    let offsets = arrays.face_offsets()
+    let corners = arrays.face_corners()
+    var face = cap.face
+    var corner = cap.corner
+    for k in 1..<cap.rings:
+        let radius = cap.radius * (f64)(cap.rings - k) / (f64)cap.rings
+        for s in 0..<n:
+            let angle = (f64)s * 2.0 * math.pi / (f64)n
+            arrays.put(cap.ring(k) + s, Vector3(math.cos(angle) * radius, cap.y, math.sin(angle) * radius))
+    # Bands from the outside in.
+    for k in 0..<cap.rings - 1:
+        let o = cap.ring(k)
+        let i = cap.ring(k + 1)
+        for s in 0..<n:
+            let next = (s + 1) % n
+            if cap.up:
+                put_quad(offsets, corners, face, corner, i + s, i + next, o + next, o + s)
+            else:
+                put_quad(offsets, corners, face, corner, o + s, o + next, i + next, i + s)
+            face += 1
+            corner += 4
+    let middle = cap.ring(cap.rings - 1)
+    let own = cap.point + (cap.rings - 1) * n
+    if cap.kind == cap_ngon:
+        offsets[face] = (i32)corner
+        for s in 0..<n:
+            corners[corner + s] = (i32)(middle + (n - 1 - s if cap.up else s))
+        return
+    if cap.kind == cap_fan:
+        arrays.put(own, Vector3(0.0, cap.y, 0.0))
+        for s in 0..<n:
+            let next = (s + 1) % n
+            if cap.up:
+                put_triangle(offsets, corners, face, corner, own, middle + next, middle + s)
+            else:
+                put_triangle(offsets, corners, face, corner, middle + s, middle + next, own)
+            face += 1
+            corner += 3
+        return
+    # Grid: (u, v) over 0..g; the square's outline is the middle ring.
+    let g = n // 4
+    let grid = GridCap(g, n, middle, own)
+    let positions = arrays.points()
+    for v in 1..<g:
+        for u in 1..<g:
+            let s = (f64)u / (f64)g
+            let t = (f64)v / (f64)g
+            let p = grid.at(positions, u, 0).multiply_scalar(1.0 - t).add(grid.at(positions, u, g).multiply_scalar(t))
+            let q = grid.at(positions, 0, v).multiply_scalar(1.0 - s).add(grid.at(positions, g, v).multiply_scalar(s))
+            let corner_mix = grid.at(positions, 0, 0).multiply_scalar((1.0 - s) * (1.0 - t)).add(grid.at(positions, g, 0).multiply_scalar(s * (1.0 - t))).add(grid.at(positions, 0, g).multiply_scalar((1.0 - s) * t)).add(grid.at(positions, g, g).multiply_scalar(s * t))
+            positions[grid.index(u, v)] = Float3.of(p.add(q).subtract(corner_mix))
+    for v in 0..<g:
+        for u in 0..<g:
+            let a = grid.index(u, v)
+            let b = grid.index(u + 1, v)
+            let c = grid.index(u + 1, v + 1)
+            let d = grid.index(u, v + 1)
+            if cap.up:
+                put_quad(offsets, corners, face, corner, d, c, b, a)
+            else:
+                put_quad(offsets, corners, face, corner, a, b, c, d)
+            face += 1
+            corner += 4
+
+## A grid cap's lattice: (u, v) on its outline is a point of the ring of
+## `sides` from `ring` (v = 0 along it from its first point, then u = g, v =
+## g backwards, u = 0 back to the start), inside one of its own from `own`.
+struct GridCap:
+    let g: usize
+    let sides: usize
+    let ring: usize
+    let own: usize
+
+    func index(u: usize, v: usize) -> usize:
+        if v == 0: return self.ring + u
+        if u == self.g: return self.ring + self.g + v
+        if v == self.g: return self.ring + 3 * self.g - u
+        if u == 0: return self.ring + (4 * self.g - v) % self.sides
+        return self.own + (v - 1) * (self.g - 1) + (u - 1)
+
+    func at(positions: const Float3[], u: usize, v: usize) -> Vector3:
+        return positions[self.index(u, v)].vector()

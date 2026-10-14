@@ -10,7 +10,7 @@ from luce_std import parallel
 from core.float3 import Float3
 from core.growing import Growing
 from math.vector import Vector3
-from geometries.distance import bounds_distance, triangle_distance, triangle_distance_below
+from geometries.distance import bounds_distance, triangle_distance, triangle_distance_below, triangle_nearest_point
 
 ## Leaves hold at most this many triangles.
 let leaf_size: usize = 8
@@ -26,6 +26,13 @@ struct Node:
 pub struct RayHit:
     pub let face: i64 = -1
     pub let distance: f64 = -1.0
+
+## The surface point nearest a query: its face (-1 for an empty tree), how
+## far it is and where it is (in the tree's positions' frame).
+pub struct SurfacePoint:
+    pub let face: i64 = -1
+    pub let distance: f64 = -1.0
+    pub let position: Vector3 = Vector3()
 
 pub struct TriangleIndex:
     var positions: const Float3[]
@@ -130,9 +137,31 @@ pub struct TriangleIndex:
     ## The nearest face closer than `bound`, or face -1: a caller that knows
     ## a face at `bound` (a neighboring query's) prunes most of the tree.
     pub func nearest_within(point: Vector3, bound: f64) -> RayHit:
-        if self.nodes.length == 0: return RayHit()
+        let found = self.nearest_triangle(point, bound)
+        if found.0 < 0: return RayHit()
+        return RayHit(self.face_of((usize)found.0), math.sqrt(found.1))
+
+    ## The surface point nearest `point`: Shrinkwrap's and Relax's
+    ## projection onto a reference surface.
+    pub func nearest_point(point: Vector3) -> SurfacePoint:
+        return self.nearest_point_within(point, 1.0e150)
+
+    ## The surface point nearest `point`, searched closer than `bound`
+    ## first (a neighboring query's distance plus how far apart they are:
+    ## most of the tree pruned), then everywhere when nothing is that close.
+    pub func nearest_point_within(point: Vector3, bound: f64) -> SurfacePoint:
+        var found = self.nearest_triangle(point, bound)
+        if found.0 < 0 and bound < 1.0e150: found = self.nearest_triangle(point, 1.0e150)
+        if found.0 < 0: return SurfacePoint()
+        let triangle = (usize)found.0
+        return SurfacePoint(self.face_of(triangle), math.sqrt(found.1), triangle_nearest_point(point, self.point(triangle, 0), self.point(triangle, 1), self.point(triangle, 2)))
+
+    ## The triangle nearest `point` closer than `bound` (-1: none) and its
+    ## squared distance.
+    func nearest_triangle(point: Vector3, bound: f64) -> (i64, f64):
+        if self.nodes.length == 0: return (-1, 0.0)
         var best: f64 = bound * bound
-        var face: i64 = -1
+        var nearest: i64 = -1
         # Nodes to visit with their box distances, the nearer child on top: each box
         # is measured once, and a node is dropped when the best has passed it since.
         var stack: u32[64]
@@ -162,8 +191,8 @@ pub struct TriangleIndex:
                     let distance = triangle_distance_below(point, self.point(triangle, 0), self.point(triangle, 1), self.point(triangle, 2), best)
                     if distance < best:
                         best = distance
-                        face = self.face_of(triangle)
-        return RayHit(face, math.sqrt(best) if face >= 0 else -1.0)
+                        nearest = (i64)triangle
+        return (nearest, best)
 
     pub func close():
         free(self.order) in memory.heap

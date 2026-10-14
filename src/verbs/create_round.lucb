@@ -1,0 +1,75 @@
+## Cylinder, Cone, Pipe (a tube of a wall thickness; Tube is CAD's sweep)
+## and Disc: rounds about their Up. Caps are N-gon,
+## Fan (triangles round a center) or Grid (a quad grid, Blender's Grid Fill
+## of the circle: sides in fours), in Cap rings bands; None leaves the end
+## open.
+
+let cylinder_parms: ParmSpec[10] = [
+    ParmSpec("Radius", ParmKind.number, 1.0, 0.001, 100000.0, 1, "", "Distance from the axis to the side.", 10.0),
+    ParmSpec("Height", ParmKind.number, 2.0, 0.001, 100000.0, 1, "", "Length along Up.", 10.0),
+    ParmSpec("Sides", ParmKind.integer, 24.0, 3.0, 4096.0, 1, "", "Points round each ring."),
+    ParmSpec("Rows", ParmKind.integer, 1.0, 1.0, 2048.0, 1, "", "Bands up the side."),
+    ParmSpec("Caps", ParmKind.menu, 1.0, 0.0, 3.0, 1, cap_choices, "How the ends are closed: None leaves them open; Fan makes triangles round a center; Grid, quads (the sides in fours)."),
+    ParmSpec("Cap rings", ParmKind.integer, 1.0, 1.0, 1024.0, 1, "", "Bands of each cap, from the rim in."),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+let cylinder_place: PlaceSpec = PlaceSpec("radius", 0, rise = 1, position = 6, up = 7)
+
+func cylinder_verb() -> Verb:
+    return Verb("Cylinder", "Primitives", "A cylinder of sides and rows, its caps n-gons, fans or grids", Domain.face, false, cylinder_parms, true, cook_cylinder, section = "Create", family = "Primitives", icon = "cylinder", inputs = 0, wheel = 2, gesture = "create", place = cylinder_place)
+
+func cook_cylinder(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    try add_piece(input, output, try cylinder_mesh(p.at(0), p.at(0), p.at(1), try count_of(p.at(2), 3.0, 4096.0), try count_of(p.at(3), 1.0, 2048.0), (i64)(try count_of(p.at(4), 0.0, 3.0)), try count_of(p.at(5), 1.0, 1024.0)), "cylinder", 6)
+
+let cone_parms: ParmSpec[11] = [
+    ParmSpec("Radius", ParmKind.number, 1.0, 0.001, 100000.0, 1, "", "The base's radius.", 10.0),
+    ParmSpec("Top radius", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "The top's radius: 0 closes it to a point, more makes a frustum.", 10.0),
+    ParmSpec("Height", ParmKind.number, 2.0, 0.001, 100000.0, 1, "", "Length along Up.", 10.0),
+    ParmSpec("Sides", ParmKind.integer, 24.0, 3.0, 4096.0, 1, "", "Points round each ring."),
+    ParmSpec("Rows", ParmKind.integer, 1.0, 1.0, 2048.0, 1, "", "Bands up the side."),
+    ParmSpec("Caps", ParmKind.menu, 1.0, 0.0, 3.0, 1, cap_choices, "How the base (and a frustum's top) is closed."),
+    ParmSpec("Cap rings", ParmKind.integer, 1.0, 1.0, 1024.0, 1, "", "Bands of each cap, from the rim in."),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+let cone_place: PlaceSpec = PlaceSpec("radius", 0, rise = 2, position = 7, up = 8)
+
+func cone_verb() -> Verb:
+    return Verb("Cone", "Primitives", "A cone, or with a top radius a frustum", Domain.face, false, cone_parms, true, cook_cone, section = "Create", family = "Primitives", icon = "cone", inputs = 0, wheel = 3, gesture = "create", place = cone_place)
+
+func cook_cone(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    try add_piece(input, output, try cylinder_mesh(p.at(0), p.at(1), p.at(2), try count_of(p.at(3), 3.0, 4096.0), try count_of(p.at(4), 1.0, 2048.0), (i64)(try count_of(p.at(5), 0.0, 3.0)), try count_of(p.at(6), 1.0, 1024.0)), "cone", 7)
+
+let tube_parms: ParmSpec[9] = [
+    ParmSpec("Radius", ParmKind.number, 1.0, 0.001, 100000.0, 1, "", "The outer wall's radius.", 10.0),
+    ParmSpec("Thickness", ParmKind.number, 0.2, 0.0, 100000.0, 1, "", "The wall's thickness (below the radius); 0 leaves one open wall.", 1.0),
+    ParmSpec("Height", ParmKind.number, 2.0, 0.001, 100000.0, 1, "", "Length along Up.", 10.0),
+    ParmSpec("Sides", ParmKind.integer, 24.0, 3.0, 4096.0, 1, "", "Points round each ring."),
+    ParmSpec("Rows", ParmKind.integer, 1.0, 1.0, 2048.0, 1, "", "Bands up the walls."),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+let tube_place: PlaceSpec = PlaceSpec("radius", 0, rise = 2, position = 5, up = 6)
+
+func tube_verb() -> Verb:
+    return Verb("Pipe", "Primitives", "A tube of a wall: an outer and an inner wall joined by rims, or one open wall", Domain.face, false, tube_parms, true, cook_tube, section = "Create", family = "Primitives", icon = "tube", inputs = 0, wheel = 3, gesture = "create", place = tube_place)
+
+func cook_tube(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    try add_piece(input, output, try tube_mesh(p.at(0), p.at(1), p.at(2), try count_of(p.at(3), 3.0, 4096.0), try count_of(p.at(4), 1.0, 2048.0)), "pipe", 5)
+
+let disc_parms: ParmSpec[8] = [
+    ParmSpec("Radius", ParmKind.number, 1.0, 0.001, 100000.0, 1, "", "Distance from the center to the rim.", 10.0),
+    ParmSpec("Sides", ParmKind.integer, 24.0, 3.0, 4096.0, 1, "", "Points round the rim."),
+    ParmSpec("Fill", ParmKind.menu, 0.0, 0.0, 2.0, 1, "N-gon|Fan|Grid", "One n-gon, triangles round a center, or a quad grid (the sides in fours)."),
+    ParmSpec("Rings", ParmKind.integer, 1.0, 1.0, 1024.0, 1, "", "Bands from the rim in."),
+    position_parm, up_parm, turn_parm, piece_parm]
+
+let disc_place: PlaceSpec = PlaceSpec("radius", 0, position = 4, up = 5)
+
+func disc_verb() -> Verb:
+    return Verb("Disc", "Primitives", "A flat circle filled by an n-gon, a fan or a grid", Domain.face, false, disc_parms, true, cook_disc, section = "Create", family = "Primitives", icon = "circle-center", inputs = 0, wheel = 1, gesture = "create", place = disc_place)
+
+func cook_disc(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    try add_piece(input, output, try disc_mesh(p.at(0), try count_of(p.at(1), 3.0, 4096.0), (i64)(try count_of(p.at(2), 0.0, 2.0)) + 1, try count_of(p.at(3), 1.0, 1024.0)), "disc", 4)

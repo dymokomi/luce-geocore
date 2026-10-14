@@ -218,9 +218,9 @@ pub func grids() -> !:
     var refused = 0
     _ = MeshPrimitives.grid(2.0, 2049) catch problem:
         refused += 1
-    _ = MeshPrimitives.sphere(1.0, 65) catch problem:
+    _ = MeshPrimitives.sphere(1.0, 4098) catch problem:
         refused += 1
-    expect(refused == 2, "grids take up to 2048 divisions, the other primitives 64")
+    expect(refused == 2, "grids take up to 2048 divisions, spheres 4096 columns")
     print("ok    grids: the builder's mesh, bit for bit; 2048 divisions")
 
 func same_ints(a: const i32[], b: const i32[]) -> bool:

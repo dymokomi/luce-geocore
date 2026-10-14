@@ -1,0 +1,198 @@
+## The flat and boxy primitives: Grid (Plane is a grid of one), Box with
+## divisions along each axis, and the quad sphere (a box lattice mapped onto
+## the sphere). Built in place on the pool (arrays.lucb).
+##
+## A box lattice numbers its surface points by layers along Z: a layer's
+## ring round the XY outline first (from x and y low, along +X, up +Y, back
+## along -X, down -Y), then, on the end layers alone, the points inside the
+## outline row by row. Its faces are its sides' cells in the order +X, -X,
+## +Y, -Y, +Z, -Z, each side row by row. A box of one division each way is
+## Mesh.cube's own numbering, points and faces alike.
+
+## Grid: `columns` along X by `rows` along Z quads over `width` by `depth`,
+## centered, facing +Y. Points row by row along X, rows along +Z; a face's
+## corners are a, a + side, a + side + 1, a + 1 (side = columns + 1).
+pub func grid_mesh(width: f64, depth: f64, columns: usize, rows: usize) -> Mesh*!:
+    if not (width > 0.0 and depth > 0.0 and width <= 100000.0 and depth <= 100000.0): error(errors.invalid, "a grid's width and depth must be in (0, 100000]")
+    if columns < 1 or rows < 1: error(errors.invalid, "a grid needs a row and a column")
+    var arrays = try Arrays.allocate((columns + 1) * (rows + 1), columns * rows, columns * rows * 4)
+    defer arrays.close()
+    var work = GridWork(width, depth, columns, rows, arrays.points(), arrays.face_offsets(), arrays.face_corners())
+    ranges.each_range(rows + 1, 64, (void*)&work, grid_rows)
+    return try arrays.finish()
+
+struct GridWork:
+    let width: f64
+    let depth: f64
+    let columns: usize
+    let rows: usize
+    let positions: Float3[]
+    let offsets: i32[]
+    let corners: i32[]
+
+## Row z's points and, below the last row, its faces.
+func grid_rows(context: void*, first: usize, end: usize, worker: usize):
+    let work = (GridWork*)context
+    let side = work.columns + 1
+    for z in first..<end:
+        let depth = ((f64)z / (f64)work.rows - 0.5) * work.depth
+        for x in 0..<side:
+            work.positions[z * side + x] = Float3.of(Vector3(((f64)x / (f64)work.columns - 0.5) * work.width, 0.0, depth))
+        if z == work.rows: continue
+        for x in 0..<work.columns:
+            let face = z * work.columns + x
+            let a = z * side + x
+            put_quad(work.offsets, work.corners, face, face * 4, a, a + side, a + side + 1, a + 1)
+
+## Box: `size` (width, height, depth) standing on the origin, `nx`, `ny`
+## and `nz` divisions along X, Y and Z.
+pub func box_mesh(size: Vector3, nx: usize, ny: usize, nz: usize) -> Mesh*!:
+    if not (size.x > 0.0 and size.y > 0.0 and size.z > 0.0 and size.x <= 100000.0 and size.y <= 100000.0 and size.z <= 100000.0):
+        error(errors.invalid, "a box's sizes must be in (0, 100000]")
+    return try lattice_mesh(Lattice(nx, ny, nz), size, 0.0)
+
+## The quad sphere: a box lattice of `divisions` each way mapped onto the
+## sphere of `radius` standing on the origin. The map (each coordinate
+## scaled by the root of 1 - b²/2 - c²/2 + b²c²/3 of the other two, on the
+## cube [-1, 1]³) puts every lattice point on the sphere and keeps the
+## quads closer in size than projecting from the center does.
+pub func quad_sphere_mesh(radius: f64, divisions: usize) -> Mesh*!:
+    if not (radius > 0.0 and radius <= 100000.0): error(errors.invalid, "a sphere's radius must be in (0, 100000]")
+    return try lattice_mesh(Lattice(divisions, divisions, divisions), Vector3(), radius)
+
+## A box lattice's divisions and how it numbers its points.
+pub struct Lattice:
+    pub let nx: usize
+    pub let ny: usize
+    pub let nz: usize
+
+    ## Points on one layer's ring.
+    pub func ring() -> usize:
+        return 2 * (self.nx + self.ny)
+
+    ## Points inside an end layer's outline.
+    pub func inside() -> usize:
+        return (self.nx - 1) * (self.ny - 1)
+
+    pub func point_count() -> usize:
+        return 2 * (self.ring() + self.inside()) + (self.nz - 1) * self.ring()
+
+    pub func face_count() -> usize:
+        return 2 * (self.ny * self.nz + self.nx * self.nz + self.nx * self.ny)
+
+    ## The first point of layer `k`.
+    pub func layer_start(k: usize) -> usize:
+        if k == 0: return 0
+        return self.ring() + self.inside() + (k - 1) * self.ring()
+
+    ## Where (i, j) sits on a layer's ring (it must be on the outline).
+    func ring_index(i: usize, j: usize) -> usize:
+        if j == 0 and i < self.nx: return i
+        if i == self.nx and j < self.ny: return self.nx + j
+        if j == self.ny and i > 0: return self.nx + self.ny + (self.nx - i)
+        return 2 * self.nx + self.ny + (self.ny - j)
+
+    ## The number of lattice point (i, j, k), on the surface.
+    pub func index(i: usize, j: usize, k: usize) -> usize:
+        let start = self.layer_start(k)
+        if i == 0 or j == 0 or i == self.nx or j == self.ny: return start + self.ring_index(i, j)
+        return start + self.ring() + (j - 1) * (self.nx - 1) + (i - 1)
+
+    ## Ring point `r`'s (i, j).
+    func ring_point(r: usize) -> (usize, usize):
+        if r < self.nx: return (r, 0)
+        if r < self.nx + self.ny: return (self.nx, r - self.nx)
+        if r < 2 * self.nx + self.ny: return (self.nx - (r - self.nx - self.ny), self.ny)
+        return (0, self.ny - (r - 2 * self.nx - self.ny))
+
+## The most divisions a box or quad sphere takes along an axis.
+pub let most_box_divisions: usize = 1024
+
+## A lattice's mesh: a box of `size` (radius 0), or the quad sphere of
+## `radius`.
+func lattice_mesh(lattice: Lattice, size: Vector3, radius: f64) -> Mesh*!:
+    if lattice.nx < 1 or lattice.ny < 1 or lattice.nz < 1 or lattice.nx > most_box_divisions or lattice.ny > most_box_divisions or lattice.nz > most_box_divisions:
+        error(errors.invalid, "divisions must be in 1..1024")
+    let faces = lattice.face_count()
+    var arrays = try Arrays.allocate(lattice.point_count(), faces, faces * 4)
+    defer arrays.close()
+    var work = LatticeWork(lattice, size, radius, arrays.points(), arrays.face_offsets(), arrays.face_corners())
+    ranges.each_range(lattice.nz + 1, 1, (void*)&work, lattice_layers)
+    ranges.each_range(faces, 4096, (void*)&work, lattice_faces)
+    return try arrays.finish()
+
+struct LatticeWork:
+    let lattice: Lattice
+    let size: Vector3
+    let radius: f64
+    let positions: Float3[]
+    let offsets: i32[]
+    let corners: i32[]
+
+    ## Lattice point (i, j, k)'s place.
+    func place(i: usize, j: usize, k: usize) -> Vector3:
+        let l = self.lattice
+        let u = (f64)i / (f64)l.nx
+        let v = (f64)j / (f64)l.ny
+        let w = (f64)k / (f64)l.nz
+        if self.radius == 0.0:
+            return Vector3((u - 0.5) * self.size.x, v * self.size.y, (w - 0.5) * self.size.z)
+        let a = 2.0 * u - 1.0
+        let b = 2.0 * v - 1.0
+        let c = 2.0 * w - 1.0
+        let x = a * math.sqrt(math.max(0.0, 1.0 - b * b / 2.0 - c * c / 2.0 + b * b * c * c / 3.0))
+        let y = b * math.sqrt(math.max(0.0, 1.0 - c * c / 2.0 - a * a / 2.0 + c * c * a * a / 3.0))
+        let z = c * math.sqrt(math.max(0.0, 1.0 - a * a / 2.0 - b * b / 2.0 + a * a * b * b / 3.0))
+        return Vector3(x * self.radius, (y + 1.0) * self.radius, z * self.radius)
+
+## Layers `first..<end`: each one's ring, and an end layer's inside.
+func lattice_layers(context: void*, first: usize, end: usize, worker: usize):
+    let work = (LatticeWork*)context
+    let l = work.lattice
+    for k in first..<end:
+        let start = l.layer_start(k)
+        for r in 0..<l.ring():
+            let at = l.ring_point(r)
+            work.positions[start + r] = Float3.of(work.place(at.0, at.1, k))
+        if k != 0 and k != l.nz: continue
+        for j in 1..<l.ny:
+            for i in 1..<l.nx:
+                work.positions[start + l.ring() + (j - 1) * (l.nx - 1) + (i - 1)] = Float3.of(work.place(i, j, k))
+
+## Faces `first..<end`: each one's side and cell, its corners by the side's
+## pattern (Mesh.cube's windings, outward).
+func lattice_faces(context: void*, first: usize, end: usize, worker: usize):
+    let work = (LatticeWork*)context
+    let l = work.lattice
+    let cells: usize[6] = [l.ny * l.nz, l.ny * l.nz, l.nx * l.nz, l.nx * l.nz, l.nx * l.ny, l.nx * l.ny]
+    let widths: usize[6] = [l.ny, l.ny, l.nx, l.nx, l.nx, l.nx]
+    for face in first..<end:
+        var side: usize = 0
+        var cell = face
+        while cell >= cells[side]:
+            cell -= cells[side]
+            side += 1
+        let a = cell % widths[side]
+        let b = cell // widths[side]
+        let p00 = side_point(l, side, a, b)
+        let p10 = side_point(l, side, a + 1, b)
+        let p11 = side_point(l, side, a + 1, b + 1)
+        let p01 = side_point(l, side, a, b + 1)
+        match side:
+            0: put_quad(work.offsets, work.corners, face, face * 4, p00, p10, p11, p01)
+            1: put_quad(work.offsets, work.corners, face, face * 4, p01, p11, p10, p00)
+            2: put_quad(work.offsets, work.corners, face, face * 4, p00, p01, p11, p10)
+            3: put_quad(work.offsets, work.corners, face, face * 4, p00, p10, p11, p01)
+            4: put_quad(work.offsets, work.corners, face, face * 4, p10, p11, p01, p00)
+            _: put_quad(work.offsets, work.corners, face, face * 4, p00, p01, p11, p10)
+
+## Lattice point (a, b) of side `side` (+X, -X: a along Y, b along Z; +Y,
+## -Y: a along X, b along Z; +Z, -Z: a along X, b along Y).
+func side_point(l: Lattice, side: usize, a: usize, b: usize) -> usize:
+    match side:
+        0: return l.index(l.nx, a, b)
+        1: return l.index(0, a, b)
+        2: return l.index(a, l.ny, b)
+        3: return l.index(a, 0, b)
+        4: return l.index(a, b, l.nz)
+        _: return l.index(a, b, 0)

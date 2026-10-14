@@ -5,10 +5,11 @@
 ## Every modeling verb's constructor, in menu order: the array's length is
 ## the registry's size, so a verb added here is counted. The select rules
 ## (selecting/registry.lucb) follow them as the Select verbs.
-let makers: (func() -> Verb)[51] = [
+let makers: (func() -> Verb)[67] = [
     transform_verb,
     smooth_verb,
     relax_verb,
+    shrinkwrap_verb,
     mountain_verb,
     peak_verb,
     flatten_verb,
@@ -48,7 +49,22 @@ let makers: (func() -> Verb)[51] = [
     mirror_verb,
     spin_verb,
     screw_verb,
+    box_verb,
+    grid_verb,
+    plane_verb,
+    sphere_verb,
+    icosphere_verb,
+    quad_sphere_verb,
+    cylinder_verb,
+    cone_verb,
+    tube_verb,
+    disc_verb,
+    torus_verb,
+    capsule_verb,
+    platonic_verb,
+    helix_verb,
     polydraw_verb,
+    poly_pen_verb,
     poke_verb,
     rotate_edge_verb,
     solidify_verb,
@@ -265,6 +281,61 @@ pub struct Verbs:
         let verb = find_verb(name) else error(errors.invalid, "unknown operation")
         return try verb_wants_second(&verb, try mesh.get(), group, group_type, numbers)
 
+    ## The inputs its node has: 0 (a primitive), 1, or 2 (a reference
+    ## surface second, required when `second_required`).
+    pub static func inputs(index: i64) -> i64:
+        return (i64)verb_at(checked(index)).inputs
+
+    pub static func second_required(index: i64) -> bool:
+        return verb_at(checked(index)).second_required
+
+    # How the "create" gesture sets a primitive's rows (Verb.place).
+
+    ## "rect", "radius", or "" for a verb that is no primitive.
+    pub static func place_base(index: i64) -> str:
+        let place = verb_at(checked(index)).place else return ""
+        return place.base
+
+    ## The parameter the base sets, the one the rise sets (-1: none) and its
+    ## component, how the rise moves ("height" or "radius"), and the
+    ## Position and Up parameters.
+    pub static func place_size(index: i64) -> i64:
+        return place_of(index).size
+
+    pub static func place_rise(index: i64) -> i64:
+        return place_of(index).rise
+
+    pub static func place_rise_component(index: i64) -> i64:
+        return place_of(index).rise_component
+
+    pub static func place_rise_mode(index: i64) -> str:
+        return place_of(index).rise_mode
+
+    pub static func place_position(index: i64) -> i64:
+        return place_of(index).position
+
+    pub static func place_up(index: i64) -> i64:
+        return place_of(index).up
+
+    ## Its Name piece parameter (after Up and Turn), which Edit Mesh's
+    ## steps turn on.
+    pub static func place_piece(index: i64) -> i64:
+        return place_of(index).up + 2
+
+    ## Axis `axis` (0 X, 1 Y, 2 Z) of the frame a primitive standing along
+    ## `up`, turned `degrees` about it, is built in (primitives/placement.lucb):
+    ## the viewport draws a base in it.
+    pub static func placement_axis(up: Vector3, degrees: f64, axis: i64) -> Vector3!:
+        let frame = try placement(Vector3(), up, degrees)
+        if axis == 0: return frame.x
+        if axis == 1: return frame.y
+        return frame.z
+
+    ## The boundary edge of `mesh` nearest `point` (-1: none), for Poly
+    ## Pen's Ctrl-click: the edge it extends to the click.
+    pub static func nearest_boundary_edge(mesh: interop.Reference[Mesh], point: Vector3) -> i64!:
+        return try boundary_edge_near(try mesh.get(), point)
+
     ## Its viewport gesture: "", "stroke", "place", "hover" or "knife".
     pub static func gesture(index: i64) -> str:
         return verb_at(checked(index)).gesture
@@ -285,10 +356,13 @@ pub struct Verbs:
     ## `symmetry` mirrors the group across X, Y or Z (1..3); `keep` selects
     ## the group carried through the verb instead of what it made; `second`
     ## is the second pick's group (Bridge's second loop), read on the
-    ## domain its levels name.
-    pub static func run(name: str, mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false, second: str = "") -> interop.Reference[VerbResult]!:
+    ## domain its levels name; `reference` the surface a verb of two inputs
+    ## reads (Shrinkwrap's target).
+    pub static func run(name: str, mesh: interop.Reference[Mesh], group: str, group_type: i64, numbers: const f64[], symmetry: i64 = 0, keep: bool = false, second: str = "", reference: interop.Reference[Mesh]? = none) -> interop.Reference[VerbResult]!:
         let verb = find_verb(name) else error(errors.invalid, "unknown operation")
-        var product = try run_verb(&verb, try mesh.get(), group, group_type, numbers, symmetry, keep, second)
+        var surface: const Mesh*? = none
+        if let given = reference: surface = try given.get()
+        var product = try run_verb(&verb, try mesh.get(), group, group_type, numbers, symmetry, keep, second, surface)
         let storage = new VerbResult[1] --- in memory.heap catch failure:
             product.close()
             error(failure.code, failure.message)
@@ -303,6 +377,11 @@ func pick_of(index: i64, pick: i64) -> PickSpec:
     let verb = verb_at(checked(index))
     if pick < 0 or (usize)pick >= verb.picks.length: trap("verb pick out of range")
     return verb.picks[(usize)pick]
+
+func place_of(index: i64) -> PlaceSpec:
+    let verb = verb_at(checked(index))
+    let place = verb.place else trap("the verb is no primitive")
+    return place
 
 func key_of(index: i64, key: i64) -> KeySpec:
     let verb = verb_at(checked(index))
