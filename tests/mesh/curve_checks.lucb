@@ -7,9 +7,11 @@ from luce_geocore import geocore, kernel as geocore_kernel
 import interop
 from luce_std import math
 import memory
+import strings
+from io import path as io_path
 from luce_geocore.geocore import Vector3, Matrix4, Mesh, MeshPrimitives, GeometrySet
 from luce_geocore.kernel import Curves, CurvesBuilder, CurveType, KnotMode, BitsBuilder, Bits, Attribute, Domain, DataType, GroupReport, SetVerbOutput
-from luce_geocore.kernel import evaluated_offsets, evaluated_positions, evaluated_frames, evaluated_id, curves_dispose, curves_share, curves_subset, curve_group_bits, set_curves, curves_type, empty_set, dispose_set, adopt_set, run_set_verb, find_set_verb, arc_curves, line_curves, spiral_curves, clear_group_cache
+from luce_geocore.kernel import save_geometry, load_geometry, evaluated_offsets, evaluated_positions, evaluated_frames, evaluated_id, curves_dispose, curves_share, curves_subset, curve_group_bits, set_curves, curves_type, empty_set, dispose_set, adopt_set, run_set_verb, find_set_verb, arc_curves, line_curves, spiral_curves, clear_group_cache
 
 func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
     return math.abs(a - b) < tolerance
@@ -24,6 +26,7 @@ pub func exercise() -> !:
     try groups()
     try verbs()
     try conversions()
+    try exact_values()
 
 ## The checks once more, reporting.
 pub func run() -> !:
@@ -340,3 +343,57 @@ pub func conversions() -> !:
     var total: usize = 0
     for curve in 0..<e.curve_count(): total += e.range(curve).1 - (0 if e.settings(curve).cyclic else 1)
     assert(total == 24)
+
+## A sketch's f64 values survive the f32 columns: a 0.1 square's corners
+## (0.1 is no f32) read back bit for bit through point(), sharing,
+## placement (in f64), a merge and a file; an arc's weight and a spline's
+## custom knots likewise. Curves of f32 data keep no exact values.
+pub func exact_values() -> !:
+    var builder = CurvesBuilder()
+    defer builder.close()
+    try builder.begin(CurveType.poly, cyclic = true)
+    let corners: f64[8] = [0.1, 0.1, 0.3, 0.1, 0.3, 0.7, 0.1, 0.7]
+    for at in 0..<(usize)4: try builder.point(Vector3(corners[at * 2], corners[at * 2 + 1], 0.1))
+    try builder.begin(CurveType.nurbs, order = 3)
+    let root = math.sqrt(0.5)
+    try builder.point(Vector3(1.0, 0.0, 0.1))
+    try builder.point(Vector3(1.0, 1.0, 0.1))
+    builder.weight(root)
+    try builder.point(Vector3(0.0, 1.0, 0.1))
+    let knots: f64[6] = [0.0, 0.0, 0.0, 0.1, 0.1, 0.1]
+    try builder.custom_knots(knots[..<6])
+    let set = try set_of(try builder.finish())
+    defer set.release()
+    let curves = set_curves(set.value()) else trap("curves")
+    for at in 0..<(usize)4:
+        let p = curves.point(at)
+        assert(p.x == corners[at * 2] and p.y == corners[at * 2 + 1] and p.z == 0.1, "a sketch corner reads back exactly")
+    assert(curves.weight_at(5) == root, "an exact weight")
+    let exact_knots = curves.exact_knots(1) else trap("exact knots")
+    assert(exact_knots[3] == 0.1, "exact knots")
+    # Placement moves the exact points in f64.
+    let moved = try set.value().transformed(Vector3(0.0, 0.0, 0.2), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer moved.release()
+    let placed = set_curves(moved.value()) else trap("placed curves")
+    for at in 0..<(usize)4: assert(placed.point(at).z == 0.1 + 0.2, "placed exactly")
+    # A merge with f32 curves keeps them.
+    var plain = CurvesBuilder()
+    defer plain.close()
+    try plain.begin(CurveType.poly)
+    try plain.point(Vector3(0.5, 0.0, 0.0))
+    try plain.point(Vector3(2.0, 0.0, 0.0))
+    let other = try set_of(try plain.finish())
+    defer other.release()
+    assert((set_curves(other.value()) else trap("plain")).exact_points() == none, "f32 data keeps no exact values")
+    let merged = try set.value().merged(other)
+    defer merged.release()
+    let joined = set_curves(merged.value()) else trap("merged")
+    assert(joined.point(2).y == 0.7 and joined.point(8).x == 2.0, "merged exactly")
+    # Through a file.
+    var room: u8[512]
+    let home = strings.format(room, f"{io_path.temp()}/luce-geocore-exact-curves.prism") else trap("path")
+    _ = try save_geometry(set.value(), home, 1, 268435456)
+    let loaded = try adopt_set(try load_geometry(home))
+    defer loaded.release()
+    let back = set_curves(loaded.value()) else trap("loaded curves")
+    assert(back.point(2).x == 0.3 and back.point(2).y == 0.7 and back.weight_at(5) == root, "exact values saved and loaded")

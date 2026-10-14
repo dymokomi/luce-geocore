@@ -261,4 +261,4 @@ pub func with_type(curves: const Curves*, selected: Bits, kind: i64) -> Curves*!
         if selected.get(curve): values[curve] = (i8)kind
     let handed = attributes
     attributes = AttributeStore()
-    return try curves_assembled(curves.positions.share(), curves.origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), handed, curves.cache)
+    return try curves_assembled(curves.positions.share(), curves.origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), handed, curves.cache, curves.exact.share())

@@ -268,9 +268,14 @@ func decode_curves(reader: GeometryReader*, path: str) -> void*!:
     errdefer knots.release()
     var knot_offsets: Column[i32]
     errdefer knot_offsets.release()
+    var exact = CurvesExact()
+    errdefer exact.release()
     while let header = try reader.next_property():
         let label = header.name
         if label == "origin": origin = try reader.triple(header)
+        elif label == "exact_P" or label == "exact_P_chunks": exact.points = try reader.column[Vector3](header)
+        elif label == "exact_w" or label == "exact_w_chunks": exact.weights = try reader.column[f64](header)
+        elif label == "exact_knots" or label == "exact_knots_chunks": exact.knots = try reader.column[f64](header)
         elif label == "P" or label == "P_chunks": positions = try reader.column[Float3](header)
         elif label == "offsets" or label == "offsets_chunks": offsets = try reader.column[i32](header)
         elif label == "knots" or label == "knots_chunks": knots = try reader.column[f32](header)
@@ -282,8 +287,15 @@ func decode_curves(reader: GeometryReader*, path: str) -> void*!:
     var attributes = AttributeStore()
     defer attributes.close()
     try reader.attributes(path, &attributes)
+    # Exact values stand for the columns just read, when they match them.
+    if exact.points.count() == positions.count() and exact.points.count() > 0: exact.points_of = positions.id()
+    if exact.knots.count() == knots.count() and exact.knots.count() > 0: exact.knots_of = knots.id()
+    let w = attributes.find("w", Domain.point)
+    if w >= 0 and exact.weights.count() == positions.count() and exact.weights.count() > 0: exact.weights_of = attributes.entry((usize)w).data.id()
     let store = try attributes.shared()
-    return (void*)(try curves_assembled(positions.take(), origin, offsets.take(), knots.take(), knot_offsets.take(), store))
+    let kept = exact
+    exact = CurvesExact()
+    return (void*)(try curves_assembled(positions.take(), origin, offsets.take(), knots.take(), knot_offsets.take(), store, none, kept))
 
 func decode_instances(reader: GeometryReader*, path: str) -> void*!:
     var count: i64 = 0

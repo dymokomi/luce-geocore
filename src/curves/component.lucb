@@ -68,9 +68,21 @@ func place_curves(data: const void*, placement: const Placement*) -> void*!:
     var attributes = try curves.attributes.shared()
     errdefer attributes.close()
     try transform_attributes(&attributes, matrix)
+    # Exact points are placed in f64 too; weights and knots do not change.
+    var exact = curves.exact.share()
+    errdefer exact.release()
+    if let points = curves.exact_points():
+        var placed = try Column[Vector3].allocate(points.length)
+        let world = placed.span()
+        for at in 0..<points.length: world[at] = matrix.transform_point(points[at])
+        exact.points.release()
+        exact.points = placed
+        exact.points_of = positions.id()
     let handed = attributes
     attributes = AttributeStore()
-    return (void*)(try curves_assembled(positions.take(), origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), handed, curves.cache))
+    let kept = exact
+    exact = CurvesExact()
+    return (void*)(try curves_assembled(positions.take(), origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), handed, curves.cache, kept))
 
 ## Float attributes by role: positions and vectors take the linear part
 ## (they are measured in the positions' frame), normals its inverse
@@ -131,6 +143,15 @@ func join_curves(first: const void*, second: const void*) -> void*!:
     memory.copy(out[..<x.point_count()], x.positions.view(), x.point_count())
     let tail = y.positions.view()
     for at in 0..<tail.length: out[x.point_count() + at] = Float3.of(tail[at].vector().add(shift))
+    # Exact points when either side keeps them (the other's widened).
+    var exact = CurvesExact()
+    errdefer exact.release()
+    if x.exact_points() != none or y.exact_points() != none:
+        exact.points = try Column[Vector3].allocate(out.length)
+        let world = exact.points.span()
+        for at in 0..<x.point_count(): world[at] = x.point(at)
+        for at in 0..<y.point_count(): world[x.point_count() + at] = y.point(at)
+        exact.points_of = positions.id()
     var offsets = try Column[i32].allocate(x.curve_count() + y.curve_count() + 1)
     errdefer offsets.release()
     let joined = offsets.span()
@@ -172,7 +193,9 @@ func join_curves(first: const void*, second: const void*) -> void*!:
             try attributes.put(joined_attribute)
     let handed = attributes
     attributes = AttributeStore()
-    return (void*)(try curves_assembled(positions.take(), x.origin, offsets.take(), knots.take(), knot_offsets.take(), handed))
+    let kept = exact
+    exact = CurvesExact()
+    return (void*)(try curves_assembled(positions.take(), x.origin, offsets.take(), knots.take(), knot_offsets.take(), handed, none, kept))
 
 ## Builtin defaults (resolution 12, order 4, endpoint knots, weight 1) over
 ## elements first..<end of a joined builtin one side lacked.
@@ -213,7 +236,7 @@ func with_point_builtins(curves: const Curves*, other: const Curves*) -> Owned!:
         try attributes.put(handles)
     let handed = attributes
     attributes = AttributeStore()
-    return Owned(try curves_assembled(curves.positions.share(), curves.origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), handed, curves.cache))
+    return Owned(try curves_assembled(curves.positions.share(), curves.origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), handed, curves.cache, curves.exact.share()))
 
 ## Heap curves owned by one scope.
 pub struct Owned:
@@ -303,6 +326,15 @@ pub func curves_reordered(curves: const Curves*, order: const i32[], reverse_fla
     let out = positions.span()
     let source = curves.positions.view()
     for at in 0..<point_parents.count: out[at] = source[(usize)point_parents.items[at]]
+    # Exact points follow their points (weights and knots are rewritten in
+    # f32 here: reordered curves keep exact points only).
+    var exact = CurvesExact()
+    errdefer exact.release()
+    if let points = curves.exact_points():
+        exact.points = try Column[Vector3].allocate(point_parents.count)
+        let world = exact.points.span()
+        for at in 0..<point_parents.count: world[at] = points[(usize)point_parents.items[at]]
+        exact.points_of = positions.id()
     var attributes = AttributeStore()
     errdefer attributes.close()
     for index in 0..<curves.attributes.count():
@@ -328,7 +360,9 @@ pub func curves_reordered(curves: const Curves*, order: const i32[], reverse_fla
         knot_offsets = try Column[i32].copy_of(knot_starts.view())
     let handed = attributes
     attributes = AttributeStore()
-    return try curves_assembled(positions.take(), curves.origin, offsets.take(), knot_column.take(), knot_offsets.take(), handed)
+    let kept = exact
+    exact = CurvesExact()
+    return try curves_assembled(positions.take(), curves.origin, offsets.take(), knot_column.take(), knot_offsets.take(), handed, none, kept)
 
 ## Handles `entry` over new points, taking `other` (the opposite side) where
 ## the point's curve was reversed.

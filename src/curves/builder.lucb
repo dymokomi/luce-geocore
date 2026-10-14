@@ -15,14 +15,14 @@ pub struct CurvesBuilder:
     var orders: Growing[i8]
     var modes: Growing[i8]
     ## Per point: weight, and handles (world) where given.
-    var weights: Growing[f32]
+    var weights: Growing[f64]
     var handles_l: Growing[Vector3]
     var handles_r: Growing[Vector3]
     var handle_given: Growing[u8]
     var any_weight: bool = false
     var any_handle: bool = false
     ## Custom knots of each curve (knot_offsets has curves + 1 entries).
-    var knots: Growing[f32]
+    var knots: Growing[f64]
     var knot_offsets: Growing[i32]
     var any_knots: bool = false
     ## Parents in the source: a point's first parent, its second and the
@@ -40,11 +40,11 @@ pub struct CurvesBuilder:
         self.resolutions = Growing[i32]()
         self.orders = Growing[i8]()
         self.modes = Growing[i8]()
-        self.weights = Growing[f32]()
+        self.weights = Growing[f64]()
         self.handles_l = Growing[Vector3]()
         self.handles_r = Growing[Vector3]()
         self.handle_given = Growing[u8]()
-        self.knots = Growing[f32]()
+        self.knots = Growing[f64]()
         self.knot_offsets = Growing[i32]()
         self.point_parents = Growing[i32]()
         self.point_others = Growing[i32]()
@@ -103,7 +103,7 @@ pub struct CurvesBuilder:
 
     ## The last point's NURBS weight.
     pub func weight(value: f64):
-        self.weights.items[self.weights.count - 1] = (f32)value
+        self.weights.items[self.weights.count - 1] = value
         self.any_weight = self.any_weight or value != 1.0
 
     ## The last point's Bezier handles (world).
@@ -116,7 +116,7 @@ pub struct CurvesBuilder:
 
     ## The current curve's custom knots.
     pub func custom_knots(values: const f64[]) -> !:
-        for value in values: try self.knots.push((f32)value)
+        for value in values: try self.knots.push(value)
         self.modes.items[self.modes.count - 1] = (i8)(u8)KnotMode.custom
         self.any_knots = true
 
@@ -127,16 +127,24 @@ pub struct CurvesBuilder:
         let (first, count) = source.range(curve)
         let left = float3_span(source, "handle_l")
         let right = float3_span(source, "handle_r")
-        let weights = weight_span(source)
+        let weighted = weight_span(source) != none
         for at in first..<first + count:
             try self.point(source.point(at), (i32)at)
             if let l = left:
                 if let r = right: self.handles(l[at].vector().add(source.origin), r[at].vector().add(source.origin))
-            if let w = weights: self.weight((f64)w[at])
+            if weighted: self.weight(source.weight_at(at))
+        try self.knots_like(source, curve)
+
+    ## The current curve's custom knots: `source`'s curve `curve`'s, exact
+    ## when it keeps them (nothing when it has none).
+    pub func knots_like(source: const Curves*, curve: usize) -> !:
+        if let exact = source.exact_knots(curve):
+            for value in exact: try self.knots.push(value)
+            self.any_knots = self.any_knots or exact.length > 0
+            return
         let knots = source.custom_knots(curve)
-        if knots.length > 0:
-            for value in knots: try self.knots.push(value)
-            self.any_knots = true
+        for value in knots: try self.knots.push((f64)value)
+        self.any_knots = self.any_knots or knots.length > 0
 
     func close_curve() -> !:
         try self.offsets.push((i32)self.points.count)
@@ -184,16 +192,52 @@ pub struct CurvesBuilder:
         var knot_offsets: Column[i32]
         errdefer knot_offsets.release()
         if self.any_knots:
-            knots = try Column[f32].copy_of(self.knots.view())
+            knots = try Column[f32].allocate(self.knots.count)
+            let rounded = knots.span()
+            for at in 0..<self.knots.count: rounded[at] = (f32)self.knots.items[at]
             knot_offsets = try Column[i32].copy_of(self.knot_offsets.view())
         var attributes = AttributeStore()
         errdefer attributes.close()
         try self.write_builtins(&attributes, origin)
         if let given = source: try self.carry(given, &attributes)
-        # Assembly owns the store from here, even when it fails.
+        var exact = try self.exact_of(&positions, &knots, &attributes, origin)
+        errdefer exact.release()
+        # Assembly owns the store and the exact values from here, even when
+        # it fails.
         let handed = attributes
         attributes = AttributeStore()
-        return try curves_assembled(positions.take(), origin, offsets.take(), knots.take(), knot_offsets.take(), handed)
+        let kept = exact
+        exact = CurvesExact()
+        return try curves_assembled(positions.take(), origin, offsets.take(), knots.take(), knot_offsets.take(), handed, none, kept)
+
+    ## The f64 values the f32 columns just written round (see CurvesExact):
+    ## points that do not survive f32 relative to `origin`, weights and knots
+    ## that are not f32 values. None of them for curves made of f32 data.
+    func exact_of(positions: const Column[Float3]*, knots: const Column[f32]*, store: const AttributeStore*, origin: Vector3) -> CurvesExact!:
+        var exact = CurvesExact()
+        errdefer exact.release()
+        let placed = positions.view()
+        for at in 0..<self.points.count:
+            let back = placed[at].vector().add(origin)
+            let want = self.points.items[at]
+            if back.x != want.x or back.y != want.y or back.z != want.z:
+                exact.points = try Column[Vector3].copy_of(self.points.view())
+                exact.points_of = positions.id()
+                break
+        let w = store.find("w", Domain.point)
+        if self.any_weight and w >= 0:
+            for value in self.weights.view():
+                if (f64)(f32)value != value:
+                    exact.weights = try Column[f64].copy_of(self.weights.view())
+                    exact.weights_of = store.entry((usize)w).data.id()
+                    break
+        if self.any_knots:
+            for value in self.knots.view():
+                if (f64)(f32)value != value:
+                    exact.knots = try Column[f64].copy_of(self.knots.view())
+                    exact.knots_of = knots.id()
+                    break
+        return exact
 
     ## Remove curves that got no points (their knots with them).
     func drop_empty() -> !:
@@ -247,7 +291,8 @@ pub struct CurvesBuilder:
         let points = self.points.count
         if self.any_weight:
             var weights = try Attribute.create("w", Domain.point, DataType.float32, 1, points)
-            memory.copy(attribute_ops.typed_mut[f32](weights.data.span()), self.weights.view(), points)
+            let rounded = attribute_ops.typed_mut[f32](weights.data.span())
+            for at in 0..<points: rounded[at] = (f32)self.weights.items[at]
             try store.put(weights)
         if self.any_handle:
             try self.fill_auto_handles()

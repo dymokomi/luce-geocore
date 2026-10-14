@@ -9,7 +9,8 @@
 ##       /geometry/mesh/a0  attribute  name, domain, type, width, single,
 ##                                     flags, role, elements, [table], value
 ##     /geometry/points   points     origin, P
-##     /geometry/curves   curves     origin, P, offsets, [knots, knot_offsets]
+##     /geometry/curves   curves     origin, P, offsets, [knots, knot_offsets],
+##                                   [exact_P, exact_w, exact_knots]
 ##     /geometry/instances  instances  count, prototypes, prototype,
 ##                                     placement, visible
 ##       .../p0           geometry   (a prototype set, written once)
@@ -286,6 +287,10 @@ func encode_curves(data: const void*, writer: GeometryWriter*, path: str) -> !:
         try writer.column_borrowed("knots", dtype_float32, knots.length, 1, bytes_view(knots))
         let starts = curves_knot_offsets(curves)
         try writer.column_borrowed("knot_offsets", dtype_int32, starts.length, 1, bytes_view(starts))
+    # The f64 values the f32 columns round, when the curves keep them.
+    if let exact = curves.exact_points(): try writer.column_borrowed("exact_P", dtype_float64, exact.length, 3, bytes_view(exact))
+    if let exact = curves.exact_weights(): try writer.column_borrowed("exact_w", dtype_float64, exact.length, 1, bytes_view(exact))
+    if let exact = curves.exact_knot_span(): try writer.column_borrowed("exact_knots", dtype_float64, exact.length, 1, bytes_view(exact))
     try writer.attributes(path, curves.store())
 
 ## Instances: the instances' prototypes, placements and visibility as

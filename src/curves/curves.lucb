@@ -85,6 +85,33 @@ let most_resolution: i64 = 1024
 ## origin at the bounds center (as meshes do).
 let origin_limit: f64 = 4096.0
 
+## The f64 values behind f32 columns that round them: a sketch's points
+## (0.1 is not an f32), its arcs' weights and its splines' knots, which CAD
+## reads exactly while display and evaluation read the f32 columns. Each
+## part holds while the column it stands for is unchanged (`*_of` is that
+## column's id): an operation that writes new positions, weights or knots
+## leaves its part stale, so it is read no more, unless the operation
+## writes the f64 values too (placing curves does). Empty parts and a zero
+## value: none.
+pub struct CurvesExact:
+    ## World points, standing for `positions`.
+    pub var points: Column[Vector3]
+    pub var points_of: u64 = 0
+    ## Weights, standing for the `w` attribute's column.
+    pub var weights: Column[f64]
+    pub var weights_of: u64 = 0
+    ## Custom knots, standing for `knots`.
+    pub var knots: Column[f64]
+    pub var knots_of: u64 = 0
+
+    pub func share() -> CurvesExact:
+        return CurvesExact(self.points.share(), self.points_of, self.weights.share(), self.weights_of, self.knots.share(), self.knots_of)
+
+    pub func release():
+        self.points.release()
+        self.weights.release()
+        self.knots.release()
+
 ## Curves sharing one point column, each a run of points with its
 ## settings in curve attributes (curve_type, cyclic, resolution, order,
 ## knot_mode); evaluated points are cached and shared like a mesh's caches.
@@ -99,6 +126,7 @@ pub struct Curves:
     var knot_offsets: Column[i32]
     var attributes: AttributeStore
     var cache: CurveCache*
+    var exact: CurvesExact = CurvesExact()
 
     ## How many control points there are.
     pub func point_count() -> usize:
@@ -115,9 +143,45 @@ pub struct Curves:
         let first = (usize)offsets[curve]
         return (first, (usize)offsets[curve + 1] - first)
 
-    ## Point `index` in world coordinates.
+    ## Point `index` in world coordinates: exact (f64) where the curves
+    ## keep exact points.
     pub func point(index: usize) -> Vector3:
+        if let exact = self.exact_points(): return exact[index]
         return self.positions.view()[index].vector().add(self.origin)
+
+    ## Every point in f64 world coordinates, when the curves keep them (a
+    ## sketch's whose f32 positions round them).
+    pub func exact_points() -> const Vector3[]?:
+        if self.exact.points_of == 0 or self.exact.points_of != self.positions.id(): return none
+        return self.exact.points.view()
+
+    ## The NURBS weights in f64, when kept for the `w` attribute as it is.
+    pub func exact_weights() -> const f64[]?:
+        if self.exact.weights_of == 0: return none
+        let entry = self.find("w", Domain.point) else return none
+        if entry.data.id() != self.exact.weights_of: return none
+        return self.exact.weights.view()
+
+    ## Curve `curve`'s custom knots in f64, when kept for `knots` as they
+    ## are (empty unless it has custom knots).
+    pub func exact_knots(curve: usize) -> const f64[]?:
+        if self.exact.knots_of == 0 or self.exact.knots_of != self.knots.id(): return none
+        let offsets = self.knot_offsets.view()
+        if offsets.length == 0: return self.exact.knots.view()[..<0]
+        return self.exact.knots.view()[(usize)offsets[curve]..<(usize)offsets[curve + 1]]
+
+    ## Every curve's custom knots in f64 (as `curves_knots` splits them),
+    ## when kept for `knots` as they are.
+    pub func exact_knot_span() -> const f64[]?:
+        if self.exact.knots_of == 0 or self.exact.knots_of != self.knots.id(): return none
+        return self.exact.knots.view()
+
+    ## Point `index`'s NURBS weight: exact when kept, else the f32 one (1
+    ## without weights).
+    pub func weight_at(index: usize) -> f64:
+        if let exact = self.exact_weights(): return exact[index]
+        if let weights = weight_span(&self): return (f64)weights[index]
+        return 1.0
 
     ## Curve c's points are offsets[c]..<offsets[c + 1].
     pub func offset_span() -> const i32[]:
@@ -136,7 +200,7 @@ pub struct Curves:
         var attributes = try self.attributes.shared()
         errdefer attributes.close()
         let storage = try new Curves[1] --- in memory.heap
-        storage[0] = Curves(self.positions.share(), self.origin, self.offsets.share(), self.knots.share(), self.knot_offsets.share(), attributes, self.cache)
+        storage[0] = Curves(self.positions.share(), self.origin, self.offsets.share(), self.knots.share(), self.knot_offsets.share(), attributes, self.cache, self.exact.share())
         _ = self.cache.users.add(1, .relaxed)
         return storage.data
 
@@ -147,6 +211,7 @@ pub struct Curves:
         self.knots.release()
         self.knot_offsets.release()
         self.attributes.close()
+        self.exact.release()
         release_cache(self.cache)
 
     ## Add or replace an attribute (taking its share) of curves this caller
@@ -221,7 +286,12 @@ pub func curves_knot_offsets(curves: const Curves*) -> const i32[]:
 ## `curves` with `attributes` (taken, even on failure) in place of its own:
 ## every column shared, the evaluation cache seeded.
 pub func curves_with_store(curves: const Curves*, attributes: AttributeStore) -> Curves*!:
-    return try curves_assembled(curves.positions.share(), curves.origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), attributes, curves.cache)
+    return try curves_assembled(curves.positions.share(), curves.origin, curves.offsets.share(), curves.knots.share(), curves.knot_offsets.share(), attributes, curves.cache, curves.exact.share())
+
+## The exact values `curves` keeps (see CurvesExact), shared: for an
+## operation that keeps some of its columns.
+pub func curves_exact(curves: const Curves*) -> CurvesExact:
+    return curves.exact.share()
 
 ## The origin positions (and handles) are measured from.
 pub func curves_origin(curves: const Curves*) -> Vector3:
@@ -260,9 +330,11 @@ pub func curves_dispose(curves: Curves*):
     curves.close()
     free(Curves[](curves, 1)) in memory.heap
 
-## A Curves owning these columns (taken even on failure), with a fresh
-## cache, or `seed`'s evaluation shape when its columns match.
-pub func curves_assembled(positions: Column[Float3], origin: Vector3, offsets: Column[i32], knots: Column[f32], knot_offsets: Column[i32], attributes: AttributeStore, seed: const CurveCache*? = none) -> Curves*!:
+## A Curves owning these columns and `exact` (taken even on failure), with
+## a fresh cache, or `seed`'s evaluation shape when its columns match.
+pub func curves_assembled(positions: Column[Float3], origin: Vector3, offsets: Column[i32], knots: Column[f32], knot_offsets: Column[i32], attributes: AttributeStore, seed: const CurveCache*? = none, exact: CurvesExact = CurvesExact()) -> Curves*!:
+    var owned_exact = exact
+    errdefer owned_exact.release()
     var owned_positions = positions
     errdefer owned_positions.release()
     var owned_offsets = offsets
@@ -276,7 +348,7 @@ pub func curves_assembled(positions: Column[Float3], origin: Vector3, offsets: C
     let cache = try new_cache(seed)
     errdefer release_cache(cache)
     let storage = try new Curves[1] --- in memory.heap
-    storage[0] = Curves(owned_positions, origin, owned_offsets, owned_knots, owned_knot_offsets, owned_attributes, cache)
+    storage[0] = Curves(owned_positions, origin, owned_offsets, owned_knots, owned_knot_offsets, owned_attributes, cache, owned_exact)
     return storage.data
 
 ## The origin a set of f64 points keeps: zero near the world origin, else

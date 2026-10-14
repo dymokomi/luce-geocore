@@ -268,10 +268,8 @@ func copy_onto(out: CurvesBuilder*, source: const Curves*, plane: SketchPlane, a
         for at in first..<first + points:
             let p = source.point(at)
             try out.point(plane.at(a + p.x, b + p.y))
-            if let w = weights: out.weight((f64)w[at])
-        let knots = source.custom_knots(curve)
-        for value in knots: try out.knots.push(value)
-        if knots.length > 0: out.any_knots = true
+            if weights != none: out.weight(source.weight_at(at))
+        try out.knots_like(source, curve)
 
 ## Control points `indices` (global ids, in order) of curve `curve` as a new
 ## curve like it, closed when `cyclic`. Custom knots do not survive a
@@ -286,7 +284,7 @@ func copy_points(out: CurvesBuilder*, source: const Curves*, curve: usize, indic
         try out.point(source.point(at), (i32)at)
         if let l = left:
             if let r = right: out.handles(l[at].vector().add(source.origin), r[at].vector().add(source.origin))
-        if let w = weights: out.weight((f64)w[at])
+        if weights != none: out.weight(source.weight_at(at))
 
 ## `curves` with its control points at `targets` (world, one per point):
 ## the moved points' (`moved`) Bezier handles turn by `linear` and follow
@@ -309,8 +307,6 @@ pub func placed_curves(curves: const Curves*, targets: const Vector3[], moved: c
                     let turn = linear if moved[at] else Matrix4()
                     out.handles(targets[at].add(turn.transform_direction(l[at].vector().add(curves.origin).subtract(here))),
                                 targets[at].add(turn.transform_direction(r[at].vector().add(curves.origin).subtract(here))))
-            if let w = weights: out.weight((f64)w[at])
-        let knots = curves.custom_knots(curve)
-        for value in knots: try out.knots.push(value)
-        if knots.length > 0: out.any_knots = true
+            if weights != none: out.weight(curves.weight_at(at))
+        try out.knots_like(curves, curve)
     return try out.finish(curves)
