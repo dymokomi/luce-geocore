@@ -34,7 +34,11 @@ i32 face offsets and corner points, f32 face normals and i32 display
 triangles. The origin is the bounds center when coordinates exceed 4096 or 8×
 the model's size, else zero, so f32 positions keep about 1e-7 of the model's
 size. Construction validates and computes normals and triangles in parallel on
-luce-std's process-wide `parallel` pool.
+luce-std's process-wide `parallel` pool. A column block of 4 MiB or more is kept
+when released (at most four, 256 MiB in all) for the next allocation of about
+its size: a drag's frames each make a new positions column and free the last,
+and handing that memory back to the system made every copy fault its pages in
+again. `kernel.clear_spare_columns` frees them (tests with allocation trackers).
 
 What connectivity alone determines (the face of each corner, the edges, numbered
 by first corner in a deterministic parallel build, point-to-face incidence and
@@ -47,8 +51,14 @@ next query instead of building one.
 A precise mesh also keeps its f64 points; `point`, normals, triangulation and
 derived meshes use them, while display and queries use the f32 positions. B-rep
 tessellation builds its chart meshes this way (trims resolve features far below
-f32 spacing) and publishes `without_precision()`. Position edits of a precise
-mesh rebuild it.
+f32 spacing) and publishes `without_precision()`, and so do Booleans. The f64
+points refine the f32 positions: a point's f64 point stands while its f32
+position is that point's rounding, and a point moved since reads as its f32
+position plus the origin (`point`, `exact_points`, which gives them all as they
+read). So moves (Transform Components, the drag path) share the f64 column
+instead of copying it and cost what a plain mesh's do; `moved_points`, `placed`
+and `with_positions` move the f64 points themselves (a displacement below f32
+spacing stays) and rebuild the mesh.
 
 ## Limits
 

@@ -5,6 +5,7 @@
 ## triangulation.
 import core.attributes
 import core.bits
+import core.shared
 import core.float3
 import core.idset
 import core.limits
@@ -113,6 +114,9 @@ pub type Selection = groups.Selection
 pub let group_bits_of = groups.group_bits
 ## Drop every cached group (tests with allocation trackers).
 pub let clear_group_cache = groups.clear_group_cache
+## Free the large column blocks kept for reuse (tests with allocation
+## trackers).
+pub let clear_spare_columns = shared.clear_spares
 ## Forget the last sculpt stroke cooked (tests with allocation trackers).
 pub let clear_stroke_cache = verbs.clear_stroke_cache
 ## The bits of a selection.

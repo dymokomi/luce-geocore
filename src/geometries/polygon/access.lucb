@@ -120,10 +120,30 @@ extend Mesh:
     pub func is_precise() -> bool:
         return not self.precise.is_empty()
 
-    ## A point in f64: the precise point, or the f32 position plus the origin.
+    ## A point in f64: the precise point while it stands (its f32 position
+    ## is its rounding), else the f32 position plus the origin.
     func point_at(index: usize) -> Vector3:
-        if not self.precise.is_empty(): return self.precise.view()[index]
-        return self.positions.view()[index].vector().add(self.origin)
+        let position = self.positions.view()[index]
+        if not self.precise.is_empty():
+            let exact = self.precise.view()[index]
+            if stands(exact, position, self.origin): return exact
+        return position.vector().add(self.origin)
+
+    ## A precise mesh's f64 points, each as `point` reads it: the column
+    ## itself, shared, while every point stands; else a new column with the
+    ## moved points' f32 positions plus the origin. Empty when not precise.
+    pub func exact_points() -> Column[Vector3]!:
+        if self.precise.is_empty(): return Column[Vector3]()
+        let exact = self.precise.view()
+        let positions = self.positions.view()
+        var first: usize = 0
+        while first < exact.length and stands(exact[first], positions[first], self.origin): first += 1
+        if first == exact.length: return self.precise.share()
+        var made = try Column[Vector3].copy_of(exact)
+        let out = made.span()
+        for at in first..<out.length:
+            if not stands(exact[at], positions[at], self.origin): out[at] = positions[at].vector().add(self.origin)
+        return made
 
     ## How many corners face `face` has.
     pub func face_size(face: i64) -> i64!:
@@ -446,3 +466,9 @@ extend Mesh:
     pub func point_edge_span() -> (const i32[], const i32[])!:
         let edges = try self.edge_arrays()
         return try self.topology.point_edges(edges.0, self.positions.count())
+
+## Whether f64 point `exact` still stands for f32 position `position`
+## relative to `origin` (Mesh's precise points): the position is its rounding.
+func stands(exact: Vector3, position: Float3, origin: Vector3) -> bool:
+    let rounded = Float3.of(exact.subtract(origin))
+    return rounded.x == position.x and rounded.y == position.y and rounded.z == position.z

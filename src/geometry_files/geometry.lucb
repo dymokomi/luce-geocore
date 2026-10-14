@@ -249,8 +249,15 @@ func encode_mesh(data: const void*, writer: GeometryWriter*, path: str) -> !:
     try writer.column_borrowed("corner_points", dtype_int32, corners.length, 1, bytes_view(corners))
     let triangles = mesh.triangle_span()
     try writer.column_borrowed("triangles", dtype_int32, triangles.length, 1, bytes_view(triangles))
-    let precise = precise_span(mesh)
-    if precise.length > 0: try writer.column_borrowed("precise", dtype_float64, precise.length, 3, bytes_view(precise))
+    # The f64 points as they read (moved ones from f32), so a file's
+    # precise points all stand: the mesh's own column when every point
+    # stands (borrowed), else a copy the writer keeps.
+    var exact = try mesh.exact_points()
+    defer exact.release()
+    let precise = exact.view()
+    if precise.length > 0:
+        if precise.data == precise_span(mesh).data: try writer.column_borrowed("precise", dtype_float64, precise.length, 3, bytes_view(precise))
+        else: try writer.column("precise", dtype_float64, precise.length, 3, bytes_view(precise))
     var entries = Growing[const Attribute*]()
     defer entries.close()
     for index in 0..<(usize)mesh.attribute_count(): try entries.push(try mesh.attribute_entry((i64)index))

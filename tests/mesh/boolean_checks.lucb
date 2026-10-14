@@ -18,7 +18,7 @@ import memory
 import strings
 from luce_std import math
 from luce_geocore.geocore import Mesh, MeshBuilder, MeshPrimitives, Verbs, VerbResult, Vector3
-from luce_geocore.kernel import clear_group_cache
+from luce_geocore.kernel import clear_group_cache, precise_span
 from tool_fixtures import near, surface, volume
 
 ## The sweep's checks: boxes, the coplanar and touching cases and the picks.
@@ -187,6 +187,28 @@ func pick_checks() -> !:
         near(now.x - was.x, 0.25, 1.0e-12)
         near(now.y - was.y, 0.5, 1.0e-12)
         near(now.z - was.z, -0.75, 1.0e-12)
+    # A move shares the f64 points (no copy); the moved points read from
+    # their f32 positions, the rest stay exact, in `point` and
+    # `exact_points` (what a later Boolean and a file read) alike.
+    let nudge: f64[15] = [0.0, 0.125, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+    let nudging = try Verbs.run("Transform Components", joined, "0", 3, nudge[..<15])
+    defer nudging.release()
+    let nudged = try nudging.value().mesh()
+    defer nudged.release()
+    assert(precise_span(try nudged.get()).data == precise_span(try joined.get()).data)
+    var exact = try (try nudged.get()).exact_points()
+    defer exact.release()
+    var lifted = 0
+    for point in 0..<joined.value().point_count():
+        let was = try joined.value().point(point)
+        let now = try nudged.value().point(point)
+        assert(exact.view()[(usize)point].x == now.x and exact.view()[(usize)point].y == now.y and exact.view()[(usize)point].z == now.z)
+        if now.y == was.y:
+            assert(now.x == was.x and now.z == was.z)
+            continue
+        near(now.y - was.y, 0.125, 1.0e-6)
+        lifted += 1
+    assert(lifted >= 3)
     # Pieces named by path (Edit Mesh's boxes /box1 and /box2, the second
     # placed half a unit along each axis): the result is one, /box1.
     let empty = try Mesh.empty()

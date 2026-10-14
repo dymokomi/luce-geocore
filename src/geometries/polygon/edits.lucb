@@ -119,6 +119,7 @@ extend Mesh:
                 marked[(usize)index] = true
                 unique += 1
         if self.is_precise():
+            # Moved in f64: a displacement below f32 spacing stays.
             let points = try self.world_points(Matrix4())
             defer free(points) in memory.heap
             for point in 0..<count:
@@ -144,7 +145,7 @@ extend Mesh:
     ## `previous` (verbs' finish, a drag's last frame).
     pub func repositions(previous: const Mesh*) -> bool:
         if previous.corners.id() != self.corners.id() or previous.offsets.id() != self.offsets.id() or previous.origin != self.origin: return false
-        if self.is_precise() or previous.is_precise() or previous.positions.count() != self.positions.count(): return false
+        if previous.precise.id() != self.precise.id() or previous.positions.count() != self.positions.count(): return false
         var kept: usize = 0
         for index in 0..<self.attributes.count():
             let entry = self.attributes.entry(index)
@@ -188,23 +189,11 @@ extend Mesh:
         errdefer release_query(queries)
         let shading = try ShadingCache.after(self.shading, moved)
         errdefer release_shading(shading)
-        # A precise mesh's f64 points follow: the moved ones (all, when the
-        # origin moved) take their new places; the rest stay exact.
-        var exact = Column[Vector3]()
-        errdefer exact.release()
-        if not self.precise.is_empty():
-            exact = try Column[Vector3].copy_of(self.precise.view())
-            let places = exact.span()
-            let placed = owned.view()
-            if moved.length == 0 or origin != self.origin:
-                for at in 0..<placed.length: places[at] = placed[at].vector().add(origin)
-            else:
-                for at in moved: places[(usize)at] = placed[(usize)at].vector().add(origin)
+        # A precise mesh's f64 points are shared: a moved point's f32
+        # position is no longer its f64 point's rounding, so it reads as
+        # that position plus the origin (Mesh.point_at); the rest stay exact.
         let storage = try new Mesh[1] --- in memory.heap
         storage[0] = self.shared_columns()
-        if not exact.is_empty():
-            storage[0].precise.release()
-            storage[0].precise = exact
         # Record provenance: caches keyed on the old positions update in place.
         owned.set_parent(self.positions.id())
         if moved.length > 0 and moved.length < owned.count():

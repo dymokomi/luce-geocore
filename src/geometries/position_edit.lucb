@@ -90,9 +90,11 @@ func chunk_extent(context: void*, first: usize, end: usize, worker: usize):
         work.results[chunk] = Extent(lo.vector(), hi.vector(), finite)
 
 ## The bounds after `moved` points moved, from the bounds `before` when they
-## are given and stay exact: on each axis where no moved point stood on a
-## bound, the points that stayed still reach it, so the new bound is it
-## grown by the moved points. Otherwise every point is scanned.
+## are given and stay exact: a bound no moved point left inward (none stood
+## on it, or those that did stayed on it or went beyond) is still reached,
+## so the new bound is it grown by the moved points. Otherwise (a point
+## that held a bound moved in) every point is scanned. A drag outward of a
+## face on the bounds (a box's top pulled up) then costs the moved points.
 func moved_bounds(shape: const Shape*, moved: const u32[], before: Bounds?) -> Bounds!:
     let old = before else return try bounds_of(shape.positions, shape.origin)
     if moved.length * 8 > shape.positions.length or moved.length == 0: return try bounds_of(shape.positions, shape.origin)
@@ -102,11 +104,12 @@ func moved_bounds(shape: const Shape*, moved: const u32[], before: Bounds?) -> B
     var high = hi
     for point in moved:
         let was = shape.previous[(usize)point].vector()
-        # A moved point on a bound may have been what held it there.
-        if was.x <= lo.x or was.y <= lo.y or was.z <= lo.z or was.x >= hi.x or was.y >= hi.y or was.z >= hi.z: return try bounds_of(shape.positions, shape.origin)
         let p = shape.positions[(usize)point]
         if not (p.x - p.x == 0.0 and p.y - p.y == 0.0 and p.z - p.z == 0.0): error(errors.invalid, "mesh points must be finite and bounded to 1e6")
         let v = p.vector()
+        # A moved point on a bound may have been what held it there: moved
+        # in from it, the bound may shrink.
+        if (was.x <= lo.x and v.x > was.x) or (was.y <= lo.y and v.y > was.y) or (was.z <= lo.z and v.z > was.z) or (was.x >= hi.x and v.x < was.x) or (was.y >= hi.y and v.y < was.y) or (was.z >= hi.z and v.z < was.z): return try bounds_of(shape.positions, shape.origin)
         low = Vector3(math.min(low.x, v.x), math.min(low.y, v.y), math.min(low.z, v.z))
         high = Vector3(math.max(high.x, v.x), math.max(high.y, v.y), math.max(high.z, v.z))
     let minimum = low.add(shape.origin)

@@ -7,7 +7,7 @@ import memory
 import ownership
 import sync
 from luce_std import parallel
-from luce_geocore.kernel import clear_group_cache
+from luce_geocore.kernel import clear_group_cache, clear_spare_columns
 import math_checks
 import placement_checks
 import verb_checks
@@ -50,6 +50,7 @@ struct Tracker: memory.Allocator:
 func settle(tracker: Tracker*):
     tracker.remaining = none
     clear_group_cache()
+    clear_spare_columns()
     ownership.collect()
     _ = ownership.finish_run(0)
     assert(tracker.live == 0, "no allocation stays live")
@@ -76,6 +77,8 @@ pub func main(arguments: str[]) -> i32!:
     # Start the pool first: its starting threads free blocks in the current heap.
     parallel.warm()
     let previous = memory.heap
+    # Blocks kept for reuse came from the plain heap: freed there first.
+    clear_spare_columns()
     var tracker = Tracker(previous, 0, none, sync.Mutex())
     memory.heap = &tracker
     defer restore(previous)

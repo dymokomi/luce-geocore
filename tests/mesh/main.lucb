@@ -8,7 +8,7 @@ import ownership
 import sync
 from luce_std import process
 from luce_std import parallel as std_parallel
-from luce_geocore.kernel import clear_group_cache
+from luce_geocore.kernel import clear_group_cache, clear_spare_columns
 import polygon_checks
 import scale_checks
 import display_checks
@@ -105,6 +105,7 @@ func restore(previous: memory.Allocator):
 func settle(tracker: Tracker*):
     tracker.remaining = none
     clear_group_cache()
+    clear_spare_columns()
     ownership.collect()
     _ = ownership.finish_run(0)
     assert(tracker.live == 0)
@@ -160,6 +161,8 @@ func checks(arguments: str[]) -> i32!:
     std_parallel.warm()
     try query_checks.exercise()
     let previous = memory.heap
+    # Blocks kept for reuse came from the plain heap: freed there first.
+    clear_spare_columns()
     var tracker = Tracker(previous, 0, none, sync.Mutex())
     memory.heap = &tracker
     defer restore(previous)

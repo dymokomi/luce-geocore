@@ -211,6 +211,8 @@ pub func remove_attribute(mesh: Mesh*, name: str, domain: Domain) -> !:
     mesh.attributes.remove((usize)found)
     try mesh.reshade_for(name, domain)
 
-## A precise mesh's f64 points; empty otherwise.
+## A precise mesh's f64 points as stored; empty otherwise. A point whose f32
+## position is not its f64 point's rounding has moved since: it reads as its
+## f32 position plus the origin (Mesh.exact_points gives them as they read).
 pub func precise_span(mesh: const Mesh*) -> const Vector3[]:
     return mesh.precise.view()

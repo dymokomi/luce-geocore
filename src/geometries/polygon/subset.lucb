@@ -93,7 +93,9 @@ extend Mesh:
         var exact: Column[Vector3]
         if self.is_precise(): exact = try Column[Vector3].allocate(point_total)
         defer exact.release()
-        var work = SubsetWork(offsets, corners, self.triangles.view(), self.normals.view(), self.positions.view(), self.precise.view(),
+        var exact_in = try self.exact_points()
+        defer exact_in.release()
+        var work = SubsetWork(offsets, corners, self.triangles.view(), self.normals.view(), self.positions.view(), exact_in.view(),
                               face_parents.view(), no, point_map, point_parents.view(), new_corners.span(), corner_parents.span(), new_triangles.span(), new_normals.span(), new_positions.span(), exact.span())
         try parallel.for_each_range(face_total, 4096, (void*)&work, subset_faces)
         try parallel.for_each_range(point_total, 65536, (void*)&work, subset_points)

@@ -10,9 +10,15 @@
 ## computes normals and triangles in parallel.
 ##
 ## A precise mesh also keeps its f64 points. B-rep tessellation builds its
-## chart meshes this way, since trims resolve features far below f32 spacing;
-## `point`, normals, triangulation and derived meshes then use the f64 points,
-## while display and spatial queries use the f32 positions as always.
+## chart meshes this way, since trims resolve features far below f32 spacing,
+## and so do Booleans; `point`, normals, triangulation and derived meshes then
+## use the f64 points, while display and spatial queries use the f32
+## positions as always. The f64 points refine the f32 positions: a point's
+## f64 point stands while its f32 position is that point's rounding
+## (Float3.of(precise - origin)); once the point moves, its f32 position is
+## no longer that, and it reads as its f32 position plus the origin (`point`,
+## `exact_points`). So a move shares the f64 column rather than copying it,
+## and a drag of a precise mesh costs what one of a plain mesh does.
 import interop
 from luce_std import math
 import memory
@@ -68,7 +74,8 @@ pub struct Mesh: PolygonTopology:
     ## Display triangles grouped by face, 3*(size-2) corner indices each.
     var triangles: Column[i32]
     var extent: Bounds
-    ## Absolute f64 points of a precise mesh; empty otherwise.
+    ## Absolute f64 points of a precise mesh, each standing while its f32
+    ## position is its rounding (see above); empty otherwise.
     var precise: Column[Vector3]
     var attributes: AttributeStore
     var topology: TopologyCache*

@@ -74,7 +74,10 @@ pub struct Operands:
         let mesh = self.mesh
         let faces = self.topology.faces()
         let positions = mesh.point_span()
-        let precise = precise_span(mesh)
+        # A precise mesh's f64 points, its moved ones read from f32.
+        var exact = try mesh.exact_points()
+        defer exact.release()
+        let precise = exact.view()
         try self.points.reserve(positions.length)
         for at in 0..<positions.length:
             self.points.items[at] = precise[at] if precise.length > 0 else positions[at].vector()
