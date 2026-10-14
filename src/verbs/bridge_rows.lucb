@@ -6,18 +6,22 @@
 ##
 ## - Linear: each cut point on the straight line between its two ends.
 ## - Blend path: the loops' centers joined by a cubic Bézier leaving each
-##   loop square to its plane (toward the other), its handles Smoothness ×
-##   a length after Blender's (4/3 of the distance for loops side by side,
-##   3/4 for loops facing); the loop's shape, blended from one end's to the
-##   other's, rides along it.
+##   loop square to its plane (toward the other; a straight run's way is
+##   square to it, toward the other run), its handles Smoothness × half
+##   the distance (across the normals' plane) × Blender's factor: 4/3 for
+##   loops side by side, down to 3/4 for loops facing. Each loop's shape
+##   rides along the curve, turned with it (the turn that keeps it from
+##   twisting), and a cut point blends where the two loops' shapes put it.
 ## - Blend surface: each point's own Bézier, leaving its end along the
 ##   surface (away from the face beside the boundary).
 ##
 ## Profile swells each cut loop away from the center line (pinches below
-## 0) by Profile × the shape's value, 0 at the ends and 1 halfway. A cut
-## point's values blend its two ends' by where it sits. Sides of different
-## lengths zip together with triangles, advancing along whichever is behind
-## by length. Merge welds the second chain's points onto the first's.
+## 0) by Profile × the shape's value, 0 at the ends and 1 halfway: the
+## straight line between the centers for Linear, the Bézier otherwise. An
+## open run swells along itself too, as Blender's does. A cut point's
+## values blend its two ends' by where it sits. Sides of different lengths
+## zip together with triangles, advancing along whichever is behind by
+## length. Merge welds the second chain's points onto the first's.
 
 ## Bridge's numbers, read once.
 struct BridgeSettings:
@@ -62,26 +66,43 @@ struct Side:
         self.along.close()
         self.outward.close()
 
-    ## The mean of its points (a closed loop's first once).
+    ## Its center as Blender weighs it: each point by the lengths of the
+    ## two edges at it, round the loop (an open run closed by its chord).
     func center(mesh: const Mesh*, closed: bool) -> Vector3:
         let count = self.points.count - (1 if closed else 0)
         var sum = Vector3()
-        for at in 0..<count: sum = sum.add(point_of(mesh, self.points.items[at]))
-        return sum.multiply_scalar(1.0 / (f64)count)
+        var mean = Vector3()
+        var total = 0.0
+        for at in 0..<count:
+            let here = point_of(mesh, self.points.items[at])
+            let before = point_of(mesh, self.points.items[(at + count - 1) % count])
+            let after = point_of(mesh, self.points.items[(at + 1) % count])
+            let weight = here.subtract(before).length() + after.subtract(here).length()
+            sum = sum.add(here.multiply_scalar(weight))
+            mean = mean.add(here)
+            total += weight
+        if total > 0.0: return sum.multiply_scalar(1.0 / total)
+        return mean.multiply_scalar(1.0 / (f64)count)
 
-    ## Its plane's normal (Newell's over its points), or the mean of its
-    ## outward directions for a straight run.
-    func normal(mesh: const Mesh*) -> Vector3:
+    ## Its plane's normal (Newell's over its points, round the loop). A
+    ## straight run has none: then square to it, along `toward` (Blender's
+    ## aligned normal). Nearly straight counts as straight, against the
+    ## loop's size, so rounding never picks a way at random.
+    func normal(mesh: const Mesh*, closed: bool, toward: Vector3) -> Vector3:
+        let count = self.points.count - (1 if closed else 0)
         var sum = Vector3()
-        let count = self.points.count
+        var aligned = Vector3()
+        var perimeter = 0.0
         for at in 0..<count:
             let p = point_of(mesh, self.points.items[at])
             let q = point_of(mesh, self.points.items[(at + 1) % count])
             sum = sum.add(p.cross(q))
-        if sum.length() > 0.000000001: return sum.multiply_scalar(1.0 / sum.length())
-        var out = Vector3()
-        for direction in self.outward.view(): out = out.add(direction)
-        return out.multiply_scalar(1.0 / out.length()) if out.length() > 0.0 else Vector3(0.0, 1.0, 0.0)
+            let way = q.subtract(p)
+            perimeter += way.length()
+            aligned = aligned.add(way.cross(toward.cross(way)))
+        if sum.length() > 0.000001 * perimeter * perimeter: return unit_of(sum)
+        if aligned.length() > 0.0: return unit_of(aligned)
+        return unit_of(toward) if toward.length() > 0.0 else Vector3(0.0, 1.0, 0.0)
 
 ## The way out of the surface across the boundary edge of corner `corner`:
 ## along its face, square to the edge, away from the face.
@@ -132,15 +153,46 @@ func side_of(mesh: const Mesh*, topology: const Topology*, chains: const Chains*
         try side.along.push(length)
 
 ## Blender's Bézier handle length between `a` leaving along `out_a` and `b`
-## along `out_b` (both unit, toward each other): 4/3 of the distance for
-## parallel ways, down to 3/4 as they come to face each other.
+## along `out_b` (both unit, toward each other): half their distance
+## across the plane of the two ways, times 4/3 for parallel ways (a
+## half circle's) down to 3/4 as they come to face each other.
 func handle_length(a: Vector3, out_a: Vector3, b: Vector3, out_b: Vector3) -> f64:
     let facing = out_a.dot(out_b)
     var factor = 4.0 / 3.0
     if facing < 0.0:
         let t = 1.0 + facing
         factor = factor * t + 0.75 * (1.0 - t)
-    return factor * b.subtract(a).length()
+    var gap = b.subtract(a)
+    let across = out_a.cross(out_b)
+    if across.length() > 0.0001:
+        let axis = unit_of(across)
+        gap = gap.subtract(axis.multiply_scalar(gap.dot(axis)))
+    return gap.length() * 0.5 * factor
+
+## `v` turned by `angle` about unit `axis` (Rodrigues).
+func axis_turned(v: Vector3, axis: Vector3, angle: f64) -> Vector3:
+    let c = math.cos(angle)
+    return v.multiply_scalar(c).add(axis.cross(v).multiply_scalar(math.sin(angle))).add(axis.multiply_scalar(axis.dot(v) * (1.0 - c)))
+
+## A turn, as the images of the X, Y and Z axes.
+struct LoopTurn:
+    var x: Vector3
+    var y: Vector3
+    var z: Vector3
+
+    static func identity() -> LoopTurn:
+        return LoopTurn(Vector3(1.0, 0.0, 0.0), Vector3(0.0, 1.0, 0.0), Vector3(0.0, 0.0, 1.0))
+
+    func apply(v: Vector3) -> Vector3:
+        return self.x.multiply_scalar(v.x).add(self.y.multiply_scalar(v.y)).add(self.z.multiply_scalar(v.z))
+
+    ## The turn undone (a rotation's transpose).
+    func undo(v: Vector3) -> Vector3:
+        return Vector3(self.x.dot(v), self.y.dot(v), self.z.dot(v))
+
+    ## This turn followed by `angle` about `axis`.
+    func followed(axis: Vector3, angle: f64) -> LoopTurn:
+        return LoopTurn(axis_turned(self.x, axis, angle), axis_turned(self.y, axis, angle), axis_turned(self.z, axis, angle))
 
 ## The cubic Bézier from `a` to `b` with handles `h` and `k`, at `t`.
 func bezier(a: Vector3, h: Vector3, k: Vector3, b: Vector3, t: f64) -> Vector3:
@@ -177,13 +229,35 @@ func bridge_pair(mesh: const Mesh*, topology: const Topology*, chains: Chains*, 
     let center_a = a.center(mesh, closed)
     let center_b = b.center(mesh, closed)
     let toward = center_b.subtract(center_a)
-    var normal_a = a.normal(mesh)
-    var normal_b = b.normal(mesh)
+    var normal_a = a.normal(mesh, closed, toward)
+    var normal_b = b.normal(mesh, closed, toward)
     if normal_a.dot(toward) < 0.0: normal_a = normal_a.multiply_scalar(-1.0)
     if normal_b.dot(toward) > 0.0: normal_b = normal_b.multiply_scalar(-1.0)
     let reach = handle_length(center_a, normal_a, center_b, normal_b) * settings.smoothness
     let handle_a = center_a.add(normal_a.multiply_scalar(reach))
     let handle_b = center_b.add(normal_b.multiply_scalar(reach))
+    # Per row: the center line's point, the profile's swell and (Blend
+    # path) the loop's turn there, carried along the curve from the first.
+    let line = try new Vector3[rows + 1] --- in memory.heap
+    defer free(line) in memory.heap
+    let swell = try new f64[rows + 1] --- in memory.heap
+    defer free(swell) in memory.heap
+    let turns = try new LoopTurn[rows + 1] --- in memory.heap
+    defer free(turns) in memory.heap
+    for row in 0..<rows + 1:
+        let t = (f64)row / (f64)rows
+        line[row] = center_a.add(toward.multiply_scalar(t)) if settings.interpolation == 0 else bezier(center_a, handle_a, handle_b, center_b, t)
+        swell[row] = 1.0 + settings.profile * profile_shape(settings.shape, t)
+        turns[row] = LoopTurn.identity()
+    if settings.interpolation == 1:
+        var before = normal_a
+        for row in 1..<rows + 1:
+            var way = normal_b.multiply_scalar(-1.0)
+            if row < rows: way = unit_of(unit_of(line[row].subtract(line[row - 1])).add(unit_of(line[row + 1].subtract(line[row]))))
+            let axis = before.cross(way)
+            let angle = math.atan2(axis.length(), before.dot(way))
+            turns[row] = turns[row - 1].followed(unit_of(axis), angle) if axis.length() > 0.000000001 else turns[row - 1]
+            before = way
     # Rows between the sides: row 0 is the first chain, row `rows` the second.
     let ids = try new i32[(n + 1) * (rows + 1)] --- in memory.heap
     defer free(ids) in memory.heap
@@ -198,18 +272,20 @@ func bridge_pair(mesh: const Mesh*, topology: const Topology*, chains: Chains*, 
             if index == n and closed:
                 ids[row * (n + 1) + index] = ids[row * (n + 1)]
                 continue
-            var middle = center_a.add(toward.multiply_scalar(t))
-            if settings.interpolation != 0 or settings.profile != 0.0: middle = bezier(center_a, handle_a, handle_b, center_b, t)
             var placed = start.add(end.subtract(start).multiply_scalar(t))
             if settings.interpolation == 1:
-                placed = middle.add(start.subtract(center_a).multiply_scalar(1.0 - t)).add(end.subtract(center_b).multiply_scalar(t))
-            elif settings.interpolation == 2:
-                let out_a = a.outward.items[index]
-                let out_b = b.outward.items[index]
-                let length = handle_length(start, out_a, end, out_b) * settings.smoothness
-                placed = bezier(start, start.add(out_a.multiply_scalar(length)), end.add(out_b.multiply_scalar(length)), end, t)
-            if settings.profile != 0.0:
-                placed = middle.add(placed.subtract(middle).multiply_scalar(1.0 + settings.profile * profile_shape(settings.shape, t)))
+                # Each loop's shape carried to this row, swelled; blended.
+                let row_turn = turns[row]
+                let from_a = line[row].add(row_turn.apply(start.subtract(center_a)).multiply_scalar(swell[row]))
+                let from_b = line[row].add(row_turn.apply(turns[rows].undo(end.subtract(center_b))).multiply_scalar(swell[row]))
+                placed = from_a.add(from_b.subtract(from_a).multiply_scalar(t))
+            else:
+                if settings.interpolation == 2:
+                    let out_a = a.outward.items[index]
+                    let out_b = b.outward.items[index]
+                    let length = handle_length(start, out_a, end, out_b) * settings.smoothness
+                    placed = bezier(start, start.add(out_a.multiply_scalar(length)), end.add(out_b.multiply_scalar(length)), end, t)
+                placed = line[row].add(placed.subtract(line[row]).multiply_scalar(swell[row]))
             let parents: i32[2] = [a.points.items[index], b.points.items[index]]
             let weights: f32[2] = [(f32)(1.0 - t), (f32)t]
             ids[row * (n + 1) + index] = try builder.mixed_point(placed, parents[..<2], weights[..<2])

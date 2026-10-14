@@ -3,14 +3,16 @@
 ## (volume 8 + 6·4/3 at offset 1), its centers; Rotate Edge's diagonal one
 ## corner on and back, a triangle pair's other diagonal, refusals; Solidify's
 ## shell of a flat grid (twice the faces plus the rim, closed, volume area ×
-## thickness), the offsets, and a cube's shell with and without Even
-## thickness. The cube spans -1..1 in X and Z and 0..2 in Y; the grid is 4
+## thickness), the offsets, a cube's shell with and without Even
+## thickness, Clamp and Angle clamp's limits, and clean shells of a noisy
+## grid and a bumped one (every inner point about Thickness behind its own,
+## no inner face turned against its outer one). The cube spans -1..1 in X and Z and 0..2 in Y; the grid is 4
 ## by 4 over -1..1 in XZ (point z*5+x, face z*4+x), facing +Y.
 import interop
 from luce_std import math
 from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
 from luce_geocore.kernel import clear_group_cache
-from tool_fixtures import made, counts, near, near_point, volume, area, surface, quads
+from tool_fixtures import made, counts, near, near_point, volume, area, surface, quads, newell
 
 pub func exercise() -> !:
     defer clear_group_cache()
@@ -21,7 +23,9 @@ pub func exercise() -> !:
     try poke_checks(cube, grid)
     try rotate_checks(grid)
     try solidify_checks(cube, grid)
-    print("PASS Poke, Rotate Edge, Solidify: fans and pyramids, centers; diagonals turned both ways, a triangle pair, refusals; shells of a grid and a cube, offsets, Even thickness, flip, no rim")
+    try clamp_checks(grid)
+    try clean_shell_checks()
+    print("PASS Poke, Rotate Edge, Solidify: fans and pyramids, centers; diagonals turned both ways, a triangle pair, refusals; shells of a grid and a cube, offsets, Even thickness, flip, no rim, clamps, clean shells of noisy and bumped grids")
 
 func poke_checks(cube: interop.Reference[Mesh], grid: interop.Reference[Mesh]) -> !:
     let flat: f64[3] = [0.0, 0.0, 0.0]
@@ -147,3 +151,56 @@ func solidify_checks(cube: interop.Reference[Mesh], grid: interop.Reference[Mesh
     defer thinner.release()
     let side = 2.0 - 0.4 / math.sqrt(3.0)
     near(try volume(thinner), 8.0 - side * side * side)
+
+func clamp_checks(grid: interop.Reference[Mesh]) -> !:
+    # A shell 1 thick behind a grid of edges 0.5: Clamp 1 holds every point
+    # to its shortest edge.
+    let held: f64[7] = [1.0, -1.0, 0.0, 1.0, 0.0, 1.0, 0.0]
+    let clamped = try made(grid, "Solidify", "", 3, held[..<7], 32)
+    defer clamped.release()
+    near(clamped.value().bounds().minimum.y, -0.5)
+    # Angle clamp: a flat point is never held; a corner of the grid (no
+    # pair of faces, so 90° as Blender takes it) moves 0.25 / cos 45°.
+    let opened: f64[7] = [1.0, -1.0, 0.0, 1.0, 0.0, 1.0, 1.0]
+    let angled = try made(grid, "Solidify", "", 3, opened[..<7], 32)
+    defer angled.release()
+    near(angled.value().bounds().minimum.y, -1.0)
+    near((try angled.value().point(25)).y, -0.25 / math.cos(math.pi / 4.0))
+
+## A shell of `mesh` (`rim` edges round its outline) `thickness` behind it
+## with Even thickness: closed, each point's inner copy between Thickness
+## and `most` × Thickness away, and no inner face turned with its outer
+## one (the inner sheet winds the other way).
+func clean_shell(mesh: interop.Reference[Mesh], rim: i64, thickness: f64, most: f64) -> !:
+    let points = mesh.value().point_count()
+    let faces = mesh.value().face_count()
+    let numbers: f64[5] = [thickness, -1.0, 1.0, 1.0, 0.0]
+    let shell = try made(mesh, "Solidify", "", 3, numbers[..<5], faces + rim)
+    defer shell.release()
+    try surface(shell, true)
+    for point in 0..<points:
+        let gap = (try shell.value().point(points + point)).subtract(try shell.value().point(point)).length()
+        if gap < thickness * 0.999 or gap > thickness * most:
+            print(f"point {point}: inner copy {gap} away for thickness {thickness}")
+            assert(false)
+    for face in 0..<faces:
+        assert((try newell(shell, face)).dot(try newell(shell, faces + face)) < 0.0)
+
+func clean_shell_checks() -> !:
+    # The preview's grid: 6 by 6 with noise 0.12 (a third of a cell).
+    let grid = try MeshPrimitives.grid(2.0, 6)
+    defer grid.release()
+    let noise: f64[2] = [0.12, 0.0]
+    let noisy = try made(grid, "Mountain", "", 1, noise[..<2], 49)
+    defer noisy.release()
+    try clean_shell(noisy, 24, 0.15, 1.2)
+    try clean_shell(noisy, 24, 0.25, 1.2)
+    # A 12 by 12 grid raised smoothly in the middle (its center point 0.6
+    # up, the points within 1 following).
+    let fine = try MeshPrimitives.grid(2.0, 12)
+    defer fine.release()
+    let bump: f64[15] = [0.0, 0.6, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 3.0]
+    let raised = try made(fine, "Transform Components", "84", 1, bump[..<15], 1)
+    defer raised.release()
+    near(raised.value().bounds().maximum.y, 0.6)
+    try clean_shell(raised, 48, 0.15, 1.6)

@@ -323,7 +323,9 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
   boundary loops or runs paired by nearness, or each first-pick chain with
   the nearest chain of the second pick (`Verbs.run`'s `second`); joined by
   Cuts + 1 rows of quads (same edge counts) shaped Linear, Blend path (a
-  cubic Bézier between the loops' centers, handles after Blender's length)
+  cubic Bézier between the loops' centers, handles Blender's length: half
+  the gap across the normals' plane times 4/3 down to 3/4; each loop's shape
+  carried along it without twisting; a straight run square to itself)
   or Blend surface (each point's own Bézier leaving the faces), with a
   Profile swell of six shapes; Twist; Merge welds the loops at Merge factor
   instead. Runs of different lengths zip with triangles.
@@ -334,7 +336,8 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
   third only).
 - **Solidify** (faces): a shell Thickness thick, Offset placing it behind,
   centered or in front, Even thickness by each point's mean 1/cos, Fill rim
-  along the group's outline, Flip.
+  along the group's outline, Flip; Clamp and Angle clamp as the Blender
+  modifier's (a point's move held to Clamp × its shortest edge).
 - **Poke** (faces): each face a fan round a new point at its weighted mean,
   mean or bounds center, moved Offset (Relative: times its mean radius)
   along its normal.
@@ -367,7 +370,11 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
   welded on the plane. **Snap to Symmetry** (points): each point paired
   with the point nearest its mirror within Threshold, the pair placed
   Factor between, centered points onto the plane.
-- **Subdivide**'s Smoothness: Linear's new points onto the sphere the
+- **Subdivide** on a selection (faces, or edges and the faces they close):
+  only they split, the faces around kept joined with Blender's Straight Cut
+  (a midpoint corner, two cut edges joined across, a quad's three as
+  `quad_3edge`); Catmull-Clark moves only points all of whose faces split.
+  Its Smoothness: Linear's new points onto the sphere the
   corners' normals describe. **Smooth**: Keep volume (Taubin's λ|μ), Keep
   boundary, Axes. **Relax**: the move along the surface only.
 - **Triangulate**'s quad methods (Beauty, Fixed, Alternate, Shortest,
@@ -454,7 +461,7 @@ and attributes included):
 | Reverse, 1k faces | 13.5 ms | 700,569 |  |
 | Triangulate, half | 35.5 ms | 1,050,570 |  |
 | Duplicate, 1k faces | 11.5 ms | 701,569 |  |
-| Subdivide, everything to 2.8M faces | 554.8 ms | 2,802,276 |  |
+| Subdivide, everything to 2.8M faces | 598.6 ms | 2,802,276 |  |
 | Fuse, 1k faces' points | 26.6 ms | 700,569 |  |
 | PolyExtrude, 1k faces as a region | 23.9 ms | 702,247 |  |
 | PolyExtrude, 1k faces one by one, inset, 2 divisions | 27.1 ms | 708,569 |  |
@@ -500,7 +507,7 @@ and attributes included):
 | Knife, a stroke across 837 faces, through | 54.7 ms | 701,406 |  |
 | Spin, a run of 10 edges about an X axis, 12 steps | 17.0 ms | 700,689 |  |
 | Screw, a run of 10 edges about an X axis, 2 turns of 12 | 17.7 ms | 700,809 |  |
-| Subdivide, everything, linear, smoothness 1 | 744.9 ms | 2,802,276 |  |
+| Subdivide, everything, linear, smoothness 1 | 724.5 ms | 2,802,276 |  |
 | Smooth, everything, keep volume and boundary | 13.0 ms | 700,569 |  |
 | Relax, everything, 5 rounds | 29.2 ms | 700,569 |  |
 | Triangulate, everything, beauty | 70.9 ms | 1,401,138 |  |

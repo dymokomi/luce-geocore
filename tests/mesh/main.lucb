@@ -44,6 +44,8 @@ import cut_slide_checks
 import face_tool_checks
 import symmetry_checks
 import fill_checks
+import bridge_shape_checks
+import subdivide_select_checks
 import split_checks
 import dissolve_tool_checks
 import merge_checks
@@ -210,6 +212,9 @@ func checks(arguments: str[]) -> i32!:
     inject(&tracker, 300, fill_checks.exercise)
     try fill_checks.exercise()
     settle(&tracker)
+    inject(&tracker, 300, bridge_shape_checks.exercise)
+    try bridge_shape_checks.exercise()
+    settle(&tracker)
     inject(&tracker, 300, split_checks.exercise)
     try split_checks.exercise()
     settle(&tracker)
@@ -230,6 +235,9 @@ func checks(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 300, shape_checks.exercise)
     try shape_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, subdivide_select_checks.exercise)
+    try subdivide_select_checks.exercise()
     settle(&tracker)
     inject(&tracker, 300, subdivision_checks.exercise)
     try subdivision_checks.exercise()

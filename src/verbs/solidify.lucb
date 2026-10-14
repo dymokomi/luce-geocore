@@ -6,18 +6,24 @@
 ## where it was and builds the shell behind it, 1 in front, 0 either side.
 ## With Even thickness a point moves farther where faces meet at an angle,
 ## by its faces' mean 1/cos to its normal, so every face's sheet stands
-## exactly Thickness apart (a cube's corner moves √3 times as far). The
+## exactly Thickness apart (a cube's corner moves √3 times as far), at
+## most ten times as far. Clamp, as the Blender modifier's, keeps a point
+## from moving farther than Clamp × its shortest edge (so thin parts do not
+## pass through each other); with Angle clamp the limit opens with the
+## flattest angle its faces make (a flat point is never held). The
 ## inner sheet winds the other way; the rim joins the sheets with a quad
 ## along every edge of the group's outline (Fill rim). Flip turns every
 ## face of the shell over. The inner sheet and the rim are the output
 ## selection. Points, normals and faces are built in parallel.
 
-let solidify_parms: ParmSpec[5] = [
+let solidify_parms: ParmSpec[7] = [
     ParmSpec("Thickness", ParmKind.number, 0.1, -100000.0, 100000.0, 1, "", "How far apart the two sheets stand.", 1.0),
     ParmSpec("Offset", ParmKind.number, -1.0, -1.0, 1.0, 1, "", "Where the shell lies against the surface: -1 behind it, 1 in front, 0 centered."),
     ParmSpec("Even thickness", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Keep every face's sheets Thickness apart where faces meet at an angle."),
     ParmSpec("Fill rim", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Join the two sheets along the group's outline."),
-    ParmSpec("Flip", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Turn the shell's faces over.", more = true)]
+    ParmSpec("Flip", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Turn the shell's faces over.", more = true),
+    ParmSpec("Clamp", ParmKind.number, 0.0, 0.0, 2.0, 1, "", "Keep each point from moving farther than this times its shortest edge (0: off).", more = true),
+    ParmSpec("Angle clamp", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Clamp: let points where the faces meet flatter move farther.", more = true)]
 
 func solidify_verb() -> Verb:
     return Verb("Solidify", "Modeling", "Give the group's faces a thickness: a second sheet behind them, joined at the rim", Domain.face, true, solidify_parms, true, cook_solidify, section = "Modify", family = "Extrude", icon = "shell", picks = pick_pieces, drag = 0)
@@ -38,6 +44,10 @@ struct SolidifyWork:
     let offset: f64
     let even: bool
     let flip: bool
+    ## Clamp's factor (0: off) and whether it opens with the faces' angle.
+    let clamp: f64
+    let angle_clamp: bool
+    let topology: const Topology*
     ## The group's faces and the rim's corners, in order.
     let shell: const i32[]
     let rim: const i32[]
@@ -49,6 +59,9 @@ func cook_solidify(input: const VerbInput*, output: VerbOutput*) -> !:
     let even = input.parms.at(2) != 0.0
     let rim_on = input.parms.at(3) != 0.0
     let flip = input.parms.at(4) != 0.0
+    let clamp = input.parms.at(5)
+    if not math.is_finite(clamp): error(errors.invalid, "Solidify's clamp must be finite")
+    let angle_clamp = input.parms.at(6) != 0.0
     let mesh = input.mesh
     let topology = try Topology.of(mesh)
     let faces = topology.faces()
@@ -88,7 +101,7 @@ func cook_solidify(input: const VerbInput*, output: VerbOutput*) -> !:
                     if input.group.get((usize)topology.corner_faces[(usize)topology.edge_corners[at]]): members += 1
                 if members == 1: try rim.push((i32)corner)
     let (point_face_offsets, point_faces) = try mesh.point_face_span()
-    var work = SolidifyWork(mesh, topology.offsets, topology.corners, mesh.face_normal_span(), point_face_offsets, point_faces, input.group, inner[..<points], builder, thickness, offset, even, flip, shell.view(), rim.view())
+    var work = SolidifyWork(mesh, topology.offsets, topology.corners, mesh.face_normal_span(), point_face_offsets, point_faces, input.group, inner[..<points], builder, thickness, offset, even, flip, math.max(0.0, clamp), angle_clamp, &topology, shell.view(), rim.view())
     try parallel.for_each_range(points, 8192, (void*)&work, solidify_points)
     let made = shell.count + rim.count
     try batched_faces(builder, mesh, faces + made, 4096, (void*)&work, solidify_faces)
@@ -124,11 +137,50 @@ func solidify_points(context: void*, first: usize, end: usize, worker: usize) ->
                 if not work.group.get(face): continue
                 cosines += shell_angle(work, face, point) * math.max(0.1, direction.dot(work.normals[face].vector()))
             if cosines > 0.0: scale = math.min(10.0, weights / cosines)
+        if work.clamp > 0.0: scale *= clamp_factor(work, point)
         let span = work.thickness * scale
         let outer = here.add(direction.multiply_scalar(span * (1.0 + work.offset) * 0.5))
         let below = here.subtract(direction.multiply_scalar(span * (1.0 - work.offset) * 0.5))
         work.builder.move_point((i32)point, outer)
         work.builder.place_point((usize)copy, below, (i32)point)
+
+## Clamp's share of point `point`'s move, after Blender's Solidify
+## modifier: the move is held to Clamp × the point's shortest edge; with
+## Angle clamp to that over 2 cos(a / 2), `a` the flattest angle the
+## group's faces make across its edges (at least 90°), the limit growing
+## with Offset's distance from the middle as Blender's does.
+func clamp_factor(work: const SolidifyWork*, point: usize) -> f64:
+    let topology = work.topology
+    var shortest = -1.0
+    var widest = math.pi * 0.5
+    for slot in (usize)topology.point_edge_offsets[point]..<(usize)topology.point_edge_offsets[point + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        let length = builder_position(work.mesh, (usize)topology.edge_points[edge * 2]).subtract(builder_position(work.mesh, (usize)topology.edge_points[edge * 2 + 1])).length()
+        if shortest < 0.0 or length < shortest: shortest = length
+        if not work.angle_clamp: continue
+        # Two faces of the group across the edge: the angle they make.
+        var pair: usize[2] = [0, 0]
+        var members: usize = 0
+        for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+            let face = (usize)topology.corner_faces[(usize)topology.edge_corners[at]]
+            if not work.group.get(face): continue
+            if members < 2: pair[members] = face
+            members += 1
+        if members != 2: continue
+        let a = work.normals[pair[0]].vector()
+        let b = work.normals[pair[1]].vector()
+        let between = math.atan2(a.cross(b).length(), a.dot(b))
+        widest = math.max(widest, math.pi - between)
+    let thickness = math.abs(work.thickness)
+    if shortest < 0.0 or thickness <= 0.0: return 1.0
+    if work.angle_clamp:
+        let limit = thickness * work.clamp * (1.0 + math.abs(work.offset))
+        let cosine = math.cos(widest * 0.5)
+        if cosine <= 0.000001 or limit <= 0.0: return 1.0
+        let most = shortest * 0.5 / cosine
+        return most / limit * 2.0 if most < limit * 0.5 else 1.0
+    let limit = thickness * work.clamp
+    return shortest / limit if shortest < limit else 1.0
 
 ## The angle of face `face`'s corner at `point` (0 when it has none).
 func shell_angle(work: const SolidifyWork*, face: usize, point: usize) -> f64:

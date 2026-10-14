@@ -58,6 +58,17 @@ pub func area(mesh: interop.Reference[Mesh], face: i64) -> f64!:
         sum = sum.add(b.cross(c))
     return sum.length() * 0.5
 
+## Face `face`'s normal times twice its area (Newell's).
+pub func newell(mesh: interop.Reference[Mesh], face: i64) -> Vector3!:
+    let geometry = mesh.value()
+    let size = try geometry.face_size(face)
+    var sum = Vector3()
+    for at in 0..<size:
+        let p = try geometry.point(try geometry.face_point(face, at))
+        let q = try geometry.point(try geometry.face_point(face, (at + 1) % size))
+        sum = sum.add(p.cross(q))
+    return sum
+
 ## How far `p` is from the line through `a` and `b`.
 pub func line_distance(p: Vector3, a: Vector3, b: Vector3) -> f64:
     let way = b.subtract(a)

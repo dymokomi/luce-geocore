@@ -1,0 +1,94 @@
+## Subdivide on a selection, as Blender's Subdivide (POLY-MODELING.md
+## Stage 5): on a 4 by 4 grid over -1..1 (point z*5+x, face z*4+x), face 5
+## alone splits into 4 quads round its center and its four neighbors take
+## the edge points as fifth corners, the rest untouched; an L of faces cuts
+## the face in its inner corner with a triangle (Straight Cut); a 2 by 2
+## block smoothed with Catmull-Clark keeps its outline and its neighbors'
+## shapes; an edge group splits only its edges; a second level splits the
+## made faces again. The surface stays joined (every edge used at most
+## twice, in opposite directions) and covers the same area.
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, area, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    try face_checks(grid)
+    try edge_checks(grid)
+    print("PASS Subdivide on a selection: one face and its neighbors' fifth corners, an L's inner corner cut, a smoothed block keeping its outline, an edge group, a second level; joined surfaces of the same area")
+
+## Subdivide's numbers: levels, method (0 Linear, 1 Catmull-Clark), smoothness.
+func subdividing(levels: f64, method: f64) -> f64[3]:
+    return [levels, method, 0.0]
+
+## How many faces of `mesh` have `size` corners.
+func sized(mesh: interop.Reference[Mesh], size: i64) -> i64!:
+    var count: i64 = 0
+    for face in 0..<mesh.value().face_count():
+        if (try mesh.value().face_size(face)) == size: count += 1
+    return count
+
+## The surface stays joined, flat and of area 4.
+func intact(mesh: interop.Reference[Mesh]) -> !:
+    try surface(mesh, false)
+    var total = 0.0
+    for face in 0..<mesh.value().face_count(): total += try area(mesh, face)
+    near(total, 4.0)
+    near(mesh.value().bounds().minimum.y, 0.0)
+    near(mesh.value().bounds().maximum.y, 0.0)
+
+func face_checks(grid: interop.Reference[Mesh]) -> !:
+    let linear = subdividing(1.0, 0.0)
+    let one = try made(grid, "Subdivide", "5", 3, linear[..<3], 4)
+    defer one.release()
+    try counts(one, 30, 19)
+    try intact(one)
+    assert((try sized(one, 5)) == 4)
+    near_point(try one.value().point(29), Vector3(-0.25, 0.0, -0.25))
+    # An L of faces 5, 6, 9: face 10 has two split edges meeting at point
+    # 12, cut across into a triangle and a pentagon.
+    let ell = try made(grid, "Subdivide", "5 6 9", 3, linear[..<3], 12)
+    defer ell.release()
+    try counts(ell, 38, 26)
+    try intact(ell)
+    assert((try sized(ell, 3)) == 1)
+    # A 2 by 2 block smoothed: its outline's points stay, its middle point
+    # (by symmetry) too; the eight neighbors keep their area of 1/4.
+    let smooth = subdividing(1.0, 1.0)
+    let block = try made(grid, "Subdivide", "5 6 9 10", 3, smooth[..<3], 16)
+    defer block.release()
+    try counts(block, 41, 28)
+    try intact(block)
+    assert((try sized(block, 5)) == 8)
+    near_point(try block.value().point(6), Vector3(-0.5, 0.0, -0.5))
+    near_point(try block.value().point(12), Vector3(0.0, 0.0, 0.0))
+    for face in 0..<block.value().face_count():
+        if (try block.value().face_size(face)) == 5: near(try area(block, face), 0.25)
+    # Two levels on face 5: its 4 quads split into 16, the neighbors gain
+    # two more corners each (heptagons).
+    let twice = subdividing(2.0, 0.0)
+    let deeper = try made(grid, "Subdivide", "5", 3, twice[..<3], 16)
+    defer deeper.release()
+    try counts(deeper, 46, 31)
+    try intact(deeper)
+    assert((try sized(deeper, 7)) == 4)
+
+func edge_checks(grid: interop.Reference[Mesh]) -> !:
+    # The edges of points 6-7-8: the faces either side (1, 2, 5, 6) take
+    # their midpoints; no face splits whole.
+    let linear = subdividing(1.0, 0.0)
+    let edged = try made(grid, "Subdivide", "p6-7-8", 2, linear[..<3], 0)
+    defer edged.release()
+    try counts(edged, 27, 16)
+    try intact(edged)
+    assert((try sized(edged, 5)) == 4)
+    let first = try edged.value().point(25)
+    let second = try edged.value().point(26)
+    near(first.z, -0.5)
+    near(second.z, -0.5)
+    near(first.x + second.x, 0.0)
+    near(math.abs(first.x), 0.25)

@@ -1,57 +1,171 @@
-## Subdivide: every face of n corners becomes n quads through its edge
-## midpoints and its center; Catmull-Clark then moves the points (Linear
-## keeps the shape). Linear's Smoothness rounds the new points out as
-## Blender's Subdivide Smoothness does, onto the sphere the corners'
-## normals describe: a new point at the mean of points p_i with normals n_i
-## rises along the normals' mean by R (1 - |mean n_i|), R the radius the
-## edges give (an edge's length over 2 sin of half the angle between its
-## ends' normals), so an edge's point rises by its arc's sagitta; the old
-## points stay.
+## Subdivide: the group's faces each become n quads through their edge
+## midpoints and their center; Catmull-Clark then moves the points (Linear
+## keeps the shape). Like Blender's Subdivide it works on the selection
+## alone: the group's faces (or with an edge group, its edges, and the faces
+## all of whose edges it holds) split whole, and every other face keeps the
+## mesh joined as Blender's do with their default Straight Cut: a face with
+## one split edge takes its midpoint as a corner, two split edges are
+## joined by a cut across it, and a quad with three is cut as Blender's
+## quad_3edge pattern (three triangles and a quad). Later levels split the
+## made faces again, the others only taking the midpoints. Catmull-Clark
+## moves only the points every face of which splits whole, and an edge's
+## point only between two such faces, so the faces around keep their shape.
+## Linear's Smoothness rounds the new points out as Blender's Subdivide
+## Smoothness does, onto the sphere the corners' normals describe: a new
+## point at the mean of points p_i with normals n_i rises along the
+## normals' mean by R (1 - |mean n_i|), R the radius the edges give (an
+## edge's length over 2 sin of half the angle between its ends' normals),
+## so an edge's point rises by its arc's sagitta; the old points stay.
 ## Edge and face points mix their parents' attributes, and each new corner
 ## mixes the corners it lies between, so UVs interpolate within faces.
-## Edges used by more than two faces act as creases.
+## Edges used by more than two faces act as creases. The faces made from
+## whole split faces are the output selection.
 
 let subdivide_parms: ParmSpec[3] = [
-    ParmSpec("Levels", ParmKind.integer, 1.0, 1.0, 4.0, 1, "", "Each level splits every face into quads."),
+    ParmSpec("Levels", ParmKind.integer, 1.0, 1.0, 4.0, 1, "", "Each level splits the faces into quads again."),
     ParmSpec("Method", ParmKind.menu, 1.0, 0.0, 1.0, 1, "Linear|Catmull-Clark", "Catmull-Clark smooths as it splits; Linear keeps the shape."),
     ParmSpec("Smoothness", ParmKind.number, 0.0, 0.0, 1.0, 1, "", "Linear: round the new points out along the surface's curve (1: onto the circle the normals describe).")]
 
+## Edges split as they are (and faces of split edges whole).
+let subdivide_also: Domain[1] = [Domain.edge]
+
+let subdivide_picks: PickSpec[1] = [PickSpec("Faces or edges", "objects faces edges")]
+
 func subdivide_verb() -> Verb:
-    return Verb("Subdivide", "Modeling", "Split faces into quads, optionally with Catmull-Clark smoothing", Domain.face, true, subdivide_parms, true, cook_subdivide, section = "Modify", family = "Subdivide", icon = "subdivide", picks = pick_pieces, whole = true)
+    return Verb("Subdivide", "Modeling", "Split the group's faces into quads (or its edges), optionally with Catmull-Clark smoothing; the faces around stay joined", Domain.face, true, subdivide_parms, true, cook_subdivide, false, subdivide_also, section = "Modify", family = "Subdivide", icon = "subdivide", picks = subdivide_picks, whole = true)
+
+## What one level splits: faces split whole, edges given a midpoint.
+struct SplitRegion:
+    var whole: BitsBuilder
+    var split: BitsBuilder
+
+    func init():
+        self.whole = BitsBuilder(Column[u64](), 0)
+        self.split = BitsBuilder(Column[u64](), 0)
+
+    func close():
+        self.whole.close()
+        self.split.close()
+
+    ## Faces all of whose edges split also split whole (Blender's grid
+    ## fill of a face whose every edge is cut).
+    func close_faces(topology: const Topology*) -> !:
+        for face in 0..<topology.faces():
+            if self.whole.view().get(face): continue
+            var all = true
+            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                if not self.split.view().get((usize)topology.corner_edges[corner]):
+                    all = false
+                    break
+            if all: self.whole.set(face)
+
+## What a level made that the next level reads: per output face whether it
+## came from a face split whole, and per new edge point the ends of its
+## edge (old points keep their numbers).
+struct LevelMarks:
+    var whole: Growing[u8]
+    var ends: Growing[i32]
+    var first_edge_point: usize
+
+    func init():
+        self.whole = Growing[u8]()
+        self.ends = Growing[i32]()
+        self.first_edge_point = 0
+
+    func close():
+        self.whole.close()
+        self.ends.close()
 
 func cook_subdivide(input: const VerbInput*, output: VerbOutput*) -> !:
     let levels = (usize)math.max(1.0, math.min(4.0, input.parms.at(0)))
     let smooth = input.parms.at(1) != 0.0
     let smoothness = 0.0 if smooth else math.max(0.0, math.min(1.0, input.parms.at(2)))
-    if input.group.population() != input.group.count:
-        output.warning = "Subdivide works on the whole mesh; the group is ignored"
+    var region = SplitRegion()
+    defer region.close()
+    try first_region(input, &region)
+    if region.split.view().population() == 0:
+        output.warning = "No faces or edges in the group to subdivide; the input passes through"
+        return
     var current = try mesh_share(input.mesh)
-    for _ in 0..<levels:
-        var level = TopologyBuilder()
-        defer level.close()
-        subdivide_level(current, smooth, smoothness, &level) catch failure:
+    var marks = LevelMarks()
+    defer marks.close()
+    for level in 0..<levels:
+        if level > 0:
+            next_region(current, &marks, &region) catch failure:
+                mesh_dispose(current)
+                error(failure.code, failure.message)
+        var built = TopologyBuilder()
+        defer built.close()
+        marks.whole.clear()
+        marks.ends.clear()
+        subdivide_level(current, &region, level == 0, smooth, smoothness, &built, &marks) catch failure:
             mesh_dispose(current)
             error(failure.code, failure.message)
-        let next = level.finish(current) catch failure:
+        let next = built.finish(current) catch failure:
             mesh_dispose(current)
             error(failure.code, failure.message)
         mesh_dispose(current)
         current = next
     output.mesh = current
-    output.selection = try BitsBuilder.ones((usize)current.face_count())
+    output.selection = try BitsBuilder.zeros((usize)current.face_count())
+    for face in 0..<marks.whole.count:
+        if marks.whole.items[face] != 0: output.selection.set(face)
     output.selection_domain = Domain.face
 
-func subdivide_level(mesh: const Mesh*, smooth: bool, smoothness: f64, builder: TopologyBuilder*) -> !:
+## The first level's region: the group's faces and their edges, or the
+## group's edges and the faces they close.
+func first_region(input: const VerbInput*, region: SplitRegion*) -> !:
+    let topology = try Topology.of(input.mesh)
+    region.whole = try BitsBuilder.zeros(topology.faces())
+    region.split = try BitsBuilder.zeros(topology.edges())
+    if input.domain == Domain.edge:
+        region.split.unite(input.group)
+    else:
+        region.whole.unite(input.group)
+        for face in 0..<topology.faces():
+            if not input.group.get(face): continue
+            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]: region.split.set((usize)topology.corner_edges[corner])
+    try region.close_faces(&topology)
+
+## A later level's region on `mesh` (the last level's output): the faces
+## made from whole faces, their edges, and the halves of split edges.
+func next_region(mesh: const Mesh*, marks: const LevelMarks*, region: SplitRegion*) -> !:
+    let topology = try Topology.of(mesh)
+    region.close()
+    region.whole = try BitsBuilder.zeros(topology.faces())
+    region.split = try BitsBuilder.zeros(topology.edges())
+    for face in 0..<topology.faces():
+        if marks.whole.items[face] == 0: continue
+        region.whole.set(face)
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]: region.split.set((usize)topology.corner_edges[corner])
+    let first = marks.first_edge_point
+    let made = marks.ends.count // 2
+    for edge in 0..<topology.edges():
+        let a = (usize)topology.edge_points[edge * 2]
+        let b = (usize)topology.edge_points[edge * 2 + 1]
+        if split_half(marks, first, made, a, b) or split_half(marks, first, made, b, a): region.split.set(edge)
+    try region.close_faces(&topology)
+
+## Whether `middle` is an edge point of the last level and `end` one of its
+## edge's ends.
+func split_half(marks: const LevelMarks*, first: usize, made: usize, middle: usize, end: usize) -> bool:
+    if middle < first or middle >= first + made: return false
+    let at = (middle - first) * 2
+    return (usize)marks.ends.items[at] == end or (usize)marks.ends.items[at + 1] == end
+
+func subdivide_level(mesh: const Mesh*, region: const SplitRegion*, patterns: bool, smooth: bool, smoothness: f64, builder: TopologyBuilder*, marks: LevelMarks*) -> !:
     let topology = try Topology.of(mesh)
     let offsets = topology.offsets
     let corners = topology.corners
     let points = topology.points
     let edges = topology.edges()
     let faces = topology.faces()
-    if points + edges + faces > max_points: error(errors.limit, "subdivision would exceed 8M points")
+    let whole = region.whole.view()
+    let split = region.split.view()
+    if points + split.population() + whole.population() > max_points: error(errors.limit, "subdivision would exceed 8M points")
     try builder.begin(mesh)
     try builder.copy_points(mesh)
-    # Face points: centroids.
+    # Face points: centroids (of every face; whole faces take theirs).
     let centers = try new Vector3[faces] --- in memory.heap
     defer free(centers) in memory.heap
     for face in 0..<faces:
@@ -60,9 +174,10 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, smoothness: f64, builder: 
         let size = (usize)offsets[face + 1] - start
         for at in 0..<size: sum = sum.add(builder.position(corners[start + at]))
         centers[face] = sum.multiply_scalar(1.0 / (f64)size)
-    # Edge points: midpoints, or with Catmull-Clark the average of the ends
-    # and the two face points of an interior edge; with Smoothness risen
-    # off the middle (their rises kept for the face points).
+    # Edge points of the split edges: midpoints, or with Catmull-Clark the
+    # average of the ends and the two face points of an edge between two
+    # whole faces; with Smoothness risen off the middle (their rises kept
+    # for the face points).
     var parents: i32[256]
     var weights: f32[256]
     let rises = try new Vector3[edges] --- in memory.heap
@@ -71,29 +186,43 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, smoothness: f64, builder: 
     defer free(radii) in memory.heap
     let point_normals = try new Vector3[points] --- in memory.heap
     defer free(point_normals) in memory.heap
+    let edge_ids = try new i32[edges] --- in memory.heap
+    defer free(edge_ids) in memory.heap
     for edge in 0..<edges:
         rises[edge] = Vector3()
         radii[edge] = 0.0
+        edge_ids[edge] = -1
     if smoothness > 0.0:
         try corner_normals(mesh, &topology, point_normals[..<points])
         edge_rises(mesh, &topology, smoothness, point_normals[..<points], rises[..<edges], radii[..<edges])
+    marks.first_edge_point = builder.point_count()
+    try marks.ends.reserve(split.population() * 2)
+    try marks.whole.reserve(topology.corners.length + faces * 4)
     for edge in 0..<edges:
+        if not split.get(edge): continue
         let a = topology.edge_points[edge * 2]
         let b = topology.edge_points[edge * 2 + 1]
         var position = builder.position(a).add(builder.position(b)).multiply_scalar(0.5)
         let first = (usize)topology.edge_corner_offsets[edge]
         let end = (usize)topology.edge_corner_offsets[edge + 1]
         if smooth and end - first == 2:
-            let f1 = centers[(usize)topology.corner_faces[(usize)topology.edge_corners[first]]]
-            let f2 = centers[(usize)topology.corner_faces[(usize)topology.edge_corners[first + 1]]]
-            position = builder.position(a).add(builder.position(b)).add(f1).add(f2).multiply_scalar(0.25)
+            let f1 = (usize)topology.corner_faces[(usize)topology.edge_corners[first]]
+            let f2 = (usize)topology.corner_faces[(usize)topology.edge_corners[first + 1]]
+            if whole.get(f1) and whole.get(f2):
+                position = builder.position(a).add(builder.position(b)).add(centers[f1]).add(centers[f2]).multiply_scalar(0.25)
         position = position.add(rises[edge])
         parents[0] = a
         parents[1] = b
         weights[0] = 0.5
         weights[1] = 0.5
-        _ = try builder.mixed_point(position, parents[..<2], weights[..<2])
+        edge_ids[edge] = try builder.mixed_point(position, parents[..<2], weights[..<2])
+        try marks.ends.push(a)
+        try marks.ends.push(b)
+    let face_ids = try new i32[faces] --- in memory.heap
+    defer free(face_ids) in memory.heap
     for face in 0..<faces:
+        face_ids[face] = -1
+        if not whole.get(face): continue
         let start = (usize)offsets[face]
         let size = (usize)offsets[face + 1] - start
         # Small faces mix on the stack, larger ones in heap scratch.
@@ -116,38 +245,150 @@ func subdivide_level(mesh: const Mesh*, smooth: bool, smoothness: f64, builder: 
         let mean = normal_sum.length() / (f64)size
         if smoothness > 0.0 and curved > 0 and mean > 0.0:
             center = center.add(normal_sum.multiply_scalar(smoothness * radius / (f64)curved * (1.0 - mean) / normal_sum.length()))
-        _ = try builder.mixed_point(center, face_parents, face_weights)
-    if smooth: try catmull_clark_points(&topology, builder, centers)
-    # n quads per face.
-    let edge_base = (i32)points
-    let face_base = (i32)(points + edges)
+        face_ids[face] = try builder.mixed_point(center, face_parents, face_weights)
+    if smooth: try catmull_clark_points(&topology, whole, builder, centers)
+    var ring = KeptRing()
+    defer ring.close()
+    for face in 0..<faces:
+        if whole.get(face):
+            try whole_face(&topology, face, edge_ids, face_ids[face], builder)
+            for _ in 0..<(usize)offsets[face + 1] - (usize)offsets[face]: try marks.whole.push(1)
+            continue
+        let made = try kept_face(&topology, face, split, edge_ids, patterns, &ring, builder)
+        for _ in 0..<made: try marks.whole.push(0)
+
+## Face `face` split whole: a quad at each corner through its two edge
+## points and the face point `center`.
+func whole_face(topology: const Topology*, face: usize, edge_ids: const i32[], center: i32, builder: TopologyBuilder*) -> !:
+    let corners = topology.corners
+    let start = (usize)topology.offsets[face]
+    let size = (usize)topology.offsets[face + 1] - start
     var mixed_parents: i32[256]
     var mixed_weights: f32[256]
-    for face in 0..<faces:
-        let start = (usize)offsets[face]
-        let size = (usize)offsets[face + 1] - start
-        let center_parents = try face_scratch.take[i32](mixed_parents, size, size)
-        defer face_scratch.release[i32](mixed_parents, center_parents)
-        let center_weights = try face_scratch.take[f32](mixed_weights, size, size)
-        defer face_scratch.release[f32](mixed_weights, center_weights)
-        for at in 0..<size:
-            center_parents[at] = (i32)(start + at)
-            center_weights[at] = (f32)(1.0 / (f64)size)
-        # Every quad's center corner shares one mix of the face's corners.
-        let center = try builder.shared_mix(center_parents, center_weights)
-        for at in 0..<size:
-            let corner = start + at
-            let next = start + (at + 1) % size
-            let previous = start + (at + size - 1) % size
-            try builder.face((i32)face)
-            try builder.corner(corners[corner], (i32)corner)
-            let pair: i32[2] = [(i32)corner, (i32)next]
-            let half: f32[2] = [0.5, 0.5]
-            try builder.mixed_corner(edge_base + topology.corner_edges[corner], pair, half)
-            try builder.shared_corner(face_base + (i32)face, center)
-            let back: i32[2] = [(i32)previous, (i32)corner]
-            try builder.mixed_corner(edge_base + topology.corner_edges[previous], back, half)
-            try builder.end_face()
+    let center_parents = try face_scratch.take[i32](mixed_parents, size, size)
+    defer face_scratch.release[i32](mixed_parents, center_parents)
+    let center_weights = try face_scratch.take[f32](mixed_weights, size, size)
+    defer face_scratch.release[f32](mixed_weights, center_weights)
+    for at in 0..<size:
+        center_parents[at] = (i32)(start + at)
+        center_weights[at] = (f32)(1.0 / (f64)size)
+    # Every quad's center corner shares one mix of the face's corners.
+    let mix = try builder.shared_mix(center_parents, center_weights)
+    for at in 0..<size:
+        let corner = start + at
+        let next = start + (at + 1) % size
+        let previous = start + (at + size - 1) % size
+        try builder.face((i32)face)
+        try builder.corner(corners[corner], (i32)corner)
+        let pair: i32[2] = [(i32)corner, (i32)next]
+        let half: f32[2] = [0.5, 0.5]
+        try builder.mixed_corner(edge_ids[(usize)topology.corner_edges[corner]], pair, half)
+        try builder.shared_corner(center, mix)
+        let back: i32[2] = [(i32)previous, (i32)corner]
+        try builder.mixed_corner(edge_ids[(usize)topology.corner_edges[previous]], back, half)
+        try builder.end_face()
+
+## A face's corners with its split edges' points between them: per entry
+## the point, the face corner it starts at, and whether it is an edge's
+## middle (its corner mixes that corner and the next).
+struct KeptRing:
+    var points: Growing[i32]
+    var corners: Growing[i32]
+    var middles: Growing[u8]
+
+    func init():
+        self.points = Growing[i32]()
+        self.corners = Growing[i32]()
+        self.middles = Growing[u8]()
+
+    func close():
+        self.points.close()
+        self.corners.close()
+        self.middles.close()
+
+    func clear():
+        self.points.clear()
+        self.corners.clear()
+        self.middles.clear()
+
+    func push(point: i32, corner: i32, middle: bool) -> !:
+        try self.points.push(point)
+        try self.corners.push(corner)
+        try self.middles.push(1 if middle else 0)
+
+## A face not split whole, kept joined to the split ones: its split edges'
+## points become its corners, and (on the first level) two of them are
+## joined across it, or a quad's three cut as Blender's quad_3edge. How
+## many faces it made.
+func kept_face(topology: const Topology*, face: usize, split: Bits, edge_ids: const i32[], patterns: bool, ring: KeptRing*, builder: TopologyBuilder*) -> usize!:
+    let start = (usize)topology.offsets[face]
+    let size = (usize)topology.offsets[face + 1] - start
+    ring.clear()
+    var cuts: usize = 0
+    for at in 0..<size:
+        let corner = start + at
+        try ring.push(topology.corners[corner], (i32)corner, false)
+        let edge = (usize)topology.corner_edges[corner]
+        if split.get(edge):
+            try ring.push(edge_ids[edge], (i32)corner, true)
+            cuts += 1
+    if cuts == 0:
+        try builder.face((i32)face, true)
+        for corner in start..<start + size: try builder.corner(topology.corners[corner], (i32)corner)
+        try builder.end_face()
+        return 1
+    let length = ring.points.count
+    if patterns and cuts == 2:
+        let first = kept_middle(ring, 0)
+        let second = kept_middle(ring, first + 1)
+        try kept_part(topology, face, ring, first, second, builder)
+        try kept_part(topology, face, ring, second, first + length, builder)
+        return 2
+    if patterns and cuts == 3 and size == 4:
+        # The middle after the uncut edge, then the other two in order.
+        var after: usize = 0
+        while after < length:
+            if ring.middles.items[after] != 0 and ring.middles.items[(after + length - 2) % length] == 0: break
+            after += 1
+        let one = after
+        let two = kept_middle(ring, one + 1)
+        let three = kept_middle(ring, two + 1)
+        try kept_part(topology, face, ring, one, two, builder)
+        try kept_part(topology, face, ring, two, three, builder)
+        try kept_triangle(topology, face, ring, one, two, three, builder)
+        try kept_part(topology, face, ring, three, one + length, builder)
+        return 4
+    try kept_part(topology, face, ring, 0, length - 1, builder)
+    return 1
+
+## The first middle at or after ring entry `start` (counting round).
+func kept_middle(ring: const KeptRing*, start: usize) -> usize:
+    let length = ring.points.count
+    for step in 0..<length:
+        if ring.middles.items[(start + step) % length] != 0: return start + step
+    return start
+
+## The face of ring entries `first` to `last`, counting round.
+func kept_part(topology: const Topology*, face: usize, ring: const KeptRing*, first: usize, last: usize, builder: TopologyBuilder*) -> !:
+    try builder.face((i32)face)
+    for at in first..<last + 1: try kept_corner(topology, ring, at % ring.points.count, builder)
+    try builder.end_face()
+
+## A triangle of three ring entries.
+func kept_triangle(topology: const Topology*, face: usize, ring: const KeptRing*, a: usize, b: usize, c: usize, builder: TopologyBuilder*) -> !:
+    let length = ring.points.count
+    try builder.face((i32)face)
+    try kept_corner(topology, ring, a % length, builder)
+    try kept_corner(topology, ring, b % length, builder)
+    try kept_corner(topology, ring, c % length, builder)
+    try builder.end_face()
+
+func kept_corner(topology: const Topology*, ring: const KeptRing*, at: usize, builder: TopologyBuilder*) -> !:
+    let corner = ring.corners.items[at]
+    if ring.middles.items[at] == 0: return try builder.corner(ring.points.items[at], corner)
+    let pair: i32[2] = [corner, (i32)topology.next((usize)corner)]
+    let half: f32[2] = [0.5, 0.5]
+    try builder.mixed_corner(ring.points.items[at], pair, half)
 
 ## Each point's normal: its faces', weighted by their corner angles (zero
 ## for a point no face uses).
@@ -185,8 +426,9 @@ func edge_rises(mesh: const Mesh*, topology: const Topology*, smoothness: f64, p
 
 ## Catmull-Clark positions of the original points: interior (F + 2R + (n-3)P)/n
 ## over n faces, boundary 3/4 P + 1/8 each boundary neighbor; points on
-## creases or other irregular boundaries stay.
-func catmull_clark_points(topology: const Topology*, builder: TopologyBuilder*, centers: const Vector3[]) -> !:
+## creases or other irregular boundaries stay, and so do points with a face
+## that does not split whole.
+func catmull_clark_points(topology: const Topology*, whole: Bits, builder: TopologyBuilder*, centers: const Vector3[]) -> !:
     let point_faces = try new Vector3[topology.points] --- in memory.heap
     defer free(point_faces) in memory.heap
     let face_counts = try new u32[topology.points] --- in memory.heap
@@ -194,10 +436,15 @@ func catmull_clark_points(topology: const Topology*, builder: TopologyBuilder*, 
     for at in 0..<topology.points:
         point_faces[at] = Vector3()
         face_counts[at] = 0
+    let held = try new u8[topology.points] --- in memory.heap
+    defer free(held) in memory.heap
+    for at in 0..<topology.points: held[at] = 0
     for corner in 0..<topology.corners.length:
         let point = (usize)topology.corners[corner]
-        point_faces[point] = point_faces[point].add(centers[(usize)topology.corner_faces[corner]])
+        let face = (usize)topology.corner_faces[corner]
+        point_faces[point] = point_faces[point].add(centers[face])
         face_counts[point] += 1
+        if not whole.get(face): held[point] = 1
     let moved = try new Vector3[topology.points] --- in memory.heap
     defer free(moved) in memory.heap
     for point in 0..<topology.points:
@@ -222,7 +469,7 @@ func catmull_clark_points(topology: const Topology*, builder: TopologyBuilder*, 
             elif uses > 2:
                 irregular = true
         let n = (f64)(end - first)
-        if irregular or n == 0.0: continue
+        if irregular or n == 0.0 or held[point] != 0: continue
         if boundary_count == 2:
             moved[point] = p.multiply_scalar(0.75).add(boundary.multiply_scalar(0.125))
         elif boundary_count == 0 and face_counts[point] > 0:

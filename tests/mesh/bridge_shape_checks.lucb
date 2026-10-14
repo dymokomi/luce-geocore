@@ -1,0 +1,138 @@
+## Bridge's shapes against closed forms (POLY-MODELING.md Stage 5). Two
+## parallel squares 2 apart, picked as faces, bridge into a straight square
+## tube: with Linear the cut rows stand evenly at y = 0.5, 1, 1.5; with Blend
+## path at y = 2 B(t), B the Bézier whose handles are Blender's 3/4 of half
+## the gap (control values 0, 0.375, 0.625, 1); Profile swells the rows by
+## 1 + Profile × the shape's value. Two straight runs of a turned flat grid
+## bridge flat: no Blend path arch out of the plane when the runs' normal
+## is rounding noise, the middle row halfway between the runs.
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshBuilder, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, surface, line_distance
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try tube_checks()
+    try flat_run_checks()
+    print("PASS Bridge shapes: parallel squares make a straight tube (Linear rows even, Blend path rows on Blender's Bézier, profiles swelled); straight runs of a turned grid bridge flat")
+
+## Bridge's numbers: cuts, twist, interpolation, smoothness, profile,
+## profile shape, merge, merge factor.
+func bridging(cuts: f64, interpolation: f64, profile: f64 = 0.0, shape: f64 = 0.0) -> f64[8]:
+    return [cuts, 0.0, interpolation, 1.0, profile, shape, 0.0, 0.5]
+
+## Two square frames round the Y axis, their holes squares of side 2 and
+## their rims of side 3: at y = 0 facing down (inner points 0-3, outer
+## 4-7) and at y = 2 facing up (inner 8-11, outer 12-15), like the ends of
+## a spool.
+func frames() -> interop.Reference[Mesh]!:
+    var builder = try MeshBuilder()
+    defer builder.close()
+    let xs: f64[4] = [-1.0, 1.0, 1.0, -1.0]
+    let zs: f64[4] = [-1.0, -1.0, 1.0, 1.0]
+    for y in [0.0, 2.0]:
+        for size in [1.0, 1.5]:
+            for k in 0..<4: _ = try builder.point(Vector3(xs[k] * size, y, zs[k] * size))
+    for k in 0..<4:
+        let next = (k + 1) % 4
+        try builder.face(4)
+        try builder.corner(4 + k)
+        try builder.corner(4 + next)
+        try builder.corner(next)
+        try builder.corner(k)
+        try builder.face(4)
+        try builder.corner(8 + k)
+        try builder.corner(8 + next)
+        try builder.corner(12 + next)
+        try builder.corner(12 + k)
+    return try builder.finish()
+
+## The Bézier with control values 0, 0.375, 0.625, 1 at `t`.
+func blended(t: f64) -> f64:
+    let s = 1.0 - t
+    return 3.0 * s * s * t * 0.375 + 3.0 * s * t * t * 0.625 + t * t * t
+
+## Every cut point of `tube` (points 16..28, four per row) on row heights
+## `heights` (2 × the row's share), its corners `half` × the row's swell
+## from the axis.
+func rows_at(tube: interop.Reference[Mesh], heights: const f64[], swells: const f64[]) -> !:
+    try counts(tube, 28, 24)
+    try surface(tube, false)
+    for point in 16..<28:
+        let p = try tube.value().point(point)
+        var row: i64 = -1
+        for at in 0..<heights.length:
+            if math.abs(p.y - heights[at]) < 0.000001: row = (i64)at
+        if row < 0:
+            print(f"cut point {point} at y {p.y}: on no row")
+            assert(false)
+        near(math.abs(p.x), swells[(usize)row])
+        near(math.abs(p.z), swells[(usize)row])
+
+func tube_checks() -> !:
+    let pair = try frames()
+    let loops = "p0-1-2-3-0 p8-9-10-11-8"
+    defer pair.release()
+    let even: f64[3] = [0.5, 1.0, 1.5]
+    let plain: f64[3] = [1.0, 1.0, 1.0]
+    let straight = bridging(3.0, 0.0)
+    let lined = try made(pair, "Bridge", loops, 2, straight[..<8], 16)
+    defer lined.release()
+    try rows_at(lined, even[..<3], plain[..<3])
+    # Blend path: square to each loop, facing, so the rows stay straight
+    # above each other, spaced as Blender's Bézier spaces them.
+    let curve: f64[3] = [2.0 * blended(0.25), 1.0, 2.0 * blended(0.75)]
+    near(curve[0], 0.5234375)
+    let path = bridging(3.0, 1.0)
+    let pathed = try made(pair, "Bridge", loops, 2, path[..<8], 16)
+    defer pathed.release()
+    try rows_at(pathed, curve[..<3], plain[..<3])
+    # Profile 0.5, Linear shape: the rows swell by 1.25, 1.5, 1.25.
+    let swollen: f64[3] = [1.25, 1.5, 1.25]
+    let linear_profile = bridging(3.0, 0.0, profile = 0.5, shape = 4.0)
+    let bulged = try made(pair, "Bridge", loops, 2, linear_profile[..<8], 16)
+    defer bulged.release()
+    try rows_at(bulged, even[..<3], swollen[..<3])
+    let path_profile = bridging(3.0, 1.0, profile = 0.5, shape = 4.0)
+    let rounded = try made(pair, "Bridge", loops, 2, path_profile[..<8], 16)
+    defer rounded.release()
+    try rows_at(rounded, curve[..<3], swollen[..<3])
+
+## `mesh` turned 30° about Y and moved, so its numbers are no longer round.
+func turned(mesh: interop.Reference[Mesh]) -> interop.Reference[Mesh]!:
+    let numbers: f64[15] = [0.3, 0.7, -0.2, 0.0, 30.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+    let result = try Verbs.run("Transform Components", mesh, "", 1, numbers[..<15])
+    defer result.release()
+    return try result.value().mesh()
+
+func flat_run_checks() -> !:
+    # A 6 by 6 grid without its two middle rows of faces: its runs of
+    # points 14-20 and 21-27 face each other 2/3 apart.
+    let grid = try MeshPrimitives.grid(2.0, 6)
+    defer grid.release()
+    let moved = try turned(grid)
+    defer moved.release()
+    let removal: f64[1] = [0.0]
+    let holed_run = try Verbs.run("Delete", moved, "12-23", 3, removal[..<1])
+    defer holed_run.release()
+    let holed = try holed_run.value().mesh()
+    defer holed.release()
+    let a = try holed.value().point(14)
+    let b = try holed.value().point(20)
+    let c = try holed.value().point(21)
+    let d = try holed.value().point(27)
+    for interpolation in [0.0, 1.0, 2.0]:
+        let numbers = bridging(3.0, interpolation)
+        let bridged = try made(holed, "Bridge", "p14-15-16-17-18-19-20 p21-22-23-24-25-26-27", 2, numbers[..<8], 24)
+        defer bridged.release()
+        try counts(bridged, 63, 48)
+        try surface(bridged, false)
+        for point in 42..<63:
+            let p = try bridged.value().point(point)
+            near(p.y, 0.7, 0.000001)
+            # The middle row (each run point's second cut) lies halfway.
+            if (point - 42) % 3 == 1:
+                near(line_distance(p, a, b), 1.0 / 3.0)
+                near(line_distance(p, c, d), 1.0 / 3.0)
