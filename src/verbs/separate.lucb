@@ -33,7 +33,10 @@ func cook_separate(input: const VerbInput*, output: VerbOutput*) -> !:
     # joined through shared points.
     let island = try new i32[faces] --- in memory.heap
     defer free(island) in memory.heap
-    let parts = try face_islands(&topology, input.group, loose, island[..<faces])
+    var parts: usize = 0
+    if not loose: parts = try face_islands(&topology, input.group, false, island[..<faces])
+    elif let whole = try whole_parts(mesh, input.group, island[..<faces]): parts = whole
+    else: parts = try face_islands(&topology, input.group, true, island[..<faces])
     # Who keeps each point: the outside when any outside face uses it, else
     # the island of its first face; other parts get copies.
     let keeper = try new i32[points] --- in memory.heap
@@ -92,6 +95,32 @@ func copy_for(builder: TopologyBuilder*, copies: Growing[PointCopy]*, heads: i32
     try copies.push(PointCopy(own, made, heads[(usize)point]))
     heads[(usize)point] = (i32)(copies.count - 1)
     return made
+
+## When `group` holds only whole parts of the mesh (faces joined through
+## shared points; the topology cache numbers them once per connectivity):
+## each face's island among them (-1 outside), numbered in face order as
+## `face_islands` numbers them, and how many. None when it splits a part,
+## whose islands only a flood over the group finds.
+func whole_parts(mesh: const Mesh*, group: Bits, island: i32[]) -> usize?!:
+    let (parts, sizes) = try mesh.face_part_span()
+    # Per part: its island number + 1 (0: not met yet), and the group's faces in it.
+    let number = try new i32[sizes.length] in memory.heap
+    defer free(number) in memory.heap
+    let held = try new i32[sizes.length] in memory.heap
+    defer free(held) in memory.heap
+    var count: i32 = 0
+    for face in 0..<island.length:
+        island[face] = -1
+        if not group.get(face): continue
+        let part = (usize)parts[face]
+        if number[part] == 0:
+            count += 1
+            number[part] = count
+        held[part] += 1
+        island[face] = number[part] - 1
+    for part in 0..<sizes.length:
+        if held[part] != 0 and held[part] != sizes[part]: return none
+    return (usize)count
 
 ## Each face's island among the group's faces (-1 outside), numbered in
 ## face order: all one, or (`loose`) parts joined through shared points.
@@ -166,16 +195,21 @@ func name_islands(mesh: Mesh*, island: const i32[], parts: usize) -> !:
     for at in 0..<parts: first_face[at] = -1
     for face in 0..<faces:
         if island[face] >= 0 and first_face[(usize)island[face]] < 0: first_face[(usize)island[face]] = (i32)face
+    # Per path so far: whether a face outside the parts or an earlier
+    # island has it (fresh paths are new, so never a base).
+    let taken = try new u8[table.count()] in memory.heap
+    defer free(taken) in memory.heap
+    for face in 0..<faces:
+        if island[face] < 0: taken[(usize)values[face]] = 1
     let renamed = try new i32[parts] --- in memory.heap
     defer free(renamed) in memory.heap
     for at in 0..<parts:
         let base = values[(usize)first_face[at]]
-        var taken = false
-        for face in 0..<faces:
-            if island[face] < 0 and values[face] == base: taken = true
-        for earlier in 0..<at:
-            if renamed[earlier] == base: taken = true
-        renamed[at] = try fresh_path(&table, table.text((usize)base)) if taken else base
+        if taken[(usize)base] == 0:
+            renamed[at] = base
+            taken[(usize)base] = 1
+        else:
+            renamed[at] = try fresh_path(&table, table.text((usize)base))
     for face in 0..<faces:
         if island[face] >= 0: values[face] = renamed[(usize)island[face]]
     var column = try table.finish()
@@ -188,8 +222,5 @@ func fresh_path(table: TableBuilder*, base: str) -> i32!:
     var room: u8[512]
     for number in 1..<(usize)1000:
         let name = strings.format(room[..<512], f"{base}.{number // 100}{number // 10 % 10}{number % 10}") else error(errors.limit, "a piece's path is too long")
-        var taken = false
-        for at in 0..<table.count():
-            if table.text(at) == name: taken = true
-        if not taken: return try table.intern(name)
+        if not table.holds(name): return try table.intern(name)
     error(errors.limit, "a thousand pieces share one path")

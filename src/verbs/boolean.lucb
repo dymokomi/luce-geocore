@@ -21,11 +21,40 @@ let boolean_picks: PickSpec[2] = [
 func boolean_verb() -> Verb:
     return Verb("Mesh Boolean", "Modeling", "Union, subtract or intersect closed pieces, exactly", Domain.face, true, boolean_parms, true, cook_boolean, section = "Modify", label = "Boolean", family = "Combine", icon = "boolean-union", picks = boolean_picks, wants = boolean_wants)
 
-## Whether the first pick alone holds fewer than two pieces.
+## Whether the first pick alone holds fewer than two pieces. Asked when a
+## tool starts, on the UI thread: it stops at the second piece it meets and
+## reads parts from the topology cache, so it does not number every piece.
 func boolean_wants(input: const VerbInput*) -> bool!:
+    let mesh = input.mesh
+    let group = input.group
+    let faces = (usize)mesh.face_count()
+    if let entry = path_entry(mesh):
+        var first: f64 = -1.0
+        for face in 0..<faces:
+            if not group.get(face): continue
+            let text = entry.number(face, 0)
+            if first < 0.0: first = text
+            elif text != first: return false
+        return true
+    let (parts, sizes) = try mesh.face_part_span()
+    var first: i32 = -1
+    for face in 0..<faces:
+        if not group.get(face): continue
+        if first < 0: first = parts[face]
+        elif parts[face] != first: return false
+    # One part met: one piece when the pick holds all of it (else count).
+    if first < 0 or (usize)sizes[(usize)first] == group.population(): return true
     var tags = Growing[i32]()
     defer tags.close()
-    return try boolean_pieces(input.mesh, input.group, &tags, 0) < 2
+    return try boolean_pieces(mesh, group, &tags, 0) < 2
+
+## The face `path` text attribute, or none.
+func path_entry(mesh: const Mesh*) -> const Attribute*?:
+    let path = mesh.attribute_on("path", Domain.face)
+    if path < 0: return none
+    let entry = mesh.attribute_entry(path) catch failure: return none
+    if entry.kind != DataType.text: return none
+    return entry
 
 ## Each face's piece among `group`'s faces, numbered from `first` in order
 ## of their lowest faces, into `tags` (-1 outside the group, which stays as
@@ -36,24 +65,22 @@ func boolean_pieces(mesh: const Mesh*, group: Bits, tags: Growing[i32]*, first: 
     let island = try new i32[faces] --- in memory.heap
     defer free(island) in memory.heap
     var count: usize = 0
-    let path = mesh.attribute_on("path", Domain.face)
-    if path >= 0 and (try mesh.attribute_entry(path)).kind == DataType.text:
-        # By path: one piece per text, in order of first use.
-        let entry = try mesh.attribute_entry(path)
-        var seen = Growing[f64]()
-        defer seen.close()
+    if let entry = path_entry(mesh):
+        # By path: one piece per text, in order of first use (the text's
+        # table index names its piece).
+        let number = try new i32[table_count(entry.table.view()) + 1] in memory.heap
+        defer free(number) in memory.heap
         for face in 0..<faces:
             island[face] = -1
             if not group.get(face): continue
-            let text = entry.number(face, 0)
-            var number: i64 = -1
-            for at in 0..<seen.count:
-                if seen.items[at] == text: number = (i64)at
-            if number < 0:
-                number = (i64)seen.count
-                try seen.push(text)
-            island[face] = (i32)number
-        count = seen.count
+            # Index -1 (no text) is slot 0.
+            let slot = (usize)((i64)entry.number(face, 0) + 1)
+            if number[slot] == 0:
+                count += 1
+                number[slot] = (i32)count
+            island[face] = number[slot] - 1
+    elif let whole = try whole_parts(mesh, group, island[..<faces]):
+        count = whole
     else:
         let topology = try Topology.of(mesh)
         count = try face_islands(&topology, group, true, island[..<faces])

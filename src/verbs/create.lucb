@@ -66,10 +66,7 @@ func name_piece(mesh: Mesh*, first: usize, stem: str) -> !:
     var name = ""
     for number in 1..<(usize)100000:
         name = strings.format(room[..<256], f"/{stem}{number}") else error(errors.limit, "a piece's path is too long")
-        var taken = false
-        for at in 0..<table.count():
-            if table.text(at) == name: taken = true
-        if not taken: break
+        if not table.holds(name): break
     let named = try table.intern(name)
     for face in first..<faces: values[face] = named
     var column = try table.finish()

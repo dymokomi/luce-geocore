@@ -21,17 +21,31 @@ struct WorkerLog:
     var warned: u64
     var warning_key: u64 = 0xFFFFFFFFFFFFFFFF
     var warning: str = ""
+    ## After a trim, the largest key kept: a later message at or past it can never be
+    ## among the first `kept_messages`, so it is only counted, not formatted or kept.
+    var cutoff: u64 = 0xFFFFFFFFFFFFFFFF
 
     func close():
         self.messages.destroy()
         self.texts.destroy()
 
     ## Keep at most `kept_messages` of the smallest keys (the list grows to twice that
-    ## between trims).
-    func trim():
+    ## between trims), and only their texts: the kept ones move to a fresh pool and the
+    ## old pool, with every dropped text, is freed. A print-per-point snippet holds at
+    ## most twice `kept_messages` texts, however many it prints.
+    func trim() -> !:
         if self.messages.length() < kept_messages * 2: return
         sort.stable(self.messages.items(), message_before)
         self.messages.truncate(kept_messages)
+        self.cutoff = self.messages.items()[kept_messages - 1].key
+        var texts: collections.TextPool
+        errdefer texts.destroy()
+        var moved: str[200]
+        for at in 0..<kept_messages:
+            moved[at] = try texts.keep_text(self.messages.items()[at].text.bytes)
+        for at in 0..<kept_messages: self.messages.items()[at].text = moved[at]
+        self.texts.destroy()
+        self.texts = texts
 
 func message_before(a: Message, b: Message) -> bool:
     return a.key < b.key
@@ -107,13 +121,15 @@ func printf_lanes(call: engine.Call*):
     for lane in 0..<call.lanes:
         call.i32_result(0)[lane] = 0
         if not call.active(lane): continue
+        log.printed += 1
+        let key = order_key(call.first + lane, order)
+        if key >= log.cutoff: continue
         for k: usize in 0..<4: values[k] = call.f32_argument(k)[lane]
         var room: u8[1024]
         let text = formatted(room, format, values)
-        log.printed += 1
         let kept = log.texts.keep_text(text.bytes) catch failure: continue
-        log.messages.append(Message(key = order_key(call.first + lane, order), text = kept)) catch failure: continue
-        log.trim()
+        log.messages.append(Message(key = key, text = kept)) catch failure: continue
+        log.trim() catch failure: continue
 
 func warning_lanes(call: engine.Call*):
     let log = worker_log(call) else return

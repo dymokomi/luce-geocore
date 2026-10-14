@@ -404,6 +404,9 @@ pub func messages() -> !:
 pub func texts() -> !:
     let set = try support.grid_set(4)
     let named = try support.run(set, support.points_mode, "let t = k.text(\"piece_\").concat(k.itoa(p.ptnum // 5))\np.set_text(\"name\", t)\nif p.ptnum == 0:\n    k.set_prim_text(3, \"label\", k.sprintf(\"face %d\", 3.0))\n")
+    # Before any snapshot shares it, the result's own string table has one owner.
+    let own = geocore_kernel.set_mesh(try named.get()) else trap("Code made no mesh")
+    expect((try own.attribute_entry(own.find_attribute("name", 0))).table.unique(), "the written attribute is its string table's only owner (nothing leaked)")
     let mesh = try (try support.mesh_of(named)).get()
     let name = try mesh.attribute_entry(mesh.find_attribute("name", 0))
     expect(name.text_at(0) == "piece_0" and name.text_at(12) == "piece_2" and name.text_at(24) == "piece_4", "set_text writes a text attribute")

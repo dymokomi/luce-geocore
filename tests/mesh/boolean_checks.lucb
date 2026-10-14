@@ -165,6 +165,13 @@ func pick_checks() -> !:
     defer corner.release()
     near(try result_volume(corner, "0-5", "6-11", 1), 7.0, 1.0e-9)
     near(try result_volume(corner, "6-11", "0-5", 1), 7.0, 1.0e-9)
+    # The second pick is wanted while the first holds one piece: a whole
+    # cube, part of one (counted by flood), or nothing; not with two.
+    let operation: f64[1] = [1.0]
+    assert(try Verbs.wants_second("Mesh Boolean", corner, "0-5", 3, operation[..<1]))
+    assert(try Verbs.wants_second("Mesh Boolean", corner, "0", 3, operation[..<1]))
+    assert(not try Verbs.wants_second("Mesh Boolean", corner, "*", 3, operation[..<1]))
+    assert(not try Verbs.wants_second("Mesh Boolean", corner, "5-6", 3, operation[..<1]))
     let third = try pair(corner, a, Vector3(-1.0, -1.0, -1.0))
     defer third.release()
     # A less the two others, and all three united, intersected.

@@ -95,6 +95,7 @@ func apply_named_texts(mesh: Mesh*, edits: const Edits*, first: TextSet, numberi
                     if set.key + 1 > winners[slot]: winners[slot] = set.key + 1
                 elif winners[slot] == set.key + 1:
                     values[slot] = try table.intern(set.text)
-    var attribute = try Attribute.text(first.name, first.domain, elements, try table.finish(), values)
-    errdefer attribute.release()
-    try put_attribute(mesh, attribute)
+    var column = try table.finish()
+    defer column.release()
+    # put_attribute takes the attribute, even when it fails.
+    try put_attribute(mesh, try Attribute.text(first.name, first.domain, elements, column, values))

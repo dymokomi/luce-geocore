@@ -11,10 +11,12 @@
 
 ## Polygon point lists rewritten since the last settle.
 struct Rewrites:
-    ## Per polygon: where its new list starts in `points` (-1: not rewritten), and its
-    ## size. Empty until the first rewrite.
+    ## Per polygon: where its new list starts in `points` (-1: not rewritten), its
+    ## size, and the room its run has there (a later rewrite of the polygon that fits
+    ## goes in the same run). Empty until the first rewrite.
     var starts: Growing[i32]
     var sizes: Growing[i32]
+    var room: Growing[i32]
     ## The new lists' point numbers, and each entry's corner before the rewrite (in the
     ## settled numbering; -1 for a new corner).
     var points: Growing[i32]
@@ -23,7 +25,7 @@ struct Rewrites:
     var delta: i64
 
     static func empty() -> Rewrites:
-        return Rewrites(starts = Growing[i32](), sizes = Growing[i32](), points = Growing[i32](), came = Growing[i32](), delta = 0)
+        return Rewrites(starts = Growing[i32](), sizes = Growing[i32](), room = Growing[i32](), points = Growing[i32](), came = Growing[i32](), delta = 0)
 
     ## Whether any polygon is rewritten.
     func active() -> bool:
@@ -41,10 +43,12 @@ struct Rewrites:
         if not self.active(): return
         try self.starts.push(-1)
         try self.sizes.push(0)
+        try self.room.push(0)
 
     func clear():
         self.starts.clear()
         self.sizes.clear()
+        self.room.clear()
         self.points.clear()
         self.came.clear()
         self.delta = 0
@@ -52,6 +56,7 @@ struct Rewrites:
     func close():
         self.starts.close()
         self.sizes.close()
+        self.room.close()
         self.points.close()
         self.came.close()
 
@@ -61,7 +66,11 @@ extend MeshEdit:
         return (usize)((i64)self.corners.count + self.rewrites.delta)
 
     ## Give polygon `prim` the points `points`, each new corner coming from corner
-    ## `came[n]` (settled numbering; -1 new).
+    ## `came[n]` (settled numbering; -1 new). `points` and `came` are the caller's own
+    ## lists, never views into the rewrites. A polygon rewritten again reuses its run
+    ## when the list fits (or the run is the last one, which grows in place); else it
+    ## moves to a new run with twice the room, so rewriting one polygon over and over
+    ## leaves at most as much dead room as it uses.
     func rewrite(prim: i64, points: const i32[], came: const i32[]) -> !:
         if points.length < 3: error(errors.invalid, "a polygon needs at least 3 points; remove_prims removes it")
         for point in points: try self.check_point((i64)point)
@@ -70,18 +79,31 @@ extend MeshEdit:
         if not rewrites.active():
             try rewrites.starts.extend(self.face_count(), -1)
             try rewrites.sizes.extend(self.face_count(), 0)
-        let start = rewrites.points.count
-        if start + points.length > 2147483647: error(errors.limit, "too many rewritten corners")
-        # `points` and `came` may be views into the lists being grown: reserve first.
-        try rewrites.points.reserve(start + points.length)
-        try rewrites.came.reserve(start + points.length)
+            try rewrites.room.extend(self.face_count(), 0)
+        let p = (usize)prim
+        var start = rewrites.points.count
+        var room = points.length
+        let had = rewrites.starts.items[p]
+        if had >= 0:
+            let run = (usize)rewrites.room.items[p]
+            if points.length <= run or (usize)had + run == rewrites.points.count:
+                start = (usize)had
+                if run > room: room = run
+            else:
+                room = points.length * 2
+        let end = start + room
+        if end > 2147483647: error(errors.limit, "too many rewritten corners")
+        if end > rewrites.points.count:
+            try rewrites.points.reserve(end)
+            try rewrites.came.reserve(end)
+            rewrites.points.count = end
+            rewrites.came.count = end
         for at in 0..<points.length:
             rewrites.points.items[start + at] = points[at]
             rewrites.came.items[start + at] = came[at]
-        rewrites.points.count = start + points.length
-        rewrites.came.count = start + points.length
-        rewrites.starts.items[(usize)prim] = (i32)start
-        rewrites.sizes.items[(usize)prim] = (i32)points.length
+        rewrites.starts.items[p] = (i32)start
+        rewrites.sizes.items[p] = (i32)points.length
+        rewrites.room.items[p] = (i32)room
         rewrites.delta += (i64)points.length - old_size
         self.reshaped = true
 

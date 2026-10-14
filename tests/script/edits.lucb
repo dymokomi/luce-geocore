@@ -47,6 +47,26 @@ pub func vertices() -> !:
     assert(back.prim_count() == 4 and back.vertex_count() == 15)
     assert(try back.prim_size(0) == 5 and try back.prim_point(0, 2) == extra)
     assert(try back.prim_size(3) == 3 and try back.prim_point(3, 2) == extra)
+    # One polygon rewritten over and over (grown past its run, shrunk, grown in
+    # place as the last run, moved again) reads and settles as its last list.
+    var r = try Geometry.grid(2.0, 3)
+    defer r.close()
+    let quad = try r.prim_points(4)
+    let corners: i64[4] = [(i64)quad[0], (i64)quad[1], (i64)quad[2], (i64)quad[3]]
+    var last: i64 = -1
+    for round in 0..<40:
+        last = try r.add_point([0.1 * (f32)round, 2.0, 0.0, 0.0])
+        try r.insert_vertex(4, 1, last)
+        try r.set_prim_points(2, corners[..<3])
+        if round % 3 == 2: try r.remove_vertex(4, 1)
+    assert(try r.prim_size(4) == 4 + 40 - 13 and try r.prim_point(4, 0) == corners[0] and try r.prim_point(4, 1) == last)
+    assert(try r.prim_size(2) == 3 and try r.prim_point(2, 2) == corners[2])
+    let rpath = try api.scratch("rewrites.prism", buffer)
+    try r.save(rpath)
+    var rback = try Geometry.load(rpath)
+    defer rback.close()
+    assert(try rback.prim_size(4) == 31 and try rback.prim_point(4, 30) == corners[3] and try rback.prim_point(4, 1) == last)
+    assert(try rback.prim_size(2) == 3 and try rback.prim_point(2, 1) == corners[1])
     print("ok    script: a polygon's own vertices")
 
 ## Per-element arrays of f32, i32 and vectors, growing, shrinking and surviving reshapes.

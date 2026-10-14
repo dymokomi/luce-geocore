@@ -452,6 +452,12 @@ extend Mesh:
     pub func point_face_span() -> (const i32[], const i32[])!:
         return try self.incidence()
 
+    ## Every face's part (faces joined through shared points, numbered by
+    ## their lowest faces) and each part's face count, built once per
+    ## connectivity and shared like the other topology caches.
+    pub func face_part_span() -> (const i32[], const i32[])!:
+        return try self.topology.parts(self.offsets.view(), self.corners.view(), self.positions.count())
+
     ## What another module derives from the connectivity, shared by every
     ## mesh with it (see TopologyCache.extension_of).
     pub func topology_extension(dispose: func(void*) -> unit, make: func() -> void*!) -> void*!:

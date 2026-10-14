@@ -207,11 +207,36 @@ struct EditColumn:
                 elif self.floating(): self.floats.items[at] = (f32)attribute.number(element, k)
                 else: self.ints.items[at] = (i32)attribute.number(element, k)
 
+    ## Forget the strings no element uses any more (values written over during the
+    ## edit), numbering the rest again in first-seen order, so the published table holds
+    ## only live strings. Nothing changes when every string is used.
+    func drop_dead_texts(elements: usize) -> !:
+        let count = self.table.count()
+        if count == 0: return
+        let map = try new i32[count] in memory.heap
+        defer free(map) in memory.heap
+        let values = self.ints.items[..<elements]
+        var live: usize = 0
+        for value in values:
+            if value >= 0 and map[(usize)value] == 0:
+                map[(usize)value] = 1
+                live += 1
+        if live == count: return
+        var kept = TableBuilder()
+        errdefer kept.close()
+        for index in 0..<count:
+            if map[index] != 0: map[index] = try kept.intern(self.table.text(index))
+        for at in 0..<elements:
+            if values[at] >= 0: values[at] = map[(usize)values[at]]
+        self.table.close()
+        self.table = kept
+
     ## The column as an attribute of `elements` elements.
     func attribute(elements: usize) -> Attribute!:
         try self.grow(elements)
         if self.ragged: return try self.ragged_attribute(elements)
         if self.kind == DataType.text:
+            try self.drop_dead_texts(elements)
             var table = try self.table.finish()
             defer table.release()
             return try Attribute.text(self.label, self.domain, elements, table, self.ints.items[..<elements])

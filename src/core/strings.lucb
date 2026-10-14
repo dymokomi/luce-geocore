@@ -42,6 +42,16 @@ pub struct TableBuilder:
         let start = 0 if index == 0 else (usize)self.ends.items[index - 1]
         return (str)self.bytes.items[start..<(usize)self.ends.items[index]]
 
+    ## Whether `text` is interned already.
+    pub func holds(text: str) -> bool:
+        if self.slots.count == 0: return false
+        let mask = self.slots.count - 1
+        var slot = (usize)text.hash() & mask
+        while self.slots.items[slot] != 0:
+            if self.text((usize)self.slots.items[slot] - 1) == text: return true
+            slot = (slot + 1) & mask
+        return false
+
     ## The index of `text`, added when new.
     pub func intern(text: str) -> i32!:
         if self.slots.count == 0 or (self.ends.count + 1) * 2 > self.slots.count:

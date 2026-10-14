@@ -1,10 +1,11 @@
 ## The script API's geometry calls: building, editing, attributes, groups, the other
 ## families and whole-set operations, checked against geocore's own builders.
+import memory
 import strings
 from luce_std import files
 from luce_geocore.script import Geometry, Domain3, AttributeKind, Float3, Cook, CookRun
 from luce_geocore.script_host import geocore_requirement
-from luce_geocore.geocore import MeshBuilder, Vector3
+from luce_geocore.geocore import MeshBuilder, Vector3, GeometryFile
 
 ## Where a test may write files (luc test gives each program a scratch HOME).
 pub func scratch(name: str, buffer: u8[]) -> str!:
@@ -79,6 +80,20 @@ pub func attributes() -> !:
     assert(try back.detail_text("source") == "a test")
     assert(back.has_attribute("empty", Domain3.point))
     assert(not back.has_attribute("missing", Domain3.point))
+    # A text written over and over keeps only the strings still in use.
+    var texts = try Geometry.grid(2.0, 2)
+    defer texts.close()
+    var room: u8[32]
+    for round in 0..<100: try texts.set_text(Domain3.point, 0, "tag", strings.format(room, f"take {round}") else "")
+    let tpath = try scratch("texts.prism", buffer)
+    try texts.save(tpath)
+    let loaded = try GeometryFile.load(tpath)
+    defer loaded.release()
+    let mesh = (try (try loaded.get()).mesh()) else trap("the file has no mesh")
+    let mesh_view = try mesh.get()
+    let tag = try mesh_view.attribute_entry(mesh_view.find_attribute("tag", 0))
+    assert(tag.text_at(0) == "take 99" and tag.text_at(1) == "")
+    assert(memory.read[u32]((void*)&tag.table.view()[0]) == 2, "only the live strings are published")
     # Bulk spans write in place.
     let positions = try back.positions()
     for at in 0..<positions.length: positions[at].y = 1.0

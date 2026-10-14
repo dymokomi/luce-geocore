@@ -30,6 +30,12 @@ pub struct TopologyCache:
     var point_edges_ready: @u32
     var point_edge_offsets: Column[i32]
     var point_edge_list: Column[i32]
+    ## Every face's part (the faces joined to it through shared points),
+    ## parts numbered by their lowest faces, and each part's face count:
+    ## Boolean's and Separate's pieces when a pick holds whole parts.
+    var parts_ready: @u32
+    var face_parts: Column[i32]
+    var part_sizes: Column[i32]
     ## What another module derives from this connectivity (subdivision's
     ## plans and display meshes), made by it on first use under its own
     ## lock and disposed with the cache.
@@ -92,6 +98,16 @@ pub struct TopologyCache:
                 try bucketed(edge_points, points, &self.point_edge_offsets, &self.point_edge_list, 2)
                 self.point_edges_ready.store(1, .release)
         return (self.point_edge_offsets.view(), self.point_edge_list.view())
+
+    ## Each face's part and each part's face count (see `face_parts`).
+    pub func parts(offsets: const i32[], corners: const i32[], points: usize) -> (const i32[], const i32[])!:
+        if self.parts_ready.load(.acquire) == 0:
+            self.lock.lock()
+            defer self.lock.unlock()
+            if self.parts_ready.load(.acquire) == 0:
+                try self.build_parts(offsets, corners, points)
+                self.parts_ready.store(1, .release)
+        return (self.face_parts.view(), self.part_sizes.view())
 
     pub func connectivity_hash(offsets: const i32[], corners: const i32[], points: usize) -> u64:
         if self.hash_ready.load(.acquire) == 0:
@@ -166,6 +182,47 @@ pub struct TopologyCache:
         self.point_face_offsets = starts
         self.point_faces = faces
 
+    ## Union the faces at each point (union by lowest face, paths halved),
+    ## then number the roots in face order.
+    func build_parts(offsets: const i32[], corners: const i32[], points: usize) -> !:
+        let faces = offsets.length - 1
+        var parts = try Column[i32].allocate(faces)
+        errdefer parts.release()
+        let parent = parts.span()
+        for face in 0..<faces: parent[face] = (i32)face
+        let first = try new i32[points] --- in memory.heap
+        defer free(first) in memory.heap
+        for at in 0..<points: first[at] = -1
+        for face in 0..<faces:
+            for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
+                let point = (usize)corners[corner]
+                if first[point] < 0:
+                    first[point] = (i32)face
+                    continue
+                let a = part_root(parent, first[point])
+                let b = part_root(parent, (i32)face)
+                if a != b: parent[(usize)(a if a > b else b)] = a if a < b else b
+        # A face's parent is a lower face (a root is its own), so one pass in
+        # face order numbers each root and gives every other face its parent's
+        # number, already written; numbers are stored as -1 - number until
+        # the pass ends so they cannot be taken for face indices.
+        var count: i32 = 0
+        for face in 0..<faces:
+            let up = parent[face]
+            if up == (i32)face:
+                parent[face] = -1 - count
+                count += 1
+            else:
+                parent[face] = parent[(usize)up]
+        var sizes = try Column[i32].allocate((usize)count)
+        let size = sizes.span()
+        for at in 0..<size.length: size[at] = 0
+        for face in 0..<faces:
+            parent[face] = -1 - parent[face]
+            size[(usize)parent[face]] += 1
+        self.face_parts = parts
+        self.part_sizes = sizes
+
     ## The extension, made by `make` on first use; `dispose` frees it with
     ## the cache. One module owns the slot.
     pub func extension_of(dispose: func(void*) -> unit, make: func() -> void*!) -> void*!:
@@ -192,6 +249,17 @@ pub struct TopologyCache:
         self.edge_corner_list.release()
         self.point_edge_offsets.release()
         self.point_edge_list.release()
+        self.face_parts.release()
+        self.part_sizes.release()
+
+## The root of `face` (halving the path on the way).
+func part_root(parent: i32[], face: i32) -> i32:
+    var at = face
+    while parent[(usize)at] != at:
+        let up = parent[(usize)parent[(usize)at]]
+        parent[(usize)at] = up
+        at = up
+    return at
 
 func ignore_extension(context: void*):
     _ = context

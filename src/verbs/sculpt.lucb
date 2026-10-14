@@ -158,7 +158,10 @@ func stroked(mesh: const Mesh*, group: Bits, settings: BrushSettings, dabs: cons
             while at < dabs.length:
                 try apply_dab(&cache.stroke, dabs[at..<at + dab_numbers])
                 at += dab_numbers
-            try cache.dabs.assign(dabs)
+            # Only the new dabs are remembered: the prefix is already there.
+            try cache.dabs.reserve(dabs.length)
+            memory.copy(cache.dabs.items[first..], dabs[first..], dabs.length - first)
+            cache.dabs.count = dabs.length
             try take_fresh(&cache.stroke, &moved)
             let made = try moved_storage(cache.made, cache.stroke.positions, moved.view())
             mesh_dispose(cache.made)
