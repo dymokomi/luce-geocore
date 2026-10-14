@@ -8,7 +8,8 @@ from luce_std import math
 import interop
 import memory
 from luce_geocore import geocore
-from luce_geocore.geocore import Mesh, Vector3, Verbs, Subdivision
+from luce_geocore.geocore import Mesh, Vector3, Verbs, Subdivision, AttributeKernels
+from luce_geocore.core.growing import Growing
 from luce_std import parallel as std_parallel
 
 ## One case: what it runs, on which mesh (0 grid, 1 tube cut in two, 2 grid
@@ -27,7 +28,7 @@ struct Case:
     let second: str = ""
     let reference: bool = false
 
-let case_total: usize = 74
+let case_total: usize = 89
 
 ## The Knife's numbers: a stroke straight across the grid's middle row,
 ## seen from above, cutting through.
@@ -66,7 +67,9 @@ func case_at(index: usize) -> Case:
         27: return Case("PolyDraw, a quad drawn onto the grid, its corners snapped", "PolyDraw", "", 0, 0, [0.001, 4.0, 135.5, 0.0, -1.5, 136.5, 0.0, -1.5, 136.5, 0.0, -0.5, 135.5, 0.0, -0.5, 0.0, 0.0])
         28: return Case("PolyDraw, through 4 selected points", "PolyDraw", "350000-350001 350838-350839", 1, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         29: return Case("Clean, everything", "Clean", "*", 0, 0, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
-        _: return stage5_case(index - 30) if index < 60 else stage6_case(index - 60)
+        _:
+            if index >= 74: return stage7_case(index - 74)
+            return stage5_case(index - 30) if index < 60 else stage6_case(index - 60)
 
 ## The Stage 5 tools.
 func stage5_case(index: usize) -> Case:
@@ -124,6 +127,30 @@ func stage6_case(index: usize) -> Case:
         12: return Case("Relax, every point, 5 rounds kept on that scan", "Relax", "*", 1, 0, [0.5, 5.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], reference = true)
         _: return Case("Poly Pen, a boundary edge extended", "Poly Pen", "p0-1", 2, 0, [0.0, 0.00001, 2.0, -418.5, 0.0, -419.5, -417.5, 0.0, -419.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
+## The Stage 7 tools on about a million faces: the 1024 × 1024 grid
+## (mesh 6, its rows of edges the group `rows`), a 1448 × 724 sphere with
+## its first half of faces turned in (7), the grid roughened by noise (8)
+## and the grid with UVs (9).
+func stage7_case(index: usize) -> Case:
+    let zero: f64[16] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let circle: f64[16] = [0.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    match index:
+        0: return Case("Circularize, the whole 1024² grid (its outline a circle, 1M inner points mapped)", "Circularize", "*", 3, 6, circle)
+        1: return Case("Circularize, a 512² block in the grid (262k faces)", "Circularize", "262400-786431:512,1024", 3, 6, circle)
+        2: return Case("Circularize, every row of the grid as an arc (1025 runs, 1M edges)", "Circularize", "rows", 2, 8, circle)
+        3: return Case("Straighten, every row of the rough grid (1025 runs, 1M edges)", "Straighten", "rows", 2, 8, [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        4: return Case("Space Evenly, every row, linear", "Space Evenly", "rows", 2, 8, [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        5: return Case("Space Evenly, every row, smooth", "Space Evenly", "rows", 2, 8, [1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        6: return Case("Make Planar, every face of the rough grid, 10 rounds", "Make Planar", "*", 3, 8, [1.0, 10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        7: return Case("Recalculate Normals, the sphere with half its faces turned in", "Recalculate Normals", "*", 3, 7, zero)
+        8: return Case("Recalculate Normals, the grid (nothing turns)", "Recalculate Normals", "*", 3, 6, zero)
+        9: return Case("Hard Edges, every edge of the grid (2.1M)", "Hard Edges", "*", 2, 6, zero)
+        10: return Case("Soft Edges, every row", "Soft Edges", "rows", 2, 6, zero)
+        11: return Case("Smooth by Angle, the whole sphere", "Smooth by Angle", "*", 3, 7, [30.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+        12: return Case("Mark Seam, every row", "Mark Seam", "rows", 2, 6, zero)
+        13: return Case("Seams from Islands, the grid with UVs", "Seams from Islands", "*", 3, 9, zero)
+        _: return Case("Bevel Weight, every row", "Bevel Weight", "rows", 2, 6, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+
 let no_numbers: f64[1] = [0.0]
 let fixed_split: f64[2] = [1.0, 0.0]
 let linear_once: f64[3] = [1.0, 0.0, 0.0]
@@ -171,6 +198,9 @@ pub func main(arguments: str[]) -> i32!:
         warm.release()
     let empty = try Mesh.empty()
     defer empty.release()
+    let stage7 = try stage7_meshes(empty)
+    defer:
+        for at in 0..<(usize)4: stage7[at].release()
     let ball = try triangles.value().transformed(Vector3(0.0, 0.3, 0.0), Vector3(0.0, 0.05, 0.0), Vector3(1.0, 1.0, 1.0))
     defer ball.release()
     try ball.value().prepare_queries()
@@ -182,6 +212,7 @@ pub func main(arguments: str[]) -> i32!:
         if case.mesh == 3: source = triangles
         if case.mesh == 4: source = fine
         if case.mesh == 5: source = empty
+        if case.mesh >= 6: source = stage7[(usize)case.mesh - 6]
         var reference: interop.Reference[Mesh]? = none
         if case.reference: reference = ball
         let start = time.now()
@@ -192,7 +223,66 @@ pub func main(arguments: str[]) -> i32!:
         mesh.release()
         result.release()
     try subdivision_rows(grid)
+    try shading_rows(stage7[1])
     return 0
+
+## Stage 7's meshes (see stage7_case).
+func stage7_meshes(empty: interop.Reference[Mesh]) -> interop.Reference[Mesh][4]!:
+    let plain = try quad_grid(1024)
+    defer plain.release()
+    let grid = try with_rows(plain, 1024)
+    errdefer grid.release()
+    let sphere_numbers: f64[16] = [1.0, 1448.0, 724.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let making = try Verbs.run("Sphere", empty, "", 0, sphere_numbers[..<numbers_taken("Sphere")])
+    defer making.release()
+    let ball = try making.value().mesh()
+    defer ball.release()
+    let turning = try Verbs.run("Reverse", ball, "0-524287", 3, no_numbers[..<0])
+    defer turning.release()
+    let sphere = try turning.value().mesh()
+    errdefer sphere.release()
+    let noise: f64[2] = [0.2, 1.0]
+    let roughening = try Verbs.run("Mountain", grid, "*", 1, noise[..<2])
+    defer roughening.release()
+    let rough = try roughening.value().mesh()
+    errdefer rough.release()
+    let mapped = try AttributeKernels.uv_project(grid, 0.01)
+    errdefer mapped.release()
+    let warm = try Verbs.run("Dissolve", rough, "0", 3, no_numbers[..<0])
+    warm.release()
+    let warm_sphere = try Verbs.run("Dissolve", sphere, "0", 3, no_numbers[..<0])
+    warm_sphere.release()
+    return [grid, sphere, rough, mapped]
+
+## The n×n grid with the group `rows`: every edge along X.
+func with_rows(grid: interop.Reference[Mesh], n: usize) -> interop.Reference[Mesh]!:
+    let edges = try grid.value().edge_count()
+    var rows = Growing[i64]()
+    defer rows.close()
+    for edge in 0..<edges:
+        let a = try grid.value().point(try grid.value().edge_point(edge, 0))
+        let b = try grid.value().point(try grid.value().edge_point(edge, 1))
+        if a.z == b.z: try rows.push(edge)
+    return try grid.value().with_group("rows", 4, rows.view())
+
+## The shading normals of the 1M-face sphere: by the cusp, and by its
+## edges' marks after Smooth by Angle (every edge marked).
+func shading_rows(sphere: interop.Reference[Mesh]) -> !:
+    let fixing = try Verbs.run("Recalculate Normals", sphere, "*", 3, no_numbers[..<1])
+    defer fixing.release()
+    let plain = try fixing.value().mesh()
+    defer plain.release()
+    var start = time.now()
+    _ = try plain.value().smooth_normal_span()
+    print(f"Shading normals, the 1M-face sphere, by the cusp\t{(f64)time.since(start) / 1000000.0}\t{plain.value().face_count()}\t")
+    let angle: f64[2] = [30.0, 0.0]
+    let marking = try Verbs.run("Smooth by Angle", plain, "*", 3, angle[..<2])
+    defer marking.release()
+    let marked = try marking.value().mesh()
+    defer marked.release()
+    start = time.now()
+    _ = try marked.value().smooth_normal_span()
+    print(f"Shading normals, the 1M-face sphere, by its edge marks (every edge marked)\t{(f64)time.since(start) / 1000000.0}\t{marked.value().face_count()}\t")
 
 ## The display subdivision of the grid: the first display builds the plan
 ## (level topology, carried attributes, sharpness) and evaluates; after a

@@ -295,7 +295,10 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
                 mesh_dispose(product)
                 error(failure.code, failure.message)
             selection_domain = domain
-            remove_attribute(product, ".carried", domain)
+            remove_attribute(product, ".carried", domain) catch failure:
+                mesh_dispose(product)
+                selection.release()
+                error(failure.code, failure.message)
     # The output selection also rides in the mesh as the group `.selection`
     # (Houdini's cook selection), so it reaches the viewport with the result.
     mark_selection(product, &selection, selection_domain) catch failure:
@@ -436,7 +439,7 @@ func select_edges(product: const Mesh*, output: VerbOutput*) -> !:
 ## the domain's.
 func mark_selection(mesh: Mesh*, bits: Column[u64]*, domain: Domain) -> !:
     let domains: Domain[4] = [Domain.point, Domain.corner, Domain.face, Domain.edge]
-    for other in domains: remove_attribute(mesh, ".selection", other)
+    for other in domains: try remove_attribute(mesh, ".selection", other)
     let count = try mesh.domain_size(domain)
     if bits.count() == 0:
         var empty = try BitsBuilder.zeros(count)

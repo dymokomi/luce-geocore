@@ -54,7 +54,7 @@ pub func build_plan(mesh: const Mesh*, settings: Settings, key: u64) -> Plan*!:
     for face in 0..<faces: values[face] = (i32)face
     try put_attribute(tagged, ids)
     # The display is not subdivided again: its levels drop the settings.
-    for name in ["subd.scheme", "subd.level", "subd.render_level", "subd.boundary"]: remove_attribute(tagged, name, Domain.detail)
+    for name in ["subd.scheme", "subd.level", "subd.render_level", "subd.boundary"]: try remove_attribute(tagged, name, Domain.detail)
     try cage_sharpness(mesh, settings.corners, plan)
     var source: const Mesh* = tagged
     for level in 0..<settings.level:

@@ -89,7 +89,9 @@ pub func point_normal(mesh: const Mesh*, starts: const i32[], faces: const i32[]
     return sum.multiply_scalar(1.0 / length) if length > 0.0 else sum
 
 ## An edge mark read from the edge attribute or group `name` ("seam",
-## "sharp", "crease"): one value per edge, 0 where there is none.
+## "sharp", "crease"): one value per edge, 0 where there is none. An edge
+## is marked by a value above 0: `sharp` below 0 is an edge marked soft
+## (shading/smooth_normals.lucb), which no delimit stops at.
 pub struct EdgeMark:
     let entry: const Attribute*?
 
@@ -103,7 +105,7 @@ pub struct EdgeMark:
         return entry.number(edge, 0)
 
     pub func marked(edge: usize) -> bool:
-        return self.value(edge) != 0.0
+        return self.value(edge) > 0.0
 
 ## A face value read from the face attribute `name` (a text's table index,
 ## so equal texts are equal values); -1 everywhere when there is none.

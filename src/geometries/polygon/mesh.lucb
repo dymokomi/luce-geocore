@@ -36,7 +36,7 @@ from math.vector import Vector3
 from math.matrix import Matrix4
 from geometries.query_cache import QueryCache, release_query
 from geometries.shading.shading_cache import ShadingCache, release_shading
-from geometries.shading.smooth_normals import Surface
+from geometries.shading.smooth_normals import Surface, EdgeMarks
 from geometries.shading.normal_refresh import refresh_normals
 from geometries.shading.curvature import CurvatureShape
 from geometries.triangle_index import TriangleIndex
@@ -159,6 +159,15 @@ pub struct Mesh: PolygonTopology:
         copy.triangles = self.triangles.share()
         copy.precise = self.precise.share()
         return copy
+
+    ## After attribute `name` on `domain` changed on this mesh (a snapshot
+    ## being built): the edge marks the shading reads (`sharp`) take a fresh
+    ## shading cache, which the snapshot shared with its source.
+    func reshade_for(name: str, domain: Domain) -> !:
+        if name != "sharp" or domain != Domain.edge: return
+        let fresh = try new ShadingCache() in memory.heap
+        release_shading(self.shading)
+        self.shading = fresh
 
     ## A heap snapshot sharing every column, cache and attribute: O(columns).
     func snapshot_storage() -> Mesh*!:

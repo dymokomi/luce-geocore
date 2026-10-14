@@ -266,6 +266,14 @@ extend Mesh:
     ## point), computed on first use.
     func smooth_normals() -> const Float3[]!:
         let incidence = try self.incidence()
+        # Edge marks (`sharp`) decide the shading where the mesh has them.
+        let marked = self.attributes.find("sharp", Domain.edge)
+        if marked >= 0:
+            let edges = try self.edge_arrays()
+            let edge_corners = try self.topology.edge_corners(edges.1, edges.0.length // 2)
+            let marks = EdgeMarks(try self.corner_faces(), edges.1, edge_corners.0, edge_corners.1, self.attributes.entry((usize)marked))
+            let shape = Surface(self.positions.view(), self.offsets.view(), self.corners.view(), self.normals.view(), incidence.0, incidence.1, &marks)
+            return try self.shading.get(&shape)
         let shape = Surface(self.positions.view(), self.offsets.view(), self.corners.view(), self.normals.view(), incidence.0, incidence.1)
         return try self.shading.get(&shape)
 

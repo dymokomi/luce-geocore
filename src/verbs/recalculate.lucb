@@ -1,0 +1,247 @@
+## Recalculate Normals: the group's faces wound one way with their
+## neighbors and facing out, after Blender's Recalculate Outside (Shift N)
+## and Maya's Conform. A breadth-first walk over each island of the group
+## (faces joined across edges of exactly two faces, both in the group;
+## each corner's link across its edge found in parallel first) gives every
+## face the winding that runs each shared edge opposite to its
+## neighbor's. The island then faces out: the volume it encloses about its
+## own center, measured with those windings, must be positive; an island
+## too flat to tell (a sheet: the volume is next to nothing beside its
+## area times its size) keeps the winding most of its faces had. Inside
+## turns every island in. Faces whose winding changes are rebuilt reversed
+## in parallel ranges; the rest are copied. The output selection is the
+## faces turned.
+
+let recalculate_parms: ParmSpec[1] = [ParmSpec("Inside", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Face every island in instead of out (Blender's Recalculate Inside).")]
+
+func recalculate_verb() -> Verb:
+    return Verb("Recalculate Normals", "Modeling", "Wind the group's faces one way with their neighbors, facing out of each island", Domain.face, true, recalculate_parms, true, cook_recalculate,
+                section = "Modify", family = "Normals", icon = "reverse-normals", picks = pick_pieces, whole = true)
+
+## What the reversing ranges read.
+struct ReverseWork:
+    let offsets: const i32[]
+    let corners: const i32[]
+    let turns: const u8[]
+
+## Faces first..<end: a flipped face's corners in reverse order (each its
+## own parent), any other copied whole.
+func reverse_range(context: void*, first: usize, end: usize, batch: FaceBatch*) -> !:
+    let work = (const ReverseWork*)context
+    for face in first..<end:
+        if work.turns[face] != 1:
+            try batch.copy_face(work.offsets, face)
+            continue
+        let start = (usize)work.offsets[face]
+        let stop = (usize)work.offsets[face + 1]
+        try batch.face((i32)face)
+        for at in 0..<stop - start:
+            let corner = stop - 1 - at
+            try batch.corner(work.corners[corner], (i32)corner)
+        try batch.end_face()
+
+func cook_recalculate(input: const VerbInput*, output: VerbOutput*) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let faces = topology.faces()
+    # Per face: 255 not reached yet, else 1 when its winding turns.
+    let turns = try new u8[faces] --- in memory.heap
+    defer free(turns) in memory.heap
+    for face in 0..<faces: turns[face] = 255
+    let queue = try new u32[faces] --- in memory.heap
+    defer free(queue) in memory.heap
+    if topology.corners.length >= 0x7FFFFFFF: error(errors.invalid, "Recalculate Normals takes fewer than 2^31 corners")
+    let links = try new u32[topology.corners.length] --- in memory.heap
+    defer free(links) in memory.heap
+    var linking = LinkWork(&topology, input.group, links[..<topology.corners.length])
+    try parallel.for_each_range(faces, 4096, (void*)&linking, link_faces)
+    let inside = input.parms.at(0) != 0.0
+    let positions = mesh.point_span()
+    var conflicts: usize = 0
+    var turned: usize = 0
+    for seed in 0..<faces:
+        if not input.group.get(seed) or turns[seed] != 255: continue
+        let island = orient_island(&topology, links[..<topology.corners.length], turns, queue, seed, &conflicts)
+        var outward = try island_outward(&topology, positions, turns, island)
+        if inside: outward = not outward
+        for face in island:
+            if not outward: turns[(usize)face] = 1 - turns[(usize)face]
+            if turns[(usize)face] == 1: turned += 1
+    if conflicts > 0:
+        output.warning = "Some faces cannot wind one way with all their neighbors (a Möbius strip, or faces of opposite windings joined); they keep the winding the walk reached first"
+        output.skipped = conflicts
+    # The output selection: the faces turned (what the verb changed).
+    output.selection = try BitsBuilder.zeros(faces)
+    output.selection_domain = Domain.face
+    for face in 0..<faces:
+        if turns[face] == 1: output.selection.set(face)
+    if turned == 0:
+        output.mesh = try mesh_share(mesh)
+        return
+    try output.builder.begin(mesh)
+    try output.builder.copy_points(mesh)
+    output.built = true
+    var work = ReverseWork(topology.offsets, topology.corners, turns[..<faces])
+    try batched_faces(&output.builder, mesh, faces, 4096, (void*)&work, reverse_range)
+
+## Each corner's link to its neighbor across its edge, found in parallel
+## before the walk: the neighbor's corner times two, plus one when both run
+## the edge the same way (one of the two faces turns); `no_link` where the
+## edge has not exactly two faces, both in the group.
+let no_link: u32 = 0xFFFFFFFF
+
+struct LinkWork:
+    let topology: const Topology*
+    let group: Bits
+    let links: u32[]
+
+func link_faces(context: void*, first: usize, end: usize, worker: usize):
+    let work = (LinkWork*)context
+    let topology = work.topology
+    for face in first..<end:
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            work.links[corner] = no_link
+            if not work.group.get(face): continue
+            let edge = (usize)topology.corner_edges[corner]
+            let start = (usize)topology.edge_corner_offsets[edge]
+            if (usize)topology.edge_corner_offsets[edge + 1] - start != 2: continue
+            var other = (usize)topology.edge_corners[start]
+            if other == corner: other = (usize)topology.edge_corners[start + 1]
+            let neighbor = (usize)topology.corner_faces[other]
+            if neighbor == face or not work.group.get(neighbor): continue
+            # Corners leaving the edge from the same point run it the same way.
+            let same: u32 = 1 if topology.corners[corner] == topology.corners[other] else 0
+            work.links[corner] = (u32)other * 2 + same
+
+## Walk the island of `seed` breadth first, giving each face (in `turns`)
+## the winding that runs every shared edge opposite to its neighbor's; the
+## island's faces in `queue`'s front, as a slice of it. An edge whose two
+## faces already disagree counts a conflict.
+func orient_island(topology: const Topology*, links: const u32[], turns: u8[], queue: u32[], seed: usize, conflicts: usize*) -> u32[]:
+    turns[seed] = 0
+    queue[0] = (u32)seed
+    var head: usize = 0
+    var tail: usize = 1
+    while head < tail:
+        let face = (usize)queue[head]
+        head += 1
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let link = links[corner]
+            if link == no_link: continue
+            let neighbor = (usize)topology.corner_faces[(usize)(link >> 1)]
+            let wanted = turns[face] ^ (u8)(link & 1)
+            if turns[neighbor] == 255:
+                turns[neighbor] = wanted
+                queue[tail] = (u32)neighbor
+                tail += 1
+            elif turns[neighbor] != wanted:
+                *conflicts += 1
+    return queue[..<tail]
+
+## What a piece of an island adds up: its corners' sum, count and bounds
+## (first pass); its faces' signed volume about the center, area and how
+## many keep their winding (second pass).
+struct IslandSums:
+    var sum: Vector3
+    var count: f64
+    var low: Vector3
+    var high: Vector3
+    var volume: f64
+    var area: f64
+    var kept: usize
+
+struct IslandWork:
+    let topology: const Topology*
+    let positions: const Float3[]
+    let turns: const u8[]
+    let island: const u32[]
+    let pieces: usize
+    var center: Vector3
+    let sums: IslandSums[]
+
+## The faces of piece `index`.
+func piece_range(work: const IslandWork*, index: usize) -> (usize, usize):
+    let size = (work.island.length + work.pieces - 1) // work.pieces
+    let first = math.min((f64)work.island.length, (f64)(index * size))
+    let end = math.min((f64)work.island.length, (f64)(index * size + size))
+    return ((usize)first, (usize)end)
+
+func island_bounds(context: void*, index: usize, worker: usize) -> !:
+    let work = (IslandWork*)context
+    let range = piece_range(work, index)
+    var sums = IslandSums(Vector3(), 0.0, Vector3(1.0e300, 1.0e300, 1.0e300), Vector3(-1.0e300, -1.0e300, -1.0e300), 0.0, 0.0, 0)
+    for at in range.0..<range.1:
+        let face = (usize)work.island[at]
+        for corner in (usize)work.topology.offsets[face]..<(usize)work.topology.offsets[face + 1]:
+            let p = work.positions[(usize)work.topology.corners[corner]]
+            sums.sum = Vector3(sums.sum.x + (f64)p.x, sums.sum.y + (f64)p.y, sums.sum.z + (f64)p.z)
+            sums.count += 1.0
+            sums.low = Vector3(math.min(sums.low.x, (f64)p.x), math.min(sums.low.y, (f64)p.y), math.min(sums.low.z, (f64)p.z))
+            sums.high = Vector3(math.max(sums.high.x, (f64)p.x), math.max(sums.high.y, (f64)p.y), math.max(sums.high.z, (f64)p.z))
+    work.sums[index] = sums
+
+func island_volume(context: void*, index: usize, worker: usize) -> !:
+    let work = (IslandWork*)context
+    let range = piece_range(work, index)
+    let center = work.center
+    var volume = 0.0
+    var area = 0.0
+    var kept: usize = 0
+    for at in range.0..<range.1:
+        let face = (usize)work.island[at]
+        let start = (usize)work.topology.offsets[face]
+        let stop = (usize)work.topology.offsets[face + 1]
+        let a = work.positions[(usize)work.topology.corners[start]].vector().subtract(center)
+        var sum = 0.0
+        var newell = Vector3()
+        var b = work.positions[(usize)work.topology.corners[start + 1]].vector().subtract(center)
+        for corner in start + 1..<stop - 1:
+            let c = work.positions[(usize)work.topology.corners[corner + 1]].vector().subtract(center)
+            let crossed = b.cross(c)
+            sum += a.dot(crossed)
+            newell = newell.add(crossed.add(a.cross(b)).add(c.cross(a)))
+            b = c
+        volume += -sum if work.turns[face] == 1 else sum
+        area += newell.length() * 0.5
+        if work.turns[face] == 0: kept += 1
+    work.sums[index].volume = volume
+    work.sums[index].area = area
+    work.sums[index].kept = kept
+
+## Whether `island`, wound as `turns` says, faces out: the volume it
+## encloses about its center is positive, or, for a sheet too flat to
+## tell, most of its faces keep their winding. Both sums run in pieces in
+## parallel.
+func island_outward(topology: const Topology*, positions: const Float3[], turns: const u8[], island: const u32[]) -> bool!:
+    let pieces = math.max(1.0, math.min(256.0, (f64)(island.length // 4096)))
+    let count = (usize)pieces
+    # A small island (most of them) sums on this thread, in one piece.
+    var single: IslandSums[1] = [IslandSums(Vector3(), 0.0, Vector3(), Vector3(), 0.0, 0.0, 0)]
+    let sums = single[..<1] if count == 1 else try new IslandSums[count] --- in memory.heap
+    defer:
+        if count > 1: free(sums) in memory.heap
+    var work = IslandWork(topology, positions, turns, island, count, Vector3(), sums[..<count])
+    if count == 1: try island_bounds((void*)&work, 0, 0)
+    else: try parallel.for_each(count, (void*)&work, island_bounds)
+    var total = Vector3()
+    var corners = 0.0
+    var low = Vector3(1.0e300, 1.0e300, 1.0e300)
+    var high = Vector3(-1.0e300, -1.0e300, -1.0e300)
+    for piece in sums[..<count]:
+        total = total.add(piece.sum)
+        corners += piece.count
+        low = Vector3(math.min(low.x, piece.low.x), math.min(low.y, piece.low.y), math.min(low.z, piece.low.z))
+        high = Vector3(math.max(high.x, piece.high.x), math.max(high.y, piece.high.y), math.max(high.z, piece.high.z))
+    work.center = total.multiply_scalar(1.0 / math.max(1.0, corners))
+    if count == 1: try island_volume((void*)&work, 0, 0)
+    else: try parallel.for_each(count, (void*)&work, island_volume)
+    var volume = 0.0
+    var area = 0.0
+    var kept: usize = 0
+    for piece in sums[..<count]:
+        volume += piece.volume
+        area += piece.area
+        kept += piece.kept
+    let size = high.subtract(low).length()
+    if math.abs(volume) > 1.0e-6 * area * size: return volume > 0.0
+    return kept * 2 >= island.length

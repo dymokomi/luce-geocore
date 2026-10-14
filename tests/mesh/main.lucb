@@ -53,6 +53,8 @@ import sweep_checks
 import knife_checks
 import reduce_checks
 import shape_checks
+import shape_loop_checks
+import normals_tool_checks
 import large_face_checks
 import contract_checks
 import unit_checks
@@ -237,6 +239,12 @@ func checks(arguments: str[]) -> i32!:
     settle(&tracker)
     inject(&tracker, 300, shape_checks.exercise)
     try shape_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, shape_loop_checks.exercise)
+    try shape_loop_checks.exercise()
+    settle(&tracker)
+    inject(&tracker, 300, normals_tool_checks.exercise)
+    try normals_tool_checks.exercise()
     settle(&tracker)
     inject(&tracker, 300, subdivide_select_checks.exercise)
     try subdivide_select_checks.exercise()

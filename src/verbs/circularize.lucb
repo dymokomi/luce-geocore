@@ -1,0 +1,609 @@
+## Circularize: the group's loops made circles, after Maya's Circularize and
+## Blender's LoopTools Circle. Edges give their chains (edge_chains.lucb):
+## a loop becomes a circle round its center (the points' mean weighted by
+## their edges' lengths) in its plane (Newell's normal), a run an arc of the
+## circle that fits it best (Kåsa's least squares in its plane). Faces give
+## their regions' outlines, each a circle, and the points inside a region
+## follow: an outline that is star-shaped about its center maps every
+## inner point along its ray from the center, so a region keeps its rings
+## and spokes; a ring of faces between two outlines (a hole's rim) becomes
+## the ring between two concentric circles. Radius 0 fits each circle to
+## its points; Even spaces a loop's points at equal angles (else each keeps
+## its own); Flatten puts them in the plane (else each keeps its height
+## off it); Twist turns them about the center; Influence blends from where
+## they were. The output selection is the group.
+
+let circularize_parms: ParmSpec[5] = [
+    ParmSpec("Radius", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "The circle's radius; 0 fits it to each loop's points. A ring's inner circle keeps its share of the outer.", 2.0),
+    ParmSpec("Even", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Space each loop's points at equal angles; off, each point keeps its angle about the center."),
+    ParmSpec("Flatten", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Put the loop in its plane; off, each point keeps its height off the plane."),
+    ParmSpec("Twist", ParmKind.number, 0.0, -360.0, 360.0, 1, "", "Turn the points about the center by this many degrees.", more = true),
+    ParmSpec("Influence", ParmKind.number, 1.0, 0.0, 1.0, 1, "", "How far the points move toward the circle: 0 leaves them, 1 is the circle.")]
+
+let circularize_also: Domain[1] = [Domain.face]
+let circularize_picks: PickSpec[1] = [PickSpec("Loops", "edges faces points")]
+
+func circularize_verb() -> Verb:
+    return Verb("Circularize", "Deform", "Make the group's edge loops, or its regions' outlines, circles", Domain.edge, true, circularize_parms, false, cook_circularize, false, circularize_also,
+                section = "Modify", family = "Shape", icon = "circle-center", picks = circularize_picks, drag = 4, drag_mode = "amount")
+
+## How a run of Circularize places points.
+struct CircleSettings:
+    let radius: f64
+    let even: bool
+    let flatten: bool
+    let twist: f64
+    let influence: f64
+
+## A plane frame: a center, its normal and two axes in it.
+struct Frame:
+    let center: Vector3
+    let normal: Vector3
+    let u: Vector3
+    let v: Vector3
+
+## The two axes square to `normal`, the first along `toward` where it can be.
+func frame_at(center: Vector3, normal: Vector3, toward: Vector3) -> Frame:
+    var u = toward.subtract(normal.multiply_scalar(toward.dot(normal)))
+    if u.length() < 1.0e-12 * math.max(1.0, toward.length()):
+        u = Vector3(1.0, 0.0, 0.0) if math.abs(normal.x) < 0.9 else Vector3(0.0, 1.0, 0.0)
+        u = u.subtract(normal.multiply_scalar(u.dot(normal)))
+    u = u.multiply_scalar(1.0 / u.length())
+    return Frame(center, normal, u, normal.cross(u))
+
+## Wrap an angle into (-π, π].
+func wrapped(angle: f64) -> f64:
+    var a = angle
+    while a > math.pi: a -= 2.0 * math.pi
+    while a <= -math.pi: a += 2.0 * math.pi
+    return a
+
+## The frame of the loop through `chain`'s points: its center (weighted by
+## the edges at each point), Newell's normal, the first axis toward its
+## first point; none for a loop with no area. Also its area.
+func loop_frame(positions: const Float3[], chain: const i32[]) -> (Frame, f64)?:
+    let count = chain.length
+    var center = Vector3()
+    var total = 0.0
+    for at in 0..<count:
+        let p = positions[(usize)chain[at]].vector()
+        let before = positions[(usize)chain[(at + count - 1) % count]].vector()
+        let after = positions[(usize)chain[(at + 1) % count]].vector()
+        let weight = p.subtract(before).length() + after.subtract(p).length()
+        center = center.add(p.multiply_scalar(weight))
+        total += weight
+    if not (total > 0.0): return none
+    center = center.multiply_scalar(1.0 / total)
+    var newell = Vector3()
+    for at in 0..<count:
+        let a = positions[(usize)chain[at]].vector().subtract(center)
+        let b = positions[(usize)chain[(at + 1) % count]].vector().subtract(center)
+        newell = newell.add(a.cross(b))
+    let length = newell.length()
+    if length < 1.0e-24 or length < 1.0e-12 * total * total: return none
+    let normal = newell.multiply_scalar(1.0 / length)
+    return (frame_at(center, normal, positions[(usize)chain[0]].vector().subtract(center)), length * 0.5)
+
+## One loop seen from its circle's frame, in the order of increasing angle:
+## where its points were (angle, distance off the center, height off the
+## plane) and where they go (each angle's shift, each new height), and the
+## circle's radius. Inner points of a region look their place up in it.
+struct Polar:
+    var angles: Growing[f64]
+    var radii: Growing[f64]
+    var heights: Growing[f64]
+    ## New angle less old, unwrapped along the order; one more entry for
+    ## the step from the last point round to the first.
+    var shifts: Growing[f64]
+    var raised: Growing[f64]
+    var radius: f64
+    ## Whether every ray from the center crosses the loop once.
+    var star: bool
+
+    func init():
+        self.angles = Growing[f64]()
+        self.radii = Growing[f64]()
+        self.heights = Growing[f64]()
+        self.shifts = Growing[f64]()
+        self.raised = Growing[f64]()
+        self.radius = 0.0
+        self.star = false
+
+    func close():
+        self.angles.close()
+        self.radii.close()
+        self.heights.close()
+        self.shifts.close()
+        self.raised.close()
+
+    ## Along the ray at `angle`: where the loop was (distance, height),
+    ## the angle that ray's crossing goes to, and its new height.
+    func at(angle: f64) -> (f64, f64, f64, f64):
+        let count = self.angles.count
+        let first = self.angles.items[0]
+        var x = first + wrapped(angle - first)
+        if x < first: x += 2.0 * math.pi
+        # The last entry not past x.
+        var low: usize = 0
+        var high = count
+        while high - low > 1:
+            let middle = (low + high) // 2
+            if self.angles.items[middle] <= x: low = middle
+            else: high = middle
+        let next = low + 1
+        let next_angle = self.angles.items[next] if next < count else first + 2.0 * math.pi
+        let next_radius = self.radii.items[next % count]
+        # Where the ray crosses the side from entry `low` to the next.
+        let a = (self.radii.items[low] * math.cos(self.angles.items[low]), self.radii.items[low] * math.sin(self.angles.items[low]))
+        let b = (next_radius * math.cos(next_angle), next_radius * math.sin(next_angle))
+        let d = (math.cos(x), math.sin(x))
+        let side = (b.0 - a.0, b.1 - a.1)
+        let det = d.1 * side.0 - d.0 * side.1
+        var s = 0.0
+        var distance = 0.0
+        if math.abs(det) > 1.0e-30:
+            s = math.clamp((d.0 * a.1 - d.1 * a.0) / det, 0.0, 1.0)
+            distance = math.sqrt((a.0 + s * side.0) * (a.0 + s * side.0) + (a.1 + s * side.1) * (a.1 + s * side.1))
+        else:
+            let span = next_angle - self.angles.items[low]
+            s = (x - self.angles.items[low]) / span if span > 0.0 else 0.0
+            distance = self.radii.items[low] + s * (next_radius - self.radii.items[low])
+        let shift = self.shifts.items[low] + s * (self.shifts.items[next] - self.shifts.items[low])
+        let height = self.heights.items[low] + s * (self.heights.items[next % count] - self.heights.items[low])
+        let raised = self.raised.items[low] + s * (self.raised.items[next % count] - self.raised.items[low])
+        return (distance, x + shift, height, raised)
+
+## Place `chain`'s loop on its circle in `frame`: each point's new place in
+## `targets` (beside the chain), and the loop's `polar` view. `scale` sets
+## the radius as a share of the fit (a ring's inner loop) when above 0.
+func circle_loop(positions: const Float3[], chain: const i32[], frame: Frame, settings: const CircleSettings*, scale: f64, targets: Vector3[], polar: Polar*) -> !:
+    let count = chain.length
+    let angles = try new f64[count] --- in memory.heap
+    defer free(angles) in memory.heap
+    let radii = try new f64[count] --- in memory.heap
+    defer free(radii) in memory.heap
+    let heights = try new f64[count] --- in memory.heap
+    defer free(heights) in memory.heap
+    var fit = 0.0
+    var total = 0.0
+    for at in 0..<count:
+        let d = positions[(usize)chain[at]].vector().subtract(frame.center)
+        heights[at] = d.dot(frame.normal)
+        let x = d.dot(frame.u)
+        let y = d.dot(frame.v)
+        angles[at] = math.atan2(y, x)
+        radii[at] = math.sqrt(x * x + y * y)
+        let before = positions[(usize)chain[(at + count - 1) % count]].vector()
+        let after = positions[(usize)chain[(at + 1) % count]].vector()
+        let p = positions[(usize)chain[at]].vector()
+        let weight = p.subtract(before).length() + after.subtract(p).length()
+        fit += radii[at] * weight
+        total += weight
+    fit = fit / total if total > 0.0 else 0.0
+    # Which way round the loop runs about the normal, and whether its
+    # angles only ever grow that way (star-shaped about the center).
+    var winding = 0.0
+    for at in 0..<count: winding += wrapped(angles[(at + 1) % count] - angles[at])
+    let way = 1.0 if winding > 0.0 else -1.0
+    var star = math.abs(winding) > math.pi
+    for at in 0..<count:
+        if wrapped(angles[(at + 1) % count] - angles[at]) * way <= 0.0: star = false
+    var radius = settings.radius if settings.radius > 0.0 else fit
+    if scale > 0.0: radius = fit * scale
+    # Even: the rotation that best fits equal steps to the points' own angles.
+    let twist = settings.twist * math.pi / 180.0
+    var start = 0.0
+    if settings.even:
+        var sine = 0.0
+        var cosine = 0.0
+        for at in 0..<count:
+            let offset = angles[at] - way * 2.0 * math.pi * (f64)at / (f64)count
+            sine += math.sin(offset)
+            cosine += math.cos(offset)
+        start = math.atan2(sine, cosine)
+    let goes = try new f64[count] --- in memory.heap
+    defer free(goes) in memory.heap
+    for at in 0..<count:
+        goes[at] = (start + way * 2.0 * math.pi * (f64)at / (f64)count if settings.even else angles[at]) + twist
+        let height = 0.0 if settings.flatten else heights[at]
+        targets[at] = frame.center.add(frame.u.multiply_scalar(radius * math.cos(goes[at]))).add(frame.v.multiply_scalar(radius * math.sin(goes[at]))).add(frame.normal.multiply_scalar(height))
+    # The polar view, from the point of least angle in increasing order.
+    polar.radius = radius
+    polar.star = star
+    var lowest: usize = 0
+    for at in 1..<count:
+        if angles[at] < angles[lowest]: lowest = at
+    var angle = angles[lowest]
+    var shift = wrapped(goes[lowest] - angles[lowest])
+    for step in 0..<count:
+        let at = (lowest + step) % count if way > 0.0 else (lowest + count - step) % count
+        if step > 0:
+            let before = (lowest + step - 1) % count if way > 0.0 else (lowest + count - step + 1) % count
+            angle += wrapped(angles[at] - angles[before])
+            shift += wrapped(wrapped(goes[at] - angles[at]) - shift)
+        try polar.angles.push(angle)
+        try polar.radii.push(radii[at])
+        try polar.heights.push(heights[at])
+        try polar.shifts.push(shift)
+        try polar.raised.push(0.0 if settings.flatten else heights[at])
+    try polar.shifts.push(shift + wrapped(polar.shifts.items[0] - shift))
+
+## The arc that fits an open run best, its points placed on it (in
+## `targets`); false for a run too straight or short to bend.
+func arc_run(positions: const Float3[], chain: const i32[], settings: const CircleSettings*, targets: Vector3[]) -> bool:
+    let count = chain.length
+    if count < 3: return false
+    var center = Vector3()
+    for point in chain: center = center.add(positions[(usize)point].vector())
+    center = center.multiply_scalar(1.0 / (f64)count)
+    var newell = Vector3()
+    var size = 0.0
+    for at in 0..<count:
+        let a = positions[(usize)chain[at]].vector().subtract(center)
+        let b = positions[(usize)chain[(at + 1) % count]].vector().subtract(center)
+        newell = newell.add(a.cross(b))
+        size = math.max(size, a.length())
+    if newell.length() < 1.0e-9 * size * size: return false
+    let frame = frame_at(center, newell.multiply_scalar(1.0 / newell.length()), positions[(usize)chain[0]].vector().subtract(center))
+    # Kåsa: x² + y² + D x + E y + F = 0 by least squares.
+    var m = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    var r = (0.0, 0.0, 0.0)
+    for point in chain:
+        let d = positions[(usize)point].vector().subtract(center)
+        let x = d.dot(frame.u)
+        let y = d.dot(frame.v)
+        let z = -(x * x + y * y)
+        m = (m.0 + x * x, m.1 + x * y, m.2 + x, m.3 + y * y, m.4 + y, m.5 + 1.0)
+        r = (r.0 + x * z, r.1 + y * z, r.2 + z)
+    # Solve [[xx xy x] [xy yy y] [x y n]] (D E F) = r by Cramer's rule.
+    let det = m.0 * (m.3 * m.5 - m.4 * m.4) - m.1 * (m.1 * m.5 - m.4 * m.2) + m.2 * (m.1 * m.4 - m.3 * m.2)
+    if math.abs(det) < 1.0e-30: return false
+    let dd = (r.0 * (m.3 * m.5 - m.4 * m.4) - m.1 * (r.1 * m.5 - m.4 * r.2) + m.2 * (r.1 * m.4 - m.3 * r.2)) / det
+    let ee = (m.0 * (r.1 * m.5 - r.2 * m.4) - r.0 * (m.1 * m.5 - m.4 * m.2) + m.2 * (m.1 * r.2 - r.1 * m.2)) / det
+    let ff = (m.0 * (m.3 * r.2 - m.4 * r.1) - m.1 * (m.1 * r.2 - m.2 * r.1) + r.0 * (m.1 * m.4 - m.3 * m.2)) / det
+    let cx = -dd * 0.5
+    let cy = -ee * 0.5
+    let squared = cx * cx + cy * cy - ff
+    if not (squared > 0.0) or not math.is_finite(squared): return false
+    let radius = settings.radius if settings.radius > 0.0 else math.sqrt(squared)
+    let middle = center.add(frame.u.multiply_scalar(cx)).add(frame.v.multiply_scalar(cy))
+    # Angles about the fitted center, unwrapped along the run.
+    var first = 0.0
+    var last = 0.0
+    var angle = 0.0
+    for at in 0..<count:
+        let d = positions[(usize)chain[at]].vector().subtract(middle)
+        let a = math.atan2(d.dot(frame.v), d.dot(frame.u))
+        angle = a if at == 0 else angle + wrapped(a - angle)
+        if at == 0: first = angle
+        last = angle
+        targets[at] = Vector3(angle, d.dot(frame.normal), 0.0)
+    let twist = settings.twist * math.pi / 180.0
+    for at in 0..<count:
+        let own = targets[at]
+        let goes = (first + (last - first) * (f64)at / (f64)(count - 1) if settings.even else own.x) + twist
+        let height = 0.0 if settings.flatten else own.y
+        targets[at] = middle.add(frame.u.multiply_scalar(radius * math.cos(goes))).add(frame.v.multiply_scalar(radius * math.sin(goes))).add(frame.normal.multiply_scalar(height))
+    return true
+
+## A region of faces: its outline loops (their chain indices) and how its
+## inner points map: the frame shared by its loops and the polar views of
+## its outer and inner loop (-1: none).
+struct Region:
+    var loops: Growing[u32]
+    var frame: Frame
+    var outer: i64
+    var inner: i64
+
+    func init():
+        self.loops = Growing[u32]()
+        self.frame = Frame(Vector3(), Vector3(), Vector3(), Vector3())
+        self.outer = -1
+        self.inner = -1
+
+    func close():
+        self.loops.close()
+
+## What mapping a region's inner points reads, per point in parallel.
+struct InnerWork:
+    let points: const u32[]
+    let regions: const i32[]
+    let rings: const Region[]
+    let polars: const Polar[]
+    let positions: Float3[]
+    let influence: f64
+
+func map_inner(context: void*, first: usize, end: usize, worker: usize):
+    let work = (InnerWork*)context
+    for at in first..<end:
+        let point = (usize)work.points[at]
+        let region = &work.rings[(usize)work.regions[at]]
+        let frame = region.frame
+        let p = work.positions[point].vector()
+        let d = p.subtract(frame.center)
+        let h = d.dot(frame.normal)
+        let x = d.dot(frame.u)
+        let y = d.dot(frame.v)
+        let angle = math.atan2(y, x)
+        let distance = math.sqrt(x * x + y * y)
+        let outer = &work.polars[(usize)region.outer]
+        let out = outer.at(angle)
+        var reach = 0.0
+        var goes = out.1
+        var height = h
+        if region.inner < 0:
+            let share = distance / out.0 if out.0 > 1.0e-30 else 0.0
+            reach = share * outer.radius
+            height = h + share * (out.3 - out.2)
+        else:
+            let inner = &work.polars[(usize)region.inner]
+            let within = inner.at(angle)
+            let span = out.0 - within.0
+            let t = math.clamp((distance - within.0) / span, 0.0, 1.0) if span > 1.0e-30 else 0.0
+            reach = inner.radius + t * (outer.radius - inner.radius)
+            goes = within.1 + t * wrapped(out.1 - within.1)
+            height = h + (within.3 - within.2) + t * ((out.3 - out.2) - (within.3 - within.2))
+        let target = frame.center.add(frame.u.multiply_scalar(reach * math.cos(goes))).add(frame.v.multiply_scalar(reach * math.sin(goes))).add(frame.normal.multiply_scalar(height))
+        work.positions[point] = Float3.of(p.add(target.subtract(p).multiply_scalar(work.influence)))
+
+func cook_circularize(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    let settings = CircleSettings(p.at(0), p.at(1) != 0.0, p.at(2) != 0.0, p.at(3), p.at(4))
+    if not (settings.radius >= 0.0) or not math.is_finite(settings.radius): error(errors.invalid, "Circularize's radius must be finite and not negative")
+    if not math.is_finite(settings.twist) or not (settings.influence >= 0.0 and settings.influence <= 1.0): error(errors.invalid, "Circularize's twist must be finite and its influence in 0..1")
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    output.positions = mesh_positions(mesh)
+    _ = try output.positions.writable()
+    let positions = output.positions.span()
+    output.selection = try BitsBuilder.copy_of(input.group)
+    output.selection_domain = input.domain
+    var moved = try BitsBuilder.zeros(topology.points)
+    defer moved.close()
+    if input.domain == Domain.face:
+        try circularize_regions(input, &topology, &settings, positions, &moved, output)
+    else:
+        try circularize_chains(&topology, input.group, &settings, positions, &moved, output)
+    try output.moved.reserve(moved.view().population())
+    for point in 0..<topology.points:
+        if moved.view().get(point): try output.moved.push((u32)point)
+
+## Edges: each loop its circle, each run its arc. The chains are fitted
+## in parallel, each into its own slots of `targets` (beside the chain
+## points); then their points move in order, so a point two runs share (a
+## branch) takes the later run's place, as one thread would leave it.
+func circularize_chains(topology: const Topology*, group: Bits, settings: const CircleSettings*, positions: Float3[], moved: BitsBuilder*, output: VerbOutput*) -> !:
+    var chains = EdgeChains()
+    defer chains.close()
+    try edge_chains(topology, group, &chains)
+    let count = chains.count()
+    let targets = try new Vector3[chains.points.count] --- in memory.heap
+    defer free(targets) in memory.heap
+    let placed = try new bool[count] --- in memory.heap
+    defer free(placed) in memory.heap
+    var work = ChainFit(&chains, positions, settings, targets[..<chains.points.count], placed[..<count])
+    work.failed.store(0, .relaxed)
+    try parallel.for_each_range(count, 16, (void*)&work, fit_chains)
+    if work.failed.load(.acquire) != 0: error(memory.exhausted, "out of memory fitting circles")
+    var skipped: usize = 0
+    for index in 0..<count:
+        if not placed[index]:
+            skipped += 1
+            continue
+        let first = (usize)chains.starts.items[index]
+        let chain = chains.chain(index)
+        try place_chain(positions, chain, targets[first..<first + chain.length], settings.influence, moved)
+    if skipped > 0:
+        output.warning = "Some chains are too straight or too short to make a circle; they stay"
+        output.skipped = skipped
+
+## What fitting the chains reads and writes, per chain in parallel.
+struct ChainFit:
+    let chains: const EdgeChains*
+    let positions: const Float3[]
+    let settings: const CircleSettings*
+    let targets: Vector3[]
+    let placed: bool[]
+    var failed: @u32
+
+func fit_chains(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ChainFit*)context
+    for index in first..<end:
+        let chain = work.chains.chain(index)
+        let start = (usize)work.chains.starts.items[index]
+        let slots = work.targets[start..<start + chain.length]
+        work.placed[index] = false
+        if work.chains.closed.items[index] != 0 and chain.length >= 3:
+            let found = loop_frame(work.positions, chain) else continue
+            var polar = Polar()
+            circle_loop(work.positions, chain, found.0, work.settings, 0.0, slots, &polar) catch failure:
+                polar.close()
+                work.failed.store(1, .relaxed)
+                continue
+            polar.close()
+            work.placed[index] = true
+        elif work.chains.closed.items[index] == 0:
+            work.placed[index] = arc_run(work.positions, chain, work.settings, slots)
+
+## Move `chain`'s points `influence` of the way to `targets`.
+func place_chain(positions: Float3[], chain: const i32[], targets: const Vector3[], influence: f64, moved: BitsBuilder*) -> !:
+    for at in 0..<chain.length:
+        let point = (usize)chain[at]
+        let p = positions[point].vector()
+        positions[point] = Float3.of(p.add(targets[at].subtract(p).multiply_scalar(influence)))
+        moved.set(point)
+
+## Faces: each region's outlines circles, its inner points mapped.
+func circularize_regions(input: const VerbInput*, topology: const Topology*, settings: const CircleSettings*, positions: Float3[], moved: BitsBuilder*, output: VerbOutput*) -> !:
+    let faces = topology.faces()
+    let group = input.group
+    # Regions: the group's faces joined across edges both of whose faces are
+    # in the group.
+    let regions = try new i32[faces] --- in memory.heap
+    defer free(regions) in memory.heap
+    let queue = try new u32[faces] --- in memory.heap
+    defer free(queue) in memory.heap
+    for face in 0..<faces: regions[face] = -1
+    var region_count: usize = 0
+    for seed in 0..<faces:
+        if not group.get(seed) or regions[seed] >= 0: continue
+        regions[seed] = (i32)region_count
+        queue[0] = (u32)seed
+        var head: usize = 0
+        var tail: usize = 1
+        while head < tail:
+            let face = (usize)queue[head]
+            head += 1
+            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                let edge = (usize)topology.corner_edges[corner]
+                for slot in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+                    let other = (usize)topology.corner_faces[(usize)topology.edge_corners[slot]]
+                    if group.get(other) and regions[other] < 0:
+                        regions[other] = (i32)region_count
+                        queue[tail] = (u32)other
+                        tail += 1
+        region_count += 1
+    # The outlines: edges of exactly one of the group's faces.
+    var outline = try BitsBuilder.zeros(topology.edges())
+    defer outline.close()
+    for edge in 0..<topology.edges():
+        var inside: usize = 0
+        for slot in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+            if group.get((usize)topology.corner_faces[(usize)topology.edge_corners[slot]]): inside += 1
+        if inside == 1: outline.set(edge)
+    var chains = EdgeChains()
+    defer chains.close()
+    try edge_chains(topology, outline.view(), &chains)
+    let rings = try new Region[region_count] --- in memory.heap
+    for at in 0..<region_count: rings[at] = Region()
+    defer:
+        for at in 0..<region_count: rings[at].close()
+        free(rings) in memory.heap
+    for index in 0..<chains.count():
+        if chains.closed.items[index] == 0 or chains.chain(index).length < 3: continue
+        let face = region_face(topology, group, chains.chain(index))
+        try rings[(usize)regions[face]].loops.push((u32)index)
+    var polars = Growing[Polar]()
+    defer:
+        for at in 0..<polars.count: polars.items[at].close()
+        polars.close()
+    var targets = Growing[Vector3]()
+    defer targets.close()
+    for region in 0..<region_count: try circle_region(positions, &chains, &rings[region], settings, &polars, &targets, moved)
+    # Inner points: on the group's faces, off every outline, in a region
+    # whose outlines map them.
+    var inner = Growing[u32]()
+    defer inner.close()
+    var owners = Growing[i32]()
+    defer owners.close()
+    var on_outline = try BitsBuilder.zeros(topology.points)
+    defer on_outline.close()
+    for edge in 0..<topology.edges():
+        if not outline.view().get(edge): continue
+        on_outline.set((usize)topology.edge_points[edge * 2])
+        on_outline.set((usize)topology.edge_points[edge * 2 + 1])
+    var seen = try BitsBuilder.zeros(topology.points)
+    defer seen.close()
+    var unmapped = try BitsBuilder.zeros(region_count)
+    defer unmapped.close()
+    for face in 0..<faces:
+        if not group.get(face): continue
+        let ring = &rings[(usize)regions[face]]
+        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+            let point = (usize)topology.corners[corner]
+            if on_outline.view().get(point) or seen.view().get(point): continue
+            seen.set(point)
+            if ring.outer < 0:
+                unmapped.set((usize)regions[face])
+                continue
+            try inner.push((u32)point)
+            try owners.push(regions[face])
+            moved.set(point)
+    var work = InnerWork(inner.view(), owners.view(), rings[..<region_count], polars.view(), positions, settings.influence)
+    try parallel.for_each_range(inner.count, 4096, (void*)&work, map_inner)
+    let kept = unmapped.view().population()
+    if kept > 0:
+        output.warning = "Some regions' outlines are not star-shaped about their centers, or a region has more than two outlines: their outlines are circles but their inner points stay"
+        output.skipped = kept
+
+## The group face along the first edge of an outline chain.
+func region_face(topology: const Topology*, group: Bits, chain: const i32[]) -> usize:
+    let a = (usize)chain[0]
+    let b = (usize)chain[1]
+    for slot in (usize)topology.point_edge_offsets[a]..<(usize)topology.point_edge_offsets[a + 1]:
+        let edge = (usize)topology.point_edges[slot]
+        let other = (usize)topology.edge_points[edge * 2] + (usize)topology.edge_points[edge * 2 + 1] - a
+        if other != b: continue
+        for at in (usize)topology.edge_corner_offsets[edge]..<(usize)topology.edge_corner_offsets[edge + 1]:
+            let face = (usize)topology.corner_faces[(usize)topology.edge_corners[at]]
+            if group.get(face): return face
+    trap("an outline edge has no face of the group")
+
+## A region's outlines made circles (one: about its own center; two: the
+## ring between two concentric circles, about the outer's center), and,
+## when they map its inner points, its frame and polar views set. Each loop
+## is placed as soon as it is measured: loops share no points, and the
+## inner points read only the polar views.
+func circle_region(positions: Float3[], chains: const EdgeChains*, ring: Region*, settings: const CircleSettings*, polars: Growing[Polar]*, targets: Growing[Vector3]*, moved: BitsBuilder*) -> !:
+    let count = ring.loops.count
+    if count == 0: return
+    # The outer loop: the one of most area.
+    var outer: usize = 0
+    var best = -1.0
+    var outer_frame = Frame(Vector3(), Vector3(), Vector3(), Vector3())
+    for at in 0..<count:
+        if let found = loop_frame(positions, chains.chain((usize)ring.loops.items[at])):
+            if found.1 > best:
+                best = found.1
+                outer = at
+                outer_frame = found.0
+    if best < 0.0: return
+    let shared = count == 2
+    ring.frame = outer_frame
+    # The outer loop first: a ring's inner circle keeps its share of it.
+    var scale = 0.0
+    for step in 0..<count:
+        let at = outer if step == 0 else (step - 1 if step - 1 < outer else step)
+        let chain = chains.chain((usize)ring.loops.items[at])
+        var frame = outer_frame
+        if not shared and at != outer:
+            let found = loop_frame(positions, chain) else continue
+            frame = found.0
+        try targets.fill(chain.length, Vector3())
+        var polar = Polar()
+        circle_loop(positions, chain, frame, settings, scale if step > 0 and shared else 0.0, targets.items[..<chain.length], &polar) catch failure:
+            polar.close()
+            error(failure.code, failure.message)
+        if step == 0 and shared:
+            let fit = polar_fit(positions, chain, frame)
+            scale = polar.radius / fit if fit > 0.0 else 0.0
+        let star = polar.star
+        polars.push(polar) catch failure:
+            polar.close()
+            error(failure.code, failure.message)
+        let index = (i64)polars.count - 1
+        if step == 0: ring.outer = index if star else -2
+        elif shared: ring.inner = index if star else -2
+        try place_chain(positions, chain, targets.view()[..<chain.length], settings.influence, moved)
+    # Inner points map only through star-shaped outlines, one or two.
+    if count > 2 or ring.outer < 0 or (shared and ring.inner < 0):
+        ring.outer = -1
+        ring.inner = -1
+
+## A loop's mean distance from `frame`'s center in its plane, weighted by
+## the edges at each point (circle_loop's fit).
+func polar_fit(positions: const Float3[], chain: const i32[], frame: Frame) -> f64:
+    let count = chain.length
+    var fit = 0.0
+    var total = 0.0
+    for at in 0..<count:
+        let p = positions[(usize)chain[at]].vector()
+        let d = p.subtract(frame.center)
+        let x = d.dot(frame.u)
+        let y = d.dot(frame.v)
+        let before = positions[(usize)chain[(at + count - 1) % count]].vector()
+        let after = positions[(usize)chain[(at + 1) % count]].vector()
+        let weight = p.subtract(before).length() + after.subtract(p).length()
+        fit += math.sqrt(x * x + y * y) * weight
+        total += weight
+    return fit / total if total > 0.0 else 0.0

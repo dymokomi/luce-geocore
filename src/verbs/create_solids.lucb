@@ -9,7 +9,7 @@ let platonic_parms: ParmSpec[6] = [
 let platonic_place: PlaceSpec = PlaceSpec("radius", 1, position = 2, up = 3)
 
 func platonic_verb() -> Verb:
-    return Verb("Platonic", "Primitives", "A Platonic solid: tetrahedron, cube, octahedron, dodecahedron or icosahedron", Domain.face, false, platonic_parms, true, cook_platonic, label = "Platonic Solid", section = "Create", family = "Primitives", icon = "cube", inputs = 0, gesture = "create", place = platonic_place)
+    return Verb("Platonic", "Primitives", "A Platonic solid: tetrahedron, cube, octahedron, dodecahedron or icosahedron", Domain.face, false, platonic_parms, true, cook_platonic, label = "Platonic Solid", section = "Create", family = "Primitives", icon = "platonic-solid", inputs = 0, gesture = "create", place = platonic_place)
 
 func cook_platonic(input: const VerbInput*, output: VerbOutput*) -> !:
     let p = input.parms

@@ -26,7 +26,7 @@ let icosphere_parms: ParmSpec[6] = [
 let icosphere_place: PlaceSpec = PlaceSpec("radius", 0, position = 2, up = 3)
 
 func icosphere_verb() -> Verb:
-    return Verb("Icosphere", "Primitives", "A sphere of even triangles: the icosahedron subdivided", Domain.face, false, icosphere_parms, true, cook_icosphere, section = "Create", family = "Primitives", icon = "sphere", inputs = 0, wheel = 1, gesture = "create", place = icosphere_place)
+    return Verb("Icosphere", "Primitives", "A sphere of even triangles: the icosahedron subdivided", Domain.face, false, icosphere_parms, true, cook_icosphere, section = "Create", family = "Primitives", icon = "icosphere", inputs = 0, wheel = 1, gesture = "create", place = icosphere_place)
 
 func cook_icosphere(input: const VerbInput*, output: VerbOutput*) -> !:
     let p = input.parms
@@ -38,7 +38,7 @@ let quad_sphere_parms: ParmSpec[6] = [
     position_parm, up_parm, turn_parm, piece_parm]
 
 func quad_sphere_verb() -> Verb:
-    return Verb("Quad Sphere", "Primitives", "A sphere of quads with no poles: a divided cube on the sphere", Domain.face, false, quad_sphere_parms, true, cook_quad_sphere, section = "Create", family = "Primitives", icon = "sphere", inputs = 0, wheel = 1, gesture = "create", place = icosphere_place)
+    return Verb("Quad Sphere", "Primitives", "A sphere of quads with no poles: a divided cube on the sphere", Domain.face, false, quad_sphere_parms, true, cook_quad_sphere, section = "Create", family = "Primitives", icon = "quad-sphere", inputs = 0, wheel = 1, gesture = "create", place = icosphere_place)
 
 func cook_quad_sphere(input: const VerbInput*, output: VerbOutput*) -> !:
     let p = input.parms

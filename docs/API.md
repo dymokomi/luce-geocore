@@ -460,6 +460,54 @@ so the editor asks for it.
   boundary edges, Split an edge at a position. New faces wind against the
   face beside their edge. `Verbs.nearest_boundary_edge(mesh, point)` is the
   edge its Ctrl-click extends.
+- **Circularize** (edges, faces, points as the edges between them): each
+  loop of the group's edges a circle round its center (the points' mean
+  weighted by their edges' lengths) in its plane (Newell's normal), each
+  open run an arc of the circle that fits it (Kåsa's least squares in its
+  plane); faces give their regions' outlines, and a region's inner points
+  follow along their rays from the center when its outline is star-shaped
+  about it, or between two concentric circles for a ring of faces (a
+  hole's rim; the inner circle keeps its share of the outer's radius).
+  Radius 0 fits; Even spaces the points at equal angles (the rotation that
+  fits their own angles best), else each keeps its angle; Flatten, Twist,
+  Influence. **Straighten** (edges, points): each run's inner points onto
+  the line between its ends, at equal steps (Even) or their shares of its
+  length; loops stay, with a warning. **Space Evenly** (edges, points):
+  each run's or loop's points slid along it to equal lengths apart, on the
+  polyline (Linear) or on the centripetal Catmull-Rom spline through them
+  (Smooth), a run's ends and a loop's first point held; chains run in
+  parallel. **Make Planar** (faces, everything with none): rounds of each
+  group face's plane (its corners' mean and Newell's normal), then each
+  point Factor of the way to the mean of its projections onto its group
+  faces' planes, both passes in parallel (Blender's Make Planar Faces).
+- **Recalculate Normals** (faces, everything with none): each island of the
+  group (faces joined across edges of exactly two faces, both in it) wound
+  one way by a breadth-first walk over each corner's link to its neighbor
+  (found in parallel), then facing out by the signed volume it encloses
+  about its center (summed in parallel pieces), or, too flat to tell, the
+  winding most of its faces had; Inside turns every island in; faces that
+  cannot agree (a Möbius strip) are reported. The faces turned are rebuilt
+  reversed in parallel ranges and are the output selection.
+- **Edge marks.** **Hard Edges** and **Soft Edges** (edges) set the edge
+  attribute `sharp` to 1 or -1 (Mode Clear puts their own back to 0);
+  **Smooth by Angle** (edges, faces, everything with none) sets every group
+  edge hard where its faces meet at more than Angle, else soft (Keep hard
+  edges keeps the hard ones), Maya's Set Normal Angle and Blender's Smooth
+  by Angle. A mesh with `sharp` on its edges shades by them: the smooth
+  normals (`ShadingCache`) split the faces round each point into fans at its
+  hard edges, joined across its soft ones and across an unmarked edge whose
+  faces meet within the 60° cusp; each corner takes its fan's angle-weighted
+  normal. One hard edge at a point splits nothing there (its faces still
+  join round the point), as Blender's sharp edges. A mesh changing `sharp`
+  (`put_attribute`, `with_attribute_entry`, `without_attribute`,
+  `renamed_attribute`, `remove_attribute`) takes a fresh shading cache.
+  **Mark Seam** (edges) sets `seam` to 1 (Clear: 0); **Seams from Islands**
+  (faces, everything with none) marks the group's edges whose two faces give
+  either end point different corner UVs (`uv` on corners; per-point UVs make
+  no islands, and no UVs are refused) and clears the rest, Mark hard
+  marking them hard too. A mark counts where it is above 0 (`EdgeMark`), so
+  a soft edge delimits no Connected; the marks ride through later verbs on
+  the edges' provenance. **Bevel Weight** sets `bevel_weight`.
 - **Select verbs** (native: the group stays on its own domain): the select
   rules of `selecting/` after the modeling verbs, one each. They change no
   geometry; the output selection is what the rule made, on its own domain.
@@ -571,3 +619,29 @@ reference):
 | Shrinkwrap, every point along a vector onto that scan | 36.6 ms | 700,569 | Some points' lines miss the reference surface; they stay where they were |
 | Relax, every point, 5 rounds kept on that scan | 247.0 ms | 700,569 |  |
 | Poly Pen, a boundary edge extended | 14.5 ms | 700,570 |  |
+
+The Stage 7 tools on about a million faces (the 1024 × 1024 grid, its rows
+of edges a named group; the grid roughened by Mountain for Straighten, Space
+Evenly and Make Planar; a 1448 × 724 sphere with its first 524,288 faces
+reversed; the grid with projected UVs), and the shading normals of that
+sphere by the cusp and by its edge marks after Smooth by Angle:
+
+| Verb run | Time | Faces out | Warning |
+|---|---:|---:|---|
+| Circularize, the whole 1024² grid (its outline a circle, 1M inner points mapped) | 89.7 ms | 1,048,576 |  |
+| Circularize, a 512² block in the grid (262k faces) | 34.8 ms | 1,048,576 |  |
+| Circularize, every row of the grid as an arc (1025 runs, 1M edges) | 80.1 ms | 1,048,576 |  |
+| Straighten, every row of the rough grid (1025 runs, 1M edges) | 39.9 ms | 1,048,576 |  |
+| Space Evenly, every row, linear | 56.9 ms | 1,048,576 |  |
+| Space Evenly, every row, smooth | 124.7 ms | 1,048,576 |  |
+| Make Planar, every face of the rough grid, 10 rounds | 43.1 ms | 1,048,576 |  |
+| Recalculate Normals, the sphere with half its faces turned in | 51.4 ms | 1,048,352 |  |
+| Recalculate Normals, the grid (nothing turns) | 27.8 ms | 1,048,576 |  |
+| Hard Edges, every edge of the grid (2.1M) | 3.0 ms | 1,048,576 |  |
+| Soft Edges, every row | 2.7 ms | 1,048,576 |  |
+| Smooth by Angle, the whole sphere | 18.1 ms | 1,048,352 |  |
+| Mark Seam, every row | 2.8 ms | 1,048,576 |  |
+| Seams from Islands, the grid with UVs | 19.9 ms | 1,048,576 |  |
+| Bevel Weight, every row | 1.7 ms | 1,048,576 |  |
+| Shading normals, the 1M-face sphere, by the cusp | 27.4 ms | 1,048,352 |  |
+| Shading normals, the 1M-face sphere, by its edge marks (every edge marked) | 22.9 ms | 1,048,352 |  |

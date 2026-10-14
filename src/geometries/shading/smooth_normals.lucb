@@ -3,8 +3,15 @@
 ## over the faces within the cusp angle of its own face (60 degrees, as
 ## Houdini's default), so hard edges stay hard. Where no two faces at a point
 ## lie past the cusp of each other, all its corners agree and one normal per
-## point serves them. All passes run in parallel and share nothing.
+## point serves them. A mesh with the edge mark `sharp` (the Hard Edges, Soft
+## Edges and Smooth by Angle tools' attribute, Blender's sharp edges and
+## Maya's hard and soft edges) shades by its edges instead: the faces round a
+## point fall into fans split at its edges marked hard (sharp > 0), joined
+## across edges marked soft (sharp < 0), and across an unmarked edge when its
+## two faces meet within the cusp; each corner takes its fan's normal. All
+## passes run in parallel and share nothing.
 from luce_std import math
+from core.attributes import Attribute
 import memory
 from luce_std import parallel
 from core.float3 import Float3
@@ -22,6 +29,18 @@ pub struct Surface:
     pub let normals: const Float3[]
     pub let incident_offsets: const i32[]
     pub let incident_faces: const i32[]
+    ## The edge marks, when the mesh has `sharp` on its edges.
+    pub let marks: const EdgeMarks*? = none
+
+## What shading by edge marks reads: each corner's face and edge (the edge
+## to the next corner), each edge's corners, and the `sharp` mark per edge
+## (above 0 hard, below 0 soft, 0 by the cusp).
+pub struct EdgeMarks:
+    pub let corner_faces: const i32[]
+    pub let corner_edges: const i32[]
+    pub let edge_corner_offsets: const i32[]
+    pub let edge_corners: const i32[]
+    pub let sharp: const Attribute*
 
 ## Every point's normal into `output`, and whether each point's corners split
 ## at a cusp (`split`); true when any point does.
@@ -129,6 +148,7 @@ func corners_at_range(context: void*, first: usize, end: usize, worker: usize):
 ## A point's angle-weighted average over all its faces, and whether any two
 ## of them lie past the cusp of each other.
 pub func point_normal(shape: const Surface*, point: usize) -> (Vector3, bool):
+    if let marks = shape.marks: return marked_point_normal(shape, marks, point)
     let first = (usize)shape.incident_offsets[point]
     let end = (usize)shape.incident_offsets[point + 1]
     var sum = Vector3()
@@ -147,6 +167,7 @@ pub func point_normal(shape: const Surface*, point: usize) -> (Vector3, bool):
 ## The angle-weighted normal of `corner` (of `face`) over the faces around its
 ## point within the cusp angle; the face normal when they cancel.
 pub func corner_normal(shape: const Surface*, face: usize, corner: usize) -> Vector3:
+    if let marks = shape.marks: return fan_normal(shape, marks, face, corner).0
     let own = shape.normals[face].vector()
     let point = (usize)shape.corners[corner]
     var sum = Vector3()
@@ -171,3 +192,81 @@ func corner_angle(shape: const Surface*, face: usize, point: usize) -> f64:
         if lengths <= 1e-30: return 0.0
         return math.acos(math.max(-1.0, math.min(1.0, previous.dot(next) / lengths)))
     return 0.0
+
+## A point's normal by its edge marks: its first face's fan, and whether the
+## faces round it fall into more than one fan.
+func marked_point_normal(shape: const Surface*, marks: const EdgeMarks*, point: usize) -> (Vector3, bool):
+    let first = (usize)shape.incident_offsets[point]
+    let end = (usize)shape.incident_offsets[point + 1]
+    if end == first: return (Vector3(0.0, 1.0, 0.0), false)
+    let face = (usize)shape.incident_faces[first]
+    let corner = corner_at(shape, face, point)
+    let fan = fan_normal(shape, marks, face, corner)
+    return (fan.0, fan.1 < end - first)
+
+## The corner of `face` at `point` (its first there).
+func corner_at(shape: const Surface*, face: usize, point: usize) -> usize:
+    for corner in (usize)shape.offsets[face]..<(usize)shape.offsets[face + 1]:
+        if (usize)shape.corners[corner] == point: return corner
+    return (usize)shape.offsets[face]
+
+## The angle-weighted normal of the fan of faces round `corner`'s point
+## that `face` lies in (walked both ways round the point across the edges
+## that do not split), and how many faces the fan holds.
+func fan_normal(shape: const Surface*, marks: const EdgeMarks*, face: usize, corner: usize) -> (Vector3, usize):
+    let point = (usize)shape.corners[corner]
+    let around = (usize)shape.incident_offsets[point + 1] - (usize)shape.incident_offsets[point]
+    var sum = shape.normals[face].vector().multiply_scalar(corner_angle(shape, face, point))
+    var count: usize = 1
+    # Forward across the edge leaving the corner, then (unless the walk came
+    # round to `face`) backward across the edge arriving at it.
+    let forward = walk_fan(shape, marks, face, corner, (usize)marks.corner_edges[corner], around)
+    sum = sum.add(forward.0)
+    count += forward.1
+    if not forward.2:
+        let backward = walk_fan(shape, marks, face, corner, (usize)marks.corner_edges[previous_corner(shape, face, corner)], around)
+        sum = sum.add(backward.0)
+        count += backward.1
+    let length = sum.length()
+    return (sum.multiply_scalar(1.0 / length) if length > 1e-20 else shape.normals[face].vector(), count)
+
+## From `face` (its `corner` at the point) across `edge` and on round the
+## point while the edges do not split: the faces' weighted normals, how many,
+## and whether the walk came back to `face` (a closed fan). At most `limit`
+## faces are taken, so a tangled point cannot loop.
+func walk_fan(shape: const Surface*, marks: const EdgeMarks*, face: usize, corner: usize, edge: usize, limit: usize) -> (Vector3, usize, bool):
+    let point = (usize)shape.corners[corner]
+    var sum = Vector3()
+    var count: usize = 0
+    var here = face
+    var crossing = edge
+    while count < limit:
+        let first = (usize)marks.edge_corner_offsets[crossing]
+        if (usize)marks.edge_corner_offsets[crossing + 1] - first != 2: break
+        var other = (usize)marks.edge_corners[first]
+        if (usize)marks.corner_faces[other] == here: other = (usize)marks.edge_corners[first + 1]
+        let next = (usize)marks.corner_faces[other]
+        if next == here: break
+        if splits(shape, marks, crossing, here, next): break
+        if next == face: return (sum, count, true)
+        # The next face's corner at the point, and its other edge there.
+        let at = other if (usize)shape.corners[other] == point else next_corner(shape, next, other)
+        let before = previous_corner(shape, next, at)
+        crossing = (usize)marks.corner_edges[before] if (usize)marks.corner_edges[at] == crossing else (usize)marks.corner_edges[at]
+        sum = sum.add(shape.normals[next].vector().multiply_scalar(corner_angle(shape, next, point)))
+        count += 1
+        here = next
+    return (sum, count, false)
+
+## Whether `edge` between faces `a` and `b` splits their shading.
+func splits(shape: const Surface*, marks: const EdgeMarks*, edge: usize, a: usize, b: usize) -> bool:
+    let mark = marks.sharp.number(edge, 0)
+    if mark > 0.0: return true
+    if mark < 0.0: return false
+    return shape.normals[a].vector().dot(shape.normals[b].vector()) < cusp_cosine
+
+func next_corner(shape: const Surface*, face: usize, corner: usize) -> usize:
+    return corner + 1 if corner + 1 < (usize)shape.offsets[face + 1] else (usize)shape.offsets[face]
+
+func previous_corner(shape: const Surface*, face: usize, corner: usize) -> usize:
+    return corner - 1 if corner > (usize)shape.offsets[face] else (usize)shape.offsets[face + 1] - 1

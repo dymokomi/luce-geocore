@@ -1,0 +1,270 @@
+## The Stage 7 shape tools (POLY-MODELING.md Stage 7): Circularize of a
+## divided box's top makes its outline a circle (every point's distance
+## from the center within 1e-6, equal angles), its inner points inside it;
+## a Radius sets it; a loop of points keeps its heights with Flatten off
+## and turns by Twist; a bent run becomes an arc and a straight one stays;
+## Straighten lays a raised row back on its line, at equal steps or its own
+## shares; Space Evenly slides a squeezed row and a square's outline back
+## to equal steps (Linear) and evens a loop's chords on its curve (Smooth);
+## Make Planar flattens one face exactly and a noisy grid's faces nearly.
+import interop
+import strings
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try circularize_checks()
+    try arc_checks()
+    try straighten_checks()
+    try space_checks()
+    try planar_checks()
+    print("PASS Circularize, Straighten, Space Evenly, Make Planar: a box's top outline a circle within 1e-6 at equal angles, inner points inside it, Radius, heights kept and Twist; runs as arcs; rows straightened evenly or by length; rows, outlines and loops spaced evenly; faces made planar")
+
+## `mesh` with points `group` moved by `offset`.
+func moved(mesh: interop.Reference[Mesh], group: str, offset: Vector3) -> interop.Reference[Mesh]!:
+    let numbers: f64[15] = [offset.x, offset.y, offset.z, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+    let result = try Verbs.run("Transform Components", mesh, group, 1, numbers[..<15])
+    defer result.release()
+    return try result.value().mesh()
+
+## Whether `p` is on the outline of the box's top at height `top`.
+func on_rim(p: Vector3, top: f64) -> bool:
+    return math.abs(p.y - top) < 1.0e-9 and (math.abs(math.abs(p.x) - 1.0) < 1.0e-9 or math.abs(math.abs(p.z) - 1.0) < 1.0e-9)
+
+## Every point of `box` on its top's outline lies in `mesh` at `radius`
+## from `center` in the XZ plane (within 1e-6); with `even`, their angles
+## step evenly.
+func on_circle(box: interop.Reference[Mesh], mesh: interop.Reference[Mesh], top: f64, center: Vector3, radius: f64, even: bool) -> !:
+    var angles: f64[16] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var count: usize = 0
+    for point in 0..<box.value().point_count():
+        if not on_rim(try box.value().point(point), top): continue
+        let d = (try mesh.value().point(point)).subtract(center)
+        near(math.sqrt(d.x * d.x + d.z * d.z), radius)
+        assert(count < 16)
+        # Kept in order as they come (insertion).
+        var at = count
+        let angle = math.atan2(d.z, d.x)
+        while at > 0 and angles[at - 1] > angle:
+            angles[at] = angles[at - 1]
+            at -= 1
+        angles[at] = angle
+        count += 1
+    assert(count == 16)
+    if not even: return
+    for at in 1..<count: near(angles[at] - angles[at - 1], 2.0 * math.pi / 16.0)
+
+## The box's top outline as a group of points.
+func rim_group(room: u8[], top: f64) -> str!:
+    return try strings.format(room, f"@P.x<-0.999 @P.x>0.999 @P.z<-0.999 @P.z>0.999 &@P.y>{top - 0.001}")
+
+func circularize_checks() -> !:
+    let box = try MeshPrimitives.box(Vector3(2.0, 2.0, 2.0), 4, 4, 4)
+    defer box.release()
+    var top = -1.0e300
+    for point in 0..<box.value().point_count(): top = math.max(top, (try box.value().point(point)).y)
+    let faces = "@N.y>0.9"
+    let numbers: f64[5] = [0.0, 1.0, 1.0, 0.0, 1.0]
+    let round = try made(box, "Circularize", faces, 3, numbers[..<5], 16)
+    defer round.release()
+    # The outline's center is the square's: its fit radius is the rim's
+    # mean distance (its edges are all 0.5 long).
+    var fit = 0.0
+    for point in 0..<box.value().point_count():
+        let p = try box.value().point(point)
+        if on_rim(p, top): fit += math.sqrt(p.x * p.x + p.z * p.z) / 16.0
+    try on_circle(box, round, top, Vector3(0.0, top, 0.0), fit, true)
+    # Inner points: inside the circle, on the top, the middle one held;
+    # points off the top stay.
+    for point in 0..<round.value().point_count():
+        let before = try box.value().point(point)
+        let after = try round.value().point(point)
+        if math.abs(before.y - top) > 1.0e-9: near_point(after, before)
+        else:
+            near(after.y, top)
+            assert(math.sqrt(after.x * after.x + after.z * after.z) <= fit + 1.0e-6)
+        if math.abs(before.x) < 1.0e-9 and math.abs(before.z) < 1.0e-9 and math.abs(before.y - top) < 1.0e-9: near_point(after, before)
+    try counts(round, box.value().point_count(), box.value().face_count())
+    # A Radius of 0.5.
+    let sized: f64[5] = [0.5, 1.0, 1.0, 0.0, 1.0]
+    let small = try made(box, "Circularize", faces, 3, sized[..<5], 16)
+    defer small.release()
+    try on_circle(box, small, top, Vector3(0.0, top, 0.0), 0.5, true)
+    # The outline as a loop of points, two opposite corners raised (the
+    # plane stays level): Flatten off keeps each one's height, with Twist 30
+    # too; Influence 0 leaves them.
+    var corner_room: u8[96]
+    let one = try moved(box, try strings.format(corner_room, f"@P.x>0.999 &@P.z>0.999 &@P.y>{top - 0.001}"), Vector3(0.0, 0.25, 0.0))
+    defer one.release()
+    let wavy = try moved(one, try strings.format(corner_room, f"@P.x<-0.999 &@P.z<-0.999 &@P.y>{top - 0.001}"), Vector3(0.0, 0.25, 0.0))
+    defer wavy.release()
+    var room: u8[128]
+    let rim = try rim_group(room, top)
+    let kept: f64[5] = [1.0, 1.0, 0.0, 30.0, 1.0]
+    let turned = try made(wavy, "Circularize", rim, 1, kept[..<5], 16)
+    defer turned.release()
+    var raised = 0
+    for point in 0..<box.value().point_count():
+        if not on_rim(try box.value().point(point), top): continue
+        near((try turned.value().point(point)).y, (try wavy.value().point(point)).y)
+        if (try turned.value().point(point)).y > top + 0.1: raised += 1
+    assert(raised == 2)
+    let none_moved: f64[5] = [1.0, 1.0, 1.0, 0.0, 0.0]
+    let still = try made(wavy, "Circularize", rim, 1, none_moved[..<5], 16)
+    defer still.release()
+    for point in 0..<box.value().point_count(): near_point(try still.value().point(point), try wavy.value().point(point))
+
+func arc_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    # Row 0's run is straight: it stays, with a warning.
+    let numbers: f64[5] = [0.0, 1.0, 1.0, 0.0, 1.0]
+    let result = try Verbs.run("Circularize", grid, "p0-1-2-3-4", 2, numbers[..<5])
+    defer result.release()
+    assert(result.value().warning().length > 0)
+    # Its middle point raised: the run becomes an arc through its ends,
+    # its points evenly turned about the arc's center.
+    let bent = try moved(grid, "2", Vector3(0.0, 0.5, 0.0))
+    defer bent.release()
+    let arc = try made(bent, "Circularize", "p0-1-2-3-4", 2, numbers[..<5], 4)
+    defer arc.release()
+    # The circle through the ends and the middle, in the XY plane.
+    let a = try arc.value().point(0)
+    let b = try arc.value().point(2)
+    let c = try arc.value().point(4)
+    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y))
+    let aa = a.x * a.x + a.y * a.y
+    let bb = b.x * b.x + b.y * b.y
+    let cc = c.x * c.x + c.y * c.y
+    let center = Vector3((aa * (b.y - c.y) + bb * (c.y - a.y) + cc * (a.y - b.y)) / d, (aa * (c.x - b.x) + bb * (a.x - c.x) + cc * (b.x - a.x)) / d, a.z)
+    let radius = a.subtract(center).length()
+    for point in 0..<(i64)5:
+        let p = try arc.value().point(point)
+        near(p.z, a.z)
+        near(p.subtract(center).length(), radius)
+    # Even: equal chords.
+    for point in 0..<(i64)4: near((try arc.value().point(point + 1)).subtract(try arc.value().point(point)).length(), b.subtract(try arc.value().point(1)).length())
+
+func straighten_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let raised = try moved(grid, "2", Vector3(0.1, 0.3, 0.0))
+    defer raised.release()
+    let even: f64[2] = [1.0, 1.0]
+    let line = try made(raised, "Straighten", "p0-1-2-3-4", 2, even[..<2], 4)
+    defer line.release()
+    for point in 0..<(i64)5: near_point(try line.value().point(point), try grid.value().point(point))
+    # By length: the raised point's share of the run's length.
+    let shares: f64[2] = [0.0, 1.0]
+    let kept = try made(raised, "Straighten", "p0-1-2-3-4", 2, shares[..<2], 4)
+    defer kept.release()
+    var total = 0.0
+    var reached = 0.0
+    for point in 1..<(i64)5:
+        total += (try raised.value().point(point)).subtract(try raised.value().point(point - 1)).length()
+        if point == 2: reached = total
+    near((try kept.value().point(2)).x, -1.0 + 2.0 * reached / total)
+    near((try kept.value().point(2)).y, 0.0)
+    # Half the influence: halfway.
+    let half: f64[2] = [1.0, 0.5]
+    let halfway = try made(raised, "Straighten", "p0-1-2-3-4", 2, half[..<2], 4)
+    defer halfway.release()
+    near((try halfway.value().point(2)).y, 0.15)
+
+func space_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    # Point 1 squeezed toward point 0 along the row: Linear spaces it back.
+    let squeezed = try moved(grid, "1", Vector3(-0.4, 0.0, 0.0))
+    defer squeezed.release()
+    let linear: f64[2] = [0.0, 1.0]
+    let spaced = try made(squeezed, "Space Evenly", "p0-1-2-3-4", 2, linear[..<2], 4)
+    defer spaced.release()
+    for point in 0..<(i64)5: near_point(try spaced.value().point(point), try grid.value().point(point))
+    # The grid's outline, one point slid along it: its 16 points 0.5 apart
+    # again round the square (the loop's first point, 0, held).
+    let outline = "p0-1-2-3-4-9-14-19-24-23-22-21-20-15-10-5-0"
+    let slid = try moved(grid, "3", Vector3(0.2, 0.0, 0.0))
+    defer slid.release()
+    let round = try made(slid, "Space Evenly", outline, 2, linear[..<2], 16)
+    defer round.release()
+    for point in 0..<(i64)25: near_point(try round.value().point(point), try grid.value().point(point))
+    # Smooth on a circle of 16 points pulled out of step: the chords even
+    # out to within 1% (equal lengths along the spline through the points,
+    # which bows a little off the circle between unevenly spaced points).
+    let circle: f64[5] = [1.0, 0.0, 1.0, 0.0, 1.0]
+    let uneven = try made(slid, "Circularize", outline, 2, circle[..<5], 16)
+    defer uneven.release()
+    let smooth: f64[2] = [1.0, 1.0]
+    let evened = try made(uneven, "Space Evenly", outline, 2, smooth[..<2], 16)
+    defer evened.release()
+    let ring: i64[16] = [0, 1, 2, 3, 4, 9, 14, 19, 24, 23, 22, 21, 20, 15, 10, 5]
+    var least = 1.0e300
+    var most = 0.0
+    var before_least = 1.0e300
+    var before_most = 0.0
+    for at in 0..<(usize)16:
+        let chord = (try evened.value().point(ring[(at + 1) % 16])).subtract(try evened.value().point(ring[at])).length()
+        least = math.min(least, chord)
+        most = math.max(most, chord)
+        let old = (try uneven.value().point(ring[(at + 1) % 16])).subtract(try uneven.value().point(ring[at])).length()
+        before_least = math.min(before_least, old)
+        before_most = math.max(before_most, old)
+    assert(most - least < 0.01 * most and before_most - before_least > 0.4 * before_most)
+
+## The farthest any corner of `mesh`'s faces lies from its face's plane
+## (Newell's normal through the corners' mean).
+func unflat(mesh: interop.Reference[Mesh]) -> f64!:
+    var worst = 0.0
+    for face in 0..<mesh.value().face_count():
+        let size = try mesh.value().face_size(face)
+        var center = Vector3()
+        var newell = Vector3()
+        for at in 0..<size:
+            let p = try mesh.value().point(try mesh.value().face_point(face, at))
+            let q = try mesh.value().point(try mesh.value().face_point(face, (at + 1) % size))
+            center = center.add(p)
+            newell = newell.add(p.cross(q))
+        center = center.multiply_scalar(1.0 / (f64)size)
+        let normal = newell.multiply_scalar(1.0 / newell.length())
+        for at in 0..<size:
+            worst = math.max(worst, math.abs((try mesh.value().point(try mesh.value().face_point(face, at))).subtract(center).dot(normal)))
+    return worst
+
+func planar_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let noise: f64[2] = [0.15, 3.0]
+    let rough = try Verbs.run("Mountain", grid, "", 1, noise[..<2])
+    defer rough.release()
+    let bumpy = try rough.value().mesh()
+    defer bumpy.release()
+    let before = try unflat(bumpy)
+    assert(before > 0.01)
+    # One face, one round: exactly flat.
+    let once: f64[2] = [1.0, 1.0]
+    let one = try made(bumpy, "Make Planar", "5", 3, once[..<2], 1)
+    defer one.release()
+    let only = try Verbs.run("Make Planar", one, "", 3, once[..<2])
+    only.release()
+    let size = try one.value().face_size(5)
+    var center = Vector3()
+    var newell = Vector3()
+    for at in 0..<size:
+        let p = try one.value().point(try one.value().face_point(5, at))
+        center = center.add(p)
+        newell = newell.add(p.cross(try one.value().point(try one.value().face_point(5, (at + 1) % size))))
+    center = center.multiply_scalar(1.0 / (f64)size)
+    for at in 0..<size: near((try one.value().point(try one.value().face_point(5, at))).subtract(center).dot(newell.multiply_scalar(1.0 / newell.length())), 0.0)
+    # Every face, 200 rounds: nearly flat; the default 10 already much flatter.
+    let many: f64[2] = [1.0, 200.0]
+    let flat = try made(bumpy, "Make Planar", "", 3, many[..<2], 16)
+    defer flat.release()
+    assert((try unflat(flat)) < before * 0.02)
+    let tenth: f64[2] = [1.0, 10.0]
+    let some = try made(bumpy, "Make Planar", "", 3, tenth[..<2], 16)
+    defer some.release()
+    assert((try unflat(some)) < before * 0.5)

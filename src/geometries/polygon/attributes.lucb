@@ -76,13 +76,18 @@ extend Mesh:
             owned.release()
             error(failure.code, failure.message)
         errdefer result.release()
+        let name = owned.name()
+        let domain = owned.domain
         try result.value().attributes.put(owned)
+        try result.value().reshade_for(name, domain)
         return result
 
     pub func without_attribute(name: str, domain: i64) -> interop.Reference[Mesh]!:
         let result = try self.snapshot()
         let found = result.value().find_attribute(name, domain)
+        errdefer result.release()
         if found >= 0: result.value().attributes.remove((usize)found)
+        try result.value().reshade_for(name, Domain((u8)domain))
         return result
 
     pub func renamed_attribute(name: str, replacement: str, domain: i64) -> interop.Reference[Mesh]!:
@@ -94,6 +99,7 @@ extend Mesh:
         if replacement != name:
             let old = result.value().find_attribute(name, domain)
             result.value().attributes.remove((usize)old)
+            try result.value().reshade_for(name, Domain((u8)domain))
         return result
 
     ## Numeric domain conversion: continuous values average incident source

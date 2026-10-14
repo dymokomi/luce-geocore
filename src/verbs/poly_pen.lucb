@@ -23,7 +23,7 @@ let poly_pen_parms: ParmSpec[3] = [
 let poly_pen_picks: PickSpec[1] = [PickSpec("Element", "edges points", "Click a boundary edge to extend, a corner point to fill, or an edge to split")]
 
 func poly_pen_verb() -> Verb:
-    return Verb("Poly Pen", "Modeling", "Grow faces from boundary edges and corners, or split edges, at drawn positions", Domain.point, true, poly_pen_parms, true, cook_poly_pen, trailing = true, native = true, section = "Create", family = "Draw", icon = "pen-tool", picks = poly_pen_picks, gesture = "pen")
+    return Verb("Poly Pen", "Modeling", "Grow faces from boundary edges and corners, or split edges, at drawn positions", Domain.point, true, poly_pen_parms, true, cook_poly_pen, trailing = true, native = true, section = "Create", family = "Draw", icon = "poly-pen", picks = poly_pen_picks, gesture = "pen")
 
 func cook_poly_pen(input: const VerbInput*, output: VerbOutput*) -> !:
     let action = (i64)input.parms.at(0)

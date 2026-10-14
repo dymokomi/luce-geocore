@@ -68,7 +68,7 @@ let disc_parms: ParmSpec[8] = [
 let disc_place: PlaceSpec = PlaceSpec("radius", 0, position = 4, up = 5)
 
 func disc_verb() -> Verb:
-    return Verb("Disc", "Primitives", "A flat circle filled by an n-gon, a fan or a grid", Domain.face, false, disc_parms, true, cook_disc, section = "Create", family = "Primitives", icon = "circle-center", inputs = 0, wheel = 1, gesture = "create", place = disc_place)
+    return Verb("Disc", "Primitives", "A flat circle filled by an n-gon, a fan or a grid", Domain.face, false, disc_parms, true, cook_disc, section = "Create", family = "Primitives", icon = "disc", inputs = 0, wheel = 1, gesture = "create", place = disc_place)
 
 func cook_disc(input: const VerbInput*, output: VerbOutput*) -> !:
     let p = input.parms

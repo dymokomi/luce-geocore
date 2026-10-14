@@ -199,12 +199,17 @@ pub func displayed(source: const Mesh*, positions: Column[Float3], moved: const 
 
 ## Add or replace an attribute of a mesh being built (taking its share).
 pub func put_attribute(mesh: Mesh*, attribute: Attribute) -> !:
+    let name = attribute.name()
+    let domain = attribute.domain
     try mesh.attributes.put(attribute)
+    try mesh.reshade_for(name, domain)
 
 ## Remove attribute `name` on `domain` from a mesh being built, if present.
-pub func remove_attribute(mesh: Mesh*, name: str, domain: Domain):
+pub func remove_attribute(mesh: Mesh*, name: str, domain: Domain) -> !:
     let found = mesh.attributes.find(name, domain)
-    if found >= 0: mesh.attributes.remove((usize)found)
+    if found < 0: return
+    mesh.attributes.remove((usize)found)
+    try mesh.reshade_for(name, domain)
 
 ## A precise mesh's f64 points; empty otherwise.
 pub func precise_span(mesh: const Mesh*) -> const Vector3[]:

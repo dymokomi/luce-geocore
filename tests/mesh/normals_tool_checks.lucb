@@ -1,0 +1,249 @@
+## The Stage 7 normals and edge-mark tools (POLY-MODELING.md Stage 7):
+## Recalculate Normals turns a sphere with flipped faces back out (closed,
+## wound one way, its volume as before) and, Inside, in; a flat grid keeps
+## the winding most of its faces had. Hard Edges, Soft Edges and Smooth by
+## Angle write `sharp`, which the shading follows: a box's corners shade
+## flat by the cusp, round when every edge is soft, flat again by angle;
+## one hard edge at a corner splits nothing there, two split its face off; a sphere's equator marked hard
+## splits there, and keeps splitting after its points move. Mark Seam and
+## Seams from Islands write `seam` (the islands from corner UVs).
+import interop
+import strings
+from luce_std import math
+import memory
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3, Domain
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import made, counts, near, near_point, volume, surface
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try recalculate_checks()
+    try shading_checks()
+    try seam_checks()
+    print("PASS Recalculate Normals, Hard/Soft Edges, Smooth by Angle, Mark Seam, Seams from Islands: flipped faces turned out (and in), sheets keep their majority; shading split and joined by the marks, through a move; seams marked, cleared and found from UV islands")
+
+func ran(mesh: interop.Reference[Mesh], name: str, group: str, group_type: i64, numbers: const f64[]) -> interop.Reference[Mesh]!:
+    let result = try Verbs.run(name, mesh, group, group_type, numbers)
+    defer result.release()
+    return try result.value().mesh()
+
+func recalculate_checks() -> !:
+    let sphere = try MeshPrimitives.sphere(1.0, 16)
+    defer sphere.release()
+    let original = try volume(sphere)
+    assert(original > 3.0)
+    let nothing: f64[1] = [0.0]
+    let flipped = try ran(sphere, "Reverse", "0-40 100-120", 3, nothing[..<0])
+    defer flipped.release()
+    let out: f64[1] = [0.0]
+    # The 62 faces reversed are the ones turned back, and selected.
+    let fixed = try made(flipped, "Recalculate Normals", "", 3, out[..<1], 62)
+    defer fixed.release()
+    try surface(fixed, true)
+    near(try volume(fixed), original, 1.0e-9)
+    try counts(fixed, sphere.value().point_count(), sphere.value().face_count())
+    # Already out: the mesh is shared as it is.
+    let again = try ran(fixed, "Recalculate Normals", "", 3, out[..<1])
+    defer again.release()
+    near(try volume(again), original, 1.0e-9)
+    # Inside.
+    let inward: f64[1] = [1.0]
+    let inside = try ran(flipped, "Recalculate Normals", "", 3, inward[..<1])
+    defer inside.release()
+    try surface(inside, true)
+    near(try volume(inside), -original, 1.0e-9)
+    # Only the group: the faces outside it stay as they were.
+    let part = try ran(flipped, "Recalculate Normals", "0-60", 3, out[..<1])
+    defer part.release()
+    for face in 61..<sphere.value().face_count(): near_point(try part.value().face_normal(face), try flipped.value().face_normal(face))
+    for face in 0..<(i64)41: near_point(try part.value().face_normal(face), try sphere.value().face_normal(face))
+    # A flat grid with a corner of faces flipped: the majority (up) wins.
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let corner = try ran(grid, "Reverse", "0 1 4 5", 3, nothing[..<0])
+    defer corner.release()
+    let sheet = try ran(corner, "Recalculate Normals", "", 3, out[..<1])
+    defer sheet.release()
+    for face in 0..<sheet.value().face_count(): near_point(try sheet.value().face_normal(face), try grid.value().face_normal(face))
+    try surface(sheet, false)
+
+## The shading normal of `mesh`'s corner of face `face` at point `point`.
+func shaded(mesh: interop.Reference[Mesh], face: i64, point: i64) -> Vector3!:
+    let size = try mesh.value().face_size(face)
+    for at in 0..<size:
+        if (try mesh.value().face_point(face, at)) == point:
+            return try mesh.value().corner_normal((try mesh.value().face_offset(face)) + at)
+    trap("the face has no such point")
+
+## A face of `mesh` around point `point` whose normal is near `normal`.
+func face_toward(mesh: interop.Reference[Mesh], point: i64, normal: Vector3) -> i64!:
+    for face in 0..<mesh.value().face_count():
+        let size = try mesh.value().face_size(face)
+        for at in 0..<size:
+            if (try mesh.value().face_point(face, at)) == point and (try mesh.value().face_normal(face)).dot(normal) > 0.99: return face
+    trap("no such face")
+
+## A face of `mesh` around point `point` whose normal leans up (`side`
+## 1) or down (-1).
+func face_leaning(mesh: interop.Reference[Mesh], point: i64, side: f64) -> i64!:
+    for face in 0..<mesh.value().face_count():
+        let size = try mesh.value().face_size(face)
+        for at in 0..<size:
+            if (try mesh.value().face_point(face, at)) == point and (try mesh.value().face_normal(face)).y * side > 0.01: return face
+    trap("no such face")
+
+## Edge mark `name`'s value on edge `edge` (0 without the attribute).
+func mark(mesh: interop.Reference[Mesh], name: str, edge: i64) -> f64!:
+    let index = mesh.value().attribute_on(name, Domain.edge)
+    if index < 0: return 0.0
+    return try mesh.value().attribute_value(index, edge)
+
+func shading_checks() -> !:
+    let box = try Mesh.cube(2.0)
+    defer box.release()
+    # Point 6 is the corner (1, 2, 1); its top face faces +Y.
+    let up = Vector3(0.0, 1.0, 0.0)
+    let top = try face_toward(box, 6, up)
+    near_point(try shaded(box, top, 6), up)
+    let set: f64[1] = [0.0]
+    let clear: f64[1] = [1.0]
+    let soft = try made(box, "Soft Edges", "*", 2, set[..<1], 12)
+    defer soft.release()
+    let diagonal = Vector3(1.0, 1.0, 1.0).multiply_scalar(1.0 / math.sqrt(3.0))
+    near_point(try shaded(soft, top, 6), diagonal)
+    assert((try mark(soft, "sharp", 0)) == -1.0)
+    # The box's own corner normals were read before the marks: the marked
+    # box shades afresh, and the unmarked one is as it was.
+    near_point(try shaded(box, top, 6), up)
+    # One hard edge alone splits nothing (the faces still join round the
+    # point, as Blender's sharp edges): the edge from 6 to 7 along the top.
+    let one = try made(soft, "Hard Edges", "p6-7", 2, set[..<1], 1)
+    defer one.release()
+    near_point(try shaded(one, top, 6), diagonal)
+    # Two, 6-7 and 6-2 (the top's two edges at 6): the top's corner is
+    # flat, the front and right faces round between them.
+    let hard = try made(soft, "Hard Edges", "p7-6-2", 2, set[..<1], 2)
+    defer hard.release()
+    let at_six = try shaded(hard, top, 6)
+    near_point(at_six, up)
+    let front = try face_toward(hard, 6, Vector3(0.0, 0.0, 1.0))
+    near_point(try shaded(hard, front, 6), Vector3(1.0, 0.0, 1.0).multiply_scalar(1.0 / math.sqrt(2.0)))
+    let far = try face_toward(hard, 3, up)
+    near_point(try shaded(hard, far, 3), Vector3(-1.0, 1.0, -1.0).multiply_scalar(1.0 / math.sqrt(3.0)))
+    # Cleared, the two edges shade by the cusp again: at 90° their faces
+    # part, so the top's corner stays flat while the edges round it are
+    # still soft; clearing every soft edge gives the box its cusp back.
+    let cleared = try ran(hard, "Hard Edges", "p7-6-2", 2, clear[..<1])
+    defer cleared.release()
+    near_point(try shaded(cleared, top, 6), up)
+    let plain = try ran(soft, "Soft Edges", "*", 2, clear[..<1])
+    defer plain.release()
+    near_point(try shaded(plain, top, 6), up)
+    # Smooth by Angle 30: every 90° edge hard, the corner flat again; at
+    # 100 every edge soft.
+    let by_angle: f64[2] = [30.0, 0.0]
+    let flat = try made(soft, "Smooth by Angle", "", 3, by_angle[..<2], 12)
+    defer flat.release()
+    near_point(try shaded(flat, top, 6), up)
+    let wide: f64[2] = [100.0, 0.0]
+    let round = try ran(box, "Smooth by Angle", "", 3, wide[..<2])
+    defer round.release()
+    near_point(try shaded(round, top, 6), diagonal)
+    # Keep hard edges: the hard edges stay hard at 100.
+    let keeping: f64[2] = [100.0, 1.0]
+    let kept = try ran(hard, "Smooth by Angle", "", 3, keeping[..<2])
+    defer kept.release()
+    near_point(try shaded(kept, top, 6), at_six)
+    # A sphere's equator hard: the corners above and below it part there,
+    # and still after the equator moves up.
+    let sphere = try MeshPrimitives.sphere(1.0, 16)
+    defer sphere.release()
+    # Two neighbors on the equator: its loop through their edge.
+    var point: i64 = -1
+    var beside: i64 = -1
+    var gap = 1.0e300
+    var low = 1.0e300
+    var high = -1.0e300
+    for at in 0..<sphere.value().point_count():
+        low = math.min(low, (try sphere.value().point(at)).y)
+        high = math.max(high, (try sphere.value().point(at)).y)
+    let middle = (low + high) * 0.5
+    for at in 0..<sphere.value().point_count():
+        if math.abs((try sphere.value().point(at)).y - middle) > 1.0e-6: continue
+        if point < 0:
+            point = at
+            continue
+        let distance = (try sphere.value().point(at)).subtract(try sphere.value().point(point)).length()
+        if distance < gap:
+            gap = distance
+            beside = at
+    assert(point >= 0 and beside >= 0)
+    var room: u8[64]
+    let equator = try strings.format(room, f"loop(p{point}-{beside})")
+    let sharp = try made(sphere, "Hard Edges", equator, 2, set[..<1], 16)
+    defer sharp.release()
+    let above = try face_leaning(sharp, point, 1.0)
+    let below = try face_leaning(sharp, point, -1.0)
+    assert((try shaded(sharp, above, point)).y > 0.05 and (try shaded(sharp, below, point)).y < -0.05)
+    near((try shaded(sphere, above, point)).y, 0.0, 1.0e-6)
+    let lift: f64[15] = [0.0, 0.1, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+    var point_room: u8[32]
+    let lifted = try ran(sharp, "Transform Components", try strings.format(point_room, f"{point}"), 1, lift[..<15])
+    defer lifted.release()
+    assert((try shaded(lifted, above, point)).y > 0.05 and (try shaded(lifted, below, point)).y < -0.05)
+
+func seam_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let set: f64[1] = [0.0]
+    let clear: f64[1] = [1.0]
+    let seamed = try made(grid, "Mark Seam", "p2-7-12", 2, set[..<1], 2)
+    defer seamed.release()
+    var marked = 0
+    for edge in 0..<(try seamed.value().edge_count()):
+        if (try mark(seamed, "seam", edge)) == 1.0: marked += 1
+    assert(marked == 2)
+    let unseamed = try ran(seamed, "Mark Seam", "p2-7", 2, clear[..<1])
+    defer unseamed.release()
+    marked = 0
+    for edge in 0..<(try unseamed.value().edge_count()):
+        if (try mark(unseamed, "seam", edge)) == 1.0: marked += 1
+    assert(marked == 1)
+    # UVs by position, the right half's (x > 0) shifted: two islands meeting
+    # along the middle column, x = 0 (points 2, 7, 12, 17, 22).
+    let nothing: f64[1] = [0.0]
+    assert(try refuses(grid, "Seams from Islands"))
+    let corners = (usize)grid.value().vertex_count()
+    let values = try new f64[corners * 2] --- in memory.heap
+    defer free(values) in memory.heap
+    for face in 0..<grid.value().face_count():
+        let size = try grid.value().face_size(face)
+        var middle = Vector3()
+        for at in 0..<size: middle = middle.add(try grid.value().point(try grid.value().face_point(face, at)))
+        let shift = 10.0 if middle.x > 0.0 else 0.0
+        for at in 0..<size:
+            let p = try grid.value().point(try grid.value().face_point(face, at))
+            let corner = (usize)((try grid.value().face_offset(face)) + at)
+            values[corner * 2] = p.x + shift
+            values[corner * 2 + 1] = p.z
+    let mapped = try grid.value().with_attribute("uv", 1, 2, values[..<corners * 2])
+    defer mapped.release()
+    let hard: f64[1] = [1.0]
+    let islands = try made(mapped, "Seams from Islands", "", 3, hard[..<1], 40)
+    defer islands.release()
+    marked = 0
+    for edge in 0..<(try islands.value().edge_count()):
+        if (try mark(islands, "seam", edge)) == 1.0:
+            marked += 1
+            assert((try mark(islands, "sharp", edge)) == 1.0)
+            assert(math.abs((try islands.value().point(try islands.value().edge_point(edge, 0))).x) < 1.0e-9)
+    assert(marked == 4)
+
+## Whether verb `name` refuses `mesh` as invalid (with no UVs to read).
+func refuses(mesh: interop.Reference[Mesh], name: str) -> bool!:
+    let nothing: f64[1] = [0.0]
+    let result = Verbs.run(name, mesh, "", 3, nothing[..<1]) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
+        return true
+    result.release()
+    return false

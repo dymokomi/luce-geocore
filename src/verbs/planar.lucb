@@ -1,0 +1,95 @@
+## Make Planar: each of the group's faces flattened in place, after
+## Blender's Make Planar Faces. A round finds every group face's plane (its
+## corners' mean and Newell's normal), then moves each of their points
+## Factor of the way to the mean of its projections onto the planes of its
+## group faces; rounds repeat, so faces sharing points settle together.
+## Unlike Flatten, which lays the whole group on one plane, each face keeps
+## its own. Both passes of a round run in parallel (faces, then points,
+## each point reading only its faces). The output selection is the group.
+
+let planar_parms: ParmSpec[2] = [
+    ParmSpec("Factor", ParmKind.number, 1.0, 0.0, 1.0, 1, "", "How far each point moves toward its faces' planes in a round."),
+    ParmSpec("Iterations", ParmKind.integer, 10.0, 1.0, 1000.0, 1, "", "Rounds; faces that share points settle over several.", 100.0)]
+
+func make_planar_verb() -> Verb:
+    return Verb("Make Planar", "Deform", "Flatten each of the group's faces in place, each on its own plane", Domain.face, true, planar_parms, false, cook_make_planar,
+                section = "Modify", family = "Shape", icon = "set-planar", picks = pick_pieces, drag = 0, drag_mode = "amount", wheel = 1, whole = true)
+
+## What a round reads and writes.
+struct PlanarWork:
+    let offsets: const i32[]
+    let corners: const i32[]
+    let group: Bits
+    let around_offsets: const i32[]
+    let around_faces: const i32[]
+    let points: const u32[]
+    let positions: Float3[]
+    let centers: Vector3[]
+    let normals: Vector3[]
+    let factor: f64
+
+## Each group face's plane: its corners' mean and unit Newell normal (zero
+## for a face with no area, which then pulls no point).
+func face_planes(context: void*, first: usize, end: usize, worker: usize):
+    let work = (PlanarWork*)context
+    for face in first..<end:
+        if not work.group.get(face): continue
+        let start = (usize)work.offsets[face]
+        let stop = (usize)work.offsets[face + 1]
+        var center = Vector3()
+        var newell = Vector3()
+        for corner in start..<stop:
+            let p = work.positions[(usize)work.corners[corner]].vector()
+            let q = work.positions[(usize)work.corners[corner + 1 if corner + 1 < stop else start]].vector()
+            center = center.add(p)
+            newell = newell.add(p.cross(q))
+        work.centers[face] = center.multiply_scalar(1.0 / (f64)(stop - start))
+        let length = newell.length()
+        work.normals[face] = newell.multiply_scalar(1.0 / length) if length > 1.0e-30 else Vector3()
+
+## Each point toward the mean of its projections onto its group faces' planes.
+func planar_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (PlanarWork*)context
+    for at in first..<end:
+        let point = (usize)work.points[at]
+        let p = work.positions[point].vector()
+        var sum = Vector3()
+        var count = 0.0
+        for slot in (usize)work.around_offsets[point]..<(usize)work.around_offsets[point + 1]:
+            let face = (usize)work.around_faces[slot]
+            if not work.group.get(face): continue
+            let normal = work.normals[face]
+            sum = sum.subtract(normal.multiply_scalar(p.subtract(work.centers[face]).dot(normal)))
+            count += 1.0
+        if count > 0.0: work.positions[point] = Float3.of(p.add(sum.multiply_scalar(work.factor / count)))
+
+func cook_make_planar(input: const VerbInput*, output: VerbOutput*) -> !:
+    let factor = input.parms.at(0)
+    if not (factor >= 0.0 and factor <= 1.0): error(errors.invalid, "Make Planar's factor must be in 0..1")
+    let rounds = (usize)math.max(1.0, math.min(1000.0, input.parms.at(1)))
+    let mesh = input.mesh
+    let faces = (usize)mesh.face_count()
+    let offsets = mesh.offset_span()
+    let corners = mesh.corner_span()
+    output.positions = mesh_positions(mesh)
+    _ = try output.positions.writable()
+    output.selection = try BitsBuilder.copy_of(input.group)
+    output.selection_domain = Domain.face
+    # The group's faces' points, in order.
+    var used = try BitsBuilder.zeros((usize)mesh.point_count())
+    defer used.close()
+    for face in 0..<faces:
+        if not input.group.get(face): continue
+        for corner in (usize)offsets[face]..<(usize)offsets[face + 1]: used.set((usize)corners[corner])
+    try output.moved.reserve(used.view().population())
+    for point in 0..<(usize)mesh.point_count():
+        if used.view().get(point): try output.moved.push((u32)point)
+    let around = try mesh.point_face_span()
+    let centers = try new Vector3[faces] --- in memory.heap
+    defer free(centers) in memory.heap
+    let normals = try new Vector3[faces] --- in memory.heap
+    defer free(normals) in memory.heap
+    var work = PlanarWork(offsets, corners, input.group, around.0, around.1, output.moved.view(), output.positions.span(), centers[..<faces], normals[..<faces], factor)
+    for _ in 0..<rounds:
+        try parallel.for_each_range(faces, 4096, (void*)&work, face_planes)
+        try parallel.for_each_range(output.moved.count, 4096, (void*)&work, planar_points)

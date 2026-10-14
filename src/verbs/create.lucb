@@ -74,7 +74,7 @@ func name_piece(mesh: Mesh*, first: usize, stem: str) -> !:
     for face in first..<faces: values[face] = named
     var column = try table.finish()
     defer column.release()
-    remove_attribute(mesh, "path", Domain.face)
+    try remove_attribute(mesh, "path", Domain.face)
     try put_attribute(mesh, try Attribute.text("path", Domain.face, faces, column, values[..<faces]))
 
 ## A count parameter as a size, checked to be whole and in range.

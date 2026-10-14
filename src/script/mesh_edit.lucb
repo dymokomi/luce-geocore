@@ -226,7 +226,7 @@ struct MeshEdit:
         errdefer mesh_dispose(made)
         for index in 0..<self.columns.count:
             let column = &self.columns.items[index]
-            remove_attribute(made, column.label, column.domain)
+            try remove_attribute(made, column.label, column.domain)
             try put_attribute(made, try column.attribute(self.domain_size(column.domain)))
         return made
 

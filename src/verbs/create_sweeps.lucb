@@ -31,7 +31,7 @@ let helix_parms: ParmSpec[11] = [
 let helix_place: PlaceSpec = PlaceSpec("radius", 0, rise = 3, position = 7, up = 8)
 
 func helix_verb() -> Verb:
-    return Verb("Helix", "Primitives", "A spring: a wire swept along a helix", Domain.face, false, helix_parms, true, cook_helix, section = "Create", family = "Primitives", icon = "curve-spiral", inputs = 0, wheel = 4, gesture = "create", place = helix_place)
+    return Verb("Helix", "Primitives", "A spring: a wire swept along a helix", Domain.face, false, helix_parms, true, cook_helix, section = "Create", family = "Primitives", icon = "helix", inputs = 0, wheel = 4, gesture = "create", place = helix_place)
 
 func cook_helix(input: const VerbInput*, output: VerbOutput*) -> !:
     let p = input.parms

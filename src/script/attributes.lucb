@@ -51,7 +51,9 @@ extend Geometry:
         self.drop_edits()
         if let mesh = set_mesh(self.set()):
             let storage = try mesh_share(mesh)
-            remove_attribute(storage, name, domain_of(domain))
+            remove_attribute(storage, name, domain_of(domain)) catch failure:
+                mesh_dispose(storage)
+                error(failure.code, failure.message)
             try self.set().put(&mesh_component, (void*)storage)
 
     # mark: One element ================================================================

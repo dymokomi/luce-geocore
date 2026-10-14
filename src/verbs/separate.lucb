@@ -180,7 +180,7 @@ func name_islands(mesh: Mesh*, island: const i32[], parts: usize) -> !:
         if island[face] >= 0: values[face] = renamed[(usize)island[face]]
     var column = try table.finish()
     defer column.release()
-    remove_attribute(mesh, "path", Domain.face)
+    try remove_attribute(mesh, "path", Domain.face)
     try put_attribute(mesh, try Attribute.text("path", Domain.face, faces, column, values[..<faces]))
 
 ## `base` with the first suffix .001, .002, … not in `table` yet, interned.

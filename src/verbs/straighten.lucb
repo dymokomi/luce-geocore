@@ -1,0 +1,221 @@
+## Straighten and Space Evenly: the points along the group's chains of
+## edges (edge_chains.lucb) moved along them, after Houdini's Edge
+## Straighten and Edge Equalize, Blender's LoopTools Space and Maya's
+## Space evenly. Straighten puts a run's inner points on the line between
+## its ends, at equal steps or (Even off) at their share of the run's
+## length; loops have no ends and stay. Space Evenly slides the points of a
+## run or loop along its own path to equal lengths apart, on the polyline
+## (Linear) or on a smooth curve through the points (Smooth: a centripetal
+## Catmull-Rom spline), a run's ends and a loop's first point held.
+## Influence blends from where the points were. Chains share at most their
+## ends, which neither verb moves, so the chains run in parallel. The
+## output selection is the group.
+
+let straighten_parms: ParmSpec[2] = [
+    ParmSpec("Even", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Space the points equally along the line; off, each keeps its share of the run's length."),
+    ParmSpec("Influence", ParmKind.number, 1.0, 0.0, 1.0, 1, "", "How far the points move toward the line.")]
+
+let chain_picks: PickSpec[1] = [PickSpec("Edges", "edges points")]
+
+func straighten_verb() -> Verb:
+    return Verb("Straighten", "Deform", "Put the inner points of the group's runs of edges on the line between the runs' ends", Domain.edge, true, straighten_parms, false, cook_straighten,
+                section = "Modify", family = "Shape", icon = "constraint-collinear", picks = chain_picks, drag = 1, drag_mode = "amount")
+
+let space_parms: ParmSpec[2] = [
+    ParmSpec("Interpolation", ParmKind.menu, 1.0, 0.0, 1.0, 1, "Linear|Smooth", "Slide the points along the edges as they are, or along a smooth curve through the points."),
+    ParmSpec("Influence", ParmKind.number, 1.0, 0.0, 1.0, 1, "", "How far the points move toward their even places.")]
+
+func space_evenly_verb() -> Verb:
+    return Verb("Space Evenly", "Deform", "Slide the points of the group's runs and loops of edges along them to equal lengths apart", Domain.edge, true, space_parms, false, cook_space_evenly,
+                section = "Modify", family = "Shape", icon = "resample-curve", picks = chain_picks, drag = 1, drag_mode = "amount")
+
+## Samples a smooth path takes between two points.
+let smooth_samples: usize = 8
+
+## What the chains read and write, per chain in parallel: the old
+## positions, the new ones, and per chain point scratch (lengths along the
+## chain; a smooth path's samples and their lengths).
+struct ChainWork:
+    let chains: const EdgeChains*
+    let before: const Float3[]
+    let positions: Float3[]
+    let lengths: f64[]
+    let samples: Vector3[]
+    let sample_lengths: f64[]
+    let straighten: bool
+    let even: bool
+    let smooth: bool
+    let influence: f64
+
+func cook_straighten(input: const VerbInput*, output: VerbOutput*) -> !:
+    let even = input.parms.at(0) != 0.0
+    let influence = input.parms.at(1)
+    if not (influence >= 0.0 and influence <= 1.0): error(errors.invalid, "Straighten's influence must be in 0..1")
+    try move_chains(input, output, true, even, false, influence)
+
+func cook_space_evenly(input: const VerbInput*, output: VerbOutput*) -> !:
+    let influence = input.parms.at(1)
+    if not (influence >= 0.0 and influence <= 1.0): error(errors.invalid, "Space Evenly's influence must be in 0..1")
+    try move_chains(input, output, false, true, input.parms.at(0) != 0.0, influence)
+
+func move_chains(input: const VerbInput*, output: VerbOutput*, straighten: bool, even: bool, smooth: bool, influence: f64) -> !:
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    var chains = EdgeChains()
+    defer chains.close()
+    try edge_chains(&topology, input.group, &chains)
+    output.positions = mesh_positions(mesh)
+    _ = try output.positions.writable()
+    output.selection = try BitsBuilder.copy_of(input.group)
+    output.selection_domain = Domain.edge
+    let total = chains.points.count
+    let lengths = try new f64[total + chains.count()] --- in memory.heap
+    defer free(lengths) in memory.heap
+    let sampled = (total + chains.count()) * smooth_samples if smooth else 0
+    let samples = try new Vector3[sampled] --- in memory.heap
+    defer free(samples) in memory.heap
+    let sample_lengths = try new f64[sampled] --- in memory.heap
+    defer free(sample_lengths) in memory.heap
+    var work = ChainWork(&chains, mesh.point_span(), output.positions.span(), lengths[..<total + chains.count()], samples[..<sampled], sample_lengths[..<sampled], straighten, even, smooth, influence)
+    try parallel.for_each_range(chains.count(), 64, (void*)&work, chain_range)
+    # Every chain point but the held ones moved.
+    var skipped: usize = 0
+    for index in 0..<chains.count():
+        let chain = chains.chain(index)
+        let closed = chains.closed.items[index] != 0
+        if straighten and closed:
+            skipped += 1
+            continue
+        let end = chain.length if closed else chain.length - 1
+        for at in 1..<end: try output.moved.push((u32)chain[at])
+    if skipped > 0:
+        output.warning = "Loops have no ends to straighten between; they stay"
+        output.skipped = skipped
+
+func chain_range(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ChainWork*)context
+    for index in first..<end:
+        let chain = work.chains.chain(index)
+        let closed = work.chains.closed.items[index] != 0
+        if chain.length < 2 or (work.straighten and closed): continue
+        # Chain index's scratch: its points' slots plus one (a loop's
+        # closing length).
+        let base = (usize)work.chains.starts.items[index] + index
+        if work.straighten: straighten_chain(work, chain, base)
+        else: space_chain(work, chain, closed, base)
+
+func straighten_chain(work: const ChainWork*, chain: const i32[], base: usize):
+    let count = chain.length
+    let a = work.before[(usize)chain[0]].vector()
+    let b = work.before[(usize)chain[count - 1]].vector()
+    var length = 0.0
+    work.lengths[base] = 0.0
+    for at in 1..<count:
+        length += work.before[(usize)chain[at]].vector().subtract(work.before[(usize)chain[at - 1]].vector()).length()
+        work.lengths[base + at] = length
+    for at in 1..<count - 1:
+        let share = (f64)at / (f64)(count - 1) if work.even or length <= 0.0 else work.lengths[base + at] / length
+        place_toward(work, (usize)chain[at], a.add(b.subtract(a).multiply_scalar(share)))
+
+func place_toward(work: const ChainWork*, point: usize, target: Vector3):
+    let p = work.before[point].vector()
+    work.positions[point] = Float3.of(p.add(target.subtract(p).multiply_scalar(work.influence)))
+
+## Chain point `at` (wrapping round a loop; a run's ends repeated past it).
+func run_point(work: const ChainWork*, chain: const i32[], closed: bool, at: i64) -> Vector3:
+    let count = (i64)chain.length
+    var index = at
+    if closed: index = ((at % count) + count) % count
+    elif index < 0: index = 0
+    elif index >= count: index = count - 1
+    return work.before[(usize)chain[(usize)index]].vector()
+
+func space_chain(work: const ChainWork*, chain: const i32[], closed: bool, base: usize):
+    let count = chain.length
+    let spans = count if closed else count - 1
+    if work.smooth:
+        space_smooth(work, chain, closed, base, spans)
+        return
+    # Linear: lengths along the polyline, then each point at its even share.
+    var length = 0.0
+    work.lengths[base] = 0.0
+    for at in 0..<spans:
+        length += run_point(work, chain, closed, (i64)at + 1).subtract(run_point(work, chain, closed, (i64)at)).length()
+        work.lengths[base + at + 1] = length
+    if length <= 0.0: return
+    let last = count if closed else count - 1
+    var span: usize = 0
+    for at in 1..<last:
+        let wanted = length * (f64)at / (f64)spans
+        while span + 1 < spans and work.lengths[base + span + 1] < wanted: span += 1
+        let behind = work.lengths[base + span]
+        let piece = work.lengths[base + span + 1] - behind
+        let t = (wanted - behind) / piece if piece > 0.0 else 0.0
+        let a = run_point(work, chain, closed, (i64)span)
+        let b = run_point(work, chain, closed, (i64)span + 1)
+        place_toward(work, (usize)chain[at], a.add(b.subtract(a).multiply_scalar(t)))
+
+## Smooth: the centripetal Catmull-Rom spline through the points, sampled
+## `smooth_samples` times a span, the points placed at even lengths along
+## the samples.
+func space_smooth(work: const ChainWork*, chain: const i32[], closed: bool, base: usize, spans: usize):
+    let first = base * smooth_samples
+    var length = 0.0
+    var previous = run_point(work, chain, closed, 0)
+    work.samples[first] = previous
+    work.sample_lengths[first] = 0.0
+    var written: usize = 1
+    for span in 0..<spans:
+        let p0 = run_point(work, chain, closed, (i64)span - 1)
+        let p1 = run_point(work, chain, closed, (i64)span)
+        let p2 = run_point(work, chain, closed, (i64)span + 1)
+        let p3 = run_point(work, chain, closed, (i64)span + 2)
+        let knots = centripetal_knots(p0, p1, p2, p3)
+        for step in 1..<smooth_samples + 1:
+            let q = catmull_rom(p0, p1, p2, p3, knots, (f64)step / (f64)smooth_samples)
+            length += q.subtract(previous).length()
+            previous = q
+            if written < spans * smooth_samples + 1 and first + written < work.samples.length:
+                work.samples[first + written] = q
+                work.sample_lengths[first + written] = length
+                written += 1
+    if length <= 0.0: return
+    let count = chain.length
+    let last = count if closed else count - 1
+    var sample: usize = 0
+    for at in 1..<last:
+        let wanted = length * (f64)at / (f64)spans
+        while sample + 2 < written and work.sample_lengths[first + sample + 1] < wanted: sample += 1
+        let behind = work.sample_lengths[first + sample]
+        let piece = work.sample_lengths[first + sample + 1] - behind
+        let t = (wanted - behind) / piece if piece > 0.0 else 0.0
+        let a = work.samples[first + sample]
+        let b = work.samples[first + sample + 1]
+        place_toward(work, (usize)chain[at], a.add(b.subtract(a).multiply_scalar(t)))
+
+## The knots of the centripetal Catmull-Rom span through p0..p3 (each the
+## last plus the square root of the chord), from 0.
+func centripetal_knots(p0: Vector3, p1: Vector3, p2: Vector3, p3: Vector3) -> Vector3:
+    let t1 = math.sqrt(math.max(p1.subtract(p0).length(), 1.0e-12))
+    let t2 = t1 + math.sqrt(math.max(p2.subtract(p1).length(), 1.0e-12))
+    return Vector3(t1, t2, t2 + math.sqrt(math.max(p3.subtract(p2).length(), 1.0e-12)))
+
+## The centripetal Catmull-Rom curve between p1 and p2 at t (0..1), after
+## Barry and Goldman's pyramid, its knots (t1, t2, t3) given.
+func catmull_rom(p0: Vector3, p1: Vector3, p2: Vector3, p3: Vector3, knots: Vector3, t: f64) -> Vector3:
+    let t1 = knots.x
+    let t2 = knots.y
+    let t3 = knots.z
+    let u = t1 + (t2 - t1) * t
+    let a1 = knot_blend(p0, p1, 0.0, t1, u)
+    let a2 = knot_blend(p1, p2, t1, t2, u)
+    let a3 = knot_blend(p2, p3, t2, t3, u)
+    let b1 = knot_blend(a1, a2, 0.0, t2, u)
+    let b2 = knot_blend(a2, a3, t1, t3, u)
+    return knot_blend(b1, b2, t1, t2, u)
+
+## The point between `a` (at knot `ta`) and `b` (at `tb`) at `u`.
+func knot_blend(a: Vector3, b: Vector3, ta: f64, tb: f64, u: f64) -> Vector3:
+    let span = tb - ta
+    if span <= 0.0: return a
+    return a.multiply_scalar((tb - u) / span).add(b.multiply_scalar((u - ta) / span))

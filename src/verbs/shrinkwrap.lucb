@@ -23,7 +23,7 @@ let down_initials: f64[3] = [0.0, -1.0, 0.0]
 let shrinkwrap_picks: PickSpec[1] = [PickSpec("Components", "objects points edges faces")]
 
 func shrinkwrap_verb() -> Verb:
-    return Verb("Shrinkwrap", "Deform", "Move the group's points onto the reference surface (its second input)", Domain.point, true, shrinkwrap_parms, false, cook_shrinkwrap, section = "Modify", family = "Shape", icon = "shrink-surface", picks = shrinkwrap_picks, drag = 2, drag_mode = "amount", whole = true, inputs = 2, second_required = true)
+    return Verb("Shrinkwrap", "Deform", "Move the group's points onto the reference surface (its second input)", Domain.point, true, shrinkwrap_parms, false, cook_shrinkwrap, section = "Modify", family = "Shape", icon = "shrinkwrap", picks = shrinkwrap_picks, drag = 2, drag_mode = "amount", whole = true, inputs = 2, second_required = true)
 
 struct WrapWork:
     let positions: Float3[]

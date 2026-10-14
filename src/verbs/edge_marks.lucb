@@ -1,0 +1,193 @@
+## Edge marks for shading and UVs: Hard Edges, Soft Edges and Smooth by
+## Angle write the edge attribute `sharp` (1 hard, -1 soft, 0 by the 60°
+## cusp), which the smooth normals follow (shading/smooth_normals.lucb), as
+## Maya's Harden and Soften Edge and Set Normal Angle and Blender's Mark
+## Sharp and Smooth by Angle do; Mark Seam and Seams from Islands write
+## `seam` (1 on a UV seam), which Connected's delimits and Select Similar
+## read. The marks ride through every later verb on the edges' provenance.
+## Each verb shares the mesh and replaces one edge column; the output
+## selection is the edges marked.
+
+let mark_parms: ParmSpec[1] = [ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Set|Clear", "Mark the group's edges, or clear their mark (they shade by the 60° cusp again).")]
+
+## Hard and Soft Edges take edges: points the edges between them, faces
+## their edges.
+func hard_edges_verb() -> Verb:
+    return Verb("Hard Edges", "Attributes", "Mark the group's edges hard: the shading splits across them", Domain.edge, true, mark_parms, false, cook_hard_edges,
+                section = "Modify", family = "Normals", icon = "select-sharp", picks = pick_edges)
+
+func soft_edges_verb() -> Verb:
+    return Verb("Soft Edges", "Attributes", "Mark the group's edges soft: the shading runs smooth across them at any angle", Domain.edge, true, mark_parms, false, cook_soft_edges,
+                section = "Modify", family = "Normals", icon = "shaded-view", picks = pick_edges)
+
+let smooth_angle_parms: ParmSpec[2] = [
+    ParmSpec("Angle", ParmKind.number, 30.0, 0.0, 180.0, 1, "", "Edges whose faces meet at more than this angle (degrees) turn hard, the others soft."),
+    ParmSpec("Keep hard edges", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Edges marked hard stay hard, whatever their angle (Blender's Keep Sharp Edges).")]
+
+## Whole pieces, faces (their edges) or edges.
+let smooth_angle_picks: PickSpec[1] = [PickSpec("Edges", "objects faces edges")]
+
+func smooth_by_angle_verb() -> Verb:
+    return Verb("Smooth by Angle", "Attributes", "Mark the group's edges hard where their faces meet at more than an angle, soft elsewhere", Domain.edge, true, smooth_angle_parms, false, cook_smooth_by_angle,
+                section = "Modify", family = "Normals", icon = "surface-normal", picks = smooth_angle_picks, drag = 0, drag_mode = "amount", whole = true)
+
+let seam_parms: ParmSpec[1] = [ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Set|Clear", "Mark the group's edges as UV seams, or clear them.")]
+
+func mark_seam_verb() -> Verb:
+    return Verb("Mark Seam", "Attributes", "Mark the group's edges as UV seams", Domain.edge, true, seam_parms, false, cook_mark_seam,
+                section = "Modify", family = "UV", icon = "sketch-break", picks = pick_edges)
+
+let island_seam_parms: ParmSpec[1] = [ParmSpec("Mark hard", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Mark the seams hard as well (Blender's Mark Sharp), so the shading splits along them.")]
+
+func seams_from_islands_verb() -> Verb:
+    return Verb("Seams from Islands", "Attributes", "Mark seams on the edges where the UVs split into islands, and clear them on the group's other edges", Domain.edge, true, island_seam_parms, false, cook_seams_from_islands,
+                section = "Modify", family = "UV", icon = "uv-project", picks = pick_pieces, whole = true)
+
+## The edge column `name` of `mesh`: its values where it exists, else 0
+## (heap; the caller frees it).
+func edge_column(mesh: const Mesh*, name: str, edges: usize) -> f32[]!:
+    let values = try new f32[edges] --- in memory.heap
+    let existing = mesh.attribute_on(name, Domain.edge)
+    if existing < 0:
+        for edge in 0..<edges: values[edge] = 0.0
+        return values
+    let entry = mesh.attribute_entry(existing) catch failure:
+        free(values) in memory.heap
+        error(failure.code, failure.message)
+    for edge in 0..<edges: values[edge] = (f32)entry.number(edge, 0)
+    return values
+
+## The input mesh with edge column `name` set to `values`, the group
+## selected: the output of a marking verb.
+func put_edge_column(input: const VerbInput*, output: VerbOutput*, name: str, values: const f32[]) -> !:
+    let mesh = input.mesh
+    var attribute = try Attribute.create(name, Domain.edge, DataType.float32, 1, values.length)
+    memory.copy(attribute_ops.typed_mut[f32](attribute.data.span()), values, values.length)
+    let made = mesh_share(mesh) catch failure:
+        attribute.release()
+        error(failure.code, failure.message)
+    put_attribute(made, attribute) catch failure:
+        mesh_dispose(made)
+        error(failure.code, failure.message)
+    if let previous = output.mesh: mesh_dispose(previous)
+    output.mesh = made
+    output.selection.close()
+    output.selection = try BitsBuilder.copy_of(input.group)
+    output.selection_domain = Domain.edge
+
+## The group's edges set to `value` (Set), or, cleared, those whose mark
+## has `value`'s sign put back to 0.
+func cook_marked(input: const VerbInput*, output: VerbOutput*, name: str, value: f32) -> !:
+    let edges = (usize)(try input.mesh.edge_count())
+    let values = try edge_column(input.mesh, name, edges)
+    defer free(values) in memory.heap
+    let clear = input.parms.at(0) == 1.0
+    for edge in 0..<edges:
+        if not input.group.get(edge): continue
+        if not clear: values[edge] = value
+        elif values[edge] * value > 0.0: values[edge] = 0.0
+    try put_edge_column(input, output, name, values)
+
+func cook_hard_edges(input: const VerbInput*, output: VerbOutput*) -> !:
+    try cook_marked(input, output, "sharp", 1.0)
+
+func cook_soft_edges(input: const VerbInput*, output: VerbOutput*) -> !:
+    try cook_marked(input, output, "sharp", -1.0)
+
+func cook_mark_seam(input: const VerbInput*, output: VerbOutput*) -> !:
+    try cook_marked(input, output, "seam", 1.0)
+
+## What marking by angle reads, per edge in parallel.
+struct AngleWork:
+    let topology: const Topology*
+    let normals: const Float3[]
+    let group: Bits
+    let cosine: f64
+    let keep: bool
+    let values: f32[]
+
+func angle_marks(context: void*, first: usize, end: usize, worker: usize):
+    let work = (AngleWork*)context
+    let topology = work.topology
+    for edge in first..<end:
+        if not work.group.get(edge): continue
+        if work.keep and work.values[edge] > 0.0: continue
+        let start = (usize)topology.edge_corner_offsets[edge]
+        if (usize)topology.edge_corner_offsets[edge + 1] - start != 2:
+            # A boundary or non-manifold edge has no angle: its faces are
+            # split anyway, so it is left soft.
+            work.values[edge] = -1.0
+            continue
+        let a = work.normals[(usize)topology.corner_faces[(usize)topology.edge_corners[start]]].vector()
+        let b = work.normals[(usize)topology.corner_faces[(usize)topology.edge_corners[start + 1]]].vector()
+        work.values[edge] = 1.0 if a.dot(b) < work.cosine else -1.0
+
+func cook_smooth_by_angle(input: const VerbInput*, output: VerbOutput*) -> !:
+    let degrees = input.parms.at(0)
+    if not (degrees >= 0.0 and degrees <= 180.0): error(errors.invalid, "Smooth by Angle's angle must be 0..180 degrees")
+    let mesh = input.mesh
+    let topology = try Topology.of(mesh)
+    let edges = topology.edges()
+    let values = try edge_column(mesh, "sharp", edges)
+    defer free(values) in memory.heap
+    var work = AngleWork(&topology, mesh.face_normal_span(), input.group, math.cos(degrees * math.pi / 180.0), input.parms.at(1) != 0.0, values[..<edges])
+    try parallel.for_each_range(edges, 16384, (void*)&work, angle_marks)
+    try put_edge_column(input, output, "sharp", values)
+
+## What finding UV seams reads, per edge in parallel.
+struct SeamWork:
+    let topology: const Topology*
+    let uv: const Attribute*
+    let group: Bits
+    let seams: f32[]
+    let sharp: f32[]
+
+func island_seams(context: void*, first: usize, end: usize, worker: usize):
+    let work = (SeamWork*)context
+    let topology = work.topology
+    for edge in first..<end:
+        if not work.group.get(edge): continue
+        let start = (usize)topology.edge_corner_offsets[edge]
+        let split = (usize)topology.edge_corner_offsets[edge + 1] - start == 2 and uv_split(topology, work.uv, (usize)topology.edge_corners[start], (usize)topology.edge_corners[start + 1])
+        work.seams[edge] = 1.0 if split else 0.0
+        if split and work.sharp.length > 0: work.sharp[edge] = 1.0
+
+## Whether the faces of corners `a` and `b` (each leaving the same edge)
+## give either of the edge's points different UVs.
+func uv_split(topology: const Topology*, uv: const Attribute*, a: usize, b: usize) -> bool:
+    let ends: usize[2] = [a, topology.next(a)]
+    let others: usize[2] = [b, topology.next(b)]
+    for here in ends:
+        let point = topology.corners[here]
+        let there = others[0] if topology.corners[others[0]] == point else others[1]
+        let du = uv.number(here, 0) - uv.number(there, 0)
+        let dv = uv.number(here, 1) - uv.number(there, 1)
+        if du * du + dv * dv > 1.0e-10: return true
+    return false
+
+func cook_seams_from_islands(input: const VerbInput*, output: VerbOutput*) -> !:
+    let mesh = input.mesh
+    let index = mesh.attribute_on("uv", Domain.corner)
+    if index < 0:
+        if mesh.attribute_on("uv", Domain.point) >= 0: error(errors.invalid, "the UVs are per point, so they make no islands: there are no seams to find")
+        error(errors.invalid, "the mesh has no UVs (a uv attribute on its corners)")
+    let uv = try mesh.attribute_entry(index)
+    if uv.width < 2: error(errors.invalid, "the uv attribute needs two components")
+    let topology = try Topology.of(mesh)
+    let edges = topology.edges()
+    let seams = try edge_column(mesh, "seam", edges)
+    defer free(seams) in memory.heap
+    let hard = input.parms.at(0) != 0.0
+    var sharp: f32[]
+    if hard: sharp = try edge_column(mesh, "sharp", edges)
+    defer:
+        if hard: free(sharp) in memory.heap
+    var work = SeamWork(&topology, uv, input.group, seams[..<edges], sharp)
+    try parallel.for_each_range(edges, 16384, (void*)&work, island_seams)
+    try put_edge_column(input, output, "seam", seams)
+    if not hard: return
+    # Mark hard: the seam mesh takes the sharp column too.
+    let seamed = output.mesh else return
+    var attribute = try Attribute.create("sharp", Domain.edge, DataType.float32, 1, edges)
+    memory.copy(attribute_ops.typed_mut[f32](attribute.data.span()), sharp, edges)
+    try put_attribute(seamed, attribute)
