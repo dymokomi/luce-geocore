@@ -25,7 +25,7 @@ let circularize_picks: PickSpec[1] = [PickSpec("Loops", "edges faces points")]
 
 func circularize_verb() -> Verb:
     return Verb("Circularize", "Deform", "Make the group's edge loops, or its regions' outlines, circles", Domain.edge, true, circularize_parms, false, cook_circularize, false, circularize_also,
-                section = "Modify", family = "Shape", icon = "circle-center", picks = circularize_picks, drag = 4, drag_mode = "amount")
+                section = "Modify", family = "Shape", icon = "circularize", picks = circularize_picks, drag = 4, drag_mode = "amount")
 
 ## How a run of Circularize places points.
 struct CircleSettings:

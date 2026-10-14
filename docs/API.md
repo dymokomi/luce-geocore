@@ -645,3 +645,32 @@ sphere by the cusp and by its edge marks after Smooth by Angle:
 | Bevel Weight, every row | 1.7 ms | 1,048,576 |  |
 | Shading normals, the 1M-face sphere, by the cusp | 27.4 ms | 1,048,352 |  |
 | Shading normals, the 1M-face sphere, by its edge marks (every edge marked) | 22.9 ms | 1,048,352 |  |
+
+The Stage 8 deformers, sculpt strokes and Mesh Check on about a million
+faces (the 1024 × 1024 grid, X its Bend axis; the 1448 × 724 sphere). A
+sculpt stroke's 100 dabs (radius 20: about 1,250 points each) run whole
+include building its point hash; "grown" is what a pointer move costs live:
+the stroke remembered at 97 dabs, sent again with 100, only the new dabs
+run and the new mesh is made over the last one. Mesh Check includes the
+first build of the mesh's triangle tree (Intersecting faces reads it).
+
+| Verb run | Time | Faces out | Warning |
+|---|---:|---:|---|
+| Bend (Bend 90°), everything | 14.2 ms | 1,048,576 |  |
+| Bend (Twist 90°), everything | 30.6 ms | 1,048,576 |  |
+| Bend (Taper 50%), everything | 11.7 ms | 1,048,576 |  |
+| Bend (Squash -30%), everything | 11.6 ms | 1,048,576 |  |
+| Lattice, 5×5×5 Smooth cage, 2 points moved, everything | 34.9 ms | 1,048,576 |  |
+| Lattice, 5×5×5 Linear cage, 2 points moved, everything | 12.2 ms | 1,048,576 |  |
+| Sculpt, a stroke of 100 Draw dabs run whole (radius 20) | 73.0 ms | 1,048,576 |  |
+| Sculpt, the stroke grown by 3 dabs (a pointer move) | 3.0 ms | 1,048,576 |  |
+| Sculpt, a Grab stroke of 100 dabs run whole | 11.7 ms | 1,048,576 |  |
+| Mesh Check, the grid, every finding | 461.4 ms | 1,048,576 |  |
+| Mesh Check, the sphere, every finding | 540.6 ms | 1,048,352 |  |
+| Mesh Check, the sphere, without Intersecting | 57.5 ms | 1,048,352 |  |
+| Select Intersecting, the sphere (its tree built) | 295.7 ms | 1,048,352 |  |
+
+Intersecting faces was 1,046 ms on the grid with one tree query per
+triangle; one query per tree leaf with its candidates' boxes and points
+gathered once brought it to 296 ms. Pinched points (94 ms serial) and the
+degenerate passes (20–23 ms) now run their elements in parallel.

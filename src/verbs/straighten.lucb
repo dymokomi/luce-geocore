@@ -19,7 +19,7 @@ let chain_picks: PickSpec[1] = [PickSpec("Edges", "edges points")]
 
 func straighten_verb() -> Verb:
     return Verb("Straighten", "Deform", "Put the inner points of the group's runs of edges on the line between the runs' ends", Domain.edge, true, straighten_parms, false, cook_straighten,
-                section = "Modify", family = "Shape", icon = "constraint-collinear", picks = chain_picks, drag = 1, drag_mode = "amount")
+                section = "Modify", family = "Shape", icon = "straighten", picks = chain_picks, drag = 1, drag_mode = "amount")
 
 let space_parms: ParmSpec[2] = [
     ParmSpec("Interpolation", ParmKind.menu, 1.0, 0.0, 1.0, 1, "Linear|Smooth", "Slide the points along the edges as they are, or along a smooth curve through the points."),
@@ -27,7 +27,7 @@ let space_parms: ParmSpec[2] = [
 
 func space_evenly_verb() -> Verb:
     return Verb("Space Evenly", "Deform", "Slide the points of the group's runs and loops of edges along them to equal lengths apart", Domain.edge, true, space_parms, false, cook_space_evenly,
-                section = "Modify", family = "Shape", icon = "resample-curve", picks = chain_picks, drag = 1, drag_mode = "amount")
+                section = "Modify", family = "Shape", icon = "space-evenly", picks = chain_picks, drag = 1, drag_mode = "amount")
 
 ## Samples a smooth path takes between two points.
 let smooth_samples: usize = 8

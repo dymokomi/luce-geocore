@@ -1,0 +1,217 @@
+## The Stage 8 deformers (POLY-MODELING.md Stage 8): Bend's modes on a box
+## column standing on the origin (1 wide, 4 tall, 8 rows): Twist 90° turns
+## the top 90° and the middle 45°, keeping every point's distance from the
+## axis; Bend 90° curls the column into a quarter circle whose top face
+## stands where the arc of radius 2L/π ends; Taper 100% doubles the top;
+## Squash -50% halves the height and widens the slices to keep the
+## volume; Limits hold the part past them rigid; only the group moves.
+## Lattice: an unmoved cage changes nothing, a cage corner moved pulls a
+## Linear cage's center by an eighth, a Smooth cage's middle by Bernstein's
+## weight, an affinely moved Smooth cage maps the box affinely, the cage
+## reads back, and a cage point past the cage is refused.
+import interop
+import memory
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import near, near_point, volume
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try twist_checks()
+    try bend_checks()
+    try taper_squash_checks()
+    try limit_checks()
+    try lattice_checks()
+    print("PASS Bend and Lattice: Twist 90° turns a column's top 90°, Bend curls it into a quarter circle, Taper doubles its top, Squash keeps its volume, Limits hold the rest rigid, the group alone moves; an unmoved cage changes nothing, moved cage points pull by trilinear and Bernstein weights, an affine cage maps affinely, the cage reads back")
+
+## The column: 1 wide, 4 tall, 8 rows, standing on the origin.
+func column() -> interop.Reference[Mesh]!:
+    return try MeshPrimitives.box(Vector3(1.0, 4.0, 1.0), 1, 8, 1)
+
+## Bend's numbers: mode, amount, axis Y, direction, origin, custom origin,
+## length, limits.
+func bend_numbers(mode: f64, amount: f64, low: f64 = 0.0, high: f64 = 1.0) -> f64[12]:
+    return [mode, amount, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, low, high, 0.0]
+
+func deformed(mesh: interop.Reference[Mesh], group: str, numbers: const f64[]) -> interop.Reference[Mesh]!:
+    let result = try Verbs.run("Bend", mesh, group, 1, numbers)
+    defer result.release()
+    assert(result.value().warning().length == 0)
+    return try result.value().mesh()
+
+## The mean of the points at height `y` of `source`, where `mesh` has them.
+func slice_middle(source: interop.Reference[Mesh], mesh: interop.Reference[Mesh], y: f64) -> Vector3!:
+    var sum = Vector3()
+    var count = 0.0
+    for point in 0..<source.value().point_count():
+        if math.abs((try source.value().point(point)).y - y) > 1.0e-9: continue
+        sum = sum.add(try mesh.value().point(point))
+        count += 1.0
+    assert(count > 0.0)
+    return sum.multiply_scalar(1.0 / count)
+
+func twist_checks() -> !:
+    let box = try column()
+    defer box.release()
+    let numbers = bend_numbers(1.0, 90.0)
+    let twisted = try deformed(box, "", numbers[..<12])
+    defer twisted.release()
+    for point in 0..<box.value().point_count():
+        let before = try box.value().point(point)
+        let after = try twisted.value().point(point)
+        near(after.y, before.y)
+        # Each slice turns about the axis by 90° times its height share.
+        let r0 = math.sqrt(before.x * before.x + before.z * before.z)
+        near(math.sqrt(after.x * after.x + after.z * after.z), r0)
+        let turn = math.atan2(before.x * after.z - before.z * after.x, before.x * after.x + before.z * after.z)
+        near(math.abs(turn), math.pi * 0.5 * before.y / 4.0, 1.0e-6)
+    # A whole turn of the same length brings the top back.
+    let whole = bend_numbers(1.0, 360.0)
+    let round = try deformed(box, "", whole[..<12])
+    defer round.release()
+    for point in 0..<box.value().point_count():
+        let before = try box.value().point(point)
+        if before.y < 3.999: continue
+        near_point(try round.value().point(point), before)
+
+func bend_checks() -> !:
+    let box = try column()
+    defer box.release()
+    let numbers = bend_numbers(0.0, 90.0)
+    let bent = try deformed(box, "", numbers[..<12])
+    defer bent.release()
+    # The base stays; the top's middle ends where a quarter arc of radius
+    # 2L/π from the base's middle ends, facing +X.
+    near_point(try slice_middle(box, bent, 0.0), Vector3(0.0, 0.0, 0.0))
+    let r = 4.0 * 2.0 / math.pi
+    near_point(try slice_middle(box, bent, 4.0), Vector3(r, r, 0.0))
+    # Every slice keeps its size, square to the arc: the top corners lie
+    # at the arc's end height ± half the width.
+    for point in 0..<box.value().point_count():
+        let before = try box.value().point(point)
+        if before.y < 3.999: continue
+        let after = try bent.value().point(point)
+        near(after.x, r)
+        near(after.y, r - before.x)
+        near(after.z, before.z)
+    # Direction turns the way it curls: 90° about Y bends toward -Z.
+    let toward = [0.0, 90.0, 1.0, 90.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    let other = try deformed(box, "", toward[..<12])
+    defer other.release()
+    near_point(try slice_middle(box, other, 4.0), Vector3(0.0, r, -r))
+
+func taper_squash_checks() -> !:
+    let box = try column()
+    defer box.release()
+    let taper = bend_numbers(2.0, 100.0)
+    let tapered = try deformed(box, "", taper[..<12])
+    defer tapered.release()
+    for point in 0..<box.value().point_count():
+        let before = try box.value().point(point)
+        let scale = 1.0 + before.y / 4.0
+        near_point(try tapered.value().point(point), Vector3(before.x * scale, before.y, before.z * scale))
+    let squash = bend_numbers(3.0, -50.0)
+    let squashed = try deformed(box, "", squash[..<12])
+    defer squashed.release()
+    near(try volume(squashed), try volume(box), 1.0e-5)
+    for point in 0..<box.value().point_count():
+        let before = try box.value().point(point)
+        let after = try squashed.value().point(point)
+        near(after.y, before.y * 0.5)
+        near(after.x, before.x * math.sqrt(2.0))
+    # A squash of 100 percent or more is refused.
+    let flat = bend_numbers(3.0, -100.0)
+    assert(try refused(box, "Bend", flat[..<12]))
+
+func limit_checks() -> !:
+    let box = try column()
+    defer box.release()
+    # Bent over the lower half only: the upper half stays a straight block
+    # leaning 45°, its length kept.
+    let numbers = bend_numbers(0.0, 90.0, 0.0, 0.5)
+    let bent = try deformed(box, "", numbers[..<12])
+    defer bent.release()
+    let middle = try slice_middle(box, bent, 2.0)
+    let top = try slice_middle(box, bent, 4.0)
+    let lean = top.subtract(middle)
+    near(lean.length(), 2.0)
+    near(lean.x, lean.y)
+    # The group alone moves: the column's lower half, twisted.
+    let twist = bend_numbers(1.0, 90.0)
+    let part = try deformed(box, "@P.y<2.01", twist[..<12])
+    defer part.release()
+    for point in 0..<box.value().point_count():
+        let before = try box.value().point(point)
+        if before.y > 2.01: near_point(try part.value().point(point), before)
+
+## Lattice's numbers: points along X, Y, Z, interpolation, padding, then
+## the moved cage points.
+func lattice_checks() -> !:
+    let box = try MeshPrimitives.box(Vector3(2.0, 2.0, 2.0), 2, 2, 2)
+    defer box.release()
+    let still = [3.0, 3.0, 3.0, 0.0, 0.0]
+    let same = try lattice(box, still[..<5])
+    defer same.release()
+    for point in 0..<box.value().point_count(): near_point(try same.value().point(point), try box.value().point(point), 0.0)
+    # Linear, two points a side: the far top corner (index 7) up by 1 moves
+    # the box's middle (cage center) by an eighth and that corner by 1.
+    let corner = [2.0, 2.0, 2.0, 1.0, 0.0, 1.0, 7.0, 0.0, 1.0, 0.0]
+    let pulled = try lattice(box, corner[..<10])
+    defer pulled.release()
+    for point in 0..<box.value().point_count():
+        let before = try box.value().point(point)
+        let after = try pulled.value().point(point)
+        let weight = (before.x + 1.0) / 2.0 * before.y / 2.0 * (before.z + 1.0) / 2.0
+        near_point(after, before.add(Vector3(0.0, weight, 0.0)))
+    # Smooth, three a side: the top middle point (1, 2, 1: index 16) pulls
+    # the middle by B1(½)·B2(1)·B1(½) = ½·1·½ and the middle of the top by ¼.
+    let top = [3.0, 3.0, 3.0, 0.0, 0.0, 1.0, 16.0, 0.0, 1.0, 0.0]
+    let raised = try lattice(box, top[..<10])
+    defer raised.release()
+    for point in 0..<box.value().point_count():
+        let before = try box.value().point(point)
+        let s = (before.x + 1.0) / 2.0
+        let t = before.y / 2.0
+        let u = (before.z + 1.0) / 2.0
+        let weight = 2.0 * s * (1.0 - s) * t * t * 2.0 * u * (1.0 - u)
+        near_point(try raised.value().point(point), before.add(Vector3(0.0, weight, 0.0)))
+    # Every cage point moved by an affine map (X doubled about the middle)
+    # maps the box by it: Bernstein weights keep linear functions.
+    var numbers: f64[114] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    numbers[0] = 3.0
+    numbers[1] = 3.0
+    numbers[2] = 3.0
+    numbers[5] = 27.0
+    for index in 0..<(usize)27:
+        let i = index % 3
+        numbers[6 + index * 4] = (f64)index
+        numbers[6 + index * 4 + 1] = (f64)i - 1.0
+    let wide = try lattice(box, numbers[..<114])
+    defer wide.release()
+    for point in 0..<box.value().point_count():
+        let before = try box.value().point(point)
+        near_point(try wide.value().point(point), Vector3(before.x * 2.0, before.y, before.z))
+    # The cage as the viewport reads it.
+    let cage = try Verbs.lattice(raised, top[..<10])
+    defer cage.release()
+    assert(cage.value().count() == 27 and cage.value().along(1) == 3)
+    near_point(cage.value().rest(0), Vector3(-1.0, 0.0, -1.0))
+    near_point(cage.value().point(16), Vector3(0.0, 3.0, 0.0))
+    # A cage point past the cage is refused.
+    let past = [3.0, 3.0, 3.0, 0.0, 0.0, 1.0, 27.0, 0.0, 1.0, 0.0]
+    assert(try refused(box, "Lattice", past[..<10]))
+
+func lattice(mesh: interop.Reference[Mesh], numbers: const f64[]) -> interop.Reference[Mesh]!:
+    let result = try Verbs.run("Lattice", mesh, "", 1, numbers)
+    defer result.release()
+    return try result.value().mesh()
+
+## Whether verb `name` refuses `numbers` on `mesh` (running out of memory
+## is no refusal).
+func refused(mesh: interop.Reference[Mesh], name: str, numbers: const f64[]) -> bool!:
+    let result = Verbs.run(name, mesh, "", 1, numbers) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
+        return true
+    result.release()
+    return false

@@ -13,7 +13,7 @@ let planar_parms: ParmSpec[2] = [
 
 func make_planar_verb() -> Verb:
     return Verb("Make Planar", "Deform", "Flatten each of the group's faces in place, each on its own plane", Domain.face, true, planar_parms, false, cook_make_planar,
-                section = "Modify", family = "Shape", icon = "set-planar", picks = pick_pieces, drag = 0, drag_mode = "amount", wheel = 1, whole = true)
+                section = "Modify", family = "Shape", icon = "make-planar", picks = pick_pieces, drag = 0, drag_mode = "amount", wheel = 1, whole = true)
 
 ## What a round reads and writes.
 struct PlanarWork:

@@ -1,0 +1,148 @@
+## The Mesh Check (POLY-MODELING.md Stage 8) on a fixture holding one of
+## each defect apart: a fin of three quads on one edge, two quads wound the
+## same way along their shared edge, two triangles touching at a point, a
+## loose point, a pentagon, a triangle of three points on a line, a quad
+## with two points in one place, two quads crossing and a closed cube
+## (eight points of three edges). Every finding counts what was built, the
+## Select rules behind them select the same, and the Mesh Check rule at
+## faces selects the faces of every defect it is set to find.
+import interop
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshBuilder, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    let fixture = try defects()
+    defer fixture.release()
+    try report_checks(fixture)
+    try rule_checks(fixture)
+    try clean_checks()
+    print("PASS Mesh Check: non-manifold, pinched, boundary, flipped, loose, n-gons, triangles, poles, zero-area, zero-length and intersecting counted on a fixture of each; the Select rules find the same; the Mesh Check rule selects every defect's faces; a clean sphere has none")
+
+## A quad of points a, b, c, d.
+func quad(builder: MeshBuilder*, a: i64, b: i64, c: i64, d: i64) -> !:
+    try builder.face(4)
+    try builder.corner(a)
+    try builder.corner(b)
+    try builder.corner(c)
+    try builder.corner(d)
+
+func triangle(builder: MeshBuilder*, a: i64, b: i64, c: i64) -> !:
+    try builder.face(3)
+    try builder.corner(a)
+    try builder.corner(b)
+    try builder.corner(c)
+
+func at(builder: MeshBuilder*, x: f64, y: f64, z: f64) -> i64!:
+    return try builder.point(Vector3(x, y, z))
+
+func defects() -> interop.Reference[Mesh]!:
+    var builder = try MeshBuilder()
+    defer builder.close()
+    # The fin: three quads on the edge a-b.
+    let a = try at(&builder, 0.0, 0.0, 0.0)
+    let b = try at(&builder, 0.0, 1.0, 0.0)
+    try quad(&builder, a, b, try at(&builder, 1.0, 1.0, 0.0), try at(&builder, 1.0, 0.0, 0.0))
+    try quad(&builder, b, a, try at(&builder, -1.0, 0.0, 0.0), try at(&builder, -1.0, 1.0, 0.0))
+    try quad(&builder, a, b, try at(&builder, 0.0, 1.0, 1.0), try at(&builder, 0.0, 0.0, 1.0))
+    # Two quads wound the same way along c-d: a flipped neighbor.
+    let c = try at(&builder, 10.0, 0.0, 0.0)
+    let d = try at(&builder, 10.0, 1.0, 0.0)
+    try quad(&builder, c, d, try at(&builder, 11.0, 1.0, 0.0), try at(&builder, 11.0, 0.0, 0.0))
+    try quad(&builder, c, d, try at(&builder, 9.0, 1.0, 0.0), try at(&builder, 9.0, 0.0, 0.0))
+    # Two triangles meeting only at e: a pinched point.
+    let e = try at(&builder, 20.0, 0.0, 0.0)
+    try triangle(&builder, e, try at(&builder, 21.0, 0.0, 0.0), try at(&builder, 21.0, 1.0, 0.0))
+    try triangle(&builder, e, try at(&builder, 19.0, 0.0, 0.0), try at(&builder, 19.0, -1.0, 0.0))
+    # A loose point.
+    _ = try at(&builder, 30.0, 0.0, 0.0)
+    # A pentagon.
+    try builder.face(5)
+    for k in 0..<(i64)5:
+        let angle = 2.0 * math.pi * (f64)k / 5.0
+        try builder.corner(try at(&builder, 40.0 + math.cos(angle), math.sin(angle), 0.0))
+    # A triangle without area: three points on a line.
+    try triangle(&builder, try at(&builder, 50.0, 0.0, 0.0), try at(&builder, 51.0, 0.0, 0.0), try at(&builder, 52.0, 0.0, 0.0))
+    # A quad with two points in one place: an edge without length.
+    let f = try at(&builder, 61.0, 1.0, 0.0)
+    try quad(&builder, try at(&builder, 60.0, 0.0, 0.0), try at(&builder, 61.0, 0.0, 0.0), f, try at(&builder, 61.0, 1.0, 0.0))
+    # Two quads crossing, sharing no point.
+    try quad(&builder, try at(&builder, 70.0, -1.0, -1.0), try at(&builder, 70.0, 1.0, -1.0), try at(&builder, 70.0, 1.0, 1.0), try at(&builder, 70.0, -1.0, 1.0))
+    try quad(&builder, try at(&builder, 69.0, 0.0, -0.5), try at(&builder, 71.0, 0.0, -0.5), try at(&builder, 71.0, 0.0, 0.5), try at(&builder, 69.0, 0.0, 0.5))
+    # A closed cube: every point an inner point of three edges.
+    var corners: i64[8] = [0, 0, 0, 0, 0, 0, 0, 0]
+    for k in 0..<(usize)8: corners[k] = try at(&builder, 80.0 + (f64)(k % 2), (f64)((k // 2) % 2), (f64)(k // 4))
+    try quad(&builder, corners[0], corners[2], corners[3], corners[1])
+    try quad(&builder, corners[4], corners[5], corners[7], corners[6])
+    try quad(&builder, corners[0], corners[1], corners[5], corners[4])
+    try quad(&builder, corners[2], corners[6], corners[7], corners[3])
+    try quad(&builder, corners[0], corners[4], corners[6], corners[2])
+    try quad(&builder, corners[1], corners[3], corners[7], corners[5])
+    return try builder.finish()
+
+## What each finding should count, in the report's order.
+let expected: i64[11] = [1, 1, 41, 1, 1, 1, 3, 8, 1, 1, 2]
+
+func report_checks(fixture: interop.Reference[Mesh]) -> !:
+    let report = try Verbs.mesh_check(fixture)
+    defer report.release()
+    assert(report.value().count() == 11)
+    for index in 0..<(i64)11:
+        let found = report.value().found(index)
+        if found != expected[(usize)index]:
+            print(f"{report.value().label(index)}: found {found}, expected {expected[(usize)index]}")
+            assert(false)
+        let selection = try report.value().selection(index)
+        defer selection.release()
+        assert(selection.value().count() == found)
+    # Left out, the intersection pass is not run.
+    let quick = try Verbs.mesh_check(fixture, 0.000001, false)
+    defer quick.release()
+    assert(not quick.value().ran(10) and quick.value().found(10) == 0)
+
+## The same counts from the Select rules (their tool verbs).
+func rule_checks(fixture: interop.Reference[Mesh]) -> !:
+    let manifold: f64[4] = [0.0, 1.0, 0.0, 0.0]
+    try selects(fixture, "Select Non-manifold", 2, manifold[..<4], 1)
+    let flipped: f64[4] = [0.0, 0.0, 1.0, 0.0]
+    try selects(fixture, "Select Non-manifold", 2, flipped[..<4], 1)
+    let poles: f64[3] = [4.0, 1.0, 1.0]
+    try selects(fixture, "Select Poles", 1, poles[..<3], 8)
+    let tolerance: f64[1] = [0.000001]
+    try selects(fixture, "Select Degenerate", 3, tolerance[..<1], 1)
+    try selects(fixture, "Select Degenerate", 2, tolerance[..<1], 1)
+    let nothing: f64[1] = [0.0]
+    try selects(fixture, "Select Intersecting", 3, nothing[..<0], 2)
+    # The Mesh Check rule at faces, as it starts: the fin's three faces,
+    # the flipped pair, the pinched triangles, the pentagon, the flat
+    # triangle, the quad with the short edge and the crossing pair.
+    let starting: f64[10] = [1.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.000001]
+    try selects(fixture, "Mesh Check", 3, starting[..<10], 12)
+    # Boundary and poles on too, at points: every point on an open edge,
+    # the cube's eight, the loose one.
+    let everything: f64[10] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.000001]
+    try selects(fixture, "Mesh Check", 1, everything[..<10], fixture.value().point_count())
+
+## Verb `name` run on everything at `group_type`'s level selects `count`.
+func selects(mesh: interop.Reference[Mesh], name: str, group_type: i64, numbers: const f64[], count: i64) -> !:
+    let result = try Verbs.run(name, mesh, "", group_type, numbers)
+    defer result.release()
+    let selection = try result.value().selection()
+    defer selection.release()
+    if selection.value().count() != count:
+        print(f"{name}: selected {selection.value().count()}, expected {count}")
+        assert(false)
+
+## A closed sphere of quads and triangle fans has no defect but its poles
+## and triangles.
+func clean_checks() -> !:
+    let ball = try MeshPrimitives.sphere(1.0, 16)
+    defer ball.release()
+    let report = try Verbs.mesh_check(ball)
+    defer report.release()
+    let none_found: i64[9] = [0, 1, 2, 3, 4, 5, 8, 9, 10]
+    for index in none_found:
+        assert(report.value().found(index) == 0)
+    assert(report.value().found(6) == 32)
+    assert(report.value().found(7) == 2)

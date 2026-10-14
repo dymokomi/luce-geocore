@@ -1,0 +1,191 @@
+## Sculpt: one brush stroke, after Blender's sculpt brushes, Cinema 4D's
+## brushes and Houdini's Sculpt SOP, kept small (sculpt-lite): Draw, Grab,
+## Smooth, Inflate, Flatten and Pinch with a radius, a strength, a falloff
+## and Invert (verbs/sculpt_brush.lucb does the dabs). The stroke's dabs
+## follow the parameters as numbers (their count, then each dab's center
+## and direction in world space: the surface's normal under the pointer, or
+## Grab's move since the last dab), so a stroke is one Edit Mesh step, one
+## undo, and a node replays it. Only the group's points move (all of them
+## with nothing selected); under the Edit node's symmetry each dab is
+## mirrored.
+##
+## Live strokes: the viewport sends the stroke again with more dabs as the
+## pointer moves. The last stroke cooked is remembered (its input, settings
+## and dabs, where its points are now and the mesh it made), so a stroke
+## that only grew goes on from there: only the new dabs run, and the new
+## mesh is made over the last one, its normals and GPU copies refreshed
+## around the points those dabs moved. The dabs run the same way either
+## way, so the result does not depend on it.
+
+let sculpt_parms: ParmSpec[5] = [
+    ParmSpec("Brush", ParmKind.menu, 0.0, 0.0, 5.0, 1, "Draw|Grab|Smooth|Inflate|Flatten|Pinch", "Draw raises along the surface's normal; Grab drags the points under the stroke's start; Smooth evens them out; Inflate pushes each along its own normal; Flatten levels them onto their plane; Pinch draws them toward the stroke."),
+    ParmSpec("Radius", ParmKind.number, 0.5, 0.000001, 100000.0, 1, "", "How far from the brush's center points are reached.", 5.0),
+    ParmSpec("Strength", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "How much each dab moves the points under it."),
+    ParmSpec("Falloff", ParmKind.menu, 0.0, 0.0, 4.0, 1, "Smooth|Sphere|Linear|Constant|Sharp", "How the brush's effect fades from its center to its edge."),
+    ParmSpec("Invert", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Draw digs, Inflate deflates, Pinch spreads and Flatten pushes away from the plane (Ctrl held while stroking).")]
+
+## Numbers per dab: its center, then its direction.
+let dab_numbers: usize = 6
+
+## Numbers before the dabs: the parameters'.
+let sculpt_head: usize = 5
+
+func sculpt_verb() -> Verb:
+    return Verb("Sculpt", "Deform", "A brush stroke: draw, grab, smooth, inflate, flatten or pinch the surface", Domain.point, true, sculpt_parms, false, cook_sculpt,
+                section = "Modify", family = "Sculpt", icon = "sculpt-tool", picks = pick_pieces_points, gesture = "sculpt", whole = true, trailing = true)
+
+func cook_sculpt(input: const VerbInput*, output: VerbOutput*) -> !:
+    let numbers = input.parms.numbers
+    let settings = try settings_of(numbers, input.symmetry)
+    let dabs = try dabs_of(numbers)
+    # The output selection is the group, or nothing when it is everything.
+    let group = input.group.population()
+    output.selection = try BitsBuilder.copy_of(input.group) if group < (usize)input.mesh.point_count() else try BitsBuilder.zeros((usize)input.mesh.point_count())
+    output.selection_domain = Domain.point
+    if dabs.length == 0: return
+    output.mesh = try stroked(input.mesh, input.group, settings, dabs)
+
+func settings_of(numbers: const f64[], symmetry: i64) -> BrushSettings!:
+    let brush = numbers[0]
+    let radius = numbers[1]
+    let strength = numbers[2]
+    let falloff = numbers[3]
+    if not (brush >= 0.0 and brush <= 5.0) or not (falloff >= 0.0 and falloff <= 4.0): error(errors.invalid, "Sculpt's brush is 0..5 and its falloff 0..4")
+    if not (radius > 0.0 and radius < 1.0e6): error(errors.invalid, "Sculpt's radius must be positive")
+    if not (strength >= 0.0 and strength <= 1.0): error(errors.invalid, "Sculpt's strength is 0..1")
+    return BrushSettings((i64)brush, radius, strength, (i64)falloff, numbers[4] != 0.0, symmetry)
+
+## The dabs after the parameters: a count, then six numbers each (numbers
+## past them are a node's unused value slots).
+func dabs_of(numbers: const f64[]) -> const f64[]!:
+    if numbers.length == sculpt_head: return numbers[sculpt_head..<sculpt_head]
+    let count = numbers[sculpt_head]
+    if not (count >= 0.0 and count == math.floor(count) and count < 1.0e9) or numbers.length < sculpt_head + 1 + (usize)count * dab_numbers: error(errors.invalid, "a stroke's dabs are a count, then a center and a direction each")
+    return numbers[sculpt_head + 1..<sculpt_head + 1 + (usize)count * dab_numbers]
+
+## The last stroke cooked: what it was run on and with, where its points
+## are and the mesh it made. One at a time; a cook takes it out while it
+## runs.
+struct StrokeCache:
+    var input: u64
+    var topology: u64
+    var settings: BrushSettings
+    var group: Column[u64]
+    var dabs: Growing[f64]
+    var stroke: Stroke
+    var made: Mesh*
+
+    func close():
+        self.group.release()
+        self.dabs.close()
+        self.stroke.close()
+        mesh_dispose(self.made)
+
+var stroke_lock: sync.Mutex
+var stroke_cache: StrokeCache*? = none
+
+## Forget the remembered stroke (tests that count allocations).
+pub func clear_stroke_cache():
+    stroke_lock.lock()
+    let held = stroke_cache
+    stroke_cache = none
+    stroke_lock.unlock()
+    if let cache = held:
+        cache.close()
+        free(cache) in memory.heap
+
+## The remembered stroke when it was run on `mesh`'s points with `settings`
+## and `group`, and `dabs` begins with its dabs; else none (and it is
+## dropped).
+func take_cache(mesh: const Mesh*, group: Bits, settings: BrushSettings, dabs: const f64[]) -> StrokeCache*?:
+    stroke_lock.lock()
+    let held = stroke_cache
+    stroke_cache = none
+    stroke_lock.unlock()
+    let cache = held else return none
+    if cache.input == mesh_positions_id(mesh) and cache.topology == (u64)mesh.topology_hash() and same_settings(cache.settings, settings) and same_words(cache.group.view(), group.words) and cache.dabs.count <= dabs.length:
+        var same = true
+        for at in 0..<cache.dabs.count:
+            if cache.dabs.items[at] != dabs[at]:
+                same = false
+                break
+        if same: return cache
+    cache.close()
+    free(cache) in memory.heap
+    return none
+
+## Remember `cache`, dropping any other.
+func keep_cache(cache: StrokeCache*):
+    stroke_lock.lock()
+    let held = stroke_cache
+    stroke_cache = cache
+    stroke_lock.unlock()
+    if let other = held:
+        other.close()
+        free(other) in memory.heap
+
+func same_settings(a: BrushSettings, b: BrushSettings) -> bool:
+    return a.brush == b.brush and a.radius == b.radius and a.strength == b.strength and a.falloff == b.falloff and a.invert == b.invert and a.symmetry == b.symmetry
+
+func same_words(a: const u64[], b: const u64[]) -> bool:
+    if a.length != b.length: return false
+    for at in 0..<a.length:
+        if a[at] != b[at]: return false
+    return true
+
+func mesh_positions_id(mesh: const Mesh*) -> u64:
+    var column = mesh_positions(mesh)
+    defer column.release()
+    return column.id()
+
+## The stroke's mesh: on from the remembered stroke when this one grew from
+## it, else from the start.
+func stroked(mesh: const Mesh*, group: Bits, settings: BrushSettings, dabs: const f64[]) -> Mesh*!:
+    var moved = Growing[u32]()
+    defer moved.close()
+    if let cache = take_cache(mesh, group, settings, dabs):
+        errdefer:
+            cache.close()
+            free(cache) in memory.heap
+        let first = cache.dabs.count
+        if first < dabs.length:
+            # The last mesh shares the positions: write a copy (its parent
+            # the last, so caches update only what the new dabs moved).
+            _ = try cache.stroke.positions.writable()
+            cache.stroke.mesh = cache.made
+            var at = first
+            while at < dabs.length:
+                try apply_dab(&cache.stroke, dabs[at..<at + dab_numbers])
+                at += dab_numbers
+            try cache.dabs.assign(dabs)
+            try take_fresh(&cache.stroke, &moved)
+            let made = try moved_storage(cache.made, cache.stroke.positions, moved.view())
+            mesh_dispose(cache.made)
+            cache.made = made
+            cache.stroke.mesh = made
+        let product = try mesh_share(cache.made)
+        keep_cache(cache)
+        return product
+    var stroke = try begin_stroke(mesh, settings, group)
+    errdefer stroke.close()
+    var at: usize = 0
+    while at < dabs.length:
+        try apply_dab(&stroke, dabs[at..<at + dab_numbers])
+        at += dab_numbers
+    # Since the start, every point moved is fresh.
+    try take_fresh(&stroke, &moved)
+    let made = try moved_storage(mesh, stroke.positions, moved.view())
+    errdefer mesh_dispose(made)
+    let product = try mesh_share(made)
+    errdefer mesh_dispose(product)
+    var recorded = Growing[f64]()
+    errdefer recorded.close()
+    try recorded.assign(dabs)
+    var group_words = try Column[u64].copy_of(group.words)
+    errdefer group_words.release()
+    let storage = try new StrokeCache[1] --- in memory.heap
+    # The stroke reads its topology from the mesh it made from here on.
+    stroke.mesh = made
+    storage[0] = StrokeCache(mesh_positions_id(mesh), (u64)mesh.topology_hash(), settings, group_words, recorded, stroke, made)
+    keep_cache(storage.data)
+    return product

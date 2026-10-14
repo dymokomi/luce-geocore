@@ -1,0 +1,205 @@
+## Sculpt-lite (POLY-MODELING.md Stage 8): on a 2×2 grid of 20×20 quads,
+## one Draw dab raises each point within the radius by strength × falloff
+## × 8% of the radius along the dab's direction and no point past it;
+## Invert lowers them as much; Constant raises them alike; under X
+## symmetry the mirrored dab raises the mirrored points alike; the group
+## alone moves; Grab carries the points under its first dab by each move,
+## weighed by their falloff; Smooth and Flatten lower a drawn bump, Pinch
+## draws points toward the stroke and Inflate swells a sphere. A stroke
+## sent again with more dabs (as the viewport sends it while the pointer
+## moves) goes on from the remembered one and gives exactly the stroke run
+## whole; a stroke whose dabs do not add up is refused.
+import interop
+import memory
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.kernel import clear_group_cache, clear_stroke_cache
+from tool_fixtures import near, near_point
+
+pub func exercise() -> !:
+    defer clear_group_cache()
+    defer clear_stroke_cache()
+    try draw_checks()
+    try symmetry_checks()
+    try grab_checks()
+    try brush_checks()
+    try replay_checks()
+    print("PASS Sculpt: Draw raises by strength × falloff within the radius, Invert lowers, Constant evens, X symmetry mirrors, the group alone moves, Grab carries its points, Smooth and Flatten lower a bump, Pinch gathers, Inflate swells; a stroke grown dab by dab equals the stroke run whole")
+
+## A stroke's numbers: brush, radius, strength, falloff, invert, then the
+## dabs (center and direction each) in `dabs`.
+func stroke_numbers(brush: f64, radius: f64, strength: f64, falloff: f64, invert: bool, dabs: const f64[], out: f64[]) -> usize:
+    out[0] = brush
+    out[1] = radius
+    out[2] = strength
+    out[3] = falloff
+    out[4] = 1.0 if invert else 0.0
+    out[5] = (f64)(dabs.length // 6)
+    for at in 0..<dabs.length: out[6 + at] = dabs[at]
+    return 6 + dabs.length
+
+func sculpted(mesh: interop.Reference[Mesh], group: str, numbers: const f64[], symmetry: i64 = 0) -> interop.Reference[Mesh]!:
+    let result = try Verbs.run("Sculpt", mesh, group, 1, numbers, symmetry)
+    defer result.release()
+    assert(result.value().warning().length == 0)
+    return try result.value().mesh()
+
+## The smooth falloff at `x` of the radius.
+func smooth(x: f64) -> f64:
+    if x >= 1.0: return 0.0
+    let y = 1.0 - x
+    return y * y * (3.0 - 2.0 * y)
+
+func draw_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 20)
+    defer grid.release()
+    let dab = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    var numbers: f64[64] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var count = stroke_numbers(0.0, 0.35, 0.5, 0.0, false, dab[..<6], numbers[..<64])
+    let raised = try sculpted(grid, "", numbers[..<count])
+    defer raised.release()
+    count = stroke_numbers(0.0, 0.35, 0.5, 0.0, true, dab[..<6], numbers[..<64])
+    let lowered = try sculpted(grid, "", numbers[..<count])
+    defer lowered.release()
+    count = stroke_numbers(0.0, 0.35, 0.5, 3.0, false, dab[..<6], numbers[..<64])
+    let even = try sculpted(grid, "", numbers[..<count])
+    defer even.release()
+    var reached = 0
+    for point in 0..<grid.value().point_count():
+        let p = try grid.value().point(point)
+        let d = math.sqrt(p.x * p.x + p.z * p.z)
+        let height = 0.5 * smooth(d / 0.35) * 0.35 * 0.08
+        near_point(try raised.value().point(point), Vector3(p.x, height, p.z))
+        near_point(try lowered.value().point(point), Vector3(p.x, -height, p.z))
+        near((try even.value().point(point)).y, 0.5 * 0.35 * 0.08 if d < 0.35 else 0.0)
+        if d < 0.35: reached += 1
+    assert(reached == 37)
+    # The group alone moves: the half at X > 0.
+    count = stroke_numbers(0.0, 0.35, 0.5, 0.0, false, dab[..<6], numbers[..<64])
+    let half = try sculpted(grid, "@P.x>0.01", numbers[..<count])
+    defer half.release()
+    for point in 0..<grid.value().point_count():
+        let p = try grid.value().point(point)
+        if p.x < 0.01: near((try half.value().point(point)).y, 0.0)
+
+func symmetry_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 20)
+    defer grid.release()
+    let dab = [0.4, 0.0, 0.1, 0.0, 1.0, 0.0]
+    var numbers: f64[12] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let count = stroke_numbers(0.0, 0.3, 1.0, 0.0, false, dab[..<6], numbers[..<12])
+    let both = try sculpted(grid, "", numbers[..<count], 1)
+    defer both.release()
+    var raised = 0
+    for point in 0..<grid.value().point_count():
+        let p = try both.value().point(point)
+        if p.y > 0.0: raised += 1
+        # The point mirrored across X stands as high.
+        for other in 0..<grid.value().point_count():
+            let q = try both.value().point(other)
+            if math.abs(q.x + p.x) < 1.0e-6 and math.abs(q.z - p.z) < 1.0e-6: near(q.y, p.y)
+    assert(raised > 0 and raised % 2 == 0)
+
+func grab_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 20)
+    defer grid.release()
+    # The first dab takes the points within 0.4 of the middle; the stroke's
+    # moves add up to 0.3 up.
+    let dabs = [0.0, 0.0, 0.0, 0.0, 0.1, 0.0, 0.5, 0.0, 0.0, 0.0, 0.2, 0.0]
+    var numbers: f64[18] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let count = stroke_numbers(1.0, 0.4, 0.5, 0.0, false, dabs[..<12], numbers[..<18])
+    let grabbed = try sculpted(grid, "", numbers[..<count])
+    defer grabbed.release()
+    for point in 0..<grid.value().point_count():
+        let p = try grid.value().point(point)
+        let d = math.sqrt(p.x * p.x + p.z * p.z)
+        near((try grabbed.value().point(point)).y, 0.3 * smooth(d / 0.4))
+
+## The largest height among `mesh`'s points.
+func peak(mesh: interop.Reference[Mesh]) -> f64!:
+    var most = -1.0e300
+    for point in 0..<mesh.value().point_count(): most = math.max(most, (try mesh.value().point(point)).y)
+    return most
+
+func brush_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 20)
+    defer grid.release()
+    # A bump drawn by five dabs on one spot, then each brush over it.
+    let spot = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    var numbers: f64[36] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var count = stroke_numbers(0.0, 0.5, 1.0, 0.0, false, spot[..<30], numbers[..<36])
+    let bump = try sculpted(grid, "", numbers[..<count])
+    defer bump.release()
+    let top = try peak(bump)
+    assert(top > 0.1)
+    let lowering: f64[2] = [2.0, 4.0]
+    for brush in lowering:
+        count = stroke_numbers(brush, 0.5, 1.0, 0.0, false, spot[..<6], numbers[..<36])
+        let lowered = try sculpted(bump, "", numbers[..<count])
+        defer lowered.release()
+        assert((try peak(lowered)) < top - 0.001)
+    # Pinch: points round the middle draw toward the Y axis.
+    count = stroke_numbers(5.0, 0.5, 1.0, 0.0, false, spot[..<6], numbers[..<36])
+    let pinched = try sculpted(grid, "", numbers[..<count])
+    defer pinched.release()
+    var gathered = 0
+    for point in 0..<grid.value().point_count():
+        let p = try grid.value().point(point)
+        let q = try pinched.value().point(point)
+        let before = math.sqrt(p.x * p.x + p.z * p.z)
+        let after = math.sqrt(q.x * q.x + q.z * q.z)
+        assert(after <= before + 1.0e-7)
+        if before > 0.01 and before < 0.45 and after < before - 1.0e-4: gathered += 1
+    assert(gathered > 20)
+    # Inflate: a sphere's points under the dab stand further out.
+    let ball = try MeshPrimitives.sphere(1.0, 32)
+    defer ball.release()
+    let side = [1.0, 1.0, 0.0, 1.0, 0.0, 0.0]
+    count = stroke_numbers(3.0, 0.5, 1.0, 0.0, false, side[..<6], numbers[..<36])
+    let swollen = try sculpted(ball, "", numbers[..<count])
+    defer swollen.release()
+    var grew = 0
+    for point in 0..<ball.value().point_count():
+        let center = Vector3(0.0, 1.0, 0.0)
+        let before = (try ball.value().point(point)).subtract(center).length()
+        let after = (try swollen.value().point(point)).subtract(center).length()
+        assert(after >= before - 1.0e-6)
+        if after > before + 1.0e-4: grew += 1
+    assert(grew > 4)
+
+func replay_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 20)
+    defer grid.release()
+    # A stroke of 12 dabs across the grid, Draw under X symmetry.
+    var dabs: f64[72] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    for at in 0..<(usize)12:
+        dabs[at * 6] = 0.1 + 0.05 * (f64)at
+        dabs[at * 6 + 2] = -0.3 + 0.05 * (f64)at
+        dabs[at * 6 + 4] = 1.0
+    var numbers: f64[78] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    clear_stroke_cache()
+    var count = stroke_numbers(0.0, 0.3, 0.8, 0.0, false, dabs[..<72], numbers[..<78])
+    let whole = try sculpted(grid, "", numbers[..<count], 1)
+    defer whole.release()
+    # Five dabs whole, for the grown stroke's middle.
+    clear_stroke_cache()
+    count = stroke_numbers(0.0, 0.3, 0.8, 0.0, false, dabs[..<30], numbers[..<78])
+    let five = try sculpted(grid, "", numbers[..<count], 1)
+    defer five.release()
+    clear_stroke_cache()
+    for dab in 1..<(usize)13:
+        count = stroke_numbers(0.0, 0.3, 0.8, 0.0, false, dabs[..<dab * 6], numbers[..<78])
+        let grown = try sculpted(grid, "", numbers[..<count], 1)
+        defer grown.release()
+        let expected = five if dab == 5 else (whole if dab == 12 else grown)
+        for point in 0..<grid.value().point_count():
+            let a = try grown.value().point(point)
+            let b = try expected.value().point(point)
+            assert(a.x == b.x and a.y == b.y and a.z == b.z)
+    # More dabs counted than given are refused.
+    numbers[5] = 13.0
+    let result = Verbs.run("Sculpt", grid, "", 1, numbers[..<count]) catch failure:
+        if failure.code == memory.exhausted: error(failure.code, failure.message)
+        return
+    result.release()
+    assert(false)

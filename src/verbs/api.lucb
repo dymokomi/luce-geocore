@@ -5,11 +5,14 @@
 ## Every modeling verb's constructor, in menu order: the array's length is
 ## the registry's size, so a verb added here is counted. The select rules
 ## (selecting/registry.lucb) follow them as the Select verbs.
-let makers: (func() -> Verb)[77] = [
+let makers: (func() -> Verb)[80] = [
     transform_verb,
     smooth_verb,
     relax_verb,
     shrinkwrap_verb,
+    bend_verb,
+    lattice_verb,
+    sculpt_verb,
     mountain_verb,
     peak_verb,
     flatten_verb,
@@ -345,6 +348,30 @@ pub struct Verbs:
     ## Pen's Ctrl-click: the edge it extends to the click.
     pub static func nearest_boundary_edge(mesh: interop.Reference[Mesh], point: Vector3) -> i64!:
         return try boundary_edge_near(try mesh.get(), point)
+
+    ## The cage of the Lattice run that made `mesh`, moved as its numbers
+    ## `numbers` say: the viewport draws its points over the result and
+    ## drags them.
+    pub static func lattice(mesh: interop.Reference[Mesh], numbers: const f64[]) -> interop.Reference[LatticeCage]!:
+        let source = try mesh.get()
+        var made = LatticeCage()
+        made.cage = try cage_on(source, numbers)
+        made.origin = source.position_origin()
+        let storage = new LatticeCage[1] --- in memory.heap catch failure:
+            made.close()
+            error(failure.code, failure.message)
+        storage[0] = made
+        return try interop.Reference[LatticeCage].adopt(storage.data, lattice_cage_type, memory.heap)
+
+    ## The Mesh Check overlay's findings on `mesh` (Intersecting faces only
+    ## with `intersecting`), degenerate within `tolerance`.
+    pub static func mesh_check(mesh: interop.Reference[Mesh], tolerance: f64 = 0.000001, intersecting: bool = true) -> interop.Reference[MeshReport]!:
+        var made = try mesh_report(try mesh.get(), tolerance, intersecting)
+        let storage = new MeshReport[1] --- in memory.heap catch failure:
+            made.close()
+            error(failure.code, failure.message)
+        storage[0] = made
+        return try interop.Reference[MeshReport].adopt(storage.data, mesh_report_type, memory.heap)
 
     ## Its viewport gesture: "", "stroke", "place", "hover" or "knife".
     pub static func gesture(index: i64) -> str:

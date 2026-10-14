@@ -1,0 +1,142 @@
+## Bend: the group bent, twisted, tapered or squashed along an axis, after
+## Houdini's Bend SOP and Blender's Simple Deform (one node with a mode).
+## The deformation runs along Axis from Origin (the group's start, its
+## center or a custom point); Limits clip the part that deforms to a span
+## of the group's extent along the axis (0 its start, 1 its end), and the
+## points past them follow rigidly, as the ends carry them:
+## - Bend curls the span by Amount degrees toward Direction (degrees about
+##   the axis from +X, or +Y for the X axis), each slice turned about the
+##   center of the arc;
+## - Twist turns each slice about the axis, Amount degrees over the length;
+## - Taper scales each slice square to the axis, the far end by Amount
+##   percent more (-100: to a point);
+## - Squash lengthens the span by Amount percent (negative shortens it), its
+##   slices scaled to keep the volume.
+## Length sets the rate (degrees or percent over that distance); 0 takes
+## the group's extent. Points are written in parallel; the output selection
+## is the group.
+
+let bend_parms: ParmSpec[8] = [
+    ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 3.0, 1, "Bend|Twist|Taper|Squash", "Bend curls along the axis; Twist turns about it; Taper widens or narrows toward the end; Squash lengthens or shortens, keeping the volume."),
+    ParmSpec("Amount", ParmKind.number, 90.0, -100000.0, 100000.0, 1, "", "Bend and Twist: degrees over the length. Taper: how much wider the far end grows, in percent (-100 is a point). Squash: how much longer the span grows, in percent (negative squashes it).", 360.0),
+    ParmSpec("Axis", ParmKind.menu, 1.0, 0.0, 2.0, 1, "X|Y|Z", "The axis the deformation runs along."),
+    ParmSpec("Direction", ParmKind.number, 0.0, -360000.0, 360000.0, 1, "", "Bend: the way it curls, in degrees about the axis from +X (+Y for the X axis)."),
+    ParmSpec("Origin", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Group's start|Group's center|Custom", "Where the deformation starts: the group's lowest point along the axis, its middle, or Custom origin."),
+    ParmSpec("Custom origin", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "The origin when Origin is Custom.", more = true),
+    ParmSpec("Length", ParmKind.number, 0.0, 0.0, 100000.0, 1, "", "The distance Amount is spread over (0: the group's extent along the axis).", 10.0, more = true),
+    ParmSpec("Limits", ParmKind.vector, 0.0, -100.0, 100.0, 3, "", "The span that deforms, as shares of the group's extent along the axis (0 its start, 1 its end; the third number is unused); points past it follow rigidly.", more = true, initials = limit_initials)]
+
+let limit_initials: f64[3] = [0.0, 1.0, 0.0]
+
+## M steps the mode and A the axis while the drag lasts.
+let bend_keys: KeySpec[2] = [KeySpec("M", 0, "cycle"), KeySpec("A", 2, "cycle")]
+
+func bend_verb() -> Verb:
+    return Verb("Bend", "Deform", "Bend, twist, taper or squash the group along an axis", Domain.point, true, bend_parms, false, cook_bend,
+                section = "Modify", family = "Deform", icon = "stretch-curve", picks = pick_pieces_points, drag = 1, drag_mode = "angle", keys = bend_keys, whole = true)
+
+## The deformation's frame and settings, as every point reads them.
+struct BendWork:
+    let positions: Float3[]
+    let moved: const u32[]
+    let mode: i64
+    ## The origin (relative to the mesh's origin), the axis and the two
+    ## directions square to it: `side` the way a bend curls.
+    let origin: Vector3
+    let axis: Vector3
+    let side: Vector3
+    let across: Vector3
+    ## The span that deforms, along the axis from the origin.
+    let low: f64
+    let high: f64
+    ## Bend and Twist: radians per unit along the axis; Taper: scale change
+    ## per unit; Squash: the span's length factor.
+    let rate: f64
+
+func cook_bend(input: const VerbInput*, output: VerbOutput*) -> !:
+    let p = input.parms
+    for at in 0..<(usize)12:
+        if not math.is_finite(p.at(at)): error(errors.invalid, "Bend's values must be finite")
+    let mode = (i64)p.at(0)
+    let amount = p.at(1)
+    let axis_index = (usize)math.max(0.0, math.min(2.0, p.at(2)))
+    if mode == 3 and amount <= -100.0: error(errors.invalid, "Squash cannot shorten the span by 100 percent or more")
+    let moved = try begin_points(input, output)
+    if moved.length == 0: return
+    let positions = output.positions.span()
+    let axis = Vector3.along(axis_index)
+    # The way a bend curls: +X (+Y for the X axis) turned about the axis.
+    let base = Vector3.along(1 if axis_index == 0 else 0)
+    let side = base.rotated_about(axis, p.at(3) * math.pi / 180.0)
+    let across = axis.cross(side)
+    # The group's extent along the axis, and its middle square to it.
+    var least = 1.0e300
+    var most = -1.0e300
+    var lo = Vector3(1.0e300, 1.0e300, 1.0e300)
+    var hi = Vector3(-1.0e300, -1.0e300, -1.0e300)
+    for point in moved:
+        let q = positions[(usize)point].vector()
+        least = math.min(least, q.dot(axis))
+        most = math.max(most, q.dot(axis))
+        lo = Vector3(math.min(lo.x, q.x), math.min(lo.y, q.y), math.min(lo.z, q.z))
+        hi = Vector3(math.max(hi.x, q.x), math.max(hi.y, q.y), math.max(hi.z, q.z))
+    let extent = most - least
+    let middle = lo.add(hi).multiply_scalar(0.5)
+    var origin = middle.add(axis.multiply_scalar(least - middle.dot(axis)))
+    let choice = (i64)p.at(4)
+    if choice == 1: origin = middle
+    if choice == 2: origin = Vector3(p.at(5), p.at(6), p.at(7)).subtract(input.mesh.position_origin())
+    let length = p.at(8) if p.at(8) > 0.0 else extent
+    if not (length > 1.0e-12): return
+    # The span, from the origin along the axis.
+    let start = least - origin.dot(axis)
+    let low = start + p.at(9) * extent
+    let high = start + p.at(10) * extent
+    if high < low: error(errors.invalid, "Bend's upper limit must not be below its lower limit")
+    var rate = amount * math.pi / 180.0 / length
+    if mode == 2: rate = amount / 100.0 / length
+    if mode == 3: rate = 1.0 + amount / 100.0
+    var work = BendWork(positions, moved, mode, origin, axis, side, across, low, high, rate)
+    try parallel.for_each_range(moved.length, 8192, (void*)&work, bend_points)
+
+func bend_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (BendWork*)context
+    for at in first..<end:
+        let point = (usize)work.moved[at]
+        let d = work.positions[point].vector().subtract(work.origin)
+        let t = d.dot(work.axis)
+        let x = d.dot(work.side)
+        let y = d.dot(work.across)
+        # The part along the axis inside the span, and what lies past it.
+        let inside = math.max(work.low, math.min(work.high, t))
+        let past = t - inside
+        var moved = d
+        if work.mode == 0:
+            # Arc coordinates: the slice at `inside` turned by phi about
+            # the arc's center 1/rate along `side`, the rest along its
+            # tangent there.
+            let phi = work.rate * inside
+            let c = math.cos(phi)
+            let s = math.sin(phi)
+            var along = inside
+            var out = 0.0
+            if math.abs(work.rate) > 1.0e-12:
+                along = s / work.rate
+                out = (1.0 - c) / work.rate
+            let t2 = along - x * s + past * c
+            let x2 = out + x * c + past * s
+            moved = work.axis.multiply_scalar(t2).add(work.side.multiply_scalar(x2)).add(work.across.multiply_scalar(y))
+        elif work.mode == 1:
+            let phi = work.rate * inside
+            let c = math.cos(phi)
+            let s = math.sin(phi)
+            moved = work.axis.multiply_scalar(t).add(work.side.multiply_scalar(x * c - y * s)).add(work.across.multiply_scalar(x * s + y * c))
+        elif work.mode == 2:
+            let scale = 1.0 + work.rate * inside
+            moved = work.axis.multiply_scalar(t).add(work.side.multiply_scalar(x * scale)).add(work.across.multiply_scalar(y * scale))
+        else:
+            # The span stretches from its start; slices keep the volume.
+            let along = work.low + (inside - work.low) * work.rate + past
+            let scale = 1.0 / math.sqrt(work.rate)
+            moved = work.axis.multiply_scalar(along).add(work.side.multiply_scalar(x * scale)).add(work.across.multiply_scalar(y * scale))
+        work.positions[point] = Float3.of(work.origin.add(moved))

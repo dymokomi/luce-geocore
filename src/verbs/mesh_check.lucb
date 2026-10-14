@@ -1,0 +1,88 @@
+## The Mesh Check overlay's report, after Cinema 4D's Mesh Checking and
+## Houdini's PolyDoctor: every finding of selecting/checks.lucb on a mesh
+## (non-manifold edges, pinched points, boundary edges, flipped neighbors,
+## loose points, n-gons, triangles, poles, zero-area faces, zero-length
+## edges, intersecting faces), each the elements its rule pass found. The
+## same passes are the Select tools (Select Non-manifold, By Sides, Poles,
+## Degenerate, Intersecting) and the Mesh Check rule, so what the overlay
+## shows and what a click on its row selects are one pass.
+
+pub struct MeshReport:
+    ## Each finding's bits (empty when it was not run), how many it found
+    ## and the size of its domain; the topology they are of.
+    var bits: Growing[Column[u64]]
+    var counts: Growing[usize]
+    var sizes: Growing[usize]
+    var guard: u64
+
+    pub func init():
+        self.bits = Growing[Column[u64]]()
+        self.counts = Growing[usize]()
+        self.sizes = Growing[usize]()
+        self.guard = 0
+
+    ## How many findings the report lists.
+    pub func count() -> i64:
+        return (i64)self.counts.count
+
+    ## Finding `index`'s name ("N-gons") and domain (0 points, 2 faces,
+    ## 4 edges).
+    pub func label(index: i64) -> str:
+        return finding_label(report_index(&self, index))
+
+    pub func domain(index: i64) -> i64:
+        return (i64)(u8)finding_domain(report_index(&self, index))
+
+    ## How many elements finding `index` found (0 when it was not run).
+    pub func found(index: i64) -> i64:
+        return (i64)self.counts.items[report_index(&self, index)]
+
+    ## Whether finding `index` was run (Intersecting faces is optional).
+    pub func ran(index: i64) -> bool:
+        return not self.bits.items[report_index(&self, index)].is_empty()
+
+    ## Finding `index`'s elements as a selection on the mesh checked.
+    pub func selection(index: i64) -> interop.Reference[Selection]!:
+        let at = report_index(&self, index)
+        let domain = finding_domain(at)
+        let column = self.bits.items[at]
+        if column.is_empty(): error(errors.invalid, "this finding was not checked")
+        return try adopt_selection(column.share(), self.sizes.items[at], domain, self.guard, GroupReport())
+
+    pub func close():
+        for column in self.bits.items[..<self.bits.count]:
+            var owned = column
+            owned.release()
+        self.bits.close()
+        self.counts.close()
+        self.sizes.close()
+
+func report_index(report: const MeshReport*, index: i64) -> usize:
+    if index < 0 or (usize)index >= report.counts.count: trap("mesh check finding out of range")
+    return (usize)index
+
+pub let mesh_report_type: interop.Type[MeshReport] = interop.Type[MeshReport]("MeshReport", MeshReport.close, closeable = true)
+
+## Every finding on `mesh` (Intersecting faces only with `intersecting`:
+## it costs a pass over the triangles' tree), the degenerate ones within
+## `tolerance`.
+pub func mesh_report(mesh: const Mesh*, tolerance: f64, intersecting: bool) -> MeshReport!:
+    var report = MeshReport()
+    errdefer report.close()
+    report.guard = (u64)mesh.topology_hash()
+    let topology = try Topology.of(mesh)
+    for index in 0..<finding_count:
+        let domain = finding_domain(index)
+        try report.sizes.push(topology.size(domain))
+        if index == finding_count - 1 and not intersecting:
+            try report.bits.push(Column[u64]())
+            try report.counts.push(0)
+            continue
+        var bits = try finding_bits(index, mesh, &topology, tolerance)
+        let found = bits.view().population()
+        var column = bits.finish()
+        report.bits.push(column) catch failure:
+            column.release()
+            error(failure.code, failure.message)
+        try report.counts.push(found)
+    return report

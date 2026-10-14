@@ -1,0 +1,335 @@
+## A sculpt stroke's state and its dabs (verbs/sculpt.lucb is the verb):
+## the working positions, a spatial hash of the points for finding those a
+## dab reaches, and the points the stroke moved. A dab reaches the points
+## within Radius of its center; each moves by the brush, weighed by
+## Strength and the falloff of its distance (Smooth, Sphere, Linear,
+## Constant, Sharp):
+## - Draw: along the dab's direction (the surface's normal under it);
+## - Grab: the points under the stroke's first dab follow its moves, each
+##   by its falloff there;
+## - Smooth: toward the mean of their neighbors;
+## - Inflate: along their own normals;
+## - Flatten: onto the plane through the reached points' weighted middle,
+##   square to the dab's direction;
+## - Pinch: toward the line through the center along the direction.
+## Invert reverses Draw, Inflate, Pinch and Flatten (which then pushes away
+## from the plane). Under symmetry each dab is followed by its mirror. The
+## same code runs a stroke live and replays it, so a step's result is the
+## stroke's, dab for dab.
+
+## Draw and Inflate move a point this share of the radius per dab at full
+## weight; Pinch and Flatten this share of the way.
+let draw_rate = 0.08
+let pinch_rate = 0.25
+let flatten_rate = 0.5
+
+## The brushes, as the Brush menu numbers them.
+let brush_draw: i64 = 0
+let brush_grab: i64 = 1
+let brush_smooth: i64 = 2
+let brush_inflate: i64 = 3
+let brush_flatten: i64 = 4
+let brush_pinch: i64 = 5
+
+## The weight of a point `x` of the radius from a dab's center, by falloff
+## `falloff` (Smooth, Sphere, Linear, Constant, Sharp).
+func falloff_at(falloff: i64, x: f64) -> f64:
+    if x >= 1.0: return 0.0
+    let y = 1.0 - x
+    match falloff:
+        1: return math.sqrt(1.0 - x * x)
+        2: return y
+        3: return 1.0
+        4: return y * y
+        _: return y * y * (3.0 - 2.0 * y)
+
+## A brush's settings, as one stroke reads them.
+struct BrushSettings:
+    let brush: i64
+    let radius: f64
+    let strength: f64
+    let falloff: i64
+    let invert: bool
+    ## Mirror across X, Y or Z (1..3; 0 none).
+    let symmetry: i64
+
+## One stroke on one mesh: its working positions and what has moved.
+struct Stroke:
+    var settings: BrushSettings
+    ## The mesh stroked (its topology: the input, then the last mesh made)
+    ## and its origin.
+    var mesh: const Mesh*
+    let origin: Vector3
+    var positions: Column[Float3]
+    ## The points the brush may move (the group).
+    var allowed: BitsBuilder
+    ## The hash of the points where they were at its last build, and how far
+    ## any point may have moved since: queries reach that much further.
+    var hash: PointHash
+    var slack: f64
+    ## Which dab last reached each point (each reached once per dab).
+    var stamps: Growing[u32]
+    var dab: u32
+    ## Every point the stroke moved, and those since `take_fresh`.
+    var moved: BitsBuilder
+    var fresh: BitsBuilder
+    ## Grab: the points under the first dab and their weights, and under
+    ## its mirror.
+    var grabbing: bool
+    var grabbed: Growing[u32]
+    var grab_weights: Growing[f32]
+    var mirrored: Growing[u32]
+    var mirror_weights: Growing[f32]
+    ## Scratch: the points a dab reaches, their weights and new places.
+    var reached: Growing[u32]
+    var weights: Growing[f32]
+    var next: Growing[Float3]
+
+    pub func init(settings: BrushSettings, mesh: const Mesh*, hash: PointHash):
+        self.settings = settings
+        self.mesh = mesh
+        self.origin = mesh.position_origin()
+        self.positions = Column[Float3]()
+        self.allowed = BitsBuilder(Column[u64](), 0)
+        self.hash = hash
+        self.slack = 0.0
+        self.stamps = Growing[u32]()
+        self.dab = 0
+        self.moved = BitsBuilder(Column[u64](), 0)
+        self.fresh = BitsBuilder(Column[u64](), 0)
+        self.grabbing = false
+        self.grabbed = Growing[u32]()
+        self.grab_weights = Growing[f32]()
+        self.mirrored = Growing[u32]()
+        self.mirror_weights = Growing[f32]()
+        self.reached = Growing[u32]()
+        self.weights = Growing[f32]()
+        self.next = Growing[Float3]()
+
+    pub func close():
+        self.positions.release()
+        self.allowed.close()
+        self.hash.close()
+        self.stamps.close()
+        self.moved.close()
+        self.fresh.close()
+        self.grabbed.close()
+        self.grab_weights.close()
+        self.mirrored.close()
+        self.mirror_weights.close()
+        self.reached.close()
+        self.weights.close()
+        self.next.close()
+
+## A stroke over `mesh` with `settings`, moving the points of `allowed`.
+func begin_stroke(mesh: const Mesh*, settings: BrushSettings, allowed: Bits) -> Stroke!:
+    let count = (usize)mesh.point_count()
+    var stroke = Stroke(settings, mesh, try PointHash.empty(0, settings.radius))
+    errdefer stroke.close()
+    stroke.positions = mesh_positions(mesh)
+    _ = try stroke.positions.writable()
+    stroke.allowed = try BitsBuilder.copy_of(allowed)
+    stroke.moved = try BitsBuilder.zeros(count)
+    stroke.fresh = try BitsBuilder.zeros(count)
+    try stroke.stamps.fill(count, 0)
+    try rebuild_hash(&stroke)
+    return stroke
+
+## The points moved since the last call, ascending, into `out`.
+func take_fresh(stroke: Stroke*, out: Growing[u32]*) -> !:
+    out.clear()
+    let words = stroke.fresh.words()
+    for word in 0..<words.length:
+        var pending = words[word]
+        while pending != 0:
+            try out.push((u32)(word * 64 + (usize)trailing_zeros(pending)))
+            pending = pending & (pending - 1)
+        words[word] = 0
+
+## The hash over the points where they are now: cells a radius wide.
+func rebuild_hash(stroke: Stroke*) -> !:
+    let positions = stroke.positions.view()
+    var made = try PointHash.empty(positions.length, stroke.settings.radius)
+    let allowed = stroke.allowed.view()
+    for point in 0..<positions.length:
+        if allowed.get(point): made.insert(point, positions[point].vector())
+    stroke.hash.close()
+    stroke.hash = made
+    stroke.slack = 0.0
+
+## Apply dab `values` (center and direction, world) and, under symmetry,
+## its mirror.
+func apply_dab(stroke: Stroke*, values: const f64[]) -> !:
+    let center = Vector3(values[0], values[1], values[2]).subtract(stroke.origin)
+    let direction = Vector3(values[3], values[4], values[5])
+    if not center.is_finite() or not direction.is_finite(): error(errors.invalid, "a sculpt dab must be finite")
+    let axis = stroke.settings.symmetry
+    let index = (usize)(axis - 1) if axis > 0 else 0
+    # The mirror's center: the world point reflected, back in the frame.
+    let mirror_center = center.add(stroke.origin).reflected(index).subtract(stroke.origin)
+    if stroke.settings.brush == brush_grab:
+        if not stroke.grabbing:
+            try take_grab(stroke, center, &stroke.grabbed, &stroke.grab_weights)
+            if axis > 0: try take_grab(stroke, mirror_center, &stroke.mirrored, &stroke.mirror_weights)
+            stroke.grabbing = true
+        try move_grabbed(stroke, &stroke.grabbed, &stroke.grab_weights, direction)
+        if axis > 0: try move_grabbed(stroke, &stroke.mirrored, &stroke.mirror_weights, direction.reflected(index))
+        return
+    try one_dab(stroke, center, direction)
+    if axis > 0: try one_dab(stroke, mirror_center, direction.reflected(index))
+
+## One dab at `center` (relative to the origin).
+func one_dab(stroke: Stroke*, center: Vector3, direction: Vector3) -> !:
+    let settings = stroke.settings
+    # Points move a little each dab: past half a radius in all, the hash is
+    # built again where they are.
+    if stroke.slack > settings.radius * 0.5: try rebuild_hash(stroke)
+    try dab_reach(stroke, center, settings.radius)
+    let count = stroke.reached.count
+    if count == 0: return
+    let facing = direction.normalized() catch failure: recover Vector3()
+    let sign = -1.0 if settings.invert else 1.0
+    try stroke.next.fill(count, Float3(0.0, 0.0, 0.0))
+    # Flatten's plane runs through the reached points' weighted middle.
+    var middle = Vector3()
+    if settings.brush == brush_flatten:
+        var total = 0.0
+        let positions = stroke.positions.view()
+        for at in 0..<count:
+            let weight = (f64)stroke.weights.items[at]
+            middle = middle.add(positions[(usize)stroke.reached.items[at]].vector().multiply_scalar(weight))
+            total += weight
+        if total > 0.0: middle = middle.multiply_scalar(1.0 / total)
+    let faces = try stroke.mesh.point_face_span()
+    let edges = try stroke.mesh.point_edge_span()
+    var work = DabWork(stroke.positions.view(), stroke.reached.view(), stroke.weights.view(), stroke.next.items[..<count], settings.brush, center, facing, settings.radius, sign, middle,
+                       stroke.mesh.offset_span(), stroke.mesh.corner_span(), faces.0, faces.1, try stroke.mesh.edge_span(), edges.0, edges.1)
+    try parallel.for_each_range(count, 2048, (void*)&work, dab_points)
+    # The new places written, and the slack grown by the farthest step.
+    let positions = stroke.positions.span()
+    var farthest = 0.0
+    for at in 0..<count:
+        let point = (usize)stroke.reached.items[at]
+        let next = stroke.next.items[at]
+        let step = next.vector().subtract(positions[point].vector()).length()
+        if step == 0.0: continue
+        farthest = math.max(farthest, step)
+        positions[point] = next
+        stroke.moved.set(point)
+        stroke.fresh.set(point)
+    stroke.slack += farthest
+
+## The allowed points within `radius` of `center` and their weights.
+func dab_reach(stroke: Stroke*, center: Vector3, radius: f64) -> !:
+    stroke.reached.clear()
+    stroke.weights.clear()
+    stroke.dab += 1
+    let positions = stroke.positions.view()
+    let span = radius + stroke.slack
+    let lo = stroke.hash.cell_of(center.subtract(Vector3(span, span, span)))
+    let hi = stroke.hash.cell_of(center.add(Vector3(span, span, span)))
+    let strength = stroke.settings.strength
+    for x in lo.x..<hi.x + 1:
+        for y in lo.y..<hi.y + 1:
+            for z in lo.z..<hi.z + 1:
+                var candidate = stroke.hash.first(Cell(x, y, z))
+                while candidate >= 0:
+                    let point = (usize)candidate
+                    candidate = stroke.hash.after(candidate)
+                    if stroke.stamps.items[point] == stroke.dab: continue
+                    stroke.stamps.items[point] = stroke.dab
+                    let distance = positions[point].vector().subtract(center).length()
+                    if distance >= radius: continue
+                    try stroke.reached.push((u32)point)
+                    try stroke.weights.push((f32)(strength * falloff_at(stroke.settings.falloff, distance / radius)))
+
+## Grab: the points under the stroke's first dab (at `center`), each
+## weighed by its falloff alone, so they go where the pointer takes them.
+func take_grab(stroke: Stroke*, center: Vector3, points: Growing[u32]*, weights: Growing[f32]*) -> !:
+    try dab_reach(stroke, center, stroke.settings.radius)
+    try points.assign(stroke.reached.view())
+    weights.clear()
+    let positions = stroke.positions.view()
+    for at in 0..<stroke.reached.count:
+        let distance = positions[(usize)stroke.reached.items[at]].vector().subtract(center).length()
+        try weights.push((f32)falloff_at(stroke.settings.falloff, distance / stroke.settings.radius))
+
+## The grabbed points moved by `delta`, each by its weight.
+func move_grabbed(stroke: Stroke*, points: const Growing[u32]*, weights: const Growing[f32]*, delta: Vector3) -> !:
+    let positions = stroke.positions.span()
+    var farthest = 0.0
+    for at in 0..<points.count:
+        let point = (usize)points.items[at]
+        let step = delta.multiply_scalar((f64)weights.items[at])
+        if step.x == 0.0 and step.y == 0.0 and step.z == 0.0: continue
+        positions[point] = Float3.of(positions[point].vector().add(step))
+        farthest = math.max(farthest, step.length())
+        stroke.moved.set(point)
+        stroke.fresh.set(point)
+    stroke.slack += farthest
+
+## What a dab's points read.
+struct DabWork:
+    let positions: const Float3[]
+    let reached: const u32[]
+    let weights: const f32[]
+    let next: Float3[]
+    let brush: i64
+    let center: Vector3
+    let direction: Vector3
+    let radius: f64
+    let sign: f64
+    let middle: Vector3
+    let offsets: const i32[]
+    let corners: const i32[]
+    let face_offsets: const i32[]
+    let point_faces: const i32[]
+    let edges: const i32[]
+    let edge_offsets: const i32[]
+    let point_edges: const i32[]
+
+func dab_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (DabWork*)context
+    for at in first..<end:
+        let point = (usize)work.reached[at]
+        let p = work.positions[point].vector()
+        let weight = (f64)work.weights[at]
+        var moved = p
+        if work.brush == brush_draw:
+            moved = p.add(work.direction.multiply_scalar(work.sign * weight * work.radius * draw_rate))
+        elif work.brush == brush_inflate:
+            moved = p.add(current_normal(work, point).multiply_scalar(work.sign * weight * work.radius * draw_rate))
+        elif work.brush == brush_smooth:
+            var sum = Vector3()
+            var count = 0.0
+            for slot in (usize)work.edge_offsets[point]..<(usize)work.edge_offsets[point + 1]:
+                let edge = (usize)work.point_edges[slot]
+                let a = (usize)work.edges[edge * 2]
+                let other = (usize)work.edges[edge * 2 + 1] if a == point else a
+                sum = sum.add(work.positions[other].vector())
+                count += 1.0
+            if count > 0.0: moved = p.add(sum.multiply_scalar(1.0 / count).subtract(p).multiply_scalar(math.min(1.0, weight)))
+        elif work.brush == brush_flatten:
+            let height = p.subtract(work.middle).dot(work.direction)
+            moved = p.subtract(work.direction.multiply_scalar(height * work.sign * math.min(1.0, weight * flatten_rate)))
+        else:
+            # Pinch: toward the line through the center along the direction.
+            let offset = p.subtract(work.center)
+            let toward = work.direction.multiply_scalar(offset.dot(work.direction)).subtract(offset)
+            moved = p.add(toward.multiply_scalar(work.sign * weight * pinch_rate))
+        work.next[at] = Float3.of(moved)
+
+## Point `point`'s normal from its faces where they are now (unit; zero for
+## a point without area round it).
+func current_normal(work: const DabWork*, point: usize) -> Vector3:
+    var sum = Vector3()
+    for slot in (usize)work.face_offsets[point]..<(usize)work.face_offsets[point + 1]:
+        let face = (usize)work.point_faces[slot]
+        let start = (usize)work.offsets[face]
+        let stop = (usize)work.offsets[face + 1]
+        for corner in start..<stop:
+            let a = work.positions[(usize)work.corners[corner]].vector()
+            let b = work.positions[(usize)work.corners[corner + 1 if corner + 1 < stop else start]].vector()
+            sum = sum.add(a.cross(b))
+    let length = sum.length()
+    return sum.multiply_scalar(1.0 / length) if length > 1.0e-30 else Vector3()

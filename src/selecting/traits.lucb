@@ -111,26 +111,51 @@ func select_nonmanifold(input: const RuleInput*) -> RuleOutput!:
     return same_domain(input, points)
 
 ## Points whose faces fall apart into more than one fan joined by the
-## point's edges (two cones touching at their tips).
+## point's edges (two cones touching at their tips); the points in
+## parallel, each range with its own scratch.
 func pinched(mesh: const Mesh*, topology: const Topology*, points: BitsBuilder*) -> !:
     let around = try mesh.point_face_span()
+    let marks = try new u8[topology.points] --- in memory.heap
+    defer free(marks) in memory.heap
+    memory.set(marks, 0)
+    var work = PinchWork(topology, around.0, around.1, marks)
+    work.failed.store(0, .relaxed)
+    try parallel.for_each_range(topology.points, 4096, (void*)&work, pinched_points)
+    if work.failed.load(.acquire) != 0: error(memory.exhausted, "no memory for the pinched points")
+    for point in 0..<topology.points:
+        if marks[point] != 0: points.set(point)
+
+struct PinchWork:
+    let topology: const Topology*
+    let starts: const i32[]
+    let faces: const i32[]
+    let marks: u8[]
+    var failed: @u32
+
+func pinched_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (PinchWork*)context
+    let topology = work.topology
     var fan = Growing[u32]()
     defer fan.close()
     var joined = Growing[bool]()
     defer joined.close()
-    for point in 0..<topology.points:
-        let first = (usize)around.0[point]
-        let count = (usize)around.0[point + 1] - first
+    for point in first..<end:
+        let start = (usize)work.starts[point]
+        let count = (usize)work.starts[point + 1] - start
         if count < 2: continue
-        try joined.fill(count, false)
+        joined.fill(count, false) catch failure:
+            _ = work.failed.add(1, .relaxed)
+            return
         # Faces of this point joined from its first through shared edges
         # at the point.
         fan.clear()
-        try fan.push(0)
+        fan.push(0) catch failure:
+            _ = work.failed.add(1, .relaxed)
+            return
         joined.items[0] = true
         var head: usize = 0
         while head < fan.count:
-            let face = (usize)around.1[first + (usize)fan.items[head]]
+            let face = (usize)work.faces[start + (usize)fan.items[head]]
             head += 1
             for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
                 let edge = (usize)topology.corner_edges[corner]
@@ -138,10 +163,12 @@ func pinched(mesh: const Mesh*, topology: const Topology*, points: BitsBuilder*)
                 for side in 0..<edge_faces(topology, edge):
                     let other = edge_face(topology, edge, side)
                     for at in 0..<count:
-                        if not joined.items[at] and (usize)around.1[first + at] == other:
+                        if not joined.items[at] and (usize)work.faces[start + at] == other:
                             joined.items[at] = true
-                            try fan.push((u32)at)
-        if fan.count < count: points.set(point)
+                            fan.push((u32)at) catch failure:
+                                _ = work.failed.add(1, .relaxed)
+                                return
+        if fan.count < count: work.marks[point] = 1
 
 let loose_picks: PickSpec[1] = [PickSpec("Points", "points")]
 

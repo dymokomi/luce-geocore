@@ -127,6 +127,63 @@ pub struct TriangleIndex:
                     face = candidate
         return RayHit(face, nearest if face >= 0 else -1.0)
 
+    ## Every triangle whose box meets the box `lo`..`hi` (in the tree's
+    ## frame), into `out` (cleared first): a self-intersection check's
+    ## candidates.
+    pub func overlapping(lo: Vector3, hi: Vector3, out: Growing[u32]*) -> !:
+        out.clear()
+        if self.nodes.length == 0: return
+        var stack: u32[64]
+        var count: usize = 1
+        stack[0] = 0
+        while count > 0:
+            count -= 1
+            let id = (usize)stack[count]
+            let node = &self.nodes[id]
+            if (f64)node.lo.x > hi.x or (f64)node.lo.y > hi.y or (f64)node.lo.z > hi.z or (f64)node.hi.x < lo.x or (f64)node.hi.y < lo.y or (f64)node.hi.z < lo.z:
+                continue
+            if node.count == 0:
+                stack[count] = node.first
+                stack[count + 1] = (u32)(id + 1)
+                count += 2
+                continue
+            for at in node.first..<node.first + node.count:
+                try out.push(self.order[(usize)at])
+
+    ## Mark in `hits` (one byte per triangle, zeroed by the caller) every
+    ## triangle that crosses another of a different face sharing no point
+    ## with it: a self-intersection check. Each leaf's box finds its
+    ## candidates once for its few triangles, the leaves in parallel.
+    pub func self_crossings(hits: u8[]) -> !:
+        if hits.length != self.triangle_count(): trap("one hit byte per triangle")
+        var leaves = Growing[u32]()
+        defer leaves.close()
+        for id in 0..<self.nodes.length:
+            if self.nodes[id].count > 0: try leaves.push((u32)id)
+        var work = CrossWork(&self, leaves.view(), hits)
+        work.failed.store(0, .relaxed)
+        try parallel.for_each_range(leaves.count, 64, (void*)&work, cross_leaves)
+        if work.failed.load(.acquire) != 0: error(memory.exhausted, "no memory for the intersection check")
+
+    ## How many triangles the tree holds; triangle `triangle`'s corner `k`
+    ## (0..2) as a point index and as a position; and its face.
+    pub func triangle_count() -> usize:
+        return self.triangles.length // 3
+
+    ## Triangle `triangle`'s three points.
+    func triangle_corners(triangle: usize) -> (usize, usize, usize):
+        let base = triangle * 3
+        return ((usize)self.corners[(usize)self.triangles[base]], (usize)self.corners[(usize)self.triangles[base + 1]], (usize)self.corners[(usize)self.triangles[base + 2]])
+
+    pub func corner_point(triangle: usize, k: usize) -> usize:
+        return (usize)self.corners[(usize)self.triangles[triangle * 3 + k]]
+
+    pub func corner_position(triangle: usize, k: usize) -> Vector3:
+        return self.point(triangle, k)
+
+    pub func triangle_face(triangle: usize) -> usize:
+        return (usize)self.face_of(triangle)
+
     ## Exact nearest distance to the triangulated mesh, using AABB pruning.
     pub func distance(point: Vector3) -> f64:
         return self.nearest(point).distance
@@ -432,3 +489,103 @@ func hit_triangle(origin: Vector3, direction: Vector3, a: Vector3, b: Vector3, c
         return -1.0
     let distance = ac.dot(q) * inverse
     return distance if distance >= 0.0 else -1.0
+
+## What the crossing pass reads.
+struct CrossWork:
+    let index: const TriangleIndex*
+    let leaves: const u32[]
+    let hits: u8[]
+    var failed: @u32
+
+func cross_leaves(context: void*, first: usize, end: usize, worker: usize):
+    let work = (CrossWork*)context
+    let index = work.index
+    var candidates = Growing[u32]()
+    defer candidates.close()
+    # Each candidate's box and points, gathered once for the leaf's few
+    # triangles.
+    var boxes = Growing[Float3]()
+    defer boxes.close()
+    var points = Growing[u32]()
+    defer points.close()
+    for at in first..<end:
+        let node = &index.nodes[(usize)work.leaves[at]]
+        index.overlapping(node.lo.vector(), node.hi.vector(), &candidates) catch failure:
+            _ = work.failed.add(1, .relaxed)
+            return
+        let count = candidates.count
+        boxes.fill(count * 2, Float3(0.0, 0.0, 0.0)) catch failure:
+            _ = work.failed.add(1, .relaxed)
+            return
+        points.fill(count * 3, 0) catch failure:
+            _ = work.failed.add(1, .relaxed)
+            return
+        for k in 0..<count:
+            let u = (usize)candidates.items[k]
+            let corners = index.triangle_corners(u)
+            let d = index.positions[corners.0]
+            let e = index.positions[corners.1]
+            let f = index.positions[corners.2]
+            boxes.items[k * 2] = Float3(fmin(d.x, fmin(e.x, f.x)), fmin(d.y, fmin(e.y, f.y)), fmin(d.z, fmin(e.z, f.z)))
+            boxes.items[k * 2 + 1] = Float3(fmax(d.x, fmax(e.x, f.x)), fmax(d.y, fmax(e.y, f.y)), fmax(d.z, fmax(e.z, f.z)))
+            points.items[k * 3] = (u32)corners.0
+            points.items[k * 3 + 1] = (u32)corners.1
+            points.items[k * 3 + 2] = (u32)corners.2
+        for slot in node.first..<node.first + node.count:
+            let triangle = (usize)index.order[(usize)slot]
+            let own = index.triangle_corners(triangle)
+            let p0 = (u32)own.0
+            let p1 = (u32)own.1
+            let p2 = (u32)own.2
+            let a3 = index.positions[own.0]
+            let b3 = index.positions[own.1]
+            let c3 = index.positions[own.2]
+            let lo = Float3(fmin(a3.x, fmin(b3.x, c3.x)), fmin(a3.y, fmin(b3.y, c3.y)), fmin(a3.z, fmin(b3.z, c3.z)))
+            let hi = Float3(fmax(a3.x, fmax(b3.x, c3.x)), fmax(a3.y, fmax(b3.y, c3.y)), fmax(a3.z, fmax(b3.z, c3.z)))
+            let face = index.face_of(triangle)
+            for k in 0..<count:
+                let near = boxes.items[k * 2]
+                let far = boxes.items[k * 2 + 1]
+                if far.x < lo.x or near.x > hi.x or far.y < lo.y or near.y > hi.y or far.z < lo.z or near.z > hi.z: continue
+                # Triangles sharing a point meet there; they are not counted
+                # (a triangle shares all three with itself).
+                let q0 = points.items[k * 3]
+                let q1 = points.items[k * 3 + 1]
+                let q2 = points.items[k * 3 + 2]
+                if q0 == p0 or q0 == p1 or q0 == p2 or q1 == p0 or q1 == p1 or q1 == p2 or q2 == p0 or q2 == p1 or q2 == p2: continue
+                let u = (usize)candidates.items[k]
+                if index.face_of(u) == face: continue
+                if triangles_cross(a3.vector(), b3.vector(), c3.vector(), index.positions[(usize)q0].vector(), index.positions[(usize)q1].vector(), index.positions[(usize)q2].vector()):
+                    work.hits[triangle] = 1
+                    break
+
+func fmin(a: f32, b: f32) -> f32:
+    return a if a < b else b
+
+func fmax(a: f32, b: f32) -> f32:
+    return a if a > b else b
+
+## Whether triangles abc and def cross: an edge of one passes through the
+## other (coplanar overlaps are not counted).
+func triangles_cross(a: Vector3, b: Vector3, c: Vector3, d: Vector3, e: Vector3, f: Vector3) -> bool:
+    return segment_crosses(a, b, d, e, f) or segment_crosses(b, c, d, e, f) or segment_crosses(c, a, d, e, f) or segment_crosses(d, e, a, b, c) or segment_crosses(e, f, a, b, c) or segment_crosses(f, d, a, b, c)
+
+## Whether segment pq passes through the inside of triangle abc
+## (Möller and Trumbore's test, the ray cut to the segment).
+func segment_crosses(p: Vector3, q: Vector3, a: Vector3, b: Vector3, c: Vector3) -> bool:
+    let along = q.subtract(p)
+    let ab = b.subtract(a)
+    let ac = c.subtract(a)
+    let h = along.cross(ac)
+    let det = ab.dot(h)
+    let scale = ab.length() * ac.length() * along.length()
+    if math.abs(det) <= 1.0e-12 * scale: return false
+    let inverse = 1.0 / det
+    let s = p.subtract(a)
+    let u = s.dot(h) * inverse
+    if u <= 0.0 or u >= 1.0: return false
+    let qv = s.cross(ab)
+    let v = along.dot(qv) * inverse
+    if v <= 0.0 or u + v >= 1.0: return false
+    let t = ac.dot(qv) * inverse
+    return t > 0.0 and t < 1.0

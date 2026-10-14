@@ -9,6 +9,7 @@ import interop
 from luce_std import math
 import memory
 import errors
+import sync
 import strings
 from luce_std import parallel
 import core.attribute_ops
@@ -26,10 +27,10 @@ from geometries.triangle_index import TriangleIndex
 from primitives import placement, grid_mesh, box_mesh, quad_sphere_mesh, uv_sphere_mesh, capsule_mesh, cylinder_mesh, tube_mesh, disc_mesh, torus_mesh, helix_mesh, platonic_mesh, icosphere_mesh
 from geometries.triangulation.polygon_triangulation import area_normal
 import geometries.triangulation.face_scratch
-from geometries.point_hash import PointHash
+from geometries.point_hash import PointHash, Cell
 from geometries.topology.connectivity import Topology
 from groups import GroupType, is_blank, guess_domain, GroupResult, GroupReport, group_bits, Selection, adopt_selection, strict_conversion, selection_bits
-from selecting import converted, rule_at, rule_count, run_rule, mirror_tolerance, mirror_map, symmetric, Delimits, delimits_for
+from selecting import converted, rule_at, rule_count, run_rule, mirror_tolerance, mirror_map, symmetric, Delimits, delimits_for, finding_count, finding_label, finding_domain, finding_bits
 from core.limits import max_points, check_mesh_size
 from core.verb_specs import ParmKind, ParmSpec, PickSpec, KeySpec, PlaceSpec, Parms, filled_parms
 from luce_std import ramp
@@ -50,6 +51,8 @@ let pick_faces: PickSpec[1] = [PickSpec("Faces", "faces")]
 let pick_edges: PickSpec[1] = [PickSpec("Edges", "edges")]
 let pick_pieces: PickSpec[1] = [PickSpec("Faces", "objects faces")]
 let pick_components: PickSpec[1] = [PickSpec("Components", "points edges faces")]
+## Whole pieces, or their points, edges or faces: a deformer's.
+let pick_pieces_points: PickSpec[1] = [PickSpec("Components", "objects points edges faces")]
 
 ## Weighted parents of interpolated elements (a new point on an edge, a new
 ## corner inside a face): element e takes entries offsets[e]..<offsets[e+1].

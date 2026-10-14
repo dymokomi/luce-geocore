@@ -1,0 +1,246 @@
+## Lattice: the group carried by a cage of control points, after Houdini's
+## Lattice SOP and Blender's Lattice (Sederberg and Parry's free-form
+## deformation). The cage is a box of Points along X, Y and Z round the
+## group's bounds (Padding stands it off them); its points start evenly
+## spaced, and moving them moves the group: Smooth weighs every cage point
+## by Bernstein polynomials of the point's place in the box (a moved cage
+## point pulls the whole group, most near it), Linear by the eight corners
+## of the cell the point is in. An unmoved cage leaves every point where it
+## is. The moved cage points follow the parameters as numbers (their count,
+## then each one's index and offset, `trailing`), so a node and an Edit
+## step replay the cage's drags; the viewport draws the cage and its points
+## (`lattice_cage`) and drags them. Points are written in parallel; the
+## output selection is the group.
+
+let lattice_parms: ParmSpec[3] = [
+    ParmSpec("Points", ParmKind.vector, 3.0, 2.0, 16.0, 3, "", "Cage points along X, Y and Z."),
+    ParmSpec("Interpolation", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Smooth|Linear", "Smooth: every cage point pulls the whole group, most near it (Bernstein weights); Linear: a point follows the eight cage points of its cell."),
+    ParmSpec("Padding", ParmKind.number, 0.0, 0.0, 10.0, 1, "", "How far the cage stands outside the group's bounds, as a share of their size.", 1.0)]
+
+func lattice_verb() -> Verb:
+    return Verb("Lattice", "Deform", "Deform the group by moving the points of a cage round it", Domain.point, true, lattice_parms, false, cook_lattice,
+                section = "Modify", family = "Deform", icon = "grid", picks = pick_pieces_points, gesture = "lattice", whole = true, trailing = true)
+
+## Cage points along an axis, at most.
+let most_cage_points: usize = 16
+
+## The cage: its box (relative to the mesh's origin), points per axis and
+## each cage point's offset (zero when unmoved).
+pub struct Cage:
+    pub var low: Vector3
+    pub var size: Vector3
+    pub var counts: usize[3]
+    pub var offsets: Growing[Vector3]
+    ## The indices of the moved cage points.
+    pub var moved: Growing[u32]
+
+    pub func init():
+        self.low = Vector3()
+        self.size = Vector3()
+        self.counts = [2, 2, 2]
+        self.offsets = Growing[Vector3]()
+        self.moved = Growing[u32]()
+
+    pub func close():
+        self.offsets.close()
+        self.moved.close()
+
+    ## How many cage points there are.
+    pub func count() -> usize:
+        return self.counts[0] * self.counts[1] * self.counts[2]
+
+    ## Cage point `index`'s place before it moved (relative to the origin).
+    pub func rest(index: usize) -> Vector3:
+        let i = index % self.counts[0]
+        let j = (index // self.counts[0]) % self.counts[1]
+        let k = index // (self.counts[0] * self.counts[1])
+        return self.low.add(Vector3(self.size.x * (f64)i / (f64)(self.counts[0] - 1), self.size.y * (f64)j / (f64)(self.counts[1] - 1), self.size.z * (f64)k / (f64)(self.counts[2] - 1)))
+
+## The cage of a Lattice run: the bounds of `group`'s points of `mesh`,
+## padded, and the moved points the numbers after the parameters list.
+func cage_of(mesh: const Mesh*, group: Bits, numbers: const f64[]) -> Cage!:
+    var cage = Cage()
+    errdefer cage.close()
+    for axis in 0..<(usize)3:
+        let points = numbers[axis]
+        if not (points >= 2.0 and points <= (f64)most_cage_points): error(errors.invalid, "a lattice has 2 to 16 cage points along each axis")
+        cage.counts[axis] = (usize)points
+    let padding = numbers[4]
+    if not (padding >= 0.0 and padding <= 10.0): error(errors.invalid, "a lattice's padding is 0..10")
+    let positions = mesh.point_span()
+    var lo = Vector3(1.0e300, 1.0e300, 1.0e300)
+    var hi = Vector3(-1.0e300, -1.0e300, -1.0e300)
+    for word in 0..<group.words.length:
+        var pending = group.words[word]
+        while pending != 0:
+            let q = positions[word * 64 + (usize)trailing_zeros(pending)].vector()
+            pending = pending & (pending - 1)
+            lo = Vector3(math.min(lo.x, q.x), math.min(lo.y, q.y), math.min(lo.z, q.z))
+            hi = Vector3(math.max(hi.x, q.x), math.max(hi.y, q.y), math.max(hi.z, q.z))
+    if lo.x > hi.x:
+        lo = Vector3()
+        hi = Vector3()
+    # A flat group (a grid) gets a sliver of depth, so its cage is a box.
+    let span = hi.subtract(lo)
+    let thin = math.max(1.0e-6, math.max(span.x, math.max(span.y, span.z)) * 0.001)
+    var size = Vector3(math.max(span.x, thin), math.max(span.y, thin), math.max(span.z, thin))
+    let middle = lo.add(hi).multiply_scalar(0.5)
+    size = size.multiply_scalar(1.0 + 2.0 * padding)
+    cage.low = middle.subtract(size.multiply_scalar(0.5))
+    cage.size = size
+    try read_moves(&cage, numbers)
+    return cage
+
+## The cage points `numbers` moves (after the five parameter numbers: their
+## count, then index and offset each; numbers past them are a node's unused
+## value slots), into `cage`'s offsets.
+func read_moves(cage: Cage*, numbers: const f64[]) -> !:
+    try cage.offsets.fill(cage.count(), Vector3())
+    cage.moved.clear()
+    let extra = numbers.length - 5 if numbers.length > 5 else 0
+    if extra == 0: return
+    let moved = numbers[5]
+    if not (moved >= 0.0 and moved == math.floor(moved) and moved < 1.0e6) or extra < 1 + (usize)moved * 4: error(errors.invalid, "a lattice's moved points are a count, then an index and an offset each")
+    for at in 0..<(usize)moved:
+        let base = 6 + at * 4
+        let index = numbers[base]
+        if not (index >= 0.0 and index < (f64)cage.count() and index == math.floor(index)): error(errors.invalid, "a lattice point index is past its cage")
+        let offset = Vector3(numbers[base + 1], numbers[base + 2], numbers[base + 3])
+        if not offset.is_finite(): error(errors.invalid, "a lattice point's offset must be finite")
+        cage.offsets.items[(usize)index] = offset
+    for index in 0..<cage.count():
+        let offset = cage.offsets.items[index]
+        if offset.x != 0.0 or offset.y != 0.0 or offset.z != 0.0: try cage.moved.push((u32)index)
+
+struct LatticeWork:
+    let positions: Float3[]
+    let points: const u32[]
+    let cage: const Cage*
+    let smooth: bool
+
+## Bernstein weights of degree count - 1 at `s` into `out`.
+func bernstein(s: f64, count: usize, out: f64[]):
+    let degree = count - 1
+    var binomial = 1.0
+    for i in 0..<count:
+        out[i] = binomial * math.pow(s, (f64)i) * math.pow(1.0 - s, (f64)(degree - i))
+        binomial = binomial * (f64)(degree - i) / (f64)(i + 1)
+
+func lattice_points(context: void*, first: usize, end: usize, worker: usize):
+    let work = (LatticeWork*)context
+    let cage = work.cage
+    var wx: f64[16] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var wy: f64[16] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    var wz: f64[16] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let nx = cage.counts[0]
+    let ny = cage.counts[1]
+    let nz = cage.counts[2]
+    for at in first..<end:
+        let point = (usize)work.points[at]
+        let p = work.positions[point].vector()
+        let local = p.subtract(cage.low)
+        let s = math.max(0.0, math.min(1.0, local.x / cage.size.x))
+        let t = math.max(0.0, math.min(1.0, local.y / cage.size.y))
+        let u = math.max(0.0, math.min(1.0, local.z / cage.size.z))
+        var shift = Vector3()
+        if work.smooth:
+            bernstein(s, nx, wx[..<nx])
+            bernstein(t, ny, wy[..<ny])
+            bernstein(u, nz, wz[..<nz])
+            for moved in cage.moved.view():
+                let index = (usize)moved
+                let weight = wx[index % nx] * wy[(index // nx) % ny] * wz[index // (nx * ny)]
+                shift = shift.add(cage.offsets.items[index].multiply_scalar(weight))
+        else:
+            # The cell and the place in it, along each axis.
+            let fx = s * (f64)(nx - 1)
+            let fy = t * (f64)(ny - 1)
+            let fz = u * (f64)(nz - 1)
+            let i = (usize)math.min((f64)(nx - 2), math.floor(fx))
+            let j = (usize)math.min((f64)(ny - 2), math.floor(fy))
+            let k = (usize)math.min((f64)(nz - 2), math.floor(fz))
+            let a = fx - (f64)i
+            let b = fy - (f64)j
+            let c = fz - (f64)k
+            for corner in 0..<(usize)8:
+                let di = corner % 2
+                let dj = (corner // 2) % 2
+                let dk = corner // 4
+                let weight = (a if di == 1 else 1.0 - a) * (b if dj == 1 else 1.0 - b) * (c if dk == 1 else 1.0 - c)
+                shift = shift.add(cage.offsets.items[(i + di) + nx * ((j + dj) + ny * (k + dk))].multiply_scalar(weight))
+        work.positions[point] = Float3.of(p.add(shift))
+
+## The detail attributes a Lattice run leaves on its mesh: its cage's box
+## (low corner, size) and points along each axis, so the viewport can draw
+## and drag the cage over the result (`cage_on`).
+let frame_names: str[3] = [".lattice_low", ".lattice_size", ".lattice_points"]
+
+func cook_lattice(input: const VerbInput*, output: VerbOutput*) -> !:
+    let moved = try begin_points(input, output)
+    var cage = try cage_of(input.mesh, input.group, input.parms.numbers)
+    defer cage.close()
+    if cage.moved.count > 0 and moved.length > 0:
+        var work = LatticeWork(output.positions.span(), moved, &cage, input.parms.at(3) == 0.0)
+        try parallel.for_each_range(moved.length, 8192, (void*)&work, lattice_points)
+    let made = try moved_storage(input.mesh, output.positions, moved)
+    errdefer mesh_dispose(made)
+    let frame: f64[9] = [cage.low.x, cage.low.y, cage.low.z, cage.size.x, cage.size.y, cage.size.z, (f64)cage.counts[0], (f64)cage.counts[1], (f64)cage.counts[2]]
+    for at in 0..<(usize)3: try put_attribute(made, try Attribute.from_numbers(frame_names[at], Domain.detail, 3, frame[at * 3..<at * 3 + 3], false))
+    output.mesh = made
+
+## The cage of the Lattice run that made `mesh` (its frame attribute) with
+## the moves `numbers` (the run's numbers) give it.
+pub func cage_on(mesh: const Mesh*, numbers: const f64[]) -> Cage!:
+    var frame: Vector3[3] = [Vector3(), Vector3(), Vector3()]
+    for at in 0..<(usize)3:
+        let found = mesh.attribute_on(frame_names[at], Domain.detail)
+        if found < 0: error(errors.invalid, "this mesh was not made by a Lattice")
+        let entry = try mesh.attribute_entry(found)
+        frame[at] = Vector3(entry.number(0, 0), entry.number(0, 1), entry.number(0, 2))
+    var cage = Cage()
+    errdefer cage.close()
+    cage.low = frame[0]
+    cage.size = frame[1]
+    cage.counts = [(usize)frame[2].x, (usize)frame[2].y, (usize)frame[2].z]
+    if cage.counts[0] < 2 or cage.counts[1] < 2 or cage.counts[2] < 2: error(errors.invalid, "this mesh's lattice frame is broken")
+    try read_moves(&cage, numbers)
+    return cage
+
+## A Lattice run's cage for the viewport (Verbs.lattice): its points before
+## and after their moves, in world space, and how many run along each axis.
+pub struct LatticeCage:
+    var cage: Cage
+    var origin: Vector3
+
+    pub func init():
+        self.cage = Cage()
+        self.origin = Vector3()
+
+    ## How many cage points there are, and along axis `axis` (0 X, 1 Y, 2 Z).
+    pub func count() -> i64:
+        return (i64)self.cage.count()
+
+    pub func along(axis: i64) -> i64:
+        if axis < 0 or axis > 2: trap("a cage axis is 0, 1 or 2")
+        return (i64)self.cage.counts[(usize)axis]
+
+    ## Cage point `index` where it started, and where it is now.
+    pub func rest(index: i64) -> Vector3:
+        return self.cage.rest(cage_index(&self.cage, index)).add(self.origin)
+
+    pub func point(index: i64) -> Vector3:
+        let at = cage_index(&self.cage, index)
+        return self.cage.rest(at).add(self.cage.offsets.items[at]).add(self.origin)
+
+    ## Cage point `index`'s offset (zero when unmoved).
+    pub func offset(index: i64) -> Vector3:
+        return self.cage.offsets.items[cage_index(&self.cage, index)]
+
+    pub func close():
+        self.cage.close()
+
+func cage_index(cage: const Cage*, index: i64) -> usize:
+    if index < 0 or (usize)index >= cage.count(): trap("cage point index out of range")
+    return (usize)index
+
+pub let lattice_cage_type: interop.Type[LatticeCage] = interop.Type[LatticeCage]("LatticeCage", LatticeCage.close, closeable = true)

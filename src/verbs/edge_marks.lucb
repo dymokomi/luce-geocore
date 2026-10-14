@@ -14,11 +14,11 @@ let mark_parms: ParmSpec[1] = [ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1,
 ## their edges.
 func hard_edges_verb() -> Verb:
     return Verb("Hard Edges", "Attributes", "Mark the group's edges hard: the shading splits across them", Domain.edge, true, mark_parms, false, cook_hard_edges,
-                section = "Modify", family = "Normals", icon = "select-sharp", picks = pick_edges)
+                section = "Modify", family = "Normals", icon = "hard-edges", picks = pick_edges)
 
 func soft_edges_verb() -> Verb:
     return Verb("Soft Edges", "Attributes", "Mark the group's edges soft: the shading runs smooth across them at any angle", Domain.edge, true, mark_parms, false, cook_soft_edges,
-                section = "Modify", family = "Normals", icon = "shaded-view", picks = pick_edges)
+                section = "Modify", family = "Normals", icon = "soft-edges", picks = pick_edges)
 
 let smooth_angle_parms: ParmSpec[2] = [
     ParmSpec("Angle", ParmKind.number, 30.0, 0.0, 180.0, 1, "", "Edges whose faces meet at more than this angle (degrees) turn hard, the others soft."),
@@ -29,19 +29,19 @@ let smooth_angle_picks: PickSpec[1] = [PickSpec("Edges", "objects faces edges")]
 
 func smooth_by_angle_verb() -> Verb:
     return Verb("Smooth by Angle", "Attributes", "Mark the group's edges hard where their faces meet at more than an angle, soft elsewhere", Domain.edge, true, smooth_angle_parms, false, cook_smooth_by_angle,
-                section = "Modify", family = "Normals", icon = "surface-normal", picks = smooth_angle_picks, drag = 0, drag_mode = "amount", whole = true)
+                section = "Modify", family = "Normals", icon = "smooth-by-angle", picks = smooth_angle_picks, drag = 0, drag_mode = "amount", whole = true)
 
 let seam_parms: ParmSpec[1] = [ParmSpec("Mode", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Set|Clear", "Mark the group's edges as UV seams, or clear them.")]
 
 func mark_seam_verb() -> Verb:
     return Verb("Mark Seam", "Attributes", "Mark the group's edges as UV seams", Domain.edge, true, seam_parms, false, cook_mark_seam,
-                section = "Modify", family = "UV", icon = "sketch-break", picks = pick_edges)
+                section = "Modify", family = "UV", icon = "mark-seam", picks = pick_edges)
 
 let island_seam_parms: ParmSpec[1] = [ParmSpec("Mark hard", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Mark the seams hard as well (Blender's Mark Sharp), so the shading splits along them.")]
 
 func seams_from_islands_verb() -> Verb:
     return Verb("Seams from Islands", "Attributes", "Mark seams on the edges where the UVs split into islands, and clear them on the group's other edges", Domain.edge, true, island_seam_parms, false, cook_seams_from_islands,
-                section = "Modify", family = "UV", icon = "uv-project", picks = pick_pieces, whole = true)
+                section = "Modify", family = "UV", icon = "seams-from-islands", picks = pick_pieces, whole = true)
 
 ## The edge column `name` of `mesh`: its values where it exists, else 0
 ## (heap; the caller frees it).

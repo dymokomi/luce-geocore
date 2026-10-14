@@ -10,6 +10,7 @@ import memory
 from luce_geocore import geocore
 from luce_geocore.geocore import Mesh, Vector3, Verbs, Subdivision, AttributeKernels
 from luce_geocore.core.growing import Growing
+from luce_geocore.kernel import clear_stroke_cache
 from luce_std import parallel as std_parallel
 
 ## One case: what it runs, on which mesh (0 grid, 1 tube cut in two, 2 grid
@@ -224,6 +225,7 @@ pub func main(arguments: str[]) -> i32!:
         result.release()
     try subdivision_rows(grid)
     try shading_rows(stage7[1])
+    try stage8_rows(stage7[0], stage7[1])
     return 0
 
 ## Stage 7's meshes (see stage7_case).
@@ -354,3 +356,67 @@ func open_tube(n: usize) -> interop.Reference[Mesh]!:
             corners[face * 4 + 2] = (i64)((y + 1) * n + (i + 1) % n)
             corners[face * 4 + 3] = (i64)(y * n + (i + 1) % n)
     return try interop.Reference[Mesh].adopt(try new Mesh(points, sizes, corners) in memory.heap, geocore.mesh_type, memory.heap)
+
+## Stage 8 on about a million faces: the deformers on the 1024² grid (X its
+## axis), a Lattice cage, sculpt strokes (a stroke of 100 Draw dabs run
+## whole, and grown by three dabs from the remembered stroke, as the
+## viewport sends it while the pointer moves) and the Mesh Check.
+func stage8_rows(grid: interop.Reference[Mesh], sphere: interop.Reference[Mesh]) -> !:
+    let modes: f64[4] = [0.0, 1.0, 2.0, 3.0]
+    let amounts: f64[4] = [90.0, 90.0, 50.0, -30.0]
+    let names: str[4] = ["Bend (Bend 90°), everything", "Bend (Twist 90°), everything", "Bend (Taper 50%), everything", "Bend (Squash -30%), everything"]
+    for at in 0..<(usize)4:
+        let numbers: f64[12] = [modes[at], amounts[at], 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        try timed(names[at], "Bend", grid, numbers[..<12])
+    let cage: f64[14] = [5.0, 5.0, 5.0, 0.0, 0.0, 2.0, 62.0, 0.0, 50.0, 0.0, 12.0, 0.0, -30.0, 0.0]
+    try timed("Lattice, 5×5×5 Smooth cage, 2 points moved, everything", "Lattice", grid, cage[..<14])
+    var linear = cage
+    linear[3] = 1.0
+    try timed("Lattice, 5×5×5 Linear cage, 2 points moved, everything", "Lattice", grid, linear[..<14])
+    # A stroke of 100 dabs across the grid's middle, radius 20 (about 1,250
+    # points under each dab).
+    var numbers = Growing[f64]()
+    defer numbers.close()
+    let head: f64[5] = [0.0, 20.0, 0.5, 0.0, 0.0]
+    for value in head: try numbers.push(value)
+    try numbers.push(100.0)
+    for dab in 0..<(usize)100:
+        let dab_values: f64[6] = [-250.0 + 5.0 * (f64)dab, 0.0, 0.0, 0.0, 1.0, 0.0]
+        for value in dab_values: try numbers.push(value)
+    clear_stroke_cache()
+    try timed("Sculpt, a stroke of 100 Draw dabs run whole (radius 20)", "Sculpt", grid, numbers.view())
+    # Grown: 97 dabs remembered, then the 100.
+    clear_stroke_cache()
+    numbers.items[5] = 97.0
+    let early = try Verbs.run("Sculpt", grid, "", 1, numbers.view()[..<6 + 97 * 6])
+    early.release()
+    numbers.items[5] = 100.0
+    try timed("Sculpt, the stroke grown by 3 dabs (a pointer move)", "Sculpt", grid, numbers.view())
+    numbers.items[0] = 1.0
+    clear_stroke_cache()
+    try timed("Sculpt, a Grab stroke of 100 dabs run whole", "Sculpt", grid, numbers.view())
+    clear_stroke_cache()
+    var start = time.now()
+    let report = try Verbs.mesh_check(grid)
+    print(f"Mesh Check, the grid, every finding\t{(f64)time.since(start) / 1000000.0}\t{grid.value().face_count()}\t")
+    report.release()
+    start = time.now()
+    let round = try Verbs.mesh_check(sphere)
+    print(f"Mesh Check, the sphere, every finding\t{(f64)time.since(start) / 1000000.0}\t{sphere.value().face_count()}\t")
+    round.release()
+    start = time.now()
+    let quick = try Verbs.mesh_check(sphere, 0.000001, false)
+    print(f"Mesh Check, the sphere, without Intersecting\t{(f64)time.since(start) / 1000000.0}\t{sphere.value().face_count()}\t")
+    quick.release()
+    let nothing: f64[1] = [0.0]
+    try timed("Select Intersecting, the sphere", "Select Intersecting", sphere, nothing[..<0])
+
+## One timed run of verb `verb` on `mesh`, as the case rows print.
+func timed(name: str, verb: str, mesh: interop.Reference[Mesh], numbers: const f64[]) -> !:
+    let start = time.now()
+    let result = try Verbs.run(verb, mesh, "", 1 if verb != "Select Intersecting" else 3, numbers)
+    let spent = (f64)time.since(start) / 1000000.0
+    let made = try result.value().mesh()
+    print(f"{name}\t{spent}\t{made.value().face_count()}\t{result.value().warning()}")
+    made.release()
+    result.release()

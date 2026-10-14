@@ -1,0 +1,191 @@
+## Rules that find a mesh's defects, for the Select tools and the Mesh
+## Check alike (selecting/mesh_check.lucb runs them as its overlay's
+## passes): Poles (points by how many edges meet there), Degenerate (faces
+## without area, edges without length) and Intersecting (faces passing
+## through other faces of the mesh).
+
+let pole_parms: ParmSpec[3] = [
+    ParmSpec("Edges", ParmKind.integer, 4.0, 1.0, 1000.0, 1, "", "The number of edges a point's edges are compared with.", soft = 8.0),
+    ParmSpec("Compare", ParmKind.menu, 1.0, 0.0, 3.0, 1, "Equal|Not equal|Less|Greater", "How a point's edges compare with Edges (Not equal 4: the poles of a quad mesh)."),
+    ParmSpec("Interior only", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Leave out points on a boundary, whose edges differ anyway (a grid's sides have three).")]
+let point_picks: PickSpec[1] = [PickSpec("Points", "points")]
+
+func poles_rule() -> SelectRule:
+    return SelectRule("Select Poles", "Poles", "poles", "Points by how many edges meet there: the poles of a quad mesh", "Find", "vertex-select",
+                      "points", point_picks, pole_parms, select_poles, whole = true)
+
+func select_poles(input: const RuleInput*) -> RuleOutput!:
+    let topology = input.topology
+    var out = try BitsBuilder.zeros(topology.points)
+    errdefer out.close()
+    let wanted = (usize)input.parms.at(0)
+    let compare = (usize)input.parms.at(1)
+    var rim = try BitsBuilder.zeros(topology.points)
+    defer rim.close()
+    if input.parms.at(2) != 0.0:
+        for edge in 0..<topology.edges():
+            if edge_faces(topology, edge) != 1: continue
+            rim.set((usize)topology.edge_points[edge * 2])
+            rim.set((usize)topology.edge_points[edge * 2 + 1])
+    let around = try input.mesh.point_face_span()
+    for point in 0..<topology.points:
+        if not input.group.get(point) or rim.view().get(point): continue
+        # A point no face uses is loose, not a pole.
+        if around.0[point] == around.0[point + 1]: continue
+        let edges = (usize)(topology.point_edge_offsets[point + 1] - topology.point_edge_offsets[point])
+        let hit = edges == wanted if compare == 0 else (edges != wanted if compare == 1 else (edges < wanted if compare == 2 else edges > wanted))
+        if hit: out.set(point)
+    return same_domain(input, out)
+
+let degenerate_parms: ParmSpec[1] = [
+    ParmSpec("Tolerance", ParmKind.number, 0.000001, 0.0, 1000000.0, 1, "", "Faces with less area than its square, edges shorter than it.", soft = 0.001)]
+let degenerate_picks: PickSpec[1] = [PickSpec("Components", "faces edges")]
+
+func degenerate_rule() -> SelectRule:
+    return SelectRule("Select Degenerate", "Degenerate", "degenerate", "Faces without area and edges without length", "Find", "select-by-area",
+                      "faces edges", degenerate_picks, degenerate_parms, select_degenerate, whole = true)
+
+func select_degenerate(input: const RuleInput*) -> RuleOutput!:
+    let topology = input.topology
+    let tolerance = input.parms.at(0)
+    if not (tolerance >= 0.0): error(errors.invalid, "the tolerance must not be negative")
+    let edges = input.domain == Domain.edge
+    let count = topology.edges() if edges else topology.faces()
+    let marks = try new u8[count] --- in memory.heap
+    defer free(marks) in memory.heap
+    var work = DegenerateWork(input.mesh, topology, input.group, marks, edges, tolerance)
+    try parallel.for_each_range(count, 8192, (void*)&work, degenerate_elements)
+    var out = try BitsBuilder.zeros(count)
+    for at in 0..<count:
+        if marks[at] != 0: out.set(at)
+    return same_domain(input, out)
+
+struct DegenerateWork:
+    let mesh: const Mesh*
+    let topology: const Topology*
+    let group: Bits
+    let marks: u8[]
+    let edges: bool
+    let tolerance: f64
+
+## Each element of the range: an edge no longer than the tolerance, a face
+## of less area than its square.
+func degenerate_elements(context: void*, first: usize, end: usize, worker: usize):
+    let work = (DegenerateWork*)context
+    for at in first..<end:
+        work.marks[at] = 0
+        if not work.group.get(at): continue
+        if work.edges:
+            if edge_length(work.mesh, work.topology, at) <= work.tolerance: work.marks[at] = 1
+        elif face_area(work.mesh, work.topology, at) <= work.tolerance * work.tolerance:
+            work.marks[at] = 1
+
+let intersecting_picks: PickSpec[1] = [PickSpec("Faces", "faces")]
+
+func intersecting_rule() -> SelectRule:
+    return SelectRule("Select Intersecting", "Intersecting", "intersecting", "Faces that pass through other faces of the mesh", "Find", "boolean-intersect",
+                      "faces", intersecting_picks, no_parms[..<0], select_intersecting, whole = true)
+
+func select_intersecting(input: const RuleInput*) -> RuleOutput!:
+    var faces = try intersecting_faces(input.mesh)
+    faces.intersect(input.group)
+    return same_domain(input, faces)
+
+## Faces whose triangles cross a triangle of another face sharing no
+## point with them (adjacent faces touch, they do not cross), found in the
+## mesh's triangle tree.
+pub func intersecting_faces(mesh: const Mesh*) -> BitsBuilder!:
+    let index = try mesh.query_index()
+    let triangles = index.triangle_count()
+    let hits = try new u8[triangles] --- in memory.heap
+    defer free(hits) in memory.heap
+    memory.set(hits, 0)
+    try index.self_crossings(hits)
+    var faces = try BitsBuilder.zeros((usize)mesh.face_count())
+    for triangle in 0..<triangles:
+        if hits[triangle] != 0: faces.set(index.triangle_face(triangle))
+    return faces
+
+## The Mesh Check's findings, in the order its overlay lists them: what
+## each is called, the domain it is on, which of the Mesh Check rule's
+## toggles turns it on, and the rule pass that finds it.
+struct Finding:
+    let label: str
+    let domain: Domain
+    let toggle: usize
+    let kernel: func(const RuleInput*) -> RuleOutput!
+    let numbers: f64[4]
+
+## How many findings there are.
+pub let finding_count: usize = 11
+
+func finding_at(index: usize) -> Finding:
+    match index:
+        0: return Finding("Non-manifold edges", Domain.edge, 0, select_nonmanifold, [0.0, 1.0, 0.0, 0.0])
+        1: return Finding("Pinched points", Domain.point, 0, select_nonmanifold, [0.0, 0.0, 0.0, 1.0])
+        2: return Finding("Boundary edges", Domain.edge, 1, select_nonmanifold, [1.0, 0.0, 0.0, 0.0])
+        3: return Finding("Flipped neighbors", Domain.edge, 2, select_nonmanifold, [0.0, 0.0, 1.0, 0.0])
+        4: return Finding("Loose points", Domain.point, 3, select_loose, [0.0, 0.0, 0.0, 0.0])
+        5: return Finding("N-gons", Domain.face, 4, select_sides, [4.0, 3.0, 0.0, 0.0])
+        6: return Finding("Triangles", Domain.face, 5, select_sides, [3.0, 0.0, 0.0, 0.0])
+        7: return Finding("Poles", Domain.point, 6, select_poles, [4.0, 1.0, 1.0, 0.0])
+        8: return Finding("Zero-area faces", Domain.face, 7, select_degenerate, [0.0, 0.0, 0.0, 0.0])
+        9: return Finding("Zero-length edges", Domain.edge, 7, select_degenerate, [0.0, 0.0, 0.0, 0.0])
+        _: return Finding("Intersecting faces", Domain.face, 8, select_intersecting, [0.0, 0.0, 0.0, 0.0])
+
+pub func finding_label(index: usize) -> str:
+    return finding_at(index).label
+
+pub func finding_domain(index: usize) -> Domain:
+    return finding_at(index).domain
+
+## Finding `index` on `mesh`: its rule's pass over every element of its
+## domain (the degenerate ones with `tolerance`).
+pub func finding_bits(index: usize, mesh: const Mesh*, topology: const Topology*, tolerance: f64) -> BitsBuilder!:
+    let finding = finding_at(index)
+    var all = try BitsBuilder.ones(topology.size(finding.domain))
+    defer all.close()
+    var numbers = finding.numbers
+    if finding.toggle == 7: numbers[0] = tolerance
+    let input = RuleInput(mesh, topology, all.view(), finding.domain, Parms(numbers[..<4]))
+    let kernel = finding.kernel
+    let made = try kernel(&input)
+    return made.bits
+
+let problem_parms: ParmSpec[10] = [
+    ParmSpec("Non-manifold", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Edges of three faces or more, and points where faces meet only at the point."),
+    ParmSpec("Boundary", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Edges with one face: the open edges of a sheet or a hole."),
+    ParmSpec("Flipped", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Edges whose two faces wind opposite ways."),
+    ParmSpec("Loose points", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Points no face uses."),
+    ParmSpec("N-gons", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Faces of more than four sides."),
+    ParmSpec("Triangles", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Faces of three sides."),
+    ParmSpec("Poles", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Inner points where other than four edges meet."),
+    ParmSpec("Degenerate", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Faces without area and edges without length (within Tolerance)."),
+    ParmSpec("Intersecting", ParmKind.toggle, 1.0, 0.0, 1.0, 1, "", "Faces passing through other faces of the mesh."),
+    ParmSpec("Tolerance", ParmKind.number, 0.000001, 0.0, 1000000.0, 1, "", "Degenerate: faces with less area than its square, edges shorter than it.", soft = 0.001, more = true)]
+let problem_picks: PickSpec[1] = [PickSpec("Components", "points edges faces")]
+
+func problems_rule() -> SelectRule:
+    return SelectRule("Mesh Check", "Mesh Check", "problems", "Select the mesh's defects: non-manifold, flipped, loose, n-gons, poles, degenerate and intersecting; the viewport's Mesh Check overlay shows them", "Find", "surface-analysis",
+                      "points edges faces", problem_picks, problem_parms, select_problems, whole = true)
+
+## Every finding turned on, on the group's domain (a face finding at
+## edges takes the faces' edges, an edge finding at faces the faces
+## beside it).
+func select_problems(input: const RuleInput*) -> RuleOutput!:
+    let topology = input.topology
+    var out = try BitsBuilder.zeros(topology.size(input.domain))
+    errdefer out.close()
+    for index in 0..<finding_count:
+        let finding = finding_at(index)
+        if input.parms.at(finding.toggle) == 0.0: continue
+        var bits = try finding_bits(index, input.mesh, topology, input.parms.at(9))
+        defer bits.close()
+        if finding.domain == input.domain:
+            out.unite(bits.view())
+            continue
+        var moved = try converted(topology, bits.view(), finding.domain, input.domain, false)
+        defer moved.close()
+        out.unite(moved.view())
+    out.intersect(input.group)
+    return same_domain(input, out)

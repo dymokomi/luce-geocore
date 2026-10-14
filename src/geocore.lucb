@@ -64,6 +64,10 @@ pub type MaterialAssignment = groups.MaterialAssignment
 pub type Verbs = verbs.Verbs
 pub type VerbResult = verbs.VerbResult
 pub type DragFrame = verbs.DragFrame
+## A Lattice step's cage, as the viewport draws and drags it (Verbs.lattice).
+pub type LatticeCage = verbs.LatticeCage
+## The Mesh Check overlay's findings on a mesh (Verbs.mesh_check).
+pub type MeshReport = verbs.MeshReport
 pub type Subdivision = subdivision.Subdivision
 ## Verbs over whole sets (curves, fields, conversions), and the one catalog
 ## of every verb a node runs.

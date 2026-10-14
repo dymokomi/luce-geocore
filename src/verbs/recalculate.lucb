@@ -16,7 +16,7 @@ let recalculate_parms: ParmSpec[1] = [ParmSpec("Inside", ParmKind.toggle, 0.0, 0
 
 func recalculate_verb() -> Verb:
     return Verb("Recalculate Normals", "Modeling", "Wind the group's faces one way with their neighbors, facing out of each island", Domain.face, true, recalculate_parms, true, cook_recalculate,
-                section = "Modify", family = "Normals", icon = "reverse-normals", picks = pick_pieces, whole = true)
+                section = "Modify", family = "Normals", icon = "recalculate-normals", picks = pick_pieces, whole = true)
 
 ## What the reversing ranges read.
 struct ReverseWork:

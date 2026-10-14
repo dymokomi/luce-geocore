@@ -1,7 +1,7 @@
 ## Every select rule, in menu order. A rule added here is a Select verb
 ## (verbs/api.lucb lists the rules after the modeling verbs) and, when it
 ## names a function, a group function.
-let rule_makers: (func() -> SelectRule)[22] = [
+let rule_makers: (func() -> SelectRule)[26] = [
     loop_rule,
     ring_rule,
     boundary_rule,
@@ -18,6 +18,10 @@ let rule_makers: (func() -> SelectRule)[22] = [
     area_rule,
     normal_rule,
     manifold_rule,
+    poles_rule,
+    degenerate_rule,
+    intersecting_rule,
+    problems_rule,
     loose_rule,
     interior_rule,
     checker_rule,
