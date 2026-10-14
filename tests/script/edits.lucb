@@ -88,6 +88,16 @@ pub func arrays() -> !:
         let many: i32[6] = [1, 2, 3, 4, 5, (i32)round]
         try g.set_i32_array(Domain3.point, 1, "ids", many[..<(usize)(1 + round % 6)])
     assert((try g.i32_array(Domain3.point, 1, "ids"))[0] == 1)
+    # Two arrays growing and shrinking in turn (each in its own run's room, or
+    # moving with twice the room) read back as last written.
+    var values: i32[8]
+    for round in 0..<200:
+        for k in 0..<8: values[k] = (i32)(round * 10 + k)
+        try g.set_i32_array(Domain3.point, 5, "ids", values[..<(usize)(round % 8)])
+        try g.set_i32_array(Domain3.point, 6, "ids", values[..<(usize)((round + 3) % 8)])
+    assert(try g.array_length(Domain3.point, 5, "ids") == 199 % 8 and try g.array_length(Domain3.point, 6, "ids") == 202 % 8)
+    assert((try g.i32_array(Domain3.point, 5, "ids"))[6] == 1996 and (try g.i32_array(Domain3.point, 6, "ids"))[1] == 1991)
+    assert((try g.i32_array(Domain3.point, 3, "ids"))[2] == 9)
     # Points removed: arrays follow theirs.
     let gone: i64[1] = [0]
     try g.remove_points(gone)

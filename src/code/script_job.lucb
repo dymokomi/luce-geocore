@@ -1,6 +1,8 @@
 # A Script node's check on a thread of its own. The first check of a package set reads its
 # packages (about 0.1 s), longer than an editor may wait between frames; luced-3d runs it
-# here and polls `finished`. Checks stay one at a time in the process: luce-kernel's file
+# here, and `wake_when_done` calls a function of its own (a main-loop notifier's handle)
+# from the job's thread when the result is ready, so nothing polls. Checks stay one at a
+# time in the process: luce-kernel's file
 # help runs under its check lock, so a completion asked while a job runs would wait for it,
 # and luced-3d asks none until the job has finished.
 
@@ -28,6 +30,27 @@ pub struct ScriptCheckJob:
         state.lock.lock()
         defer state.lock.unlock()
         return state.done
+
+    ## Call `wake(context)` once the check has finished: from the job's thread when it
+    ## finishes, or here at once when it has. `let_go(context)` follows the call, or
+    ## comes alone when the job closes first or another wake replaces this one. Base
+    ## callers only: `wake` must be safe on any thread (a notifier handle's notify).
+    pub func wake_when_done(wake: func(void*) -> unit, let_go: func(void*) -> unit, context: void*):
+        if self.state == none:
+            wake(context)
+            let_go(context)
+            return
+        let state = self.state else return
+        state.lock.lock()
+        if state.done:
+            state.lock.unlock()
+            wake(context)
+            let_go(context)
+            return
+        let old = state.waker
+        state.waker = Waker(wake, let_go, context)
+        state.lock.unlock()
+        if let earlier = old: earlier.drop()
 
     ## The check's result, waiting for it if it is still running; once.
     pub func result() -> interop.Reference[CodeCheck]!:
@@ -59,6 +82,8 @@ struct JobState:
     var done: bool = false
     var joined: bool = true
     var handle: thread.Handle
+    ## Called when the check finishes (see wake_when_done), under `lock`.
+    var waker: Waker? = none
 
     ## Wait for the thread, once.
     func join():
@@ -66,8 +91,26 @@ struct JobState:
         self.handle.join() catch failure: trap(failure.message)
         self.joined = true
 
+## A wake asked for: called once when the check finishes, its context then released.
+struct Waker:
+    let wake: func(void*) -> unit
+    let let_go: func(void*) -> unit
+    let context: void*
+
+    func fire():
+        let wake = self.wake
+        wake(self.context)
+        self.drop()
+
+    func drop():
+        let let_go = self.let_go
+        let_go(self.context)
+
 ## Free `state`'s copies, its result and the state itself (joined first).
 func release_state(state: JobState*):
+    if let waker = state.waker:
+        state.waker = none
+        waker.drop()
     heap_release(state.file)
     heap_release(state.text)
     heap_release(state.message)
@@ -83,7 +126,10 @@ func run_job(raw: void*?):
         state.message = heap_copy(failure.message) catch exhausted: recover ""
     state.lock.lock()
     state.done = true
+    let waker = state.waker
+    state.waker = none
     state.lock.unlock()
+    if let asked = waker: asked.fire()
 
 func empty_check() -> CodeCheck:
     return CodeCheck(passed = false, lines = collections.List[CheckLine](), parameters = collections.List[CheckParameter](), timeline = false, texts = collections.TextPool())

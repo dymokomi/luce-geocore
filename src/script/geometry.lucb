@@ -39,7 +39,7 @@ import math.vector
 from math.matrix import Matrix4
 from geometries.polygon import Mesh, assembled, mesh_share, mesh_dispose, moved_storage, put_attribute, remove_attribute, transfer_attributes
 from primitives import MeshPrimitives
-from geometry_set import GeometrySet, Placement, set_mesh, mesh_component, empty_storage, dispose_set, adopt_set, set_joined, set_placed, set_detail, set_put_detail, cloud_of_mesh, set_cloud, cloud_positions, cloud_origin, cloud_store, points_component
+from geometry_set import GeometrySet, Placement, set_bounds, set_mesh, mesh_component, empty_storage, dispose_set, adopt_set, set_joined, set_placed, set_detail, set_put_detail, cloud_of_mesh, set_cloud, cloud_positions, cloud_origin, cloud_store, points_component
 from curves import Curves, CurveType, CurvesBuilder, set_curves, curves_type
 from geometry_files import GeometryFile
 from fields import Volume, SparseGrid, GridClass, VolumeLook, restyled, box_grid, new_grid, share_grid, release_grid, new_volume, add_grid, release_volume, volume_type, set_volume, key_leaf, leaf_key, leaf_of, local_index, leaf_voxels, mask_words
@@ -261,8 +261,10 @@ pub struct Geometry:
     ## The box around everything the set holds; empty boxes have min > max.
     pub func bounds() -> Bounds!:
         let set = try self.finished()
-        if not try set.has_bounds(): return Bounds(Vector3(1.0, 1.0, 1.0), Vector3(-1.0, -1.0, -1.0))
-        return try set.bounds()
+        # One traversal: the set's bounds, or the empty box when it has none.
+        var box = Bounds(Vector3(1.0, 1.0, 1.0), Vector3(-1.0, -1.0, -1.0))
+        _ = try set_bounds(set, Matrix4(), &box)
+        return box
 
     ## The origin positions are kept relative to (zero unless the input set one).
     pub func origin() -> f32[4]:

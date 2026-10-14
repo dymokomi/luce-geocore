@@ -159,10 +159,10 @@ func apply_array_sets(mesh: Mesh*, edits: const Edits*, numbering: const Numberi
 func array_target(set: const ArraySet*, numbering: const Numbering*, point_map: const i64[], prim_map: const i64[], corner_map: const i64[]) -> i64!:
     if set.domain == .point:
         let at = numbering.point(set.index) else error(errors.invalid, "an array set names a point that does not exist")
-        return point_map[at]
+        return mapped(point_map, at)
     if set.domain == .face:
         let at = numbering.prim(set.index) else error(errors.invalid, "an array set names a primitive that does not exist")
-        return prim_map[at]
+        return mapped(prim_map, at)
     if set.index < 0 or (usize)set.index >= corner_map.length: error(errors.invalid, "an array set names a vertex that does not exist")
     return corner_map[(usize)set.index]
 

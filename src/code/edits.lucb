@@ -94,6 +94,12 @@ struct Edits:
     func any() -> bool:
         return self.masked.load(.acquire) or self.point_adds.length() + self.prim_adds.length() + self.removals.length() + self.set_count() > 0
 
+    ## How many array sets are queued (the queues are one per worker, empty or not).
+    func array_set_count() -> usize:
+        var count: usize = 0
+        for queue in self.array_sets.view(): count += queue.length()
+        return count
+
     ## How many attribute sets are queued.
     func set_count() -> usize:
         var count: usize = 0

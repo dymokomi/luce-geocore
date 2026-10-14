@@ -9,6 +9,7 @@ from luce_std import collections, files, process
 from luce_geocore.geocore import ScriptHelp, ScriptCheckJob, CodeCompletion
 import interop
 import thread
+import sync
 
 let not_found: ErrorCode = ErrorCode.package(1)
 
@@ -19,6 +20,22 @@ func expect(condition: bool, what: str):
 
 ## The script, lines 1 to 9; completions go on line 10.
 let script: str = "from luce_geocore.script import Cook, Geometry, Verb, VolumeClass\n\npub func cook(k: Cook*) -> !:\n    let g = k.geometry()\n    let fog = try g.add_volume(\"density\", VolumeClass.fog, [0.0, 0.0, 0.0, 0.0], [2.0, 2.0, 2.0, 0.0], voxel = 0.5)\n    var verb = try Verb.named(\"Subdivide\")\n    try verb.parm(\"Levels\", 2.0)\n    let positions = try g.positions()\n    positions[0].y = (f32)fog.voxel_size()\n"
+
+## What the job's wake reaches: set and signalled from its thread.
+struct Woken:
+    var lock: sync.Mutex
+    var signal: sync.Condition
+    var done: bool = false
+
+func woke(context: void*):
+    let woken = (Woken*)context
+    woken.lock.lock()
+    woken.done = true
+    woken.signal.broadcast()
+    woken.lock.unlock()
+
+func let_go(context: void*):
+    _ = context
 
 pub func run_all() -> !:
     var kept = collections.List[u8]()
@@ -32,7 +49,13 @@ pub func run_all() -> !:
     defer job.release()
     let beside = try ScriptHelp.check(file, script)
     expect((try beside.get()).ok(), "a check beside a running job")
-    while not (try job.get()).finished(): thread.sleep(1)
+    # The job says when it is done (as a notifier wakes luced-3d's loop); nothing polls.
+    var woken = Woken()
+    (try job.get()).wake_when_done(woke, let_go, (void*)&woken)
+    woken.lock.lock()
+    while not woken.done: woken.signal.wait(&woken.lock)
+    woken.lock.unlock()
+    expect((try job.get()).finished(), "the job is finished when it wakes")
     let first = time.now() - started
     let clean = try (try job.get()).result()
     let checked = try clean.get()

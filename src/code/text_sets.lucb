@@ -85,10 +85,10 @@ func apply_named_texts(mesh: Mesh*, edits: const Edits*, first: TextSet, numberi
                 var target: i64 = -1
                 if set.domain == .point:
                     let at = numbering.point(set.index) else error(errors.invalid, "a set_text names a point that does not exist")
-                    target = point_map[at]
+                    target = mapped(point_map, at)
                 else:
                     let at = numbering.prim(set.index) else error(errors.invalid, "a set_text names a primitive that does not exist")
-                    target = prim_map[at]
+                    target = mapped(prim_map, at)
                 if target < 0: continue
                 let slot = (usize)target
                 if pass == 0:

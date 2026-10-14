@@ -49,6 +49,10 @@ pub struct Sdf:
     var preview_voxel: f64 = 0.0
     ## A coarse preview for a drag's frames (made when asked, kept apart).
     var quick_preview: Mesh*? = none
+    ## Whether each preview was evaluated (a surface that comes out empty
+    ## is remembered too, not sampled again on every request).
+    var previewed: bool = false
+    var quick_previewed: bool = false
 
     pub func op_count() -> usize:
         return self.ops.count()
@@ -74,6 +78,8 @@ pub struct Sdf:
         self.preview = none
         if let mesh = self.quick_preview: mesh_dispose(mesh)
         self.quick_preview = none
+        self.previewed = false
+        self.quick_previewed = false
 
 ## A heap SDF owning these columns (taken, even on failure); the program is
 ## checked to leave exactly one distance.
@@ -99,6 +105,8 @@ func empty_sdf() -> Sdf*!:
     sdf.preview = none
     sdf.preview_voxel = 0.0
     sdf.quick_preview = none
+    sdf.previewed = false
+    sdf.quick_previewed = false
     return sdf
 
 pub func share_sdf(sdf: Sdf*) -> Sdf*:

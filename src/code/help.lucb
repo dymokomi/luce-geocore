@@ -76,10 +76,10 @@ func help_part(part: i64, header: str, body: str) -> (lower.Part, str):
     if part == 1: return (lower.Part.header, header)
     return (lower.Part.body, body)
 
-## The snippet root, laid out under the cache's lock.
+## The snippet root, laid out under the compile lock.
 func locked_root() -> str!:
-    cache_lock.lock()
-    defer cache_lock.unlock()
+    compile_lock.lock()
+    defer compile_lock.unlock()
     return try snippet_root()
 
 ## The 1-based byte column of 1-based character column `column` of `line` (past its end:

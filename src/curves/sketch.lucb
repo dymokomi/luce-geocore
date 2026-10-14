@@ -110,18 +110,12 @@ pub struct Sketches:
             let moved = delta.transform_point(here)
             try targets.push(on_grid(plane, moved, grid) if grid > 0.0 else moved)
         if reach > 0.0:
-            var ends = Growing[usize]()
+            var ends = try EndHash.of(curves, reach)
             defer ends.close()
-            try open_ends(curves, &ends)
-            for end in ends.view():
+            for end in ends.ends.view():
                 if not chosen.points.items[end]: continue
-                var best = reach
-                for other in ends.view():
-                    if chosen.points.items[other]: continue
-                    let distance = curves.point(other).subtract(targets.items[end]).length()
-                    if distance <= best:
-                        best = distance
-                        targets.items[end] = curves.point(other)
+                let other = ends.nearest(targets.items[end], reach, chosen.points.view(), end, false)
+                if other >= 0: targets.items[end] = curves.point((usize)other)
         return try adopt_set(try with_curves(source, try placed_curves(curves, targets.view(), chosen.points.view(), linear)))
 
     ## The set with the chosen control points snapped to a grid of
@@ -152,22 +146,15 @@ pub struct Sketches:
         let curves = set_curves(source) else error(errors.invalid, "Edit Sketch has no curves to join")
         var chosen = try SketchChoice.of(curves, try pick.get(), group, group_type)
         defer chosen.close()
-        var ends = Growing[usize]()
+        var ends = try EndHash.of(curves, tolerance)
         defer ends.close()
-        try open_ends(curves, &ends)
         var targets = Growing[Vector3]()
         defer targets.close()
         for at in 0..<curves.point_count(): try targets.push(curves.point(at))
-        for end in ends.view():
+        for end in ends.ends.view():
             if not chosen.points.items[end]: continue
-            let here = curves.point(end)
-            var best = tolerance
-            for other in ends.view():
-                if other == end: continue
-                let distance = curves.point(other).subtract(here).length()
-                if distance <= best and not (chosen.points.items[other] and other < end):
-                    best = distance
-                    targets.items[end] = curves.point(other)
+            let other = ends.nearest(curves.point(end), tolerance, chosen.points.view(), end, true)
+            if other >= 0: targets.items[end] = curves.point((usize)other)
         return try adopt_set(try with_curves(source, try placed_curves(curves, targets.view(), chosen.points.view(), Matrix4())))
 
     ## The set without what `group` names: control points (their curves keep
@@ -247,6 +234,55 @@ func on_grid(plane: SketchPlane, point: Vector3, spacing: f64) -> Vector3:
     return plane.at(a, b).add(plane.normal.multiply_scalar(offset.dot(plane.normal)))
 
 ## The end points of the open curves (global point ids).
+## Open curves' end points in a spatial hash of cells one snapping reach
+## wide, so snapping each moved end looks at the ends near it instead of
+## every end (an all-pairs search on a large sketch).
+struct EndHash:
+    var ends: Growing[usize]
+    var points: Growing[Vector3]
+    var grid: PointHash
+
+    static func of(curves: const Curves*, reach: f64) -> EndHash!:
+        var ends = Growing[usize]()
+        errdefer ends.close()
+        try open_ends(curves, &ends)
+        var points = Growing[Vector3]()
+        errdefer points.close()
+        for end in ends.view(): try points.push(curves.point(end))
+        let grid = try PointHash.build(points.view(), reach)
+        return EndHash(ends, points, grid)
+
+    ## The end nearest `point` within `reach` (ties: the later end, as a
+    ## scan in end order keeps), other than `end`, that is not chosen; with
+    ## `ordered`, a chosen end after `end` counts (joining two chosen ends
+    ## moves only the later one). -1 when none.
+    func nearest(point: Vector3, reach: f64, chosen: const bool[], end: usize, ordered: bool) -> i64:
+        let home = self.grid.cell_of(point)
+        var best = reach * reach
+        var found: i64 = -1
+        var found_slot: i32 = -1
+        for dx in (i64)-1..<(i64)2:
+            for dy in (i64)-1..<(i64)2:
+                for dz in (i64)-1..<(i64)2:
+                    var slot = self.grid.first(home.moved(dx, dy, dz))
+                    while slot >= 0:
+                        let other = self.ends.items[(usize)slot]
+                        let allowed = other != end and (not chosen[other] or (ordered and other > end))
+                        if allowed:
+                            let offset = self.points.items[(usize)slot].subtract(point)
+                            let distance = offset.dot(offset)
+                            if distance < best or (distance == best and slot > found_slot):
+                                best = distance
+                                found = (i64)other
+                                found_slot = slot
+                        slot = self.grid.after(slot)
+        return found
+
+    func close():
+        self.ends.close()
+        self.points.close()
+        self.grid.close()
+
 func open_ends(curves: const Curves*, ends: Growing[usize]*) -> !:
     for curve in 0..<curves.curve_count():
         let (first, points) = curves.range(curve)

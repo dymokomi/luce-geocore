@@ -4,9 +4,10 @@
 # attribute when it has one, and become attributes again when the mesh is assembled.
 #
 # An array attribute (Houdini's f[]@, i[]@, v[]@; `ragged`) keeps each element's items as a
-# run in the same float or int pool, found by the element's start and length. Writing a
-# longer array appends a new run; the pool is packed when it holds more dead items than
-# live ones, and when the column becomes an attribute.
+# run in the same float or int pool, found by the element's start and length, with room
+# for more: an array that shrinks and grows again stays in its run, the last run grows in
+# place, and a run that must move takes twice the room. The pool is packed when it holds
+# more dead items than live ones, and when the column becomes an attribute.
 
 ## One attribute being edited.
 struct EditColumn:
@@ -26,7 +27,9 @@ struct EditColumn:
     var ragged: bool
     var starts: Growing[u32]
     var lengths: Growing[u32]
-    ## Items of the pool no element uses any more.
+    ## Each element's run's room in tuples (its length or more).
+    var rooms: Growing[u32]
+    ## Items of the pool in no element's run any more.
     var dead: usize
 
     ## An empty column (the caller grows it to its domain's size).
@@ -39,7 +42,7 @@ struct EditColumn:
             error(errors.invalid, "array attributes hold f32 or i32 items of 1 or 3 components")
         return EditColumn(label = try heap_text(name), domain = domain, kind = kind, width = width, group = group,
                           floats = Growing[f32](), ints = Growing[i32](), table = TableBuilder(),
-                          ragged = ragged, starts = Growing[u32](), lengths = Growing[u32](), dead = 0)
+                          ragged = ragged, starts = Growing[u32](), lengths = Growing[u32](), rooms = Growing[u32](), dead = 0)
 
     ## Whether its values are floats.
     func floating() -> bool:
@@ -59,6 +62,7 @@ struct EditColumn:
         if self.ragged:
             try self.starts.extend(elements, 0)
             try self.lengths.extend(elements, 0)
+            try self.rooms.extend(elements, 0)
             return
         if self.floating(): try self.floats.extend(elements * self.width, 0.0)
         else: try self.ints.extend(elements * self.width, 0 if self.kind != DataType.text else try self.table.intern(""))
@@ -69,12 +73,14 @@ struct EditColumn:
             for old in 0..<map.length:
                 let to = map[old]
                 if to < 0:
-                    self.dead += (usize)self.lengths.items[old]
+                    self.dead += (usize)self.rooms.items[old]
                     continue
                 self.starts.items[(usize)to] = self.starts.items[old]
                 self.lengths.items[(usize)to] = self.lengths.items[old]
+                self.rooms.items[(usize)to] = self.rooms.items[old]
             self.starts.count = kept
             self.lengths.count = kept
+            self.rooms.count = kept
             return
         let w = self.width
         for old in 0..<map.length:
@@ -104,7 +110,8 @@ struct EditColumn:
             self.lengths.close()
             self.starts = starts
             self.lengths = lengths
-            # Runs no element points at stay until the next pack.
+            # Packing next gives every run its own place and room again.
+            try self.rooms.fill(origin.length, 0)
             self.dead = 0
             try self.pack()
             return
@@ -135,21 +142,29 @@ struct EditColumn:
     func run(element: usize) -> (usize, usize):
         return ((usize)self.starts.items[element], (usize)self.lengths.items[element])
 
-    ## Room for `count` items of element `element`: its own run when that is long
-    ## enough, else a new one at the end of the pool. The first pool tuple.
+    ## Room for `count` items of element `element`: its own run when it has the room or
+    ## is the pool's last (which grows), else a new run at the end of the pool with
+    ## twice the room. The first pool tuple.
     func place(element: usize, count: usize) -> usize!:
-        let (first, old) = self.run(element)
-        if count <= old:
+        let (first, _) = self.run(element)
+        let room = (usize)self.rooms.items[element]
+        if count <= room:
             self.lengths.items[element] = (u32)count
-            self.dead += old - count
             return first
-        let start = self.pooled()
-        if (start + count) * self.width > 2147483647: error(errors.limit, "an array attribute holds at most 2G values")
-        if self.floating(): try self.floats.extend((start + count) * self.width, 0.0)
-        else: try self.ints.extend((start + count) * self.width, 0)
+        let end = self.pooled()
+        var start = end
+        var made = count
+        if first + room == end and (room > 0 or first == end):
+            start = first
+        else:
+            made = count * 2
+            self.dead += room
+        if (start + made) * self.width > 2147483647: error(errors.limit, "an array attribute holds at most 2G values")
+        if self.floating(): try self.floats.extend((start + made) * self.width, 0.0)
+        else: try self.ints.extend((start + made) * self.width, 0)
         self.starts.items[element] = (u32)start
         self.lengths.items[element] = (u32)count
-        self.dead += old
+        self.rooms.items[element] = (u32)made
         return start
 
     ## Pack the pool when most of it is dead: every run in element order, the dead
@@ -168,6 +183,7 @@ struct EditColumn:
                 let (first, count) = self.run(e)
                 for v in first * w..<(first + count) * w: try packed.push(self.floats.items[v])
                 self.starts.items[e] = (u32)at
+                self.rooms.items[e] = (u32)count
                 at += count
             self.floats.close()
             self.floats = packed
@@ -178,6 +194,7 @@ struct EditColumn:
                 let (first, count) = self.run(e)
                 for v in first * w..<(first + count) * w: try packed.push(self.ints.items[v])
                 self.starts.items[e] = (u32)at
+                self.rooms.items[e] = (u32)count
                 at += count
             self.ints.close()
             self.ints = packed
@@ -194,6 +211,7 @@ struct EditColumn:
                 let count = attribute.item_count(element)
                 self.starts.items[element] = (u32)at
                 self.lengths.items[element] = (u32)count
+                self.rooms.items[element] = (u32)count
                 for item in 0..<count:
                     for k in 0..<self.width:
                         if self.floating(): try self.floats.push((f32)attribute.item(element, item, k))
@@ -277,6 +295,7 @@ struct EditColumn:
         self.table.close()
         self.starts.close()
         self.lengths.close()
+        self.rooms.close()
         release_text(self.label)
 
 ## The edit kind a stored attribute becomes: float32 for floats, int32 for integers,
