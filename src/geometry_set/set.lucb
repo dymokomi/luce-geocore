@@ -183,6 +183,14 @@ pub struct GeometrySet:
         storage.drop_traced()
         return storage
 
+    ## Whether a component holds objects of the thread that made them (CAD
+    ## models), through the instances: the set cannot go to another thread
+    ## whole (plain_storage leaves them out).
+    pub func holds_objects() -> bool:
+        for entry in self.entries.view():
+            if holds_objects(&entry): return true
+        return false
+
     ## Drop the components whose kind traces objects, through the instances.
     pub func drop_traced():
         var index: usize = 0
