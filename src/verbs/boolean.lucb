@@ -8,7 +8,7 @@
 ## faces are cut from their source faces (attributes carried) and are the
 ## output selection. A piece is the faces sharing a `path` (Edit Mesh's
 ## Object level), else a part joined through shared points; pieces must be
-## closed.
+## closed. The result is one piece: its faces take A's first piece's path.
 import booleans
 
 let boolean_parms: ParmSpec[1] = [
@@ -88,6 +88,18 @@ func cook_boolean(input: const VerbInput*, output: VerbOutput*) -> !:
     if b_count == 0:
         output.warning = "Boolean needs pieces to cut with; the input passes through"
         return
+    # The result's path: A's first piece's (the lowest face's), when pieces
+    # have paths.
+    var name = Growing[u8]()
+    defer name.close()
+    let path = mesh.attribute_on("path", Domain.face)
+    if path >= 0:
+        let entry = try mesh.attribute_entry(path)
+        if entry.kind == DataType.text:
+            for face in 0..<faces:
+                if tags.items[face] == 0:
+                    try name.assign(entry.text_at(face).bytes)
+                    break
     # Unite each side's pieces into its first, then combine the two.
     var current: Mesh*? = none
     defer:
@@ -110,6 +122,8 @@ func cook_boolean(input: const VerbInput*, output: VerbOutput*) -> !:
         tags.close()
         tags = next_tags
         next_tags = Growing[i32]()
+    if name.count > 0:
+        if let made = current: try one_piece(made, result.view(), (str)name.view())
     output.mesh = current
     current = none
     output.selection.close()
@@ -171,6 +185,25 @@ func boolean_step(source: const Mesh*, tags: const i32[], a: i32, b: i32, operat
     result.close()
     *result = bits
     return mesh
+
+## Faces `faces` of `mesh` given the path `name` (the result one piece);
+## the rest keep theirs.
+func one_piece(mesh: Mesh*, faces: Bits, name: str) -> !:
+    let count = (usize)mesh.face_count()
+    let index = mesh.attribute_on("path", Domain.face)
+    if index < 0: return
+    let entry = try mesh.attribute_entry(index)
+    var table = TableBuilder()
+    defer table.close()
+    let values = try new i32[count] --- in memory.heap
+    defer free(values) in memory.heap
+    let named = try table.intern(name)
+    for face in 0..<count:
+        values[face] = named if faces.get(face) else try table.intern(entry.text_at(face))
+    var column = try table.finish()
+    defer column.release()
+    try remove_attribute(mesh, "path", Domain.face)
+    try put_attribute(mesh, try Attribute.text("path", Domain.face, count, column, values[..<count]))
 
 ## Combined face `index` into the builder.
 func boolean_face(builder: TopologyBuilder*, combined: const booleans.Combined*, index: usize) -> !:

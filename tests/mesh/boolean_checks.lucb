@@ -7,7 +7,9 @@
 ## through a box's corner; spheres against the lens's closed form and
 ## inclusion-exclusion; the same result bits on reruns; attributes carried
 ## by provenance (a point and a corner value equal to X interpolated along
-## the cut, a face group); the two picks, three pieces, and refusals of an
+## the cut, a face group); the two picks, three pieces, named pieces made
+## one, a result moved
+## (its precise points follow), and refusals of an
 ## open piece; and a fixed stream of random pairs (boxes on a quarter grid,
 ## so faces lie on each other everywhere; turned spheres, boxes and tori)
 ## and of booleans chained on one result, each closed and consistent.
@@ -169,6 +171,46 @@ func pick_checks() -> !:
     near(try result_volume(third, "*", "", 1), 6.0, 1.0e-9)
     near(try result_volume(third, "*", "", 0), 22.0, 1.0e-9)
     near(try result_volume(third, "*", "", 2), 2.0, 1.0e-9)
+    # A result is precise (f64 points); moved, its precise points follow.
+    let united = try combined(corner, "*", "", 0)
+    defer united.release()
+    let joined = try united.value().mesh()
+    defer joined.release()
+    let shift: f64[15] = [0.25, 0.5, -0.75, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 3.0]
+    let moving = try Verbs.run("Transform Components", joined, "", 1, shift[..<15])
+    defer moving.release()
+    let moved = try moving.value().mesh()
+    defer moved.release()
+    for point in 0..<joined.value().point_count():
+        let was = try joined.value().point(point)
+        let now = try moved.value().point(point)
+        near(now.x - was.x, 0.25, 1.0e-12)
+        near(now.y - was.y, 0.5, 1.0e-12)
+        near(now.z - was.z, -0.75, 1.0e-12)
+    # Pieces named by path (Edit Mesh's boxes /box1 and /box2, the second
+    # placed half a unit along each axis): the result is one, /box1.
+    let empty = try Mesh.empty()
+    defer empty.release()
+    var box: f64[16] = [2.0, 2.0, 2.0, 1.0, 1.0, 1.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0]
+    let making = try Verbs.run("Box", empty, "", 0, box[..<16])
+    defer making.release()
+    let one = try making.value().mesh()
+    defer one.release()
+    box[8] = 0.5
+    box[9] = 0.5
+    box[10] = 0.5
+    let adding = try Verbs.run("Box", one, "", 0, box[..<16])
+    defer adding.release()
+    let boxes = try adding.value().mesh()
+    defer boxes.release()
+    let named = try combined(boxes, "*", "", 0)
+    defer named.release()
+    let piece = try named.value().mesh()
+    defer piece.release()
+    let path = piece.value().find_attribute("path", 2)
+    for face in 0..<piece.value().face_count():
+        assert((try piece.value().attribute_text(path, face)) == "/box1")
+    near(try volume(piece), 12.625, 1.0e-9)
     # A grid is open: refused, saying why.
     let grid = try MeshPrimitives.grid(1.0, 2)
     defer grid.release()
