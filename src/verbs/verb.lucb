@@ -383,7 +383,15 @@ func resolve_group(verb: const Verb*, mesh: const Mesh*, group: str, group_type:
         chosen = mirrored
     var bits = try BitsBuilder.copy_of(chosen.view())
     errdefer bits.close()
-    if domain != target:
+    if domain != target and expression == "*":
+        # Everything is everything on the verb's domain too (loose points
+        # with it): the cached group, not a conversion of the whole mesh on
+        # every frame of a stroke.
+        var all = try group_bits(mesh, expression, target)
+        defer all.bits.release()
+        bits.close()
+        bits = try BitsBuilder.copy_of(Bits(all.bits.view(), try mesh.domain_size(target)))
+    elif domain != target:
         let topology = try Topology.of(mesh)
         var moved = try converted(&topology, bits.view(), domain, target, (strict_conversion(domain, target) or verb.strict) and not verb.loose)
         bits.close()
