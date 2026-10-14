@@ -17,6 +17,7 @@ import strings
 import errors
 from core.growing import Growing
 from luce_std.process import Command
+from luce_std import wake
 from luce_std.net import Connection, Listener, SocketAddress, Deadline, WaitInterest
 
 # The parent's side of the protocol (serve.lucb has the child's): a Script tool started
@@ -33,14 +34,15 @@ pub struct ScriptProcess:
     var pending: Growing[u8]
     var ended: bool
 
-    ## Start `program` in `directory`, listening for it on a loopback port of our own.
-    pub func init(program: str, directory: str) -> !:
+    ## Start `program` in `directory`, listening for it on a loopback port of our own;
+    ## `waker` is woken as it prints and once it exits (its command's).
+    pub func init(program: str, directory: str, waker: interop.Reference[wake.Waker]? = none) -> !:
         var listener = try Listener.bind(SocketAddress.loopback(0))
         errdefer listener.destroy()
         var digits: u8[8]
         let port = try strings.format_u64((u64)(try listener.port()), digits)
         let arguments: str[2] = ["--l3d", port]
-        let command = try Command(program, arguments, directory = directory, output_limit = 16777216)
+        let command = try Command(program, arguments, directory = directory, output_limit = 16777216, waker = waker)
         self.listener = listener
         self.link = none
         self.command = command
