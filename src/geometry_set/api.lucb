@@ -129,6 +129,27 @@ extend GeometrySet:
             error(failure.code, failure.message)
         return try adopt_set(try self.with_component(&instances_component, (void*)instances))
 
+    ## Copies of this set at every point of `targets` (each turned by
+    ## `rotation`, XYZ radians, and scaled by `scale`), joined in point
+    ## order in one pass (Copy to Points); empty without points.
+    pub func copies_at_points(targets: interop.Reference[Mesh], rotation: Vector3, scale: Vector3) -> interop.Reference[GeometrySet]!:
+        let mesh = try targets.get()
+        let count = (usize)mesh.point_count()
+        let placements = try new Placement[count] --- in memory.heap
+        defer free(placements) in memory.heap
+        for at in 0..<count: placements[at] = Placement.compose(try mesh.point((i64)at), rotation, scale)
+        return try adopt_set(try set_copies(&self, placements))
+
+    ## `count` copies of this set, copy n moved by `step` times n (each
+    ## turned by `rotation` and scaled by `scale`), joined in order in one
+    ## pass (Copy and Transform); empty for none.
+    pub func copies_along(count: i64, step: Vector3, rotation: Vector3, scale: Vector3) -> interop.Reference[GeometrySet]!:
+        if count < 0 or count > 16777216: error(errors.invalid, "copies are 0 to 16M")
+        let placements = try new Placement[(usize)count] --- in memory.heap
+        defer free(placements) in memory.heap
+        for at in 0..<placements.length: placements[at] = Placement.compose(step.multiply_scalar((f64)at), rotation, scale)
+        return try adopt_set(try set_copies(&self, placements))
+
     ## A heap copy of this set with `data` (taken) as its `kind` component.
     func with_component(kind: const ComponentType*, data: void*) -> GeometrySet*!:
         let storage = self.storage() catch failure:

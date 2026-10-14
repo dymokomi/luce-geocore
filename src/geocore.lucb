@@ -45,6 +45,8 @@ pub let dissolve_edge = dissolve_workspace.dissolve_edge
 pub type AttributeKernels = attribute_kernels.AttributeKernels
 pub type GeometrySet = geometry_set.GeometrySet
 pub let geometry_set_type = geometry_set.geometry_set_type
+## Instances added one call each and joined once (InstanceBuilder.of).
+pub type InstanceBuilder = geometry_set.InstanceBuilder
 ## Cameras and lights in a set, flattened to world space (GeometrySet.scene).
 pub type SceneList = geometry_set.SceneList
 pub type SceneObject = geometry_set.SceneObject

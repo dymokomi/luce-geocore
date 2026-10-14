@@ -1,0 +1,131 @@
+## Making many instances or copies in one pass, for nodes that make one per
+## child or per point: appending them one at a time to an immutable set
+## copied the growing collection on every append (O(n²)), and copies joined
+## pairwise wrote every element O(log n) times.
+##
+## InstanceBuilder takes a set and adds instances to it, each child's set
+## shared as its own prototype, the row attributes extended once at the
+## end. GeometrySet.copies places the set at many translations and joins
+## them in one pass: meshes in a single concatenation, other families
+## joined pairwise in rounds.
+
+## A set gaining instances: Luce adds them one call each and finishes once.
+pub struct InstanceBuilder:
+    ## The set the instances join (its instances moved to `instances`).
+    var base: GeometrySet*?
+    var instances: Instances*?
+    ## Rows the set already had, and their attributes, set aside so adding a
+    ## row does not grow them; joined with the new rows' once in `finish`.
+    var before: usize
+    var held: AttributeStore
+
+    ## Instances to add to `set` (its own instances kept first).
+    pub static func of(set: interop.Reference[GeometrySet]) -> interop.Reference[InstanceBuilder]!:
+        let base = try (try set.get()).storage()
+        errdefer dispose_set(base)
+        let instances = try new_instances()
+        errdefer close_instances((void*)instances)
+        if let existing = base.find(&instances_component): try instances.add_all((const Instances*)existing)
+        base.remove(&instances_component)
+        let storage = try new InstanceBuilder[1] --- in memory.heap
+        storage[0] = InstanceBuilder(base, instances, instances.size, instances.attributes)
+        instances.attributes = AttributeStore()
+        return try interop.Reference[InstanceBuilder].adopt(storage.data, instance_builder_type, memory.heap)
+
+    ## One more instance: `child` placed by translation, rotation (XYZ
+    ## radians) and scale.
+    pub func add(child: interop.Reference[GeometrySet], translation: Vector3, rotation: Vector3, scale: Vector3, visible: bool = true) -> !:
+        let instances = self.instances else error(errors.invalid, "the instances were already finished")
+        let copy = try (try child.get()).storage()
+        let placement = Placement.compose(translation, rotation, scale)
+        try instances.add(copy, &placement, visible)
+
+    ## The set with every instance added; the builder is empty after.
+    pub func finish() -> interop.Reference[GeometrySet]!:
+        let base = self.base else error(errors.invalid, "the instances were already finished")
+        let instances = self.instances else error(errors.invalid, "the instances were already finished")
+        if self.held.count() > 0:
+            instances.attributes = try joined_store(&self.held, self.before, none, instances.size - self.before)
+            self.held.close()
+            self.held = AttributeStore()
+        self.base = none
+        self.instances = none
+        if instances.size == 0:
+            close_instances((void*)instances)
+        else:
+            base.put(&instances_component, (void*)instances) catch failure:
+                dispose_set(base)
+                error(failure.code, failure.message)
+        return try adopt_set(base)
+
+    pub func close():
+        if let base = self.base: dispose_set(base)
+        if let instances = self.instances: close_instances((void*)instances)
+        self.base = none
+        self.instances = none
+        self.held.close()
+
+func trace_builder(builder: const InstanceBuilder*, visit: func(ownership.Object*, void*) -> unit, context: void*):
+    if let base = builder.base: base.trace(visit, context)
+    if let instances = builder.instances: trace_instances((const void*)instances, visit, context)
+
+pub let instance_builder_type: interop.Type[InstanceBuilder] = interop.Type[InstanceBuilder]("InstanceBuilder", InstanceBuilder.close, trace_builder, closeable = true)
+
+## `set` placed by each of `placements` and joined in that order: what
+## merging the placed copies one after another makes. Meshes are written
+## once (one concatenation of every copy); other families are placed and
+## joined pairwise in rounds. Detail attributes are the first copy's.
+pub func set_copies(set: const GeometrySet*, placements: const Placement[]) -> GeometrySet*!:
+    let result = try empty_storage()
+    errdefer dispose_set(result)
+    if placements.length == 0: return result
+    try result.take_detail(try placed_detail(&set.detail, placements[0].matrix))
+    for entry in set.entries.view():
+        if entry.kind == &mesh_component:
+            let parts = try new MeshPart[placements.length] --- in memory.heap
+            defer free(parts) in memory.heap
+            for at in 0..<placements.length: parts[at] = MeshPart((const Mesh*)entry.data, placements[at].matrix)
+            let joined = try concatenated(parts)
+            defer joined.release()
+            try result.put(entry.kind, (void*)(try mesh_share(joined.value())))
+            continue
+        try result.put(entry.kind, try joined_copies(entry.kind, entry.data, placements))
+    return result
+
+## One family's copies placed and joined pairwise in rounds (each element
+## written O(log copies) times). A slot is none once its piece is consumed,
+## so a failure closes exactly the pieces still held.
+func joined_copies(kind: const ComponentType*, data: const void*, placements: const Placement[]) -> void*!:
+    let place = kind.placed
+    let join = kind.joined
+    let close = kind.close
+    let pieces = try new (void*?)[placements.length] --- in memory.heap
+    defer free(pieces) in memory.heap
+    for at in 0..<pieces.length: pieces[at] = none
+    defer:
+        for at in 0..<pieces.length:
+            if let held = pieces[at]: close(held)
+    for (at, placement) in placements.indexed(): pieces[at] = try place(data, &placement)
+    var count = pieces.length
+    while count > 1:
+        var kept: usize = 0
+        var at: usize = 0
+        while at < count:
+            let first = pieces[at] else trap("a consumed copy")
+            if at + 1 < count:
+                let second = pieces[at + 1] else trap("a consumed copy")
+                let joined = try join(first, second)
+                close(first)
+                close(second)
+                pieces[at] = none
+                pieces[at + 1] = none
+                pieces[kept] = joined
+            else:
+                pieces[at] = none
+                pieces[kept] = first
+            kept += 1
+            at += 2
+        count = kept
+    let result = pieces[0] else trap("no copy")
+    pieces[0] = none
+    return result

@@ -7,7 +7,7 @@ import interop
 from luce_std import math
 import memory
 from io import path
-from luce_geocore.geocore import Vector3, Mesh, GeometrySet
+from luce_geocore.geocore import Vector3, Mesh, GeometrySet, InstanceBuilder
 from luce_geocore.kernel import Instances, Placement, Attribute, Domain, TableBuilder, empty_set, dispose_set, adopt_set, instances_component, new_instances, save_geometry, load_geometry
 from luce_geocore.core.growing import Growing
 import strings
@@ -74,6 +74,48 @@ pub func exercise() -> !:
     let joined = try grown.value().merged(set)
     defer joined.release()
     assert(joined.value().instance_count() == 20001 and (try joined.value().instance_path(10006)) == "/row5")
+    # A builder adds many instances at once: the set's own first, their
+    # paths kept and the new rows' empty, as with_instance one by one.
+    let builder = try InstanceBuilder.of(set)
+    defer builder.release()
+    for at in 0..<(usize)300: try builder.value().add(cube_set, Vector3(0.0, 0.0, (f64)at), Vector3(), Vector3(1.0, 1.0, 1.0), at % 2 == 0)
+    let built = try builder.value().finish()
+    defer built.release()
+    assert(built.value().instance_count() == 10300 and (try built.value().instance_path(9999)) == "/row9999" and (try built.value().instance_path(10001)) == "")
+    assert((try built.value().instance_translation(10299)).z == 299.0 and not (try built.value().instance_visible(10001)))
+    # Copies: at a mesh's points and along a step, joined in order, the
+    # same as merging placed copies one by one.
+    let targets = try Mesh.cube(2.0)
+    defer targets.release()
+    let at_points = try cube_set.value().copies_at_points(targets, Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer at_points.release()
+    var merged = try cube_set.value().transformed(try targets.value().point(0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    for point in 1..<targets.value().point_count():
+        let placed = try cube_set.value().transformed(try targets.value().point(point), Vector3(), Vector3(1.0, 1.0, 1.0))
+        defer placed.release()
+        let next = try merged.value().merged(placed)
+        merged.release()
+        merged = next
+    defer merged.release()
+    let a = (try at_points.value().mesh()) else trap("copies mesh")
+    defer a.release()
+    let b = (try merged.value().mesh()) else trap("merged mesh")
+    defer b.release()
+    assert(a.value().point_count() == b.value().point_count() and a.value().face_count() == b.value().face_count())
+    for point in 0..<a.value().point_count():
+        let p = try a.value().point(point)
+        let q = try b.value().point(point)
+        assert(math.abs(p.x - q.x) + math.abs(p.y - q.y) + math.abs(p.z - q.z) < 1e-6, "copies sit where merged copies do")
+    let along = try raised.value().copies_along(5, Vector3(3.0, 0.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer along.release()
+    let line = (try along.value().mesh()) else trap("copies mesh")
+    defer line.release()
+    assert(line.value().face_count() == 30 and math.abs(line.value().bounds().maximum.x - 12.5) < 1e-6)
+    # Instances copied (placed, each copy one instance of the whole, and
+    # joined pairwise): three instances, the last placed two steps up.
+    let instanced = try set.value().copies_along(3, Vector3(0.0, 1.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer instanced.release()
+    assert(instanced.value().instance_count() == 3 and (try instanced.value().instance_translation(2)).y == 2.0)
 
 func fill(instances: Instances*, a: const GeometrySet*, b: const GeometrySet*) -> !:
     let first = try instances.add_prototype(try a.storage())
