@@ -47,6 +47,10 @@ func build_faces(input: const VerbInput*, output: VerbOutput*, topology: const T
         for front in 0..<fronts.count():
             _ = try builder.point(front_place(mesh, fronts, regions, settings, front, t), fronts.points.items[front])
     let layout = WallLayout(first_front, first_row, rows, fronts.count())
+    # The fronts' and rows' points, in the order made, renumbered with the
+    # points below: what a drag's next frame places again (Mesh.trail).
+    output.trail_points.clear()
+    for at in first_front..<builder.point_count(): try output.trail_points.push((u32)at)
     var merges = Merges()
     defer merges.close()
     try find_merges(mesh, topology, input.group, fronts, regions, settings, &merges)
@@ -92,7 +96,14 @@ func build_faces(input: const VerbInput*, output: VerbOutput*, topology: const T
                 try wall_corner(topology, builder, mesh, b, row + 1, layout)
                 try wall_corner(topology, builder, mesh, a, row + 1, layout)
                 try builder.end_face()
-    try builder.drop_unused_points()
+    var renumbered = Growing[i32]()
+    defer renumbered.close()
+    for point in output.trail_points.view(): try renumbered.push((i32)point)
+    try builder.drop_unused_points(none, &renumbered)
+    for (at, point) in renumbered.view().indexed(): output.trail_points.items[at] = (u32)point if point >= 0 else dropped_point
+
+## A trail entry for a front or row point the build dropped (unused).
+let dropped_point: u32 = 0xFFFFFFFF
 
 ## Where the fronts and the wall rows' points are in the builder.
 struct WallLayout:

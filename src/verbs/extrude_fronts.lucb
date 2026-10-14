@@ -42,22 +42,28 @@ struct Fronts:
 ## Every front: the sectors from each stopping edge's far end, then the
 ## regions' inner points along their faces' summed normals (or their
 ## region's way).
+## Only the group's faces' corners and points are read, so only those are
+## set up: an extrusion costs its group, not the mesh (a drag's frame).
 func place_fronts(mesh: const Mesh*, topology: const Topology*, group: Bits, settings: Extrusion, regions: const Regions*, fronts: Fronts*) -> !:
-    try fronts.of_corner.fill(topology.corners.length, -1)
-    let normals = mesh.face_normal_span()
-    let faces = topology.faces()
-    for face in 0..<faces:
-        if not group.get(face): continue
-        for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
-            if not stops(topology, group, corner, settings.individual): continue
-            try sector(mesh, topology, group, normals, settings, regions, corner, fronts)
+    var listed = try group_faces(group)
+    defer listed.close()
+    try fronts.of_corner.reserve(topology.corners.length)
+    fronts.of_corner.count = topology.corners.length
     let inner = try new i32[topology.points] --- in memory.heap
     defer free(inner) in memory.heap
-    for at in 0..<topology.points: inner[at] = -1
+    for face in listed.view():
+        for corner in (usize)topology.offsets[(usize)face]..<(usize)topology.offsets[(usize)face + 1]:
+            fronts.of_corner.items[corner] = -1
+            inner[(usize)topology.corners[corner]] = -1
+    let normals = mesh.face_normal_span()
+    for face in listed.view():
+        for corner in (usize)topology.offsets[(usize)face]..<(usize)topology.offsets[(usize)face + 1]:
+            if not stops(topology, group, corner, settings.individual): continue
+            try sector(mesh, topology, group, normals, settings, regions, corner, fronts)
     let sums = try new Vector3[topology.points] --- in memory.heap
     defer free(sums) in memory.heap
-    for face in 0..<faces:
-        if not group.get(face): continue
+    for listed_face in listed.view():
+        let face = (usize)listed_face
         for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
             if fronts.of_corner.items[corner] >= 0: continue
             let point = (usize)topology.corners[corner]
@@ -71,6 +77,19 @@ func place_fronts(mesh: const Mesh*, topology: const Topology*, group: Bits, set
         let point = (usize)fronts.points.items[front]
         if inner[point] != (i32)front: continue
         fronts.ways.items[front] = way_of(regions, fronts.regions.items[front], sums[point])
+
+## The group's faces, ascending, read off its set words.
+func group_faces(group: Bits) -> Growing[u32]!:
+    var listed = Growing[u32]()
+    errdefer listed.close()
+    try listed.reserve(group.population())
+    for word in 0..<group.words.length:
+        var pending = group.words[word]
+        while pending != 0:
+            listed.items[listed.count] = (u32)(word * 64 + (usize)trailing_zeros(pending))
+            listed.count += 1
+            pending = pending & (pending - 1)
+    return listed
 
 ## The way a front of region `region` moves: the region's, else `normal`
 ## (its faces' summed normals) at unit length.

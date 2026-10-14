@@ -98,7 +98,7 @@ func cook_extrude(input: const VerbInput*, output: VerbOutput*) -> !:
     let settings = Extrusion(distance, inset, divisions, input.parms.at(3) != 0.0, input.parms.at(4) != 0.0, direction, vector, twist, taper, input.parms.at(11) != 0.0)
     if input.domain == Domain.edge: return try extrude_edges(input, output, settings)
     if input.domain == Domain.point: return try extrude_points(input, output, settings)
-    try extrude_faces(input, output, settings)
+    try extrude_faces(input, output, settings, try drag_key(input, settings))
 
 func cook_inset(input: const VerbInput*, output: VerbOutput*) -> !:
     let thickness = input.parms.at(0)
@@ -107,7 +107,7 @@ func cook_inset(input: const VerbInput*, output: VerbOutput*) -> !:
     let outset = input.parms.at(4) != 0.0
     let settings = Extrusion(depth, thickness, 1, input.parms.at(2) != 0.0, input.parms.at(3) != 0.0, even = input.parms.at(5) != 0.0, relative = input.parms.at(6) != 0.0,
                              rail = input.parms.at(7) != 0.0, boundary = input.parms.at(8) != 0.0 and not outset)
-    if not outset: return try extrude_faces(input, output, settings)
+    if not outset: return try extrude_faces(input, output, settings, 0)
     # Outset: the faces around the group inset away from it (along the
     # mesh's open edges they slide), and the group stays selected.
     let faces = (usize)input.mesh.face_count()
@@ -116,15 +116,18 @@ func cook_inset(input: const VerbInput*, output: VerbOutput*) -> !:
     for face in 0..<faces:
         if not input.group.get(face): rest.set(face)
     let around = VerbInput(input.mesh, rest.view(), input.parms, input.symmetry, input.domain)
-    try extrude_faces(&around, output, settings)
+    try extrude_faces(&around, output, settings, 0)
     if not output.built: return
     output.selection.close()
     output.selection = try BitsBuilder.zeros(output.builder.face_count())
     for face in 0..<faces:
         if input.group.get(face): output.selection.set(face)
 
-## Face extrusion: the regions, their fronts, then the faces.
-func extrude_faces(input: const VerbInput*, output: VerbOutput*, settings: Extrusion) -> !:
+## Face extrusion: the regions, their fronts, then the faces. With a drag
+## key (see drag_key) a frame whose last frame was built from the same key
+## only places the fronts and wall rows again; a built one keeps their
+## points for the next frame.
+func extrude_faces(input: const VerbInput*, output: VerbOutput*, settings: Extrusion, key: u64) -> !:
     let mesh = input.mesh
     if not input.group.any():
         output.warning = "No faces in the group to extrude; the input passes through"
@@ -135,7 +138,66 @@ func extrude_faces(input: const VerbInput*, output: VerbOutput*, settings: Extru
     var fronts = Fronts()
     defer fronts.close()
     try place_fronts(mesh, &topology, input.group, settings, &regions, &fronts)
+    if key != 0:
+        if let last = input.over:
+            if try placed_again(input, output, last, key, &fronts, &regions, settings): return
     try build_faces(input, output, &topology, &fronts, &regions, settings)
+    if key != 0 and output.trail_points.count == fronts.count() * settings.divisions: output.trail_key = key
+
+## What a face extrusion's topology and corner values follow, as one key:
+## the input's points and faces, the group, and every setting but those
+## that only place the fronts (distance, direction, vector, twist, taper).
+## 0 (no key) for Manifold, whose merges follow the positions, and for a
+## zero distance, whose walls collapse.
+func drag_key(input: const VerbInput*, settings: Extrusion) -> u64!:
+    if settings.manifold or settings.distance == 0.0: return 0
+    var key = FullKey()
+    defer key.close()
+    try key.text("PolyExtrude faces")
+    try key.word(mesh_positions_id(input.mesh))
+    try key.word(input.mesh.corners_id())
+    try key.word(input.mesh.offsets_id())
+    try key.word((u64)input.symmetry)
+    for word in input.group.words: try key.word(word)
+    for at in 0..<input.parms.numbers.length:
+        if at == 0 or (at >= 5 and at <= 10): continue
+        try key.word(memory.read[u64]((void*)&input.parms.numbers[at]))
+    let hash = key.hash()
+    return hash if hash != 0 else 1
+
+## The last frame `last` with every front and wall row placed again for
+## `settings`, when it was built from `key` (its trail lists those points in
+## the order build_faces makes them); false when it was not.
+func placed_again(input: const VerbInput*, output: VerbOutput*, last: const Mesh*, key: u64, fronts: const Fronts*, regions: const Regions*, settings: Extrusion) -> bool!:
+    let points = trail_from(last, key) else return false
+    let count = fronts.count()
+    let rows = settings.divisions
+    if points.length != count * rows: return false
+    let mesh = input.mesh
+    var positions = mesh_positions(last)
+    errdefer positions.release()
+    let out = try positions.writable()
+    let origin = last.position_origin()
+    # Fronts first (the last row), then rows 1..<rows, as build_faces made them;
+    # a row point no wall used (an inner front's) was dropped.
+    output.moved.clear()
+    for (at, point) in points.indexed():
+        if point == dropped_point: continue
+        let row = rows if at < count else 1 + (at - count) // count
+        let front = at % count
+        out[(usize)point] = Float3.of(front_place(mesh, fronts, regions, settings, front, (f64)row / (f64)rows).subtract(origin))
+        try output.moved.push(point)
+    output.positions.release()
+    output.positions = positions
+    try output.trail_points.assign(points)
+    output.over_key = key
+    # The selection is the group's faces, as a build selects them.
+    output.selection.close()
+    output.selection = try BitsBuilder.zeros((usize)last.face_count())
+    let words = output.selection.words()
+    memory.copy(words[..<input.group.words.length], input.group.words, input.group.words.length)
+    output.selection_domain = Domain.face
+    return true
 
 ## The group's regions: faces joined across edges that do not stop a region
 ## (each face alone for individual faces), with the way each region's fronts
@@ -162,12 +224,17 @@ struct Regions:
 func regions_of(mesh: const Mesh*, topology: const Topology*, group: Bits, settings: Extrusion) -> Regions!:
     var regions = Regions()
     errdefer regions.close()
-    let faces = topology.faces()
-    try regions.of_face.fill(faces, -1)
+    # Only the group's faces are read (a region grows across group faces).
+    var listed = try group_faces(group)
+    defer listed.close()
+    try regions.of_face.reserve(topology.faces())
+    regions.of_face.count = topology.faces()
+    for face in listed.view(): regions.of_face.items[(usize)face] = -1
     var queue = Growing[i32]()
     defer queue.close()
-    for seed in 0..<faces:
-        if not group.get(seed) or regions.of_face.items[seed] >= 0: continue
+    for listed_seed in listed.view():
+        let seed = (usize)listed_seed
+        if regions.of_face.items[seed] >= 0: continue
         let region = (i32)regions.directions.count
         regions.of_face.items[seed] = region
         queue.clear()

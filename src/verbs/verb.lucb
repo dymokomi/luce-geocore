@@ -15,6 +15,7 @@ from luce_std import parallel
 import core.attribute_ops
 from core.growing import Growing
 from core.strings import TableBuilder, table_count
+from core.hash import FullKey
 from core.shared import Column
 from core.float3 import Float3
 from core.bits import Bits, BitsBuilder, popcount, trailing_zeros
@@ -89,6 +90,10 @@ pub struct VerbInput:
     ## node's second input, an Edit Mesh's Reference): Shrinkwrap's target,
     ## the surface Relax keeps its points on.
     pub let reference: const Mesh*? = none
+    ## The last frame of a drag when it is given (Verbs.run's `over`): a
+    ## verb that builds its mesh may move only the points the last frame
+    ## says depend on what changed (Mesh.trail), instead of building again.
+    pub let over: const Mesh*? = none
 
 ## What a kernel returns: new positions over the same topology, a topology
 ## built with parents, or a finished mesh; and the output selection.
@@ -108,6 +113,14 @@ pub struct VerbOutput:
     ## elements it concerns.
     pub var warning: str = ""
     pub var skipped: usize = 0
+    ## A built mesh's points a later frame repositions (see Mesh.trail; a
+    ## verb may mark entries it dropped), and the key of everything the frame
+    ## was built from but those positions; with `over_key`, `positions` are
+    ## the last frame's (`over`) with `moved` (those points) placed again,
+    ## nothing built.
+    pub var trail_key: u64 = 0
+    pub var trail_points: Growing[u32]
+    pub var over_key: u64 = 0
 
     pub func init():
         self.positions = Column[Float3]()
@@ -119,10 +132,14 @@ pub struct VerbOutput:
         self.selection_domain = Domain.face
         self.warning = ""
         self.skipped = 0
+        self.trail_key = 0
+        self.trail_points = Growing[u32]()
+        self.over_key = 0
 
     pub func close():
         self.positions.release()
         self.moved.close()
+        self.trail_points.close()
         self.builder.close()
         if let mesh = self.mesh: mesh_dispose(mesh)
         self.mesh = none
@@ -268,7 +285,7 @@ pub func run_verb(verb: const Verb*, mesh: const Mesh*, group: str, group_type: 
     defer output.close()
     var second_bits: Bits? = none
     if not is_blank(second) and verb.picks.length > 1: second_bits = picked.view()
-    let input = VerbInput(source, bits, Parms(values.view()), symmetry, target, second_bits, reference)
+    let input = VerbInput(source, bits, Parms(values.view()), symmetry, target, second_bits, reference, over if not keep else none)
     if verb.rule >= 0:
         let rule = rule_at((usize)verb.rule)
         let made = try run_rule(&rule, source, bits, target, values.view())
@@ -408,6 +425,22 @@ func finish(source: const Mesh*, output: VerbOutput*, over: const Mesh*? = none)
     if let made = output.mesh:
         output.mesh = none
         return made
+    if output.over_key != 0:
+        # The last frame's mesh with the points that depend on the dragged
+        # value placed again: its topology, caches and GPU copies kept.
+        let previous = over else trap("a verb repositioned a last frame it was not given")
+        # Authored normals stay as the build carried them through the parents.
+        let made = try moved_storage(previous, output.positions, output.moved.view(), keep_normals = true)
+        if (try degenerate_around(made, output.moved.view())) <= (try degenerate_around(previous, output.moved.view())):
+            set_trail(made, output.over_key, output.trail_points.view()) catch failure:
+                mesh_dispose(made)
+                error(failure.code, failure.message)
+            return made
+        mesh_dispose(made)
+        output.warning = "The operation would collapse faces; the input passes through"
+        output.selection.close()
+        output.selection = try BitsBuilder.zeros(0)
+        return try mesh_share(source)
     if output.built:
         # Faces the kernel made degenerate (a bridge between coplanar loops,
         # say): nothing sensible to show, so the input passes through.
@@ -418,7 +451,12 @@ func finish(source: const Mesh*, output: VerbOutput*, over: const Mesh*? = none)
         if let made = built:
             # Meshes keep faces without an area; a verb making new ones
             # still refuses.
-            if degenerate_faces(made) <= degenerate_faces(source): return made
+            if degenerate_faces(made) <= degenerate_faces(source):
+                if output.trail_key != 0:
+                    set_trail(made, output.trail_key, output.trail_points.view()) catch failure:
+                        mesh_dispose(made)
+                        error(failure.code, failure.message)
+                return made
             mesh_dispose(made)
             output.warning = "The operation would make degenerate faces; the input passes through"
         output.selection.close()

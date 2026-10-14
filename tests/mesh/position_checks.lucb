@@ -81,6 +81,7 @@ pub func exercise() -> !:
     try same_triangles(smoothed.value(), display)
     try folding()
     try drag_frames()
+    try extrude_frames()
 
 ## Ordinary meshes still re-triangulate a face whose kept triangles fold.
 func folding() -> !:
@@ -139,3 +140,40 @@ func drag_frames() -> !:
             assert(made.value().bounds().maximum.y == expected.value().bounds().maximum.y)
             if let held = last: held.release()
             last = made
+
+## Extrude's distance, twist and taper dragged, each frame over the last:
+## the fronts and wall rows placed again on the last frame's faces, equal
+## point for point and corner for corner to the same extrusion made alone;
+## a frame whose settings change the faces (divisions) builds again.
+func extrude_frames() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 6)
+    defer grid.release()
+    let distances: f64[5] = [0.5, 0.75, -0.3, 1.0, 1.0]
+    let twists: f64[5] = [0.0, 0.0, 0.0, 30.0, 30.0]
+    let divisions: f64[5] = [2.0, 2.0, 2.0, 2.0, 3.0]
+    var last: interop.Reference[Mesh]? = none
+    defer:
+        if let held = last: held.release()
+    for frame in 0..<(usize)5:
+        let numbers: f64[11] = [distances[frame], 0.0, divisions[frame], 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, twists[frame], 1.0]
+        let over = try Verbs.run("PolyExtrude", grid, "7-9 13-15", 3, numbers[..<11], over = last)
+        defer over.release()
+        let alone = try Verbs.run("PolyExtrude", grid, "7-9 13-15", 3, numbers[..<11])
+        defer alone.release()
+        let made = try over.value().mesh()
+        let expected = try alone.value().mesh()
+        defer expected.release()
+        let a = made.value()
+        let b = expected.value()
+        assert(a.point_count() == b.point_count() and a.face_count() == b.face_count() and a.vertex_count() == b.vertex_count(), "an extrusion over its last frame has the faces of one made alone")
+        for point in 0..<a.point_count():
+            let p = try a.point(point)
+            let q = try b.point(point)
+            assert(p.x == q.x and p.y == q.y and p.z == q.z, "and its points")
+        for corner in 0..<a.vertex_count(): assert((try a.corner_point(corner)) == (try b.corner_point(corner)), "and its corners")
+        # Frames 1..3 kept the last frame's faces (nothing built); the change of
+        # divisions built anew.
+        if let held = last:
+            assert((a.corners_id() == held.value().corners_id()) == (frame >= 1 and frame <= 3), "a placed frame shares its last frame's faces")
+            held.release()
+        last = made
