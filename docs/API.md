@@ -359,6 +359,9 @@ The modeling verbs, after Houdini's SOPs and Blender's tools:
   along two opposite edges (Turn picks which).
 - **Separate** (faces): the group, or each of its loose parts, a piece of its
   own: own points where it touched others, its path suffixed .001, .002, …
+- **Mesh Boolean** (label Boolean; picks Pieces and Cutters at the objects
+  level): Union, Subtract or Intersect of closed pieces, exactly; see Mesh
+  Boolean below.
 - **Dissolve**'s Clean points, **Delete Edge Loop** and **Limited Dissolve**:
   points left between two edges go; a loop's faces either side join and its
   points go; faces flatter than Angle join flattest first while the regions'
@@ -686,3 +689,70 @@ Intersecting faces was 1,046 ms on the grid with one tree query per
 triangle; one query per tree leaf with its candidates' boxes and points
 gathered once brought it to 296 ms. Pinched points (94 ms serial) and the
 degenerate passes (20–23 ms) now run their elements in parallel.
+
+## Mesh Boolean
+
+`Mesh Boolean` combines closed pieces by Operation (Union, Subtract,
+Intersect). With a second pick (Cutters) the first pick's pieces are A and
+the second's B; with one pick the piece holding the lowest face is A and the
+rest are B. A pick of several pieces is united first, so A and B are solids.
+A piece is the faces sharing a `path`, else a part joined through shared
+points; a piece with open edges is refused with an error naming the pick.
+Faces outside the picks pass through; the result's faces are the output
+selection, cut from their source faces, whose attributes they carry (new
+points interpolate along the edge they were cut on, new corners by where
+they lie in their source triangle). The result keeps f64 points (a precise
+mesh), so a boolean on it reads its cuts as they were made.
+
+The kernel (`src/booleans/`) follows the mesh-arrangement booleans of Zhou
+et al. (2016) and Cherchi et al. (2022), written anew:
+
+- **Exact decisions.** Every test is the sign of a polynomial in the input
+  coordinates: orientations of input points by Shewchuk's static filter with
+  an exact expansion fallback (two-sum, FMA products); points the cut makes
+  are exact homogeneous coordinates (an edge through a plane, two coplanar
+  edges, three planes) with their own filtered, exact orientation and
+  comparison predicates, scaled by powers of two to stay in range. There is
+  no tolerance anywhere.
+- **One name per point.** A cut point is named by input points only (an
+  edge's two and a triangle's three, two edges', or three triangles'), so
+  every pair of triangles that finds it names it alike, and points that
+  still land in one place under two names merge by exact comparison.
+- **Every crossing cut.** Triangle pairs whose f64 boxes meet are cut
+  exactly; coplanar pairs clip each other's edges. Faces of one operand that
+  cross or lie on each other (an earlier cut's rounding folds slivers) are
+  cut against each other outward from the cut, and if the kept faces do not
+  close up, against every face of their operand. Faces whose corners are in
+  a line are retriangulated, or else make up for themselves by giving their
+  middle corner to the neighbor across their long side.
+- **Constrained triangulation.** Each cut triangle is triangulated with its
+  points inserted and its segments forced in by Sloan's edge flips; crossing
+  cuts are split where they meet.
+- **Winding numbers.** Pieces of one triangle and faces left whole join into
+  patches; two exact rays from a point of each patch, moved off it either
+  way by simulation of simplicity, give the winding numbers about A and B on
+  its two sides, and the patch is kept, facing out of the result, when the
+  result holds one side only. Coincident faces (coplanar faces of A and B, or
+  a piece's own faces laid together) are one place, decided once by the
+  first triangle's piece.
+- **Closed or refused.** The kept faces are checked to close up, edge by
+  edge; a result that would not is an error, never a silent leak.
+- **Deterministic.** Parallel steps write per-index results and gather them
+  in index order; sorts are total orders. The same input gives the same
+  result bits on any thread count.
+
+Kept pieces of a face join back into polygons across sides no other kept
+face uses; a region with a hole stays in triangles.
+
+`tests/bench/run.py` times two UV spheres of radius 1, the second moved
+(0.7, 0.3, 0.2) (one `--native --opt 3` run each on an M-series Mac, output
+mesh and attributes included):
+
+| Boolean run | Time | Faces out |
+|---|---:|---:|
+| Union, two 100,352-face spheres | 70.0 ms | 146,038 |
+| Subtract, two 100,352-face spheres | 67.6 ms | 101,104 |
+| Intersect, two 100,352-face spheres | 62.0 ms | 56,170 |
+| Union, two 999,698-face spheres | 478.8 ms | 1,449,596 |
+| Subtract, two 999,698-face spheres | 465.3 ms | 1,002,062 |
+| Intersect, two 999,698-face spheres | 416.3 ms | 554,528 |

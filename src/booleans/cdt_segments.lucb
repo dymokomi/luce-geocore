@@ -1,0 +1,304 @@
+# mark: Cut segments ===========================================================================
+
+## Pack an edge's two local points for the flip queue.
+func edge_word(left: u32, right: u32) -> u64:
+    return ((u64)left << 32) | (u64)right
+
+extend Triangulation:
+    ## Join local points u and w with cut edges for segment `segment`,
+    ## splitting at any point the segment passes through.
+    func insert_segment(u: u32, w: u32, segment: u32) -> !:
+        var at = u
+        while at != w: at = try self.constrain(at, w, segment)
+
+    ## Whether local point a, on the line through u and w, lies on u's side
+    ## toward w.
+    func toward(u: u32, a: u32, w: u32) -> bool!:
+        let pu = &self.points.items[(usize)u]
+        let pa = &self.points.items[(usize)a]
+        let pw = &self.points.items[(usize)w]
+        var way = try compare_h(self.arena, pw, pu, self.axis_u)
+        var axis = self.axis_u
+        if way == 0:
+            way = try compare_h(self.arena, pw, pu, self.axis_v)
+            axis = self.axis_v
+        return try compare_h(self.arena, pa, pu, axis) == way
+
+    ## Make a cut edge from u toward w: to w, or to the first point on the
+    ## way. Returns where it ended.
+    func constrain(u: u32, w: u32, segment: u32) -> u32!:
+        let direct = try self.find_side(u, w)
+        let back = try self.find_side(w, u)
+        if direct.0 >= 0 or back.0 >= 0:
+            try self.fix_edge(u, w, segment)
+            return w
+        # The triangle at u the segment leaves through: (u, a, b) with a
+        # right of it and b left, or a point of the fan on it.
+        try self.gather_fan(u)
+        var start: i32 = -1
+        var side: usize = 3
+        for at in 0..<self.fan.count:
+            let t = self.fan.items[at]
+            let tri = self.tris.items[(usize)t]
+            let k = tri.corner_of(u)
+            let a = tri.v[(k + 1) % 3]
+            let b = tri.v[(k + 2) % 3]
+            let oa = try self.orient(u, w, a)
+            let ob = try self.orient(u, w, b)
+            if oa == 0 and try self.toward(u, a, w):
+                try self.fix_edge(u, a, segment)
+                return a
+            if ob == 0 and try self.toward(u, b, w):
+                try self.fix_edge(u, b, segment)
+                return b
+            if oa < 0 and ob > 0:
+                start = t
+                side = k
+        if start < 0: error(errors.invalid, "Boolean: inconsistent cut (a segment leaves its face)")
+        # March across the edges it crosses, to w or to a point on it.
+        self.crossed.clear()
+        var current = start
+        var tri = self.tris.items[(usize)current]
+        var left = tri.v[(side + 2) % 3]
+        var right = tri.v[(side + 1) % 3]
+        var end = w
+        while true:
+            if (tri.fixed >> (u8)side) & 1 != 0: error(errors.invalid, "Boolean: two cuts cross inside a face (the pieces cross themselves?)")
+            try self.crossed.push(edge_word(left, right))
+            let next = tri.n[side]
+            if next < 0: error(errors.invalid, "Boolean: inconsistent cut (a segment leaves its face)")
+            let ahead = self.tris.items[(usize)next]
+            let d = ahead.v[ahead.side_to(current)]
+            if d == w: break
+            let od = try self.orient(u, w, d)
+            if od == 0:
+                end = d
+                break
+            if od > 0:
+                side = ahead.corner_of(left)
+                left = d
+            else:
+                side = ahead.corner_of(right)
+                right = d
+            current = next
+            tri = ahead
+        try self.flip_out(u, end)
+        try self.fix_edge(u, end, segment)
+        return end
+
+    ## Flip the crossed edges away until u and `end` are joined (Sloan): an
+    ## edge whose quad is convex turns, and goes back in the queue while it
+    ## still crosses; one whose quad is not waits its turn again.
+    func flip_out(u: u32, end: u32) -> !:
+        self.queue.clear()
+        for word in self.crossed.view(): try self.queue.push(word)
+        var head: usize = 0
+        var turns: usize = 0
+        let most = 64 * self.tris.count * self.tris.count + 1024
+        while head < self.queue.count:
+            turns += 1
+            if turns > most: error(errors.invalid, "Boolean: inconsistent cut (flips do not end)")
+            let word = self.queue.items[head]
+            head += 1
+            let x = (u32)(word >> 32)
+            let y = (u32)(word & 0xFFFFFFFF)
+            var found = try self.find_side(x, y)
+            if found.0 < 0: found = try self.find_side(y, x)
+            if found.0 < 0: error(errors.invalid, "Boolean: inconsistent cut (a lost edge)")
+            let t = (usize)found.0
+            let k = found.1
+            let tri = self.tris.items[t]
+            let c = tri.v[k]
+            let other = self.tris.items[(usize)tri.n[k]]
+            let d = other.v[other.side_to((i32)t)]
+            let p = tri.v[(k + 1) % 3]
+            let q = tri.v[(k + 2) % 3]
+            if (try self.orient(c, d, p)) * (try self.orient(c, d, q)) < 0:
+                self.flip(t, k)
+                if c != u and c != end and d != u and d != end:
+                    if (try self.orient(u, end, c)) * (try self.orient(u, end, d)) < 0: try self.queue.push(edge_word(c, d))
+            else:
+                try self.queue.push(word)
+            # Keep the queue's live part at the front.
+            if head > 4096 and head * 2 > self.queue.count:
+                let live = self.queue.count - head
+                for at in 0..<live: self.queue.items[at] = self.queue.items[head + at]
+                self.queue.count = live
+                head = 0
+
+# mark: Triangulating every cut triangle =======================================================
+
+## One cut triangle's pieces: three cut point numbers each, in the host's
+## winding, which sides a cut runs along (bits), and the coplanar triangle
+## of the other operand covering it (-1 none).
+struct Pieces:
+    var corners: Growing[u32]
+    var fixed: Growing[u8]
+    var covers: Growing[i32]
+
+    func init():
+        self.corners = Growing[u32]()
+        self.fixed = Growing[u8]()
+        self.covers = Growing[i32]()
+
+    func close():
+        self.corners.close()
+        self.fixed.close()
+        self.covers.close()
+
+struct TriangulateWork:
+    let operands: const Operands*
+    let cut: const Cut*
+    let table: const PointTable*
+    var arenas: Arena[]
+    var pieces: Pieces[]
+
+func triangulate_range(context: void*, first: usize, end: usize, worker: usize) -> !:
+    let work = (TriangulateWork*)context
+    var triangulation = Triangulation(&work.arenas[worker])
+    defer triangulation.close()
+    for slot in first..<end:
+        try triangulate_one(work, &triangulation, slot)
+
+## Triangulate cut triangle `slot`: its corners, its points, its segments,
+## then which pieces coplanar triangles cover.
+func triangulate_one(work: TriangulateWork*, triangulation: Triangulation*, slot: usize) -> !:
+    let operands = work.operands
+    let cut = work.cut
+    let t = (usize)cut.triangles.items[slot]
+    let corners: u32[3] = [(u32)operands.vertex(t, 0), (u32)operands.vertex(t, 1), (u32)operands.vertex(t, 2)]
+    try triangulation.begin(work.table, corners, operands.projections.items[t], (u64)t)
+    for at in (usize)cut.point_starts.items[slot]..<(usize)cut.point_starts.items[slot + 1]:
+        let id = cut.points.items[at]
+        if id == corners[0] or id == corners[1] or id == corners[2]: continue
+        try triangulation.insert_point(work.table, id)
+    for at in (usize)cut.segment_starts.items[slot]..<(usize)cut.segment_starts.items[slot + 1]:
+        let segment = cut.segments.items[at]
+        try triangulation.insert_segment(local_of(triangulation, segment.first), local_of(triangulation, segment.second), (u32)at)
+    let pieces = &work.pieces[slot]
+    for tri in triangulation.tris.view():
+        for k in 0..<(usize)3: try pieces.corners.push(triangulation.ids.items[(usize)tri.v[k]])
+        try pieces.fixed.push(tri.fixed)
+        try pieces.covers.push(-1)
+    for at in (usize)cut.cover_starts.items[slot]..<(usize)cut.cover_starts.items[slot + 1]:
+        try mark_cover(operands, cut, triangulation, slot, (usize)cut.covers.items[at], pieces)
+
+## The local number of cut point `id` (inserted): a corner, or one of the
+## points after them, which went in in increasing order.
+func local_of(triangulation: const Triangulation*, id: u32) -> u32:
+    for at in 0..<(usize)3:
+        if triangulation.ids.items[at] == id: return (u32)at
+    var low: usize = 3
+    var high = triangulation.ids.count
+    while low < high:
+        let middle = (low + high) // 2
+        if triangulation.ids.items[middle] < id: low = middle + 1
+        else: high = middle
+    if low >= triangulation.ids.count or triangulation.ids.items[low] != id: trap("a cut segment's point was not inserted")
+    return (u32)low
+
+## One edge of a covering triangle, by its packed local points, with the
+## covering triangle's point off it.
+struct CoverEdge:
+    let word: u64
+    let opposite: u32
+
+func cover_edge_less(a: CoverEdge, b: CoverEdge) -> bool:
+    return a.word < b.word
+
+## Mark the pieces coplanar triangle `other` covers, when it comes before
+## the host: of faces lying one on another, the first triangle's pieces
+## stand for the stack, the others' go. The covered pieces are the regions
+## between its edges, each inside when the triangle lies on its side of
+## one of them, and with none of its edges in this triangulation, all of
+## it when the host lies inside it.
+func mark_cover(operands: const Operands*, cut: const Cut*, triangulation: Triangulation*, slot: usize, other: usize, pieces: Pieces*) -> !:
+    if other > (usize)cut.triangles.items[slot]: return
+    let count = triangulation.tris.count
+    let region = try new i32[count] in memory.heap
+    defer free(region) in memory.heap
+    let stack = try new u32[count] --- in memory.heap
+    defer free(stack) in memory.heap
+    # Its edges here: the cut edges of segments it covers.
+    var edges = Growing[CoverEdge]()
+    defer edges.close()
+    for edge in triangulation.fixed_edges.view():
+        let segment = cut.segments.items[(usize)edge.segment]
+        if segment.cover() != (i32)other: continue
+        try edges.push(CoverEdge(edge_word(math32_min(edge.first, edge.second), math32_max(edge.first, edge.second)), (u32)segment.opposite))
+    sort.by(edges.items[..<edges.count], cover_edge_less)
+    var regions: i32 = 0
+    for seed in 0..<count:
+        if region[seed] != 0: continue
+        regions += 1
+        region[seed] = regions
+        var top: usize = 1
+        stack[0] = (u32)seed
+        var inside: i64 = 0
+        while top > 0:
+            top -= 1
+            let t = (usize)stack[top]
+            let tri = triangulation.tris.items[t]
+            for k in 0..<(usize)3:
+                let x = tri.v[(k + 1) % 3]
+                let y = tri.v[(k + 2) % 3]
+                if (tri.fixed >> (u8)k) & 1 != 0:
+                    let found = find_cover_edge(edges.view(), edge_word(math32_min(x, y), math32_max(x, y)))
+                    if found >= 0:
+                        # The piece is left of x -> y; inside when the
+                        # covering triangle's far point is too.
+                        if inside == 0:
+                            var store: f64[4] = ---
+                            let corner = input_point(operands.points.items[(usize)edges.items[(usize)found].opposite], store[..<4])
+                            let turn = try orient2d_h(triangulation.arena, &triangulation.points.items[(usize)x], &triangulation.points.items[(usize)y], &corner, triangulation.axis_u, triangulation.axis_v) * triangulation.sense
+                            inside = 1 if turn > 0 else -1
+                        continue
+                let next = tri.n[k]
+                if next < 0 or region[(usize)next] != 0: continue
+                region[(usize)next] = regions
+                stack[top] = (u32)next
+                top += 1
+        if inside == 0 and edges.count == 0 and host_inside(operands, cut, slot, other): inside = 1
+        if inside <= 0: continue
+        for t in 0..<count:
+            if region[t] == regions and pieces.covers.items[t] < 0: pieces.covers.items[t] = (i32)other
+
+## The index of the cover edge `word`, or -1.
+func find_cover_edge(edges: const CoverEdge[], word: u64) -> i64:
+    var low: usize = 0
+    var high = edges.length
+    while low < high:
+        let middle = (low + high) // 2
+        if edges[middle].word < word: low = middle + 1
+        else: high = middle
+    return (i64)low if low < edges.length and edges[low].word == word else -1
+
+## Whether every corner of cut triangle `slot` lies in coplanar triangle
+## `other` (inside or on its border).
+func host_inside(operands: const Operands*, cut: const Cut*, slot: usize, other: usize) -> bool:
+    let t = (usize)cut.triangles.items[slot]
+    let h = Corners.of(operands, other)
+    let projection = operands.projections.items[t]
+    let sense = orient2d(h.at[0], h.at[1], h.at[2], projection.u, projection.v)
+    for k in 0..<(usize)3:
+        if not inside_closed(&h, operands.place(t, k), projection, sense): return false
+    return true
+
+func math32_min(a: u32, b: u32) -> u32:
+    return a if a < b else b
+
+func math32_max(a: u32, b: u32) -> u32:
+    return a if a > b else b
+
+## Triangulate every cut triangle, in parallel; one Pieces per slot.
+func triangulate_all(operands: const Operands*, cut: const Cut*, table: const PointTable*, pieces: Pieces[]) -> !:
+    let count = cut.triangles.count
+    if count == 0: return
+    let workers = parallel.workers(count)
+    let arenas = try new Arena[workers] --- in memory.heap
+    for at in 0..<workers: arenas[at] = Arena()
+    defer:
+        for at in 0..<workers: arenas[at].close()
+        free(arenas) in memory.heap
+    var work = TriangulateWork(operands, cut, table, arenas, pieces)
+    try parallel.for_each_range(count, 16, (void*)&work, triangulate_range)

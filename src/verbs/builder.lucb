@@ -25,6 +25,9 @@ pub struct TopologyBuilder:
     ## area check; face normals left zero): subdivision templates, whose
     ## positions the display replaces.
     pub var fans: bool = false
+    ## Keep f64 points (a precise mesh) even when the source has none: a
+    ## boolean's cut points, which the next boolean reads as they were made.
+    pub var precise: bool = false
 
     pub func init():
         self.positions = Growing[Vector3]()
@@ -39,6 +42,7 @@ pub struct TopologyBuilder:
         self.origin = Vector3()
         self.selected_edges = Growing[i32]()
         self.fans = false
+        self.precise = false
 
     ## Start from `source`'s frame (its origin).
     pub func begin(source: const Mesh*) -> !:
@@ -229,7 +233,7 @@ pub struct TopologyBuilder:
         for at in 0..<points: placed[at] = Float3.of(self.positions.items[at])
         var exact: Column[Vector3]
         defer exact.release()
-        if precise_span(source).length > 0:
+        if self.precise or precise_span(source).length > 0:
             exact = try Column[Vector3].allocate(points)
             let out = exact.span()
             for at in 0..<points: out[at] = self.positions.items[at].add(self.origin)

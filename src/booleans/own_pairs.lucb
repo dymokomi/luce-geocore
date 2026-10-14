@@ -1,0 +1,154 @@
+# mark: Pairs within an operand ===============================================================
+
+## Triangles of one operand never cross in a solid, but an earlier cut's
+## rounding can fold a sliver of one face through another, or lay one over
+## another. A patch that crossed such a fold unseen would take the wrong
+## winding where it meets the cut, so every crossing of cut triangles with
+## others of their own operand is cut too, and so on outward from each
+## triangle found, until no fold near the cut is left unseen. Neighbors
+## across an edge meet only along it.
+
+struct OwnWork:
+    let operands: const Operands*
+    let tree_a: const BoxTree*
+    let tree_b: const BoxTree*
+    ## Per triangle: 0 not reached, 1 done in an earlier round, 2 in this
+    ## round's frontier.
+    let state: const u8[]
+    let frontier: const u32[]
+    var outs: PairOut[]
+    var found: Growing[u32][]
+
+func own_range(context: void*, index: usize, worker: usize) -> !:
+    let work = (OwnWork*)context
+    let operands = work.operands
+    let first = index * pair_chunk
+    let end = first + pair_chunk if first + pair_chunk < work.frontier.length else work.frontier.length
+    let found = &work.found[worker]
+    for at in first..<end:
+        let t = (usize)work.frontier[at]
+        let a = operands.place(t, 0)
+        let b = operands.place(t, 1)
+        let c = operands.place(t, 2)
+        found.clear()
+        if operands.operand_of(t) == operand_a: try work.tree_a.overlapping(lower(a, lower(b, c)), upper(a, upper(b, c)), 0, found)
+        else: try work.tree_b.overlapping(lower(a, lower(b, c)), upper(a, upper(b, c)), operands.split, found)
+        for other in found.view():
+            let u = (usize)other
+            # Each pair once: not with triangles done before, and within
+            # the frontier from the lower one.
+            if u == t or work.state[u] == 1 or (work.state[u] == 2 and u < t): continue
+            if shared_points(operands, t, u) >= 2 and not flat_with(operands, t, u): continue
+            try cut_pair(operands, t, u, &work.outs[index], true)
+
+## Whether u lies in t's plane over part of it (neighbors folded flat on
+## each other overlap, where other neighbors only meet).
+func flat_with(operands: const Operands*, t: usize, u: usize) -> bool:
+    if operands.projections.items[t].sense == 0: return false
+    for k in 0..<(usize)3:
+        if plane_side(operands.place(t, 0), operands.place(t, 1), operands.place(t, 2), operands.place(u, k)) != 0: return false
+    let a = Corners.of(operands, t)
+    let b = Corners.of(operands, u)
+    return overlapping(&a, &b, operands.projections.items[t])
+
+## How many points triangles t and u share.
+func shared_points(operands: const Operands*, t: usize, u: usize) -> usize:
+    var count: usize = 0
+    for k in 0..<(usize)3:
+        let point = operands.vertex(t, k)
+        if point == operands.vertex(u, 0) or point == operands.vertex(u, 1) or point == operands.vertex(u, 2): count += 1
+    return count
+
+## Cut the cut triangles against the others of their own operand, round
+## by round from the triangles the other operand cuts (with `full`, from
+## every triangle), adding to `out` (each round's records in frontier
+## order).
+func cut_own_pairs(operands: const Operands*, tree_a: const BoxTree*, tree_b: const BoxTree*, out: PairOut*, full: bool) -> !:
+    let total = operands.triangle_count()
+    let state = try new u8[total] in memory.heap
+    defer free(state) in memory.heap
+    for record in out.points.view(): state[(usize)record.triangle] = 2
+    for record in out.covers.view(): state[(usize)record.triangle] = 2
+    if full:
+        for t in 0..<total: state[t] = 2
+    var frontier = Growing[u32]()
+    defer frontier.close()
+    for t in 0..<total:
+        if state[t] == 2: try frontier.push((u32)t)
+    let workers = parallel.workers(total)
+    let found = try new Growing[u32][workers] --- in memory.heap
+    for at in 0..<workers: found[at] = Growing[u32]()
+    defer:
+        for at in 0..<workers: found[at].close()
+        free(found) in memory.heap
+    while frontier.count > 0:
+        let chunks = (frontier.count + pair_chunk - 1) // pair_chunk
+        let outs = try new PairOut[chunks] --- in memory.heap
+        for at in 0..<chunks: outs[at] = PairOut()
+        defer:
+            for at in 0..<chunks: outs[at].close()
+            free(outs) in memory.heap
+        var work = OwnWork(operands, tree_a, tree_b, state[..<total], frontier.view(), outs, found)
+        try parallel.for_each(chunks, (void*)&work, own_range)
+        for t in frontier.view(): state[(usize)t] = 1
+        frontier.clear()
+        for at in 0..<chunks:
+            for record in outs[at].points.view():
+                try out.points.push(record)
+                let t = (usize)record.triangle
+                if state[t] == 0:
+                    state[t] = 2
+                    try frontier.push((u32)t)
+            for record in outs[at].segments.view(): try out.segments.push(record)
+            for record in outs[at].covers.view(): try out.covers.push(record)
+        sort.sort(frontier.items[..<frontier.count])
+
+# mark: Flat triangles ========================================================================
+
+## A flat triangle's long side and the corner lying on it.
+struct FlatSide:
+    let low: u32
+    let high: u32
+    let middle: u32
+
+func flat_side_less(a: FlatSide, b: FlatSide) -> bool:
+    if a.low != b.low: return a.low < b.low
+    if a.high != b.high: return a.high < b.high
+    return a.middle < b.middle
+
+## A triangle whose corners lie in a line (an earlier cut's rounding can
+## flatten a sliver, and no ear clipping of its face avoids it) has no
+## area and no place in the cut; its neighbors across its two short sides
+## meet the one across its long side at its middle corner, so that one
+## takes the middle corner as a point on its side.
+func flat_records(operands: const Operands*, out: PairOut*) -> !:
+    var sides = Growing[FlatSide]()
+    defer sides.close()
+    for t in 0..<operands.triangle_count():
+        if operands.collapsed(t) or operands.projections.items[t].sense != 0: continue
+        for k in 0..<(usize)3:
+            let a = operands.vertex(t, (k + 1) % 3)
+            let b = operands.vertex(t, (k + 2) % 3)
+            let c = operands.vertex(t, k)
+            if strictly_between(operands.points.items[a], operands.points.items[b], operands.points.items[c]):
+                try sides.push(FlatSide((u32)(a if a < b else b), (u32)(b if a < b else a), (u32)c))
+    if sides.count == 0: return
+    sort.by(sides.items[..<sides.count], flat_side_less)
+    for t in 0..<operands.triangle_count():
+        if operands.inert(t): continue
+        for k in 0..<(usize)3:
+            let a = operands.vertex(t, k)
+            let b = operands.vertex(t, (k + 1) % 3)
+            let low = (u32)(a if a < b else b)
+            let high = (u32)(b if a < b else a)
+            var lo: usize = 0
+            var hi = sides.count
+            while lo < hi:
+                let middle = (lo + hi) // 2
+                let side = sides.items[middle]
+                if side.low < low or (side.low == low and side.high < high): lo = middle + 1
+                else: hi = middle
+            while lo < sides.count and sides.items[lo].low == low and sides.items[lo].high == high:
+                let c = (usize)sides.items[lo].middle
+                try out.points.push(PointRecord((i32)t, point_key(c), point_recipe(c)))
+                lo += 1

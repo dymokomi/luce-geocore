@@ -1,0 +1,354 @@
+# mark: Pairs ==================================================================================
+
+# Each A triangle against each B triangle whose box meets its own is cut
+# exactly, with signs of input points only: where its plane crosses the
+# other's edges and the other's plane crosses its edges, whether those
+# crossings fall inside, on an edge or at a corner, and for coplanar pairs
+# where their edges cross. The result is points, named by what they are so
+# that every pair that finds one names it alike, and the segments between
+# them, recorded for both triangles.
+
+## How a cut point is named, by input points (after Operands.same) only,
+## so a triangle and its exact double name it alike: an input point
+## (`v[0]`), an edge crossing a triangle's inside (the edge's points
+## sorted, then the triangle's), two edges crossing (each edge's points
+## sorted, the lower edge first), or three triangles' planes meeting (each
+## triangle's points sorted, the triangles in order).
+struct PointKey:
+    let kind: u8
+    let v: i32[9]
+
+    func less(other: PointKey) -> bool:
+        if self.kind != other.kind: return self.kind < other.kind
+        for at in 0..<(usize)9:
+            if self.v[at] != other.v[at]: return self.v[at] < other.v[at]
+        return false
+
+    func same(other: PointKey) -> bool:
+        if self.kind != other.kind: return false
+        for at in 0..<(usize)9:
+            if self.v[at] != other.v[at]: return false
+        return true
+
+let input_key: u8 = 0
+let edge_triangle_key: u8 = 1
+let edge_edge_key: u8 = 2
+
+## How a cut point is built: an input point (`p`), segment `p`-`q`
+## crossing the plane of points `a`, `b`, `c`, or segment `p`-`q` meeting
+## line `a`-`b` in the plane of projection axis `c`.
+struct Recipe:
+    let kind: u8
+    let p: i32
+    let q: i32
+    let a: i32
+    let b: i32
+    let c: i32
+
+    func less(other: Recipe) -> bool:
+        if self.kind != other.kind: return self.kind < other.kind
+        if self.p != other.p: return self.p < other.p
+        if self.q != other.q: return self.q < other.q
+        if self.a != other.a: return self.a < other.a
+        if self.b != other.b: return self.b < other.b
+        return self.c < other.c
+
+let input_recipe: u8 = 0
+let crossing_recipe: u8 = 1
+let meeting_recipe: u8 = 2
+
+## A point that lies on triangle `triangle`.
+struct PointRecord:
+    let triangle: i32
+    let key: PointKey
+    let recipe: Recipe
+
+## A segment of the cut on triangle `triangle`: where triangle `source`
+## crosses it (`opposite` -1), or an edge of coplanar triangle `source`
+## that overlaps it, whose point `opposite` is off that edge.
+struct SegmentRecord:
+    let triangle: i32
+    let first: PointKey
+    let second: PointKey
+    let source: i32
+    let opposite: i32
+
+## Coplanar triangles `triangle` and `other` meet.
+struct CoverRecord:
+    let triangle: i32
+    let other: i32
+
+## What the pairs of one range of A triangles found.
+struct PairOut:
+    var points: Growing[PointRecord]
+    var segments: Growing[SegmentRecord]
+    var covers: Growing[CoverRecord]
+
+    func init():
+        self.points = Growing[PointRecord]()
+        self.segments = Growing[SegmentRecord]()
+        self.covers = Growing[CoverRecord]()
+
+    func close():
+        self.points.close()
+        self.segments.close()
+        self.covers.close()
+
+## The points one pair found, at most a few.
+struct Found:
+    var keys: PointKey[8]
+    var recipes: Recipe[8]
+    var count: usize
+
+    func add(key: PointKey, recipe: Recipe) -> !:
+        for at in 0..<self.count:
+            if self.keys[at].same(key): return
+        if self.count == 8: error(errors.invalid, "Boolean: inconsistent cut (the pieces cross themselves?)")
+        self.keys[self.count] = key
+        self.recipes[self.count] = recipe
+        self.count += 1
+
+func point_key(p: usize) -> PointKey:
+    return PointKey(input_key, [(i32)p, 0, 0, 0, 0, 0, 0, 0, 0])
+
+func point_recipe(p: usize) -> Recipe:
+    return Recipe(input_recipe, (i32)p, 0, 0, 0, 0)
+
+func edge_triangle(u: usize, w: usize, triangle: const usize[3]) -> PointKey:
+    let t = sorted_three(triangle)
+    return PointKey(edge_triangle_key, [(i32)(u if u < w else w), (i32)(w if u < w else u), (i32)t[0], (i32)t[1], (i32)t[2], 0, 0, 0, 0])
+
+func edge_edge(u: usize, w: usize, x: usize, y: usize) -> PointKey:
+    let a: usize[2] = [u if u < w else w, w if u < w else u]
+    let b: usize[2] = [x if x < y else y, y if x < y else x]
+    let a_first = a[0] < b[0] or (a[0] == b[0] and a[1] < b[1])
+    let low = a if a_first else b
+    let high = b if a_first else a
+    return PointKey(edge_edge_key, [(i32)low[0], (i32)low[1], (i32)high[0], (i32)high[1], 0, 0, 0, 0, 0])
+
+## Three point numbers in increasing order.
+func sorted_three(points: const usize[3]) -> usize[3]:
+    var t: usize[3] = [points[0], points[1], points[2]]
+    if t[0] > t[1]:
+        let swap = t[0]
+        t[0] = t[1]
+        t[1] = swap
+    if t[1] > t[2]:
+        let swap = t[1]
+        t[1] = t[2]
+        t[2] = swap
+    if t[0] > t[1]:
+        let swap = t[0]
+        t[0] = t[1]
+        t[1] = swap
+    return t
+
+## The three points of triangle `t` and their places.
+struct Corners:
+    var ids: usize[3]
+    var at: Vector3[3]
+
+    static func of(operands: const Operands*, t: usize) -> Corners:
+        return Corners([operands.vertex(t, 0), operands.vertex(t, 1), operands.vertex(t, 2)], [operands.place(t, 0), operands.place(t, 1), operands.place(t, 2)])
+
+## Whether `p`, in the plane of `h`, is inside `h` or on its border, in
+## projection `projection` (h's sense there).
+func inside_closed(h: const Corners*, p: Vector3, projection: Projection, sense: i64) -> bool:
+    for k in 0..<(usize)3:
+        if orient2d(h.at[k], h.at[(k + 1) % 3], p, projection.u, projection.v) * sense < 0: return false
+    return true
+
+## Cut A triangle `t` with B triangle `s`; with `own`, two triangles of
+## one operand (see cut_own_pairs), whose coplanar overlaps are left be.
+func cut_pair(operands: const Operands*, t: usize, s: usize, out: PairOut*, own: bool = false) -> !:
+    if operands.inert(t) or operands.inert(s): return
+    let a = Corners.of(operands, t)
+    let b = Corners.of(operands, s)
+    let pa = operands.projections.items[t]
+    let pb = operands.projections.items[s]
+    var sb: i64[3] = [0, 0, 0]
+    var sa: i64[3] = [0, 0, 0]
+    for k in 0..<(usize)3: sb[k] = plane_side(a.at[0], a.at[1], a.at[2], b.at[k])
+    if apart(sb): return
+    for k in 0..<(usize)3: sa[k] = plane_side(b.at[0], b.at[1], b.at[2], a.at[k])
+    if apart(sa): return
+    if sb[0] == 0 and sb[1] == 0 and sb[2] == 0:
+        # A face of one operand lying beside another of its own (a flat
+        # region's triangles) only touches it: nothing to record.
+        if own and not overlapping(&a, &b, pa): return
+        try cut_coplanar(&a, &b, t, s, pa, out)
+        return
+    var found = Found()
+    try crossings(&a, &b, t, sb, pa, &found)
+    try crossings(&b, &a, s, sa, pb, &found)
+    if found.count == 0: return
+    if found.count > 2: error(errors.invalid, "Boolean: inconsistent cut (the pieces cross themselves?)")
+    # Two faces of one operand meeting only at a point they share do not
+    # cross: nothing to record (else every fan would spread the search).
+    if own and found.count == 1 and found.keys[0].kind == input_key and shares_point(&a, &b, (usize)found.keys[0].v[0]): return
+    for at in 0..<found.count:
+        try out.points.push(PointRecord((i32)t, found.keys[at], found.recipes[at]))
+        try out.points.push(PointRecord((i32)s, found.keys[at], found.recipes[at]))
+    if found.count == 2:
+        try out.segments.push(SegmentRecord((i32)t, found.keys[0], found.keys[1], (i32)s, -1))
+        try out.segments.push(SegmentRecord((i32)s, found.keys[0], found.keys[1], (i32)t, -1))
+
+## Whether both triangles have point `p`.
+func shares_point(a: const Corners*, b: const Corners*, p: usize) -> bool:
+    return (a.ids[0] == p or a.ids[1] == p or a.ids[2] == p) and (b.ids[0] == p or b.ids[1] == p or b.ids[2] == p)
+
+## Whether coplanar triangles a and b overlap in more than a border: no
+## edge line of either has the other wholly on its far side or on it.
+func overlapping(a: const Corners*, b: const Corners*, projection: Projection) -> bool:
+    let sense_b = orient2d(b.at[0], b.at[1], b.at[2], projection.u, projection.v)
+    for k in 0..<(usize)3:
+        var apart_a = true
+        var apart_b = true
+        for j in 0..<(usize)3:
+            if orient2d(a.at[k], a.at[(k + 1) % 3], b.at[j], projection.u, projection.v) * projection.sense > 0: apart_a = false
+            if orient2d(b.at[k], b.at[(k + 1) % 3], a.at[j], projection.u, projection.v) * sense_b > 0: apart_b = false
+        if apart_a or apart_b: return false
+    return true
+
+## Whether all three signs are the same and not zero.
+func apart(signs: const i64[3]) -> bool:
+    return (signs[0] > 0 and signs[1] > 0 and signs[2] > 0) or (signs[0] < 0 and signs[1] < 0 and signs[2] < 0)
+
+## Where `guest` (its points' sides of host's plane in `signs`) meets host
+## triangle `h` (number `host`): its points on that plane inside h, and its
+## edges crossing that plane inside h.
+func crossings(h: const Corners*, guest: const Corners*, host: usize, signs: const i64[3], projection: Projection, found: Found*) -> !:
+    for k in 0..<(usize)3:
+        if signs[k] == 0 and inside_closed(h, guest.at[k], projection, projection.sense):
+            try found.add(point_key(guest.ids[k]), point_recipe(guest.ids[k]))
+    for k in 0..<(usize)3:
+        let j = (k + 1) % 3
+        if signs[k] * signs[j] >= 0: continue
+        try edge_through(h, host, guest.ids[k], guest.ids[j], guest.at[k], guest.at[j], found)
+
+## Where edge u-w (points `u_id`, `w_id`), its ends strictly on opposite
+## sides of h's plane, passes host triangle h (number `host`): inside it,
+## on one of its edges, at one of its corners, or outside it (nothing).
+func edge_through(h: const Corners*, host: usize, u_id: usize, w_id: usize, u: Vector3, w: Vector3, found: Found*) -> !:
+    var o: i64[3] = [0, 0, 0]
+    var zeros: usize = 0
+    var positive = false
+    var negative = false
+    for e in 0..<(usize)3:
+        o[e] = plane_side(u, w, h.at[e], h.at[(e + 1) % 3])
+        if o[e] == 0: zeros += 1
+        if o[e] > 0: positive = true
+        if o[e] < 0: negative = true
+    if positive and negative: return
+    let recipe = Recipe(crossing_recipe, (i32)u_id, (i32)w_id, (i32)h.ids[0], (i32)h.ids[1], (i32)h.ids[2])
+    if zeros == 0:
+        try found.add(edge_triangle(u_id, w_id, h.ids), recipe)
+    elif zeros == 1:
+        for e in 0..<(usize)3:
+            if o[e] == 0: try found.add(edge_edge(u_id, w_id, h.ids[e], h.ids[(e + 1) % 3]), recipe)
+    elif zeros == 2:
+        # On two edges' lines: the corner they share.
+        for e in 0..<(usize)3:
+            if o[e] != 0 and o[(e + 1) % 3] == 0 and o[(e + 2) % 3] == 0:
+                let corner = h.ids[(e + 2) % 3]
+                try found.add(point_key(corner), point_recipe(corner))
+
+## Coplanar t and s: each one's points inside the other, and each one's
+## edges clipped to the other as segments; where they overlap, they cover
+## each other (see mark_cover).
+func cut_coplanar(a: const Corners*, b: const Corners*, t: usize, s: usize, projection: Projection, out: PairOut*) -> !:
+    let sense_b = orient2d(b.at[0], b.at[1], b.at[2], projection.u, projection.v)
+    var touched = false
+    touched = try clip_edges(a, b, t, s, projection, projection.sense, sense_b, out) or touched
+    touched = try clip_edges(b, a, s, t, projection, sense_b, projection.sense, out) or touched
+    if touched:
+        try out.covers.push(CoverRecord((i32)t, (i32)s))
+        try out.covers.push(CoverRecord((i32)s, (i32)t))
+
+## Edges of `g` (number `guest`) clipped to `h` (number `host`), as
+## segments on host covered by guest, and g's points inside h. Whether
+## anything was found.
+func clip_edges(h: const Corners*, g: const Corners*, host: usize, guest: usize, projection: Projection, sense_h: i64, sense_g: i64, out: PairOut*) -> bool!:
+    var touched = false
+    for k in 0..<(usize)3:
+        if inside_closed(h, g.at[k], projection, sense_h):
+            try out.points.push(PointRecord((i32)host, point_key(g.ids[k]), point_recipe(g.ids[k])))
+            touched = true
+    for k in 0..<(usize)3:
+        let j = (k + 1) % 3
+        var found = Found()
+        let p = g.at[k]
+        let q = g.at[j]
+        if inside_closed(h, p, projection, sense_h): try found.add(point_key(g.ids[k]), point_recipe(g.ids[k]))
+        if inside_closed(h, q, projection, sense_h): try found.add(point_key(g.ids[j]), point_recipe(g.ids[j]))
+        for e in 0..<(usize)3:
+            let f = (e + 1) % 3
+            let r = h.at[e]
+            let s = h.at[f]
+            let or_ = orient2d(p, q, r, projection.u, projection.v)
+            let os = orient2d(p, q, s, projection.u, projection.v)
+            if or_ * os >= 0: continue
+            let op = orient2d(r, s, p, projection.u, projection.v)
+            let oq = orient2d(r, s, q, projection.u, projection.v)
+            if op * oq >= 0: continue
+            try found.add(edge_edge(g.ids[k], g.ids[j], h.ids[e], h.ids[f]), Recipe(meeting_recipe, (i32)g.ids[k], (i32)g.ids[j], (i32)h.ids[e], (i32)h.ids[f], (i32)projection.axis))
+        for e in 0..<(usize)3:
+            let r = h.at[e]
+            if orient2d(p, q, r, projection.u, projection.v) == 0 and strictly_between(p, q, r):
+                try found.add(point_key(h.ids[e]), point_recipe(h.ids[e]))
+        if found.count > 2: error(errors.invalid, "Boolean: inconsistent cut (the pieces cross themselves?)")
+        for at in 0..<found.count:
+            try out.points.push(PointRecord((i32)host, found.keys[at], found.recipes[at]))
+        if found.count > 0: touched = true
+        if found.count == 2:
+            try out.segments.push(SegmentRecord((i32)host, found.keys[0], found.keys[1], (i32)guest, (i32)g.ids[(k + 2) % 3]))
+    return touched
+
+# mark: All pairs ==============================================================================
+
+## A triangles in each range of the pair search.
+let pair_chunk: usize = 256
+
+struct PairWork:
+    let operands: const Operands*
+    let tree: const BoxTree*
+    var outs: PairOut[]
+    var found: Growing[u32][]
+
+func pair_range(context: void*, index: usize, worker: usize) -> !:
+    let work = (PairWork*)context
+    let operands = work.operands
+    let first = index * pair_chunk
+    let end = first + pair_chunk if first + pair_chunk < operands.split else operands.split
+    let found = &work.found[worker]
+    for t in first..<end:
+        let a = operands.place(t, 0)
+        let b = operands.place(t, 1)
+        let c = operands.place(t, 2)
+        found.clear()
+        try work.tree.overlapping(lower(a, lower(b, c)), upper(a, upper(b, c)), operands.split, found)
+        for at in 0..<found.count:
+            try cut_pair(operands, t, (usize)found.items[at], &work.outs[index])
+
+## Every pair of A and B triangles cut, the records gathered in A-triangle
+## order (the same whatever the thread count).
+func cut_all_pairs(operands: const Operands*, tree: const BoxTree*, out: PairOut*) -> !:
+    let chunks = (operands.split + pair_chunk - 1) // pair_chunk
+    if chunks == 0: return
+    let outs = try new PairOut[chunks] --- in memory.heap
+    for at in 0..<chunks: outs[at] = PairOut()
+    defer:
+        for at in 0..<chunks: outs[at].close()
+        free(outs) in memory.heap
+    let workers = parallel.workers(chunks)
+    let found = try new Growing[u32][workers] --- in memory.heap
+    for at in 0..<workers: found[at] = Growing[u32]()
+    defer:
+        for at in 0..<workers: found[at].close()
+        free(found) in memory.heap
+    var work = PairWork(operands, tree, outs, found)
+    try parallel.for_each(chunks, (void*)&work, pair_range)
+    for at in 0..<chunks:
+        for record in outs[at].points.view(): try out.points.push(record)
+        for record in outs[at].segments.view(): try out.segments.push(record)
+        for record in outs[at].covers.view(): try out.covers.push(record)

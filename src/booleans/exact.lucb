@@ -1,0 +1,270 @@
+## Mesh booleans: Union, Subtract and Intersect of closed polygon meshes,
+## exact in the way Zhou et al.'s mesh arrangements (2016) and Cherchi et
+## al.'s interactive booleans (2022) are. Every decision is the sign of a
+## polynomial in the input coordinates, computed exactly (Shewchuk's
+## floating-point expansions behind a floating filter); new points are
+## kept as exact homogeneous coordinates until the output rounds them once.
+## So the same input gives the same result bits on any thread count, and a
+## closed manifold pair gives a closed result, coplanar and touching faces
+## included, with no tolerance anywhere.
+##
+## The steps (one fragment each): the operands' triangles and their exact
+## points (operands), a box tree over each (bvh), each pair of triangles
+## that may meet cut exactly into points and segments (pairs), and each
+## operand's triangles against its own where an earlier cut's rounding
+## folded them (own_pairs), all gathered into one point table (merge,
+## points) with cuts crossing inside a triangle met at their crossing
+## (crossings), each cut triangle triangulated with its cut segments as
+## constraints (cdt, cdt_segments), the pieces classified by exact winding
+## numbers (classify), and the kept pieces joined back into polygons of
+## their source faces (regions). boolean.lucb runs them and checks the
+## result closes.
+from luce_std import math
+from luce_std import parallel
+from luce_std import sort
+import memory
+import errors
+from core.growing import Growing
+from core.float3 import Float3
+from core.bits import Bits
+from math.vector import Vector3
+from geometries.polygon import Mesh, precise_span
+from geometries.topology.connectivity import Topology
+
+# mark: Expansions =============================================================================
+
+# An expansion is a sum of f64 components, nonoverlapping and ordered by
+# increasing magnitude, that represents a real number exactly (Shewchuk,
+# "Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric
+# Predicates", 1997). Base computes IEEE round to nearest with no
+# contraction or reassociation, which these rely on; products split exactly
+# with a fused multiply-add. The forms here eliminate zero components, and
+# a zero expansion has length 0 or a single 0.0.
+
+## a + b as the rounded sum and its exact error.
+func two_sum(a: f64, b: f64) -> (f64, f64):
+    let x = a + b
+    let bv = x - a
+    let av = x - bv
+    return (x, (a - av) + (b - bv))
+
+## a + b where |a| >= |b|, or a is zero.
+func fast_two_sum(a: f64, b: f64) -> (f64, f64):
+    let x = a + b
+    return (x, b - (x - a))
+
+## a - b as the rounded difference and its exact error.
+func two_diff(a: f64, b: f64) -> (f64, f64):
+    let x = a - b
+    let bv = a - x
+    let av = x + bv
+    return (x, (a - av) + (bv - b))
+
+## a * b as the rounded product and its exact error.
+func two_product(a: f64, b: f64) -> (f64, f64):
+    let x = a * b
+    return (x, a.mul_add(b, -x))
+
+## Whether `a` is smaller in magnitude than `b`, as the merge orders them.
+func smaller(a: f64, b: f64) -> bool:
+    return (b > a) == (b > -a)
+
+## e + f into h (room for both lengths); Shewchuk's FAST-EXPANSION-SUM,
+## merged by magnitude, with TWO-SUM throughout. Returns h's length.
+func expansion_sum(e: const f64[], f: const f64[], h: f64[]) -> usize:
+    var ei: usize = 0
+    var fi: usize = 0
+    var q = 0.0
+    var started = false
+    var count: usize = 0
+    while ei < e.length or fi < f.length:
+        var next = 0.0
+        if fi >= f.length or (ei < e.length and smaller(e[ei], f[fi])):
+            next = e[ei]
+            ei += 1
+        else:
+            next = f[fi]
+            fi += 1
+        if not started:
+            q = next
+            started = true
+            continue
+        let (total, lost) = two_sum(q, next)
+        q = total
+        if lost != 0.0:
+            h[count] = lost
+            count += 1
+    if q != 0.0 or count == 0:
+        h[count] = q
+        count += 1
+    return count
+
+## e * b into h (room for twice e's length); SCALE-EXPANSION. Returns h's
+## length.
+func expansion_scale(e: const f64[], b: f64, h: f64[]) -> usize:
+    if e.length == 0 or b == 0.0:
+        h[0] = 0.0
+        return 1
+    var count: usize = 0
+    let start = two_product(e[0], b)
+    var q = start.0
+    if start.1 != 0.0:
+        h[count] = start.1
+        count += 1
+    for at in 1..<e.length:
+        let (high, small) = two_product(e[at], b)
+        let (total, lost) = two_sum(q, small)
+        if lost != 0.0:
+            h[count] = lost
+            count += 1
+        let (next, rest) = fast_two_sum(high, total)
+        q = next
+        if rest != 0.0:
+            h[count] = rest
+            count += 1
+    if q != 0.0 or count == 0:
+        h[count] = q
+        count += 1
+    return count
+
+## e compressed in place (COMPRESS): as few components as the value needs,
+## the largest within an ulp of the whole. Returns the new length.
+func expansion_compress(e: f64[]) -> usize:
+    if e.length < 2: return e.length
+    var bottom = e.length - 1
+    var q = e[bottom]
+    var at = e.length - 1
+    while at > 0:
+        at -= 1
+        let (total, lost) = fast_two_sum(q, e[at])
+        if lost != 0.0:
+            e[bottom] = total
+            bottom -= 1
+            q = lost
+        else:
+            q = total
+    var top: usize = 0
+    for index in bottom + 1..<e.length:
+        let (total, lost) = fast_two_sum(e[index], q)
+        if lost != 0.0:
+            e[top] = lost
+            top += 1
+        q = total
+    e[top] = q
+    return top + 1
+
+## The sign of an expansion: its largest component's.
+func expansion_sign(e: const f64[]) -> i64:
+    if e.length == 0: return 0
+    let top = e[e.length - 1]
+    return 1 if top > 0.0 else (-1 if top < 0.0 else 0)
+
+## The expansion's value to about an ulp.
+func expansion_estimate(e: const f64[]) -> f64:
+    var total = 0.0
+    for value in e: total += value
+    return total
+
+## e negated in place.
+func expansion_negate(e: f64[]):
+    for at in 0..<e.length: e[at] = -e[at]
+
+## The exact difference a - b as a two-component expansion in h.
+func difference_into(a: f64, b: f64, h: f64[]) -> usize:
+    let (x, y) = two_diff(a, b)
+    if y == 0.0:
+        h[0] = x
+        return 1
+    h[0] = y
+    h[1] = x
+    return 2
+
+## e * f into h (room for 2 * e.length * f.length) for short f (at most
+## 2 components), with `scratch` of room 4 * e.length.
+func expansion_times_short(e: const f64[], f: const f64[], h: f64[], scratch: f64[]) -> usize:
+    if f.length == 1: return expansion_scale(e, f[0], h)
+    let half = scratch.length // 2
+    let first = expansion_scale(e, f[0], scratch[..<half])
+    let second = expansion_scale(e, f[1], scratch[half..])
+    return expansion_sum(scratch[..<first], scratch[half..<half + second], h)
+
+# mark: Scratch ================================================================================
+
+## A mark to return an arena to.
+pub struct ArenaMark:
+    let block: usize
+    let used: usize
+
+## Scratch for expansions too long for the stack: blocks of f64 handed out
+## in order and taken back to a mark, so a predicate's temporaries cost no
+## allocation once the blocks exist. One per worker.
+pub struct Arena:
+    var blocks: Growing[f64[]]
+    var block: usize = 0
+    var used: usize = 0
+
+    pub func init():
+        self.blocks = Growing[f64[]]()
+        self.block = 0
+        self.used = 0
+
+    ## `count` components of room, valid until the arena is reset below it.
+    pub func take(count: usize) -> f64[]!:
+        let size = count if count > 0 else 1
+        while self.block < self.blocks.count:
+            let room = self.blocks.items[self.block]
+            if room.length - self.used >= size:
+                let first = self.used
+                self.used += size
+                return room[first..<first + size]
+            self.block += 1
+            self.used = 0
+        let length: usize = size if size > 65536 else 65536
+        let room = try new f64[length] --- in memory.heap
+        errdefer free(room) in memory.heap
+        try self.blocks.push(room)
+        self.block = self.blocks.count - 1
+        self.used = size
+        return room[..<size]
+
+    pub func mark() -> ArenaMark:
+        return ArenaMark(self.block, self.used)
+
+    pub func reset(mark: ArenaMark):
+        self.block = mark.block
+        self.used = mark.used
+
+    pub func close():
+        for at in 0..<self.blocks.count: free(self.blocks.items[at]) in memory.heap
+        self.blocks.close()
+
+## e + f in the arena.
+func arena_sum(arena: Arena*, e: const f64[], f: const f64[]) -> f64[]!:
+    let h = try arena.take(e.length + f.length + 1)
+    return h[..<expansion_sum(e, f, h)]
+
+## e - f in the arena.
+func arena_difference(arena: Arena*, e: const f64[], f: const f64[]) -> f64[]!:
+    let negated = try arena.take(f.length)
+    for at in 0..<f.length: negated[at] = -f[at]
+    return try arena_sum(arena, e, negated)
+
+## e * b in the arena.
+func arena_scale(arena: Arena*, e: const f64[], b: f64) -> f64[]!:
+    let h = try arena.take(e.length * 2 + 1)
+    return h[..<expansion_scale(e, b, h)]
+
+## e * f in the arena: the sum of e scaled by each component of f,
+## compressed.
+func arena_product(arena: Arena*, e: const f64[], f: const f64[]) -> f64[]!:
+    if e.length == 0 or f.length == 0:
+        let zero = try arena.take(1)
+        zero[0] = 0.0
+        return zero
+    # The longer one scales: fewer, longer partial sums.
+    let (long, short) = (e, f) if e.length >= f.length else (f, e)
+    var total = try arena_scale(arena, long, short[0])
+    for at in 1..<short.length:
+        let part = try arena_scale(arena, long, short[at])
+        total = try arena_sum(arena, total, part)
+    return total[..<expansion_compress(total)]

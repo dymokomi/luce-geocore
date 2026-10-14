@@ -1,0 +1,382 @@
+## Boolean checks (Mesh Boolean): Union, Subtract and Intersect of boxes
+## against their exact volumes, every result closed with each edge between
+## two faces running opposite ways; the coplanar and touching cases
+## (identical boxes, a box less itself is empty, boxes sharing a face, an
+## edge, a corner, nested boxes, faces overlapping in part, subdivided
+## faces overlapping in a grid); a tetrahedron whose edge runs exactly
+## through a box's corner; spheres against the lens's closed form and
+## inclusion-exclusion; the same result bits on reruns; attributes carried
+## by provenance (a point and a corner value equal to X interpolated along
+## the cut, a face group); the two picks, three pieces, and refusals of an
+## open piece; and a fixed stream of random pairs (boxes on a quarter grid,
+## so faces lie on each other everywhere; turned spheres, boxes and tori)
+## and of booleans chained on one result, each closed and consistent.
+import interop
+import memory
+import strings
+from luce_std import math
+from luce_geocore.geocore import Mesh, MeshBuilder, MeshPrimitives, Verbs, VerbResult, Vector3
+from luce_geocore.kernel import clear_group_cache
+from tool_fixtures import near, surface, volume
+
+## The sweep's checks: boxes, the coplanar and touching cases and the picks.
+pub func exercise() -> !:
+    defer clear_group_cache()
+    try box_checks()
+    try coplanar_checks()
+    try touching_checks()
+    try pick_checks()
+
+## Every check once, the heavier ones too.
+pub func run() -> !:
+    defer clear_group_cache()
+    try exercise()
+    try corner_cut_checks()
+    try grid_checks()
+    try sphere_checks()
+    try attribute_checks()
+    try random_checks()
+    print("PASS boolean: boxes exact, identical, self-subtracted, sharing a face, an edge, a corner, nested, partly coplanar, gridded; a cut through a corner; spheres; reruns bit for bit; attributes carried; picks; open pieces refused; 120 random pairs and 16 chained booleans closed and consistent")
+
+## Mesh Boolean on `mesh` (`second` the second pick, "" none): the run.
+func combined(mesh: interop.Reference[Mesh], group: str, second: str, operation: i64) -> interop.Reference[VerbResult]!:
+    let numbers: f64[1] = [(f64)operation]
+    let result = try Verbs.run("Mesh Boolean", mesh, group, 3, numbers[..<1], 0, false, second)
+    if result.value().warning().length > 0: print(f"Boolean: {result.value().warning()}")
+    return result
+
+## The run's volume, checking it is a closed manifold surface (or, with
+## `touching`, closed with every edge's uses balanced).
+func result_volume(mesh: interop.Reference[Mesh], group: str, second: str, operation: i64, touching: bool = false) -> f64!:
+    let result = try combined(mesh, group, second, operation)
+    defer result.release()
+    let made = try result.value().mesh()
+    defer made.release()
+    if touching: try balanced(made)
+    else: try surface(made, true)
+    return try volume(made)
+
+## How many faces the run makes.
+func result_faces(mesh: interop.Reference[Mesh], group: str, second: str, operation: i64) -> i64!:
+    let result = try combined(mesh, group, second, operation)
+    defer result.release()
+    let made = try result.value().mesh()
+    defer made.release()
+    return made.value().face_count()
+
+## Every edge used as often in one direction as in the other (solids
+## touching along an edge share it four times).
+func balanced(mesh: interop.Reference[Mesh]) -> !:
+    let geometry = mesh.value()
+    let edges = (usize)(try geometry.edge_count())
+    let uses = try new i32[edges] in memory.heap
+    defer free(uses) in memory.heap
+    for face in 0..<geometry.face_count():
+        let size = try geometry.face_size(face)
+        for at in 0..<size:
+            let edge = (usize)(try geometry.face_edge(face, at))
+            let forward = (try geometry.face_point(face, at)) == (try geometry.edge_point((i64)edge, 0))
+            uses[edge] += 1 if forward else -1
+    for edge in 0..<edges: assert(uses[edge] == 0)
+
+## Two pieces: `a`, and `b` moved by `offset`.
+func pair(a: interop.Reference[Mesh], b: interop.Reference[Mesh], offset: Vector3) -> interop.Reference[Mesh]!:
+    let moved = try b.value().transformed(offset, Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer moved.release()
+    return try a.value().merged(moved)
+
+## Union, Subtract and Intersect of the mesh's two pieces: their volumes.
+func three(mesh: interop.Reference[Mesh], expected: const f64[3], touching: bool = false) -> !:
+    for operation in 0..<(i64)3:
+        near(try result_volume(mesh, "*", "", operation, touching), expected[(usize)operation], 1.0e-9)
+
+## A 2-unit cube standing on the origin (x and z in -1..1, y in 0..2).
+func cube() -> interop.Reference[Mesh]!:
+    return try MeshPrimitives.box(Vector3(2.0, 2.0, 2.0))
+
+func box_checks() -> !:
+    let a = try cube()
+    defer a.release()
+    # Overlapping a unit cube's worth at a corner.
+    let corner = try pair(a, a, Vector3(1.0, 1.0, 1.0))
+    defer corner.release()
+    let expected: f64[3] = [15.0, 7.0, 1.0]
+    try three(corner, expected)
+    # Overlapping in a slab sharing two side planes: faces coplanar in part.
+    let slab = try pair(a, a, Vector3(1.0, 1.0, 0.0))
+    defer slab.release()
+    let slab_expected: f64[3] = [14.0, 6.0, 2.0]
+    try three(slab, slab_expected)
+
+func coplanar_checks() -> !:
+    let a = try cube()
+    defer a.release()
+    # The same box twice: the union and the intersection are the box, a
+    # box less itself nothing at all.
+    let twice = try pair(a, a, Vector3())
+    defer twice.release()
+    let same: f64[3] = [8.0, 0.0, 8.0]
+    try three(twice, same)
+    assert(try result_faces(twice, "*", "", 1) == 0)
+    assert(try result_faces(twice, "*", "", 0) == 6)
+    # Sharing a face: one long box, the first as it was, nothing.
+    let side = try pair(a, a, Vector3(2.0, 0.0, 0.0))
+    defer side.release()
+    let sharing: f64[3] = [16.0, 8.0, 0.0]
+    try three(side, sharing)
+    assert(try result_faces(side, "*", "", 2) == 0)
+    # Nested: a half-size box inside.
+    let half = try MeshPrimitives.box(Vector3(1.0, 1.0, 1.0))
+    defer half.release()
+    let nested = try pair(a, half, Vector3(0.0, 0.5, 0.0))
+    defer nested.release()
+    let inside: f64[3] = [8.0, 7.0, 1.0]
+    try three(nested, inside)
+    # Nested and resting on the floor: the cavity opens into a dent.
+    let resting = try pair(a, half, Vector3())
+    defer resting.release()
+    try three(resting, inside)
+
+func touching_checks() -> !:
+    let a = try cube()
+    defer a.release()
+    # Touching along an edge, and at one corner: the union keeps both,
+    # sharing the edge or the corner; nothing in common.
+    let along = try pair(a, a, Vector3(2.0, 2.0, 0.0))
+    defer along.release()
+    let apart: f64[3] = [16.0, 8.0, 0.0]
+    try three(along, apart, true)
+    let point = try pair(a, a, Vector3(2.0, 2.0, 2.0))
+    defer point.release()
+    try three(point, apart, true)
+    # Far apart: untouched.
+    let far = try pair(a, a, Vector3(5.0, 0.0, 0.0))
+    defer far.release()
+    try three(far, apart)
+
+## The picks: faces 0-5 against 6-11 as two picks; three pieces in one
+## pick (the first against the other two united); an open piece refused.
+func pick_checks() -> !:
+    let a = try cube()
+    defer a.release()
+    let corner = try pair(a, a, Vector3(1.0, 1.0, 1.0))
+    defer corner.release()
+    near(try result_volume(corner, "0-5", "6-11", 1), 7.0, 1.0e-9)
+    near(try result_volume(corner, "6-11", "0-5", 1), 7.0, 1.0e-9)
+    let third = try pair(corner, a, Vector3(-1.0, -1.0, -1.0))
+    defer third.release()
+    # A less the two others, and all three united, intersected.
+    near(try result_volume(third, "*", "", 1), 6.0, 1.0e-9)
+    near(try result_volume(third, "*", "", 0), 22.0, 1.0e-9)
+    near(try result_volume(third, "*", "", 2), 2.0, 1.0e-9)
+    # A grid is open: refused, saying why.
+    let grid = try MeshPrimitives.grid(1.0, 2)
+    defer grid.release()
+    let open = try pair(a, grid, Vector3(0.0, 1.0, 0.0))
+    defer open.release()
+    let numbers: f64[1] = [0.0]
+    var refused = false
+    let attempt: interop.Reference[VerbResult]? = Verbs.run("Mesh Boolean", open, "*", 3, numbers[..<1]) catch failure:
+        assert(failure.message.length > 0)
+        refused = true
+        recover none
+    if let made = attempt: made.release()
+    assert(refused)
+
+## A tetrahedron one of whose edges runs exactly through the cube's corner
+## (1, 2, 1), two along its edges and one corner on its corner: each
+## operation closed, and the volumes consistent (A + B = union +
+## intersection; A - B = A - intersection).
+func corner_cut_checks() -> !:
+    let a = try cube()
+    defer a.release()
+    var builder = try MeshBuilder()
+    defer builder.close()
+    let places: Vector3[4] = [Vector3(-1.0, 0.0, -1.0), Vector3(3.0, 4.0, 3.0), Vector3(3.0, 0.0, -1.0), Vector3(-1.0, 4.0, -1.0)]
+    for place in places: _ = try builder.point(place)
+    let faces: i64[12] = [0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3]
+    for face in 0..<(usize)4:
+        try builder.face(3)
+        for k in 0..<(usize)3: try builder.corner(faces[face * 3 + k])
+    let tetra = try builder.finish()
+    defer tetra.release()
+    let b_volume = math.abs(try volume(tetra))
+    let both = try a.value().merged(tetra)
+    defer both.release()
+    let joined = try result_volume(both, "*", "", 0)
+    let less = try result_volume(both, "*", "", 1)
+    let common = try result_volume(both, "*", "", 2)
+    assert(common > 0.1)
+    near(joined + common, 8.0 + b_volume, 1.0e-9)
+    near(less + common, 8.0, 1.0e-9)
+
+## Subdivided boxes overlapping half a cell off: their side faces overlap
+## coplanar, each face cut by the other's grid.
+func grid_checks() -> !:
+    let a = try MeshPrimitives.box(Vector3(2.0, 2.0, 2.0), 3, 3, 3)
+    defer a.release()
+    let shifted = try pair(a, a, Vector3(0.5, 0.0, 0.0))
+    defer shifted.release()
+    let expected: f64[3] = [10.0, 2.0, 6.0]
+    try three(shifted, expected)
+
+## Two UV spheres of radius 1, their centers `distance` apart: the lens
+## within a percent of its closed form (the spheres are faceted),
+## inclusion-exclusion to the points' f32 rounding, and a rerun the same
+## to the bit.
+func sphere_checks() -> !:
+    let ball = try MeshPrimitives.sphere(1.0, 64)
+    defer ball.release()
+    let ball_volume = try volume(ball)
+    let both = try pair(ball, ball, Vector3(0.7, 0.3, 0.2))
+    defer both.release()
+    let distance = math.sqrt(0.49 + 0.09 + 0.04)
+    let lens = math.pi * (4.0 + distance) * (2.0 - distance) * (2.0 - distance) / 12.0
+    let joined = try result_volume(both, "*", "", 0)
+    let less = try result_volume(both, "*", "", 1)
+    let common = try result_volume(both, "*", "", 2)
+    near(common, lens, lens * 0.01)
+    # The new points are stored in f32, as every mesh's are.
+    near(joined + common, 2.0 * ball_volume, 1.0e-6)
+    near(less + common, ball_volume, 1.0e-6)
+    # Reruns: the same points, in the same order, to the bit.
+    let first = try combined(both, "*", "", 0)
+    defer first.release()
+    let again = try combined(both, "*", "", 0)
+    defer again.release()
+    let x = try first.value().mesh()
+    defer x.release()
+    let y = try again.value().mesh()
+    defer y.release()
+    assert(x.value().point_count() == y.value().point_count() and x.value().face_count() == y.value().face_count())
+    for point in 0..<x.value().point_count():
+        let p = try x.value().point(point)
+        let q = try y.value().point(point)
+        assert(p.x.bits() == q.x.bits() and p.y.bits() == q.y.bits() and p.z.bits() == q.z.bits())
+    for face in 0..<x.value().face_count():
+        let size = try x.value().face_size(face)
+        assert(size == (try y.value().face_size(face)))
+        for at in 0..<size: assert((try x.value().face_point(face, at)) == (try y.value().face_point(face, at)))
+
+## A point value and a corner value equal to X, and a face group on A:
+## after a union the new points' and corners' values are still their X
+## (interpolated along the cut), and A's six faces keep the group.
+func attribute_checks() -> !:
+    let a = try cube()
+    defer a.release()
+    let both = try pair(a, a, Vector3(1.0, 1.0, 1.0))
+    defer both.release()
+    let geometry = both.value()
+    let points = (usize)geometry.point_count()
+    let xs = try new f64[points] in memory.heap
+    defer free(xs) in memory.heap
+    for point in 0..<points: xs[point] = (try geometry.point((i64)point)).x
+    let corners = (usize)(try geometry.domain_count(1))
+    let corner_xs = try new f64[corners] in memory.heap
+    defer free(corner_xs) in memory.heap
+    var at: usize = 0
+    for face in 0..<geometry.face_count():
+        for k in 0..<(try geometry.face_size(face)):
+            corner_xs[at] = (try geometry.point(try geometry.face_point(face, k))).x
+            at += 1
+    let members: i64[6] = [0, 1, 2, 3, 4, 5]
+    let with_points = try geometry.with_attribute("px", 0, 1, xs[..<points])
+    defer with_points.release()
+    let with_corners = try with_points.value().with_attribute("cx", 1, 1, corner_xs[..<corners])
+    defer with_corners.release()
+    let tagged = try with_corners.value().with_group("from_a", 2, members[..<6])
+    defer tagged.release()
+    let result = try combined(tagged, "*", "", 0)
+    defer result.release()
+    let made = try result.value().mesh()
+    defer made.release()
+    let out = made.value()
+    assert(out.group_size("from_a", 2) == 6)
+    let px = out.find_attribute("px", 0)
+    let cx = out.find_attribute("cx", 1)
+    assert(px >= 0 and cx >= 0)
+    for point in 0..<out.point_count():
+        near(try out.attribute_value(px, point), (try out.point(point)).x, 1.0e-6)
+    var corner: i64 = 0
+    for face in 0..<out.face_count():
+        for k in 0..<(try out.face_size(face)):
+            near(try out.attribute_value(cx, corner), (try out.point(try out.face_point(face, k))).x, 1.0e-6)
+            corner += 1
+
+# mark: Random pairs and chains
+
+## A fixed stream of numbers in 0..1 (a 64-bit LCG), so the checks are the
+## same every run.
+struct Stream:
+    var state: u64
+
+    func next() -> f64:
+        self.state = self.state *% 6364136223846793005 +% 1442695040888963407
+        return (f64)(self.state >> 11) / 9007199254740992.0
+
+## Union, Subtract and Intersect of faces `first` (0..split) and the rest,
+## each balanced: union + intersection = A + B, difference + intersection
+## = A, within `tolerance`.
+func consistent(mesh: interop.Reference[Mesh], split: i64, a: f64, b: f64, tolerance: f64) -> !:
+    var first_room: u8[32] = ---
+    var second_room: u8[32] = ---
+    let group = strings.format(first_room[..<32], f"0-{split - 1}") else "*"
+    let second = strings.format(second_room[..<32], f"{split}-{mesh.value().face_count() - 1}") else "*"
+    var volumes: f64[3] = [0.0, 0.0, 0.0]
+    for operation in 0..<(usize)3:
+        volumes[operation] = try result_volume(mesh, group, second, (i64)operation, true)
+    near(volumes[0] + volumes[2], a + b, tolerance)
+    near(volumes[1] + volumes[2], a, tolerance)
+
+func random_checks() -> !:
+    var stream = Stream(20261013)
+    # Boxes of 1 to 3 cells a side moved on a quarter grid: coplanar faces,
+    # shared edges and corners everywhere; dyadic, so the volumes are exact.
+    for _ in 0..<(usize)100:
+        let cells_a = 1 + (i64)(stream.next() * 3.0)
+        let cells_b = 1 + (i64)(stream.next() * 3.0)
+        let a = try MeshPrimitives.box(Vector3(2.0, 2.0, 2.0), cells_a, cells_a, cells_a)
+        defer a.release()
+        let size = Vector3(0.5 * (1.0 + math.floor(stream.next() * 6.0)), 0.5 * (1.0 + math.floor(stream.next() * 6.0)), 0.5 * (1.0 + math.floor(stream.next() * 6.0)))
+        let b = try MeshPrimitives.box(size, cells_b, cells_b, cells_b)
+        defer b.release()
+        let offset = Vector3(0.25 * math.floor(stream.next() * 13.0 - 6.0), 0.25 * math.floor(stream.next() * 13.0 - 6.0), 0.25 * math.floor(stream.next() * 13.0 - 6.0))
+        let both = try pair(a, b, offset)
+        defer both.release()
+        try consistent(both, a.value().face_count(), try volume(a), try volume(b), 1.0e-9)
+    # A sphere against a turned sphere, box or torus.
+    for kind_at in 0..<(usize)20:
+        let a = try MeshPrimitives.sphere(1.0, 12 + (i64)(stream.next() * 12.0))
+        defer a.release()
+        let r = 0.5 + stream.next()
+        let n = 8 + (i64)(stream.next() * 12.0)
+        let kind = kind_at % 3
+        let shape = try (MeshPrimitives.sphere(r, n) if kind == 0 else (MeshPrimitives.box(Vector3(1.0 + r, 1.0 + r * 0.5, 2.0 - r), 2, 2, 2) if kind == 1 else MeshPrimitives.torus(0.8, 0.3, n)))
+        defer shape.release()
+        let turned = try shape.value().transformed(Vector3(stream.next() - 0.5, stream.next() - 0.5, stream.next() - 0.5), Vector3(stream.next() * 3.0, stream.next() * 3.0, stream.next() * 3.0), Vector3(1.0, 1.0, 1.0))
+        defer turned.release()
+        let both = try a.value().merged(turned)
+        defer both.release()
+        try consistent(both, a.value().face_count(), try volume(a), try volume(turned), 1.0e-6)
+    # A sphere cut again and again by turned boxes, each result the next
+    # one's first piece: rounded cuts meeting new ones.
+    var current = try MeshPrimitives.sphere(1.0, 24)
+    defer current.release()
+    for step in 0..<(usize)16:
+        let box = try MeshPrimitives.box(Vector3(0.6, 0.6, 0.6))
+        defer box.release()
+        let placed = try box.value().transformed(Vector3(stream.next() * 1.6 - 0.8, stream.next() * 1.6 - 0.8, stream.next() * 1.6 - 0.8), Vector3(stream.next(), stream.next(), stream.next()), Vector3(1.0, 1.0, 1.0))
+        defer placed.release()
+        let both = try current.value().merged(placed)
+        defer both.release()
+        let split = current.value().face_count()
+        try consistent(both, split, try volume(current), try volume(placed), 1.0e-6)
+        var first_room: u8[32] = ---
+        var second_room: u8[32] = ---
+        let group = strings.format(first_room[..<32], f"0-{split - 1}") else "*"
+        let second = strings.format(second_room[..<32], f"{split}-{both.value().face_count() - 1}") else "*"
+        let result = try combined(both, group, second, (i64)(step % 2))
+        let next = try result.value().mesh()
+        result.release()
+        current.release()
+        current = next

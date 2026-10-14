@@ -1,0 +1,327 @@
+# mark: Triangulating a cut triangle ===========================================================
+
+# Each cut triangle is triangulated in its own plane with the cut's points
+# inserted and its segments as constrained edges: points one by one (a walk
+# finds the triangle holding the next, which splits in three, or in two on
+# an edge), then each segment by flipping the edges it crosses (Sloan's
+# 1993 algorithm, which ends because no point lies inside a segment: a
+# point on one splits it). Every test is an exact orientation of exact
+# points, so the result is a valid triangulation whatever the shapes, and
+# no Delaunay criterion is needed. Corners are counterclockwise in the
+# host's projection, turned so the host triangle itself is: the host's
+# winding in 3D.
+
+## A triangle of a triangulation: its corners (local numbers), the triangle
+## across each side (side k is opposite corner k; -1 the host's border)
+## and which sides are cut edges (bit k).
+struct Tri:
+    var v: u32[3]
+    var n: i32[3]
+    var fixed: u8
+
+    ## The side of this triangle opposite corner `point`, or 3.
+    func corner_of(point: u32) -> usize:
+        for k in 0..<(usize)3:
+            if self.v[k] == point: return k
+        return 3
+
+    ## The side whose neighbor is `other`, or 3.
+    func side_to(other: i32) -> usize:
+        for k in 0..<(usize)3:
+            if self.n[k] == other: return k
+        return 3
+
+## A cut edge made of segment `segment`'s piece from `first` to `second`.
+struct FixedEdge:
+    let first: u32
+    let second: u32
+    let segment: u32
+
+## The triangulation of one cut triangle.
+struct Triangulation:
+    var arena: Arena*
+    var axis_u: usize
+    var axis_v: usize
+    var sense: i64
+    ## Per local point: its number in the cut and its exact coordinates.
+    var ids: Growing[u32]
+    var points: Growing[HPoint]
+    ## Per local point: a triangle it is a corner of.
+    var corner_tri: Growing[i32]
+    var tris: Growing[Tri]
+    var fixed_edges: Growing[FixedEdge]
+    ## Scratch for walks and fans.
+    var fan: Growing[i32]
+    var queue: Growing[u64]
+    var crossed: Growing[u64]
+    var seed: u64
+
+    func init(arena: Arena*):
+        self.arena = arena
+        self.axis_u = 0
+        self.axis_v = 1
+        self.sense = 1
+        self.ids = Growing[u32]()
+        self.points = Growing[HPoint]()
+        self.corner_tri = Growing[i32]()
+        self.tris = Growing[Tri]()
+        self.fixed_edges = Growing[FixedEdge]()
+        self.fan = Growing[i32]()
+        self.queue = Growing[u64]()
+        self.crossed = Growing[u64]()
+        self.seed = 1
+
+    func close():
+        self.ids.close()
+        self.points.close()
+        self.corner_tri.close()
+        self.tris.close()
+        self.fixed_edges.close()
+        self.fan.close()
+        self.queue.close()
+        self.crossed.close()
+
+    ## Start over on a host triangle: its three corners (cut numbers, in its
+    ## winding) as the one triangle, in projection `projection`.
+    func begin(table: const PointTable*, corners: const u32[3], projection: Projection, seed: u64) -> !:
+        self.ids.clear()
+        self.points.clear()
+        self.corner_tri.clear()
+        self.tris.clear()
+        self.fixed_edges.clear()
+        self.axis_u = projection.u
+        self.axis_v = projection.v
+        self.sense = projection.sense
+        self.seed = seed * 2 + 1
+        for k in 0..<(usize)3:
+            try self.ids.push(corners[k])
+            try self.points.push(table.point((usize)corners[k]))
+            try self.corner_tri.push(0)
+        try self.tris.push(Tri([0, 1, 2], [-1, -1, -1], 0))
+
+    ## The exact orientation of local points a, b, c, positive when they
+    ## turn as the host does.
+    func orient(a: u32, b: u32, c: u32) -> i64!:
+        return self.sense * (try orient2d_h(self.arena, &self.points.items[(usize)a], &self.points.items[(usize)b], &self.points.items[(usize)c], self.axis_u, self.axis_v))
+
+    ## A deterministic pseudo-random number (xorshift), for the walk.
+    func next_random() -> u64:
+        var x = self.seed
+        x = x ^ (x << 13)
+        x = x ^ (x >> 7)
+        x = x ^ (x << 17)
+        self.seed = x
+        return x
+
+    # mark: Points
+
+    ## Insert cut point `id` (inside the host or on its border).
+    func insert_point(table: const PointTable*, id: u32) -> !:
+        let p = (u32)self.points.count
+        try self.ids.push(id)
+        try self.points.push(table.point((usize)id))
+        try self.corner_tri.push(-1)
+        let (tri, on) = try self.locate(p)
+        if on < 3: try self.split_side(tri, on, p)
+        else: try self.split_inside(tri, p)
+
+    ## The triangle holding local point p and, when p is on one of its
+    ## sides, that side (else 3). A visibility walk that leaves through a
+    ## random side among those p is beyond (it cannot cycle forever),
+    ## falling back to trying every triangle after many steps.
+    func locate(p: u32) -> (usize, usize)!:
+        var current = (usize)self.corner_tri.items[(usize)self.ids.count - 2] if self.ids.count > 1 else 0
+        if current >= self.tris.count: current = 0
+        var steps: usize = 0
+        while steps < 4 * self.tris.count + 64:
+            steps += 1
+            let tri = self.tris.items[current]
+            let start = (usize)(self.next_random() % 3)
+            var moved = false
+            for step in 0..<(usize)3:
+                let k = (start + step) % 3
+                if try self.orient(tri.v[(k + 1) % 3], tri.v[(k + 2) % 3], p) < 0:
+                    if tri.n[k] < 0: error(errors.invalid, "Boolean: inconsistent cut (a point outside its face)")
+                    current = (usize)tri.n[k]
+                    moved = true
+                    break
+            if not moved: return try self.placed(current, p)
+        for at in 0..<self.tris.count:
+            let tri = self.tris.items[at]
+            var outside = false
+            for k in 0..<(usize)3:
+                if try self.orient(tri.v[(k + 1) % 3], tri.v[(k + 2) % 3], p) < 0: outside = true
+            if not outside: return try self.placed(at, p)
+        error(errors.invalid, "Boolean: inconsistent cut (a point outside its face)")
+
+    ## Where p is in triangle `at` that holds it: inside (3) or on a side.
+    func placed(at: usize, p: u32) -> (usize, usize)!:
+        let tri = self.tris.items[at]
+        var on: usize = 3
+        var zeros: usize = 0
+        for k in 0..<(usize)3:
+            if try self.orient(tri.v[(k + 1) % 3], tri.v[(k + 2) % 3], p) == 0:
+                on = k
+                zeros += 1
+        if zeros > 1: error(errors.invalid, "Boolean: two cut points in one place (the pieces cross themselves?)")
+        return (at, on)
+
+    ## Point p inside triangle `at`: three triangles.
+    func split_inside(at: usize, p: u32) -> !:
+        let old = self.tris.items[at]
+        let a = old.v[0]
+        let b = old.v[1]
+        let c = old.v[2]
+        let t0 = (i32)at
+        let t1 = (i32)self.tris.count
+        let t2 = t1 + 1
+        let flag0: u8 = (old.fixed >> 0) & 1
+        let flag1: u8 = (old.fixed >> 1) & 1
+        let flag2: u8 = (old.fixed >> 2) & 1
+        self.tris.items[at] = Tri([a, b, p], [t1, t2, old.n[2]], flag2 << 2)
+        try self.tris.push(Tri([b, c, p], [t2, t0, old.n[0]], flag0 << 2))
+        try self.tris.push(Tri([c, a, p], [t0, t1, old.n[1]], flag1 << 2))
+        self.repoint(old.n[0], t0, t1)
+        self.repoint(old.n[1], t0, t2)
+        self.corner_tri.items[(usize)a] = t0
+        self.corner_tri.items[(usize)b] = t0
+        self.corner_tri.items[(usize)c] = t1
+        self.corner_tri.items[(usize)p] = t0
+
+    ## Point p on side `k` of triangle `at`: that triangle and the one
+    ## across split in two each.
+    func split_side(at: usize, k: usize, p: u32) -> !:
+        let old = self.tris.items[at]
+        let c = old.v[k]
+        let a = old.v[(k + 1) % 3]
+        let b = old.v[(k + 2) % 3]
+        let across = old.n[k]
+        let flag = (old.fixed >> (u8)k) & 1
+        let side_ca = old.n[(k + 2) % 3]
+        let side_bc = old.n[(k + 1) % 3]
+        let flag_ca = (old.fixed >> (u8)((k + 2) % 3)) & 1
+        let flag_bc = (old.fixed >> (u8)((k + 1) % 3)) & 1
+        let t0 = (i32)at
+        let t1 = (i32)self.tris.count
+        if across < 0:
+            # (c, a, p) and (c, p, b).
+            self.tris.items[at] = Tri([c, a, p], [-1, t1, side_ca], flag | (flag_ca << 2))
+            try self.tris.push(Tri([c, p, b], [-1, side_bc, t0], flag | (flag_bc << 1)))
+            self.repoint(side_bc, t0, t1)
+            self.corner_tri.items[(usize)c] = t0
+            self.corner_tri.items[(usize)a] = t0
+            self.corner_tri.items[(usize)p] = t0
+            self.corner_tri.items[(usize)b] = t1
+            return
+        let other = self.tris.items[(usize)across]
+        let j = other.side_to(t0)
+        let d = other.v[j]
+        let side_bd = other.n[other.corner_of(a)]
+        let side_da = other.n[other.corner_of(b)]
+        let flag_bd = (other.fixed >> (u8)other.corner_of(a)) & 1
+        let flag_da = (other.fixed >> (u8)other.corner_of(b)) & 1
+        let u0 = across
+        let u1 = t1 + 1
+        # (c, a, p), (c, p, b) from this one; (d, b, p), (d, p, a) across.
+        self.tris.items[at] = Tri([c, a, p], [u1, t1, side_ca], flag | (flag_ca << 2))
+        try self.tris.push(Tri([c, p, b], [u0, side_bc, t0], flag | (flag_bc << 1)))
+        self.tris.items[(usize)u0] = Tri([d, b, p], [t1, u1, side_bd], flag | (flag_bd << 2))
+        try self.tris.push(Tri([d, p, a], [t0, side_da, u0], flag | (flag_da << 1)))
+        self.repoint(side_bc, t0, t1)
+        self.repoint(side_da, u0, u1)
+        self.corner_tri.items[(usize)c] = t0
+        self.corner_tri.items[(usize)a] = t0
+        self.corner_tri.items[(usize)p] = t0
+        self.corner_tri.items[(usize)b] = t1
+        self.corner_tri.items[(usize)d] = u0
+
+    ## Triangle `neighbor` (when there is one) now borders `new` where it
+    ## bordered `old`.
+    func repoint(neighbor: i32, old: i32, new_tri: i32):
+        if neighbor < 0: return
+        let side = self.tris.items[(usize)neighbor].side_to(old)
+        if side < 3: self.tris.items[(usize)neighbor].n[side] = new_tri
+
+    # mark: Edges
+
+    ## The triangles around local point x, in turn (an open fan ends at
+    ## the border), into `fan`.
+    func gather_fan(x: u32) -> !:
+        self.fan.clear()
+        let start = self.corner_tri.items[(usize)x]
+        var current = start
+        # Turn one way until back at the start or out at the border.
+        while true:
+            try self.fan.push(current)
+            let tri = self.tris.items[(usize)current]
+            let k = tri.corner_of(x)
+            let next = tri.n[(k + 1) % 3]
+            if next == start: return
+            if next < 0: break
+            current = next
+        # Open fan: the other way from the start.
+        current = start
+        while true:
+            let tri = self.tris.items[(usize)current]
+            let k = tri.corner_of(x)
+            let next = tri.n[(k + 2) % 3]
+            if next < 0: return
+            try self.fan.push(next)
+            current = next
+
+    ## The triangle with side (x, y) going from x to y counterclockwise, and
+    ## that side's index; (-1, 3) when there is none.
+    func find_side(x: u32, y: u32) -> (i32, usize)!:
+        try self.gather_fan(x)
+        for at in 0..<self.fan.count:
+            let t = self.fan.items[at]
+            let tri = self.tris.items[(usize)t]
+            let k = tri.corner_of(x)
+            if tri.v[(k + 1) % 3] == y: return (t, (k + 2) % 3)
+        return (-1, 3)
+
+    ## Mark the edge between x and y (it exists) as cut by segment `segment`.
+    func fix_edge(x: u32, y: u32, segment: u32) -> !:
+        var found = try self.find_side(x, y)
+        if found.0 < 0: found = try self.find_side(y, x)
+        let t = found.0
+        let k = found.1
+        if t < 0: error(errors.invalid, "Boolean: inconsistent cut (a lost edge)")
+        let tri = &self.tris.items[(usize)t]
+        tri.fixed = tri.fixed | ((u8)1 << (u8)k)
+        let across = tri.n[k]
+        if across >= 0:
+            let other = &self.tris.items[(usize)across]
+            let j = other.side_to(t)
+            other.fixed = other.fixed | ((u8)1 << (u8)j)
+        try self.fixed_edges.push(FixedEdge(x, y, segment))
+
+    ## Turn the diagonal on side k of triangle `at` (its quad convex): the
+    ## two triangles (c, a, b) and (d, b, a) become (c, a, d) and (c, d, b).
+    func flip(at: usize, k: usize):
+        let t = (i32)at
+        let old = self.tris.items[at]
+        let c = old.v[k]
+        let a = old.v[(k + 1) % 3]
+        let b = old.v[(k + 2) % 3]
+        let u = old.n[k]
+        let other = self.tris.items[(usize)u]
+        let d = other.v[other.side_to(t)]
+        let ia = other.corner_of(a)
+        let ib = other.corner_of(b)
+        let side_ad = other.n[ib]
+        let side_db = other.n[ia]
+        let flag_ad = (other.fixed >> (u8)ib) & 1
+        let flag_db = (other.fixed >> (u8)ia) & 1
+        let side_ca = old.n[(k + 2) % 3]
+        let side_bc = old.n[(k + 1) % 3]
+        let flag_ca = (old.fixed >> (u8)((k + 2) % 3)) & 1
+        let flag_bc = (old.fixed >> (u8)((k + 1) % 3)) & 1
+        self.tris.items[at] = Tri([c, a, d], [side_ad, u, side_ca], flag_ad | (flag_ca << 2))
+        self.tris.items[(usize)u] = Tri([c, d, b], [side_db, side_bc, t], flag_db | (flag_bc << 1))
+        self.repoint(side_ad, u, t)
+        self.repoint(side_bc, t, u)
+        self.corner_tri.items[(usize)c] = t
+        self.corner_tri.items[(usize)a] = t
+        self.corner_tri.items[(usize)d] = t
+        self.corner_tri.items[(usize)b] = u

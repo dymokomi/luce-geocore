@@ -1,0 +1,187 @@
+## Boolean: Union, Subtract or Intersect of closed pieces, after Blender's
+## Boolean (Exact) and Maya's Boolean, exact as booleans/ says. With a
+## second pick the first pick's pieces are A and the second's B; with one
+## pick of several pieces the first piece (the one holding the lowest face)
+## is A and the rest are B. A pick of several pieces is first united, so A
+## and B are solids each; Union keeps A or B, Subtract A without B,
+## Intersect A and B. Faces outside the picks pass through. The result's
+## faces are cut from their source faces (attributes carried) and are the
+## output selection. A piece is the faces sharing a `path` (Edit Mesh's
+## Object level), else a part joined through shared points; pieces must be
+## closed.
+import booleans
+
+let boolean_parms: ParmSpec[1] = [
+    ParmSpec("Operation", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Union|Subtract|Intersect", "Union keeps what any piece holds, Subtract what the pieces hold outside the cutters, Intersect what both hold.")]
+
+let boolean_picks: PickSpec[2] = [
+    PickSpec("Pieces", "objects", "Pick the pieces to combine"),
+    PickSpec("Cutters", "objects", "Pick the pieces to cut with")]
+
+func boolean_verb() -> Verb:
+    return Verb("Mesh Boolean", "Modeling", "Union, subtract or intersect closed pieces, exactly", Domain.face, true, boolean_parms, true, cook_boolean, section = "Modify", label = "Boolean", family = "Combine", icon = "boolean-union", picks = boolean_picks, wants = boolean_wants)
+
+## Whether the first pick alone holds fewer than two pieces.
+func boolean_wants(input: const VerbInput*) -> bool!:
+    var tags = Growing[i32]()
+    defer tags.close()
+    return try boolean_pieces(input.mesh, input.group, &tags, 0) < 2
+
+## Each face's piece among `group`'s faces, numbered from `first` in order
+## of their lowest faces, into `tags` (-1 outside the group, which stays as
+## it was); how many pieces.
+func boolean_pieces(mesh: const Mesh*, group: Bits, tags: Growing[i32]*, first: i32) -> usize!:
+    let faces = (usize)mesh.face_count()
+    if tags.count < faces: try tags.extend(faces, -1)
+    let island = try new i32[faces] --- in memory.heap
+    defer free(island) in memory.heap
+    var count: usize = 0
+    let path = mesh.attribute_on("path", Domain.face)
+    if path >= 0 and (try mesh.attribute_entry(path)).kind == DataType.text:
+        # By path: one piece per text, in order of first use.
+        let entry = try mesh.attribute_entry(path)
+        var seen = Growing[f64]()
+        defer seen.close()
+        for face in 0..<faces:
+            island[face] = -1
+            if not group.get(face): continue
+            let text = entry.number(face, 0)
+            var number: i64 = -1
+            for at in 0..<seen.count:
+                if seen.items[at] == text: number = (i64)at
+            if number < 0:
+                number = (i64)seen.count
+                try seen.push(text)
+            island[face] = (i32)number
+        count = seen.count
+    else:
+        let topology = try Topology.of(mesh)
+        count = try face_islands(&topology, group, true, island[..<faces])
+    for face in 0..<faces:
+        if island[face] >= 0: tags.items[face] = first + island[face]
+    return count
+
+func cook_boolean(input: const VerbInput*, output: VerbOutput*) -> !:
+    let operation = (i64)input.parms.at(0)
+    let mesh = input.mesh
+    let faces = (usize)mesh.face_count()
+    if input.group.population() == 0:
+        output.warning = "Boolean needs pieces to combine; the input passes through"
+        return
+    # Tags: A's pieces first, then B's.
+    var tags = Growing[i32]()
+    defer tags.close()
+    var a_count: usize = 0
+    var b_count: usize = 0
+    if let second = input.second:
+        for face in 0..<faces:
+            if input.group.get(face) and second.get(face): error(errors.invalid, "Boolean: a piece is both one to combine and one to cut with")
+        a_count = try boolean_pieces(mesh, input.group, &tags, 0)
+        b_count = try boolean_pieces(mesh, second, &tags, (i32)a_count)
+    else:
+        let count = try boolean_pieces(mesh, input.group, &tags, 0)
+        if count < 2:
+            output.warning = "Boolean needs two pieces (or pieces to cut with); the input passes through"
+            return
+        a_count = 1
+        b_count = count - 1
+    if b_count == 0:
+        output.warning = "Boolean needs pieces to cut with; the input passes through"
+        return
+    # Unite each side's pieces into its first, then combine the two.
+    var current: Mesh*? = none
+    defer:
+        if let made = current: mesh_dispose(made)
+    var result = try BitsBuilder.zeros(0)
+    defer result.close()
+    var steps = Growing[(i32, i32, i64)]()
+    defer steps.close()
+    for piece in 1..<a_count: try steps.push((0, (i32)piece, booleans.boolean_union))
+    for piece in 1..<b_count: try steps.push(((i32)a_count, (i32)(a_count + piece), booleans.boolean_union))
+    try steps.push((0, (i32)a_count, operation))
+    for step in steps.view():
+        var source = mesh
+        if let made = current: source = made
+        var next_tags = Growing[i32]()
+        defer next_tags.close()
+        let made = try boolean_step(source, tags.view(), step.0, step.1, step.2, &next_tags, &result)
+        if let old = current: mesh_dispose(old)
+        current = made
+        tags.close()
+        tags = next_tags
+        next_tags = Growing[i32]()
+    output.mesh = current
+    current = none
+    output.selection.close()
+    output.selection = result
+    result = try BitsBuilder.zeros(0)
+    output.selection_domain = Domain.face
+
+## One boolean of the faces tagged `a` and `b` on `source`: the new mesh,
+## its faces' tags (the result's faces take `a`), and the result's faces.
+func boolean_step(source: const Mesh*, tags: const i32[], a: i32, b: i32, operation: i64, next_tags: Growing[i32]*, result: BitsBuilder*) -> Mesh*!:
+    let faces = (usize)source.face_count()
+    var a_bits = try BitsBuilder.zeros(faces)
+    defer a_bits.close()
+    var b_bits = try BitsBuilder.zeros(faces)
+    defer b_bits.close()
+    for face in 0..<faces:
+        if tags[face] == a: a_bits.set(face)
+        elif tags[face] == b: b_bits.set(face)
+    var combined = booleans.Combined()
+    defer combined.close()
+    try booleans.combine(source, a_bits.view(), b_bits.view(), operation, &combined)
+    var builder = TopologyBuilder()
+    defer builder.close()
+    builder.precise = true
+    try builder.begin(source)
+    try builder.copy_points(source)
+    for at in 0..<combined.places.count:
+        _ = try builder.mixed_point(combined.places.items[at], combined.parents.items[at * 3..<at * 3 + 3], combined.weights.items[at * 3..<at * 3 + 3])
+    var made: Growing[u8] = Growing[u8]()
+    defer made.close()
+    var run: usize = 0
+    var next: usize = 0
+    for face in 0..<faces:
+        if combined.operand_faces.items[face] == 0:
+            try next_tags.push(tags[face])
+            try made.push(0)
+            continue
+        # A face kept as it is joins the run copied whole.
+        if next < combined.face_count() and (usize)combined.faces.items[next] == face and combined.kinds.items[next] == 3:
+            try next_tags.push(a)
+            try made.push(1)
+            next += 1
+            continue
+        try builder.copy_faces(source, run, face)
+        run = face + 1
+        while next < combined.face_count() and (usize)combined.faces.items[next] == face:
+            try boolean_face(&builder, &combined, next)
+            try next_tags.push(a)
+            try made.push(1)
+            next += 1
+    try builder.copy_faces(source, run, faces)
+    try builder.drop_unused_points()
+    let mesh = try builder.finish(source)
+    errdefer mesh_dispose(mesh)
+    # The faces in builder order: copied runs and the result's, as `made` says.
+    var bits = try BitsBuilder.zeros(made.count)
+    for at in 0..<made.count:
+        if made.items[at] != 0: bits.set(at)
+    result.close()
+    *result = bits
+    return mesh
+
+## Combined face `index` into the builder.
+func boolean_face(builder: TopologyBuilder*, combined: const booleans.Combined*, index: usize) -> !:
+    let kind = combined.kinds.items[index]
+    try builder.face(combined.faces.items[index], kind == 1, kind == 2)
+    for corner in (usize)combined.offsets.items[index]..<(usize)combined.offsets.items[index + 1]:
+        let point = combined.points.items[corner]
+        let parent = combined.corner_parents.items[corner]
+        if parent >= 0:
+            try builder.corner(point, parent)
+            continue
+        let mix = (usize)(-1 - parent) * 3
+        try builder.mixed_corner(point, combined.mix_corners.items[mix..<mix + 3], combined.mix_weights.items[mix..<mix + 3])
+    try builder.end_face()

@@ -1,0 +1,378 @@
+# mark: Operands ===============================================================================
+
+## Which operand a face belongs to.
+let outside_operands: u8 = 0
+let operand_a: u8 = 1
+let operand_b: u8 = 2
+
+## The two operands as triangles (the mesh's display triangles, so a face
+## means what the viewport shows) over exact points: a non-precise mesh's
+## f32 positions are exact doubles in its own frame, a precise mesh's f64
+## points exact in the world, and `frame` takes them to the world. A's
+## triangles come first (below `split`), each operand's in face order.
+pub struct Operands:
+    let mesh: const Mesh*
+    let topology: Topology
+    var points: Growing[Vector3]
+    var frame: Vector3
+    ## Per point: the point it is the same as. Points at exactly one place
+    ## take the lowest number there (B's on A's, and a piece's own points
+    ## rounded together by an earlier cut), so the cut sees one point.
+    var same: Growing[i32]
+    ## Per face: its operand (outside_operands, operand_a, operand_b) and
+    ## its first triangle in `triangles` (-1 outside).
+    var face_operand: Growing[u8]
+    var face_first: Growing[i32]
+    ## Per triangle: its points (after `same`), its corners, its face and
+    ## its projection.
+    var triangles: Growing[i32]
+    var corners: Growing[i32]
+    var faces: Growing[i32]
+    var projections: Growing[Projection]
+    var split: usize
+
+    func init(mesh: const Mesh*, topology: Topology):
+        self.mesh = mesh
+        self.topology = topology
+        self.points = Growing[Vector3]()
+        self.frame = Vector3()
+        self.same = Growing[i32]()
+        self.face_operand = Growing[u8]()
+        self.face_first = Growing[i32]()
+        self.triangles = Growing[i32]()
+        self.corners = Growing[i32]()
+        self.faces = Growing[i32]()
+        self.projections = Growing[Projection]()
+        self.split = 0
+
+    func close():
+        self.points.close()
+        self.same.close()
+        self.face_operand.close()
+        self.face_first.close()
+        self.triangles.close()
+        self.corners.close()
+        self.faces.close()
+        self.projections.close()
+
+    func triangle_count() -> usize:
+        return self.faces.count
+
+    ## Triangle `t`'s operand.
+    func operand_of(t: usize) -> u8:
+        return operand_a if t < self.split else operand_b
+
+    ## Point `k` (0..3) of triangle `t`.
+    func vertex(t: usize, k: usize) -> usize:
+        return (usize)self.triangles.items[t * 3 + k]
+
+    func place(t: usize, k: usize) -> Vector3:
+        return self.points.items[self.vertex(t, k)]
+
+    ## Gather faces `a` and `b` (disjoint) of the mesh.
+    func gather(a: Bits, b: Bits) -> !:
+        let mesh = self.mesh
+        let faces = self.topology.faces()
+        let positions = mesh.point_span()
+        let precise = precise_span(mesh)
+        try self.points.reserve(positions.length)
+        for at in 0..<positions.length:
+            self.points.items[at] = precise[at] if precise.length > 0 else positions[at].vector()
+        self.points.count = positions.length
+        self.frame = Vector3() if precise.length > 0 else mesh.position_origin()
+        try self.face_operand.fill(faces, outside_operands)
+        try self.face_first.fill(faces, -1)
+        for face in 0..<faces:
+            if a.get(face): self.face_operand.items[face] = operand_a
+            elif b.get(face): self.face_operand.items[face] = operand_b
+        try self.unify()
+        try self.add_triangles()
+        try self.projections.reserve(self.faces.count)
+        self.projections.count = self.faces.count
+        var work = ProjectionWork(&self)
+        try parallel.for_each_range(self.faces.count, 4096, (void*)&work, project_range)
+        try self.mend_slivers()
+
+    ## Faces whose display triangles include one without area (collinear
+    ## points of a polygon, rounded so by an earlier cut) triangulated anew,
+    ## exactly, so none is flat; a face that cannot be keeps its own.
+    func mend_slivers() -> !:
+        var last: i64 = -1
+        for t in 0..<self.faces.count:
+            let face = (i64)self.faces.items[t]
+            if self.projections.items[t].sense != 0 or face == last or self.collapsed(t): continue
+            last = face
+            if try self.retriangulate((usize)face):
+                let first = (usize)self.face_first.items[(usize)face]
+                let size = (usize)(self.topology.offsets[(usize)face + 1] - self.topology.offsets[(usize)face])
+                for at in first..<first + size - 2: self.projections.items[at] = projection_of(self.place(at, 0), self.place(at, 1), self.place(at, 2))
+
+    ## Ear clip face `face` exactly in the projection its outline faces
+    ## most: each ear strictly convex with no other corner in or on it.
+    ## False (nothing changed) when the outline has no such ears.
+    func retriangulate(face: usize) -> bool!:
+        let start = (usize)self.topology.offsets[face]
+        let size = (usize)self.topology.offsets[face + 1] - start
+        var normal = Vector3()
+        for k in 0..<size:
+            let p = self.points.items[(usize)self.same.items[(usize)self.topology.corners[start + k]]]
+            let q = self.points.items[(usize)self.same.items[(usize)self.topology.corners[start + (k + 1) % size]]]
+            normal = normal.add(p.cross(q))
+        let axis: usize = 0 if math.abs(normal.x) >= math.abs(normal.y) and math.abs(normal.x) >= math.abs(normal.z) else (1 if math.abs(normal.y) >= math.abs(normal.z) else 2)
+        let along = Projection.along(axis)
+        let sense: i64 = 1 if normal.coordinate(axis) > 0.0 else (-1 if normal.coordinate(axis) < 0.0 else 0)
+        if sense == 0: return false
+        # Corners at the place of the one before them drop out.
+        var left = Growing[u32]()
+        defer left.close()
+        for k in 0..<size:
+            let point = self.same.items[(usize)self.topology.corners[start + k]]
+            if self.same.items[(usize)self.topology.corners[start + (k + size - 1) % size]] != point: try left.push((u32)k)
+        if left.count < 3: return false
+        var made = Growing[u32]()
+        defer made.close()
+        var ears = Growing[u32]()
+        defer ears.close()
+        try ears.assign(left.view())
+        if not try self.ear_clip(start, &ears, along, sense, &made):
+            # An outline that crosses itself has no ears: a fan from a
+            # corner with no flat triangle (overlaps are cut as folds).
+            var fanned = false
+            for apex in 0..<left.count:
+                made.clear()
+                if try self.fan_from(start, left.view(), apex, &made):
+                    fanned = true
+                    break
+            if not fanned: return false
+        # The dropped corners' slots: collapsed triangles at one corner.
+        while made.count < (size - 2) * 3: try made.push(left.items[0])
+        let first = (usize)self.face_first.items[face]
+        for at in 0..<made.count:
+            let corner = start + (usize)made.items[at]
+            self.corners.items[first * 3 + at] = (i32)corner
+            self.triangles.items[first * 3 + at] = self.same.items[(usize)self.topology.corners[corner]]
+        return true
+
+    ## Ear clip corners `left` (consumed) of the face whose corners start at
+    ## `start` into `made`; false when some ear is missing.
+    func ear_clip(start: usize, left: Growing[u32]*, along: Projection, sense: i64, made: Growing[u32]*) -> bool!:
+        while left.count > 3:
+            var clipped = false
+            for at in 0..<left.count:
+                let a = (usize)left.items[(at + left.count - 1) % left.count]
+                let b = (usize)left.items[at]
+                let c = (usize)left.items[(at + 1) % left.count]
+                if not self.is_ear(start, left.view(), a, b, c, along, sense): continue
+                try made.push((u32)a)
+                try made.push((u32)b)
+                try made.push((u32)c)
+                for move in at..<left.count - 1: left.items[move] = left.items[move + 1]
+                left.count -= 1
+                clipped = true
+                break
+            if not clipped: return false
+        let a = self.corner_place(start, (usize)left.items[0])
+        let b = self.corner_place(start, (usize)left.items[1])
+        let c = self.corner_place(start, (usize)left.items[2])
+        if orient2d(a, b, c, along.u, along.v) * sense <= 0: return false
+        for k in 0..<(usize)3: try made.push(left.items[k])
+        return true
+
+    ## The fan of corners `left` from corner `apex` into `made`; false when
+    ## a triangle of it would be flat.
+    func fan_from(start: usize, left: const u32[], apex: usize, made: Growing[u32]*) -> bool!:
+        let count = left.length
+        let a = (usize)left[apex]
+        for step in 1..<count - 1:
+            let b = (usize)left[(apex + step) % count]
+            let c = (usize)left[(apex + step + 1) % count]
+            if projection_of(self.corner_place(start, a), self.corner_place(start, b), self.corner_place(start, c)).sense == 0: return false
+            try made.push((u32)a)
+            try made.push((u32)b)
+            try made.push((u32)c)
+        return true
+
+    ## The place of corner `k` of the face whose corners start at `start`.
+    func corner_place(start: usize, k: usize) -> Vector3:
+        return self.points.items[(usize)self.same.items[(usize)self.topology.corners[start + k]]]
+
+    ## Whether (a, b, c), corners of the face starting at `start`, is an ear
+    ## among the corners `left`: turning the outline's way, no other corner
+    ## inside it or on it (one at a corner's very place aside).
+    func is_ear(start: usize, left: const u32[], a: usize, b: usize, c: usize, along: Projection, sense: i64) -> bool:
+        let pa = self.corner_place(start, a)
+        let pb = self.corner_place(start, b)
+        let pc = self.corner_place(start, c)
+        if orient2d(pa, pb, pc, along.u, along.v) * sense <= 0: return false
+        for other in left:
+            let k = (usize)other
+            if k == a or k == b or k == c: continue
+            let p = self.corner_place(start, k)
+            if same_place(p, pa) or same_place(p, pb) or same_place(p, pc): continue
+            if orient2d(pa, pb, p, along.u, along.v) * sense >= 0 and orient2d(pb, pc, p, along.u, along.v) * sense >= 0 and orient2d(pc, pa, p, along.u, along.v) * sense >= 0: return false
+        return true
+
+    ## Each operand face's display triangles, A's faces first, each
+    ## operand's in face order: numbered here, filled on the pool.
+    func add_triangles() -> !:
+        let offsets = self.topology.offsets
+        var total: usize = 0
+        for operand in 1..<(u8)3:
+            if operand == operand_b: self.split = total
+            for face in 0..<self.topology.faces():
+                if self.face_operand.items[face] != operand: continue
+                self.face_first.items[face] = (i32)total
+                total += (usize)(offsets[face + 1] - offsets[face]) - 2
+        try self.triangles.reserve(total * 3)
+        try self.corners.reserve(total * 3)
+        try self.faces.reserve(total)
+        self.triangles.count = total * 3
+        self.corners.count = total * 3
+        self.faces.count = total
+        var work = TriangleFill(&self, self.mesh.triangle_span())
+        try parallel.for_each_range(self.topology.faces(), 8192, (void*)&work, fill_triangles)
+
+    ## Number points at one place as the lowest there.
+    func unify() -> !:
+        let points = self.points.count
+        try self.same.reserve(points)
+        for at in 0..<points: self.same.items[at] = (i32)at
+        self.same.count = points
+        let used = try new u8[points] in memory.heap
+        defer free(used) in memory.heap
+        let offsets = self.topology.offsets
+        let corners = self.topology.corners
+        var count: usize = 0
+        for face in 0..<self.topology.faces():
+            if self.face_operand.items[face] == outside_operands: continue
+            for corner in (usize)offsets[face]..<(usize)offsets[face + 1]:
+                let point = (usize)corners[corner]
+                if used[point] == 0: count += 1
+                used[point] = 1
+        if count == 0: return
+        var table = try PlaceTable.sized(count)
+        defer table.close()
+        for point in 0..<points:
+            if used[point] != 0: self.same.items[point] = (i32)table.insert(self.points.view(), point)
+
+    ## Whether triangle `t` has two corners at one point (a sliver an
+    ## earlier cut's rounding closed up): it has no area and no place in
+    ## the cut, its sides' neighbors meeting across it.
+    func collapsed(t: usize) -> bool:
+        let a = self.triangles.items[t * 3]
+        let b = self.triangles.items[t * 3 + 1]
+        let c = self.triangles.items[t * 3 + 2]
+        return a == b or b == c or a == c
+
+    ## Whether triangle `t` has no place in the cut: collapsed, or flat (its
+    ## corners in a line), which its neighbor across the long side makes
+    ## up for by taking the middle corner (see flat_records).
+    func inert(t: usize) -> bool:
+        return self.collapsed(t) or self.projections.items[t].sense == 0
+
+    ## Fail unless each operand is closed: every edge of its faces used as
+    ## often in one direction as in the other (a closed manifold, or solids
+    ## touching along an edge).
+    func check_closed() -> !:
+        let topology = &self.topology
+        let balance = try new i32[topology.edges() * 2] in memory.heap
+        defer free(balance) in memory.heap
+        for face in 0..<topology.faces():
+            let operand = self.face_operand.items[face]
+            if operand == outside_operands: continue
+            let shift: usize = 0 if operand == operand_a else 1
+            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                let edge = (usize)topology.corner_edges[corner]
+                let forward = topology.corners[corner] == topology.edge_points[edge * 2]
+                balance[edge * 2 + shift] += 1 if forward else -1
+        var open_a: usize = 0
+        var open_b: usize = 0
+        for edge in 0..<topology.edges():
+            if balance[edge * 2] != 0: open_a += 1
+            if balance[edge * 2 + 1] != 0: open_b += 1
+        if open_a > 0: error(errors.invalid, "Boolean needs closed pieces: the pieces to combine have open edges (or faces facing opposite ways)")
+        if open_b > 0: error(errors.invalid, "Boolean needs closed pieces: the pieces to cut with have open edges (or faces facing opposite ways)")
+
+struct TriangleFill:
+    var operands: Operands*
+    let display: const i32[]
+
+func fill_triangles(context: void*, first: usize, end: usize, worker: usize):
+    let work = (TriangleFill*)context
+    let operands = work.operands
+    let offsets = operands.topology.offsets
+    let corners = operands.topology.corners
+    for face in first..<end:
+        let at = operands.face_first.items[face]
+        if at < 0: continue
+        let start = (usize)offsets[face]
+        let size = (usize)offsets[face + 1] - start
+        let from_display = (start - face * 2) * 3
+        let to = (usize)at
+        for k in 0..<(size - 2) * 3:
+            let corner = work.display[from_display + k]
+            operands.corners.items[to * 3 + k] = corner
+            operands.triangles.items[to * 3 + k] = operands.same.items[(usize)corners[(usize)corner]]
+        for k in 0..<size - 2: operands.faces.items[to + k] = (i32)face
+
+struct ProjectionWork:
+    var operands: Operands*
+
+func project_range(context: void*, first: usize, end: usize, worker: usize):
+    let work = (ProjectionWork*)context
+    let operands = work.operands
+    for t in first..<end:
+        operands.projections.items[t] = projection_of(operands.place(t, 0), operands.place(t, 1), operands.place(t, 2))
+
+## Points by their exact place: open addressing over the coordinates' bits.
+struct PlaceTable:
+    var slots: i32[]
+    var mask: usize
+
+    static func sized(count: usize) -> PlaceTable!:
+        var size: usize = 64
+        while size < count * 2: size *= 2
+        let slots = try new i32[size] --- in memory.heap
+        for at in 0..<size: slots[at] = -1
+        return PlaceTable(slots, size - 1)
+
+    func close():
+        free(self.slots) in memory.heap
+
+    ## Store `point` unless one is already there; the point there.
+    func insert(points: const Vector3[], point: usize) -> i64:
+        let place = points[point]
+        var at = place_hash(place) & self.mask
+        while self.slots[at] >= 0:
+            let other = (usize)self.slots[at]
+            if same_place(points[other], place): return (i64)other
+            at = (at + 1) & self.mask
+        self.slots[at] = (i32)point
+        return (i64)point
+
+    ## The point at `place`, or -1.
+    func find(points: const Vector3[], place: Vector3) -> i64:
+        var at = place_hash(place) & self.mask
+        while self.slots[at] >= 0:
+            let other = (usize)self.slots[at]
+            if same_place(points[other], place): return (i64)other
+            at = (at + 1) & self.mask
+        return -1
+
+## Whether `p` is in the box [lo, hi].
+func within(p: Vector3, lo: Vector3, hi: Vector3) -> bool:
+    return p.x >= lo.x and p.x <= hi.x and p.y >= lo.y and p.y <= hi.y and p.z >= lo.z and p.z <= hi.z
+
+func same_place(a: Vector3, b: Vector3) -> bool:
+    return a.x == b.x and a.y == b.y and a.z == b.z
+
+## A hash of the exact coordinates (-0 as 0).
+func place_hash(p: Vector3) -> usize:
+    let x = (p.x + 0.0).bits()
+    let y = (p.y + 0.0).bits()
+    let z = (p.z + 0.0).bits()
+    var h = x *% 0x9E3779B97F4A7C15
+    h = (h ^ (h >> 29)) +% y *% 0xBF58476D1CE4E5B9
+    h = (h ^ (h >> 31)) +% z *% 0x94D049BB133111EB
+    h = h ^ (h >> 32)
+    return (usize)h

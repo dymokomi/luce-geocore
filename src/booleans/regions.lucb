@@ -1,0 +1,401 @@
+# mark: The result's faces =====================================================================
+
+# Kept pieces of one source face join back into polygons across sides no
+# other kept face uses (so every edge of the result stays shared by the
+# faces it was shared by); a region's outline, when it is one loop touching
+# itself nowhere, becomes one face, which keeps its source face's corners
+# where it reaches them; a region with a hole, or one that touches itself,
+# stays in triangles. A face the cut left whole is copied as it was,
+# turned over where the result needs it.
+
+## What the boolean makes: new points, and the operands' faces of the
+## result in source face order (other faces are the caller's to copy).
+pub struct Combined:
+    ## Points the cut made, numbered after the mesh's points: their places
+    ## (world), and three parent points each with their weights.
+    pub var places: Growing[Vector3]
+    pub var parents: Growing[i32]
+    pub var weights: Growing[f32]
+    ## Per face: its source face and kind (0 made, 1 the source's corners in
+    ## order, 2 in reverse order, 3 the source face as it is, no corners
+    ## listed); `offsets` starts each face's corners.
+    pub var faces: Growing[i32]
+    pub var kinds: Growing[u8]
+    pub var offsets: Growing[i32]
+    ## Per corner: its point (a mesh point, or the mesh's count plus a new
+    ## point's index) and its parent corner (a source corner, or -1 - m for
+    ## mix m: three source corners with weights).
+    pub var points: Growing[i32]
+    pub var corner_parents: Growing[i32]
+    pub var mix_corners: Growing[i32]
+    pub var mix_weights: Growing[f32]
+    ## Per mesh face: whether it was one of the operands' (its result, if
+    ## any, is in `faces`).
+    pub var operand_faces: Growing[u8]
+
+    pub func init():
+        self.places = Growing[Vector3]()
+        self.parents = Growing[i32]()
+        self.weights = Growing[f32]()
+        self.faces = Growing[i32]()
+        self.kinds = Growing[u8]()
+        self.offsets = Growing[i32]()
+        self.points = Growing[i32]()
+        self.corner_parents = Growing[i32]()
+        self.mix_corners = Growing[i32]()
+        self.mix_weights = Growing[f32]()
+        self.operand_faces = Growing[u8]()
+
+    pub func close():
+        self.places.close()
+        self.parents.close()
+        self.weights.close()
+        self.faces.close()
+        self.kinds.close()
+        self.offsets.close()
+        self.points.close()
+        self.corner_parents.close()
+        self.mix_corners.close()
+        self.mix_weights.close()
+        self.operand_faces.close()
+
+    pub func face_count() -> usize:
+        return self.faces.count
+
+    func begin_face(face: usize, kind: u8) -> !:
+        try self.faces.push((i32)face)
+        try self.kinds.push(kind)
+
+    func end_face() -> !:
+        try self.offsets.push((i32)self.points.count)
+
+## A piece's side running from point `from_point` to `to_point`, as one of
+## a region's sides; `inner` when the region continues across it.
+struct HalfSide:
+    let low: u32
+    let high: u32
+    let from_point: u32
+    let to_point: u32
+    let piece: u32
+    var inner: bool
+
+func half_side_less(a: HalfSide, b: HalfSide) -> bool:
+    if a.low != b.low: return a.low < b.low
+    if a.high != b.high: return a.high < b.high
+    return a.piece < b.piece
+
+func half_side_from_less(a: HalfSide, b: HalfSide) -> bool:
+    if a.from_point != b.from_point: return a.from_point < b.from_point
+    return a.piece < b.piece
+
+## Scratch reused from face to face.
+struct RegionScratch:
+    var members: Growing[u32]
+    var sides: Growing[HalfSide]
+    var parent: Growing[u32]
+    var outline: Growing[HalfSide]
+    var used: Growing[u8]
+    var loop: Growing[u32]
+    var loop_pieces: Growing[u32]
+
+    func init():
+        self.members = Growing[u32]()
+        self.sides = Growing[HalfSide]()
+        self.parent = Growing[u32]()
+        self.outline = Growing[HalfSide]()
+        self.used = Growing[u8]()
+        self.loop = Growing[u32]()
+        self.loop_pieces = Growing[u32]()
+
+    func close():
+        self.members.close()
+        self.sides.close()
+        self.parent.close()
+        self.outline.close()
+        self.used.close()
+        self.loop.close()
+        self.loop_pieces.close()
+
+    func root(at: usize) -> usize:
+        var x = at
+        while (usize)self.parent.items[x] != x:
+            self.parent.items[x] = self.parent.items[(usize)self.parent.items[x]]
+            x = (usize)self.parent.items[x]
+        return x
+
+## Everything the result's faces are made from.
+struct Assembly:
+    let operands: const Operands*
+    let cut: const Cut*
+    let table: const PointTable*
+    let pieces: const CutFaces*
+    let fate: const u8[]
+    var out: Combined*
+    var scratch: RegionScratch
+    ## Every side of every kept piece, packed and sorted: how many kept
+    ## faces use an edge inside the cut faces.
+    var kept_sides: Growing[u64]
+
+    ## How many kept pieces have a side between points x and y.
+    func kept_uses(x: u32, y: u32) -> usize:
+        let word = edge_word(math32_min(x, y), math32_max(x, y))
+        let sides = self.kept_sides.view()
+        var low: usize = 0
+        var high = sides.length
+        while low < high:
+            let middle = (low + high) // 2
+            if sides[middle] < word: low = middle + 1
+            else: high = middle
+        var end = low
+        while end < sides.length and sides[end] == word: end += 1
+        return end - low
+
+## The result: new points and every operand face's outcome, in face order.
+func assemble(operands: const Operands*, cut: const Cut*, table: const PointTable*, pieces: const CutFaces*, classes: const Classes*, out: Combined*) -> !:
+    try add_new_points(operands, cut, table, out)
+    var assembly = Assembly(operands, cut, table, pieces, classes.fate.view(), out, RegionScratch(), Growing[u64]())
+    defer assembly.scratch.close()
+    defer assembly.kept_sides.close()
+    let faces = operands.topology.faces()
+    for piece in 0..<pieces.count():
+        if classes.fate.items[faces + piece] == unit_dropped: continue
+        for k in 0..<(usize)3:
+            let x = pieces.corners.items[piece * 3 + k]
+            let y = pieces.corners.items[piece * 3 + (k + 1) % 3]
+            try assembly.kept_sides.push(edge_word(math32_min(x, y), math32_max(x, y)))
+    sort.sort(assembly.kept_sides.items[..<assembly.kept_sides.count])
+    try out.operand_faces.fill(faces, 0)
+    try out.offsets.push(0)
+    for face in 0..<faces:
+        if operands.face_operand.items[face] == outside_operands: continue
+        out.operand_faces.items[face] = 1
+        if pieces.cut_face(face): try emit_cut_face(&assembly, face)
+        else:
+            let fate = classes.fate.items[face]
+            if fate != unit_dropped: try copy_whole(&assembly, face, fate == unit_reversed)
+
+## The constructed points: places in the world, and parents: the ends of
+## the segment a point was made on, or for three planes' point the
+## corners of the first triangle, by where it lies in it.
+func add_new_points(operands: const Operands*, cut: const Cut*, table: const PointTable*, out: Combined*) -> !:
+    let inputs = operands.points.count
+    for at in 0..<cut.named.count:
+        let recipe = cut.named.items[at].recipe
+        let place = table.near_of(inputs + at)
+        try out.places.push(place.add(operands.frame))
+        if recipe.kind == three_planes_recipe:
+            let t = (usize)recipe.p
+            let weights = barycentric(operands, t, place)
+            for k in 0..<(usize)3:
+                try out.parents.push((i32)operands.vertex(t, k))
+                try out.weights.push((f32)weights[k])
+            continue
+        let p = operands.points.items[(usize)recipe.p]
+        let q = operands.points.items[(usize)recipe.q]
+        let way = q.subtract(p)
+        let length = way.dot(way)
+        var weight = place.subtract(p).dot(way) / length if length > 0.0 else 0.0
+        weight = math.min(1.0, math.max(0.0, weight))
+        try out.parents.push(recipe.p)
+        try out.parents.push(recipe.q)
+        try out.parents.push(recipe.q)
+        try out.weights.push((f32)(1.0 - weight))
+        try out.weights.push((f32)weight)
+        try out.weights.push(0.0)
+
+## Where `place` lies in triangle `t`: its barycentric weights in the
+## triangle's projection, clamped to the triangle and summing to 1.
+func barycentric(operands: const Operands*, t: usize, place: Vector3) -> f64[3]:
+    let projection = operands.projections.items[t]
+    let a = operands.place(t, 0)
+    let b = operands.place(t, 1)
+    let c = operands.place(t, 2)
+    let whole = area2(a, b, c, projection)
+    var weights: f64[3] = [area2(place, b, c, projection) / whole, area2(a, place, c, projection) / whole, area2(a, b, place, projection) / whole]
+    var total = 0.0
+    for k in 0..<(usize)3:
+        weights[k] = math.max(0.0, weights[k])
+        total += weights[k]
+    for k in 0..<(usize)3: weights[k] = weights[k] / total if total > 0.0 else 1.0 / 3.0
+    return weights
+
+## Whole face `face` copied, its corners in order or reversed, with the
+## cut's point numbers (a corner at the place of the one before it drops
+## out); as it is when none of its points was renumbered.
+func copy_whole(assembly: Assembly*, face: usize, reversed: bool) -> !:
+    let topology = &assembly.operands.topology
+    let same = assembly.operands.same.view()
+    let out = assembly.out
+    let first = (usize)topology.offsets[face]
+    let end = (usize)topology.offsets[face + 1]
+    let size = end - first
+    var renumbered = false
+    var dropped: usize = 0
+    for corner in first..<end:
+        let point = topology.corners[corner]
+        if same[(usize)point] != point: renumbered = true
+        let before = topology.corners[first + (corner - first + size - 1) % size]
+        if same[(usize)before] == same[(usize)point]: dropped += 1
+    if not reversed and not renumbered:
+        try out.begin_face(face, 3)
+        try out.end_face()
+        return
+    if size - dropped < 3: return
+    try out.begin_face(face, 0 if dropped > 0 else (2 if reversed else 1))
+    for at in 0..<size:
+        let corner = end - 1 - at if reversed else first + at
+        let point = same[(usize)topology.corners[corner]]
+        let before = topology.corners[first + (corner - first + size - 1) % size]
+        if same[(usize)before] == point: continue
+        try out.points.push(point)
+        try out.corner_parents.push((i32)corner)
+    try out.end_face()
+
+## Cut face `face`: its kept pieces joined into regions, each one face or,
+## failing that, its triangles.
+func emit_cut_face(assembly: Assembly*, face: usize) -> !:
+    let pieces = assembly.pieces
+    let faces = assembly.operands.topology.faces()
+    for pass in 0..<(usize)2:
+        let wanted: u8 = unit_kept if pass == 0 else unit_reversed
+        let scratch = &assembly.scratch
+        scratch.members.clear()
+        for piece in (usize)pieces.face_start.items[face]..<(usize)pieces.face_end.items[face]:
+            if assembly.fate[faces + piece] == wanted: try scratch.members.push((u32)piece)
+        if scratch.members.count == 0: continue
+        try join_regions(assembly)
+        # Each region by its root, in order of its first piece.
+        for at in 0..<scratch.members.count:
+            if scratch.root(at) != at: continue
+            try emit_region(assembly, face, at, pass == 1)
+
+## Join the members across sides no other kept face uses: two members'
+## sides running opposite ways, the only kept uses of their edge.
+func join_regions(assembly: Assembly*) -> !:
+    let pieces = assembly.pieces
+    let scratch = &assembly.scratch
+    let count = scratch.members.count
+    try scratch.parent.reserve(count)
+    for at in 0..<count: scratch.parent.items[at] = (u32)at
+    scratch.parent.count = count
+    scratch.sides.clear()
+    for at in 0..<count:
+        let piece = (usize)scratch.members.items[at]
+        for k in 0..<(usize)3:
+            let x = pieces.corners.items[piece * 3 + k]
+            let y = pieces.corners.items[piece * 3 + (k + 1) % 3]
+            try scratch.sides.push(HalfSide(math32_min(x, y), math32_max(x, y), x, y, (u32)at, false))
+    sort.by(scratch.sides.items[..<scratch.sides.count], half_side_less)
+    var at: usize = 0
+    while at < scratch.sides.count:
+        var end = at + 1
+        while end < scratch.sides.count and scratch.sides.items[end].low == scratch.sides.items[at].low and scratch.sides.items[end].high == scratch.sides.items[at].high: end += 1
+        let first = scratch.sides.items[at]
+        if end == at + 2 and scratch.sides.items[at + 1].from_point == first.to_point and assembly.kept_uses(first.low, first.high) == 2:
+            scratch.sides.items[at].inner = true
+            scratch.sides.items[at + 1].inner = true
+            let x = scratch.root((usize)first.piece)
+            let y = scratch.root((usize)scratch.sides.items[at + 1].piece)
+            if x < y: scratch.parent.items[y] = (u32)x
+            elif y < x: scratch.parent.items[x] = (u32)y
+        at = end
+
+## Emit the region whose root is member `root`: its outline as one face
+## when it is a single loop touching itself nowhere, else its triangles.
+func emit_region(assembly: Assembly*, face: usize, root: usize, reversed: bool) -> !:
+    let scratch = &assembly.scratch
+    scratch.outline.clear()
+    for side in scratch.sides.view():
+        if not side.inner and scratch.root((usize)side.piece) == root: try scratch.outline.push(side)
+    if try trace_outline(scratch):
+        try emit_outline(assembly, face, reversed)
+        return
+    for member in 0..<scratch.members.count:
+        if scratch.root(member) == root: try emit_triangle(assembly, face, (usize)scratch.members.items[member], reversed)
+
+## Follow the outline as one loop into `loop` (points) and `loop_pieces`;
+## false when it is several loops or passes a point twice.
+func trace_outline(scratch: RegionScratch*) -> bool!:
+    let count = scratch.outline.count
+    if count < 3: return false
+    sort.by(scratch.outline.items[..<count], half_side_from_less)
+    for at in 1..<count:
+        if scratch.outline.items[at].from_point == scratch.outline.items[at - 1].from_point: return false
+    scratch.loop.clear()
+    scratch.loop_pieces.clear()
+    var at: usize = 0
+    for _ in 0..<count:
+        let side = scratch.outline.items[at]
+        try scratch.loop.push(side.from_point)
+        try scratch.loop_pieces.push(scratch.members.items[(usize)side.piece])
+        # The side starting where this one ends.
+        var low: usize = 0
+        var high = count
+        while low < high:
+            let middle = (low + high) // 2
+            if scratch.outline.items[middle].from_point < side.to_point: low = middle + 1
+            else: high = middle
+        if low >= count or scratch.outline.items[low].from_point != side.to_point: return false
+        at = low
+        if at == 0: return scratch.loop.count == count
+    return false
+
+## The traced loop as a face of `face`: copied when it is the face's own
+## outline, else made, its corners' parents found in the pieces' triangles.
+func emit_outline(assembly: Assembly*, face: usize, reversed: bool) -> !:
+    let scratch = &assembly.scratch
+    let operands = assembly.operands
+    let topology = &operands.topology
+    let first = (usize)topology.offsets[face]
+    let size = (usize)topology.offsets[face + 1] - first
+    let count = scratch.loop.count
+    # The face's own outline, starting anywhere: copy it.
+    if count == size:
+        for shift in 0..<count:
+            var same = true
+            for k in 0..<count:
+                if scratch.loop.items[(shift + k) % count] != (u32)operands.same.items[(usize)topology.corners[first + k]]: same = false
+            if same:
+                try copy_whole(assembly, face, reversed)
+                return
+    let out = assembly.out
+    try out.begin_face(face, 0)
+    for k in 0..<count:
+        let at = count - 1 - k if reversed else k
+        try add_corner(assembly, face, (usize)scratch.loop.items[at], (usize)scratch.loop_pieces.items[at])
+    try out.end_face()
+
+## Piece `piece` as a triangle face of `face`.
+func emit_triangle(assembly: Assembly*, face: usize, piece: usize, reversed: bool) -> !:
+    let out = assembly.out
+    try out.begin_face(face, 0)
+    for k in 0..<(usize)3:
+        let at = 2 - k if reversed else k
+        try add_corner(assembly, face, (usize)assembly.pieces.corners.items[piece * 3 + at], piece)
+    try out.end_face()
+
+## A corner at cut point `point` of a face made from `face`, inside piece
+## `piece`: the face's own corner there, or a mix of its triangle's corners
+## by where the point lies in it.
+func add_corner(assembly: Assembly*, face: usize, point: usize, piece: usize) -> !:
+    let operands = assembly.operands
+    let topology = &operands.topology
+    let out = assembly.out
+    try out.points.push((i32)point)
+    for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+        if (usize)operands.same.items[(usize)topology.corners[corner]] == point:
+            try out.corner_parents.push((i32)corner)
+            return
+    let t = (usize)assembly.pieces.triangle.items[piece]
+    let weights = barycentric(operands, t, assembly.table.near_of(point))
+    let mix = out.mix_weights.count // 3
+    for k in 0..<(usize)3:
+        try out.mix_corners.push(operands.corners.items[t * 3 + k])
+        try out.mix_weights.push((f32)weights[k])
+    try out.corner_parents.push(-1 - (i32)mix)
+
+## Twice the signed area of (a, b, c) in a projection.
+func area2(a: Vector3, b: Vector3, c: Vector3, projection: Projection) -> f64:
+    let u = projection.u
+    let v = projection.v
+    return (b.coordinate(u) - a.coordinate(u)) * (c.coordinate(v) - a.coordinate(v)) - (b.coordinate(v) - a.coordinate(v)) * (c.coordinate(u) - a.coordinate(u))

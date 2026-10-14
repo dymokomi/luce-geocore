@@ -1,0 +1,291 @@
+# mark: Exact points ===========================================================================
+
+# Points the cut makes are kept exactly as homogeneous coordinates
+# (X, Y, Z, W), W > 0, whose components are expansions: a segment crossing
+# a plane is (dp q - dq p) / (dp - dq) with dp and dq the exact sides of its
+# ends, a polynomial in the input coordinates. Predicates on them first try
+# the points' floating approximations with a bound on their error, then
+# the exact determinants (Cherchi et al.'s indirect predicates, written as
+# homogeneous determinants).
+
+## How far a constructed point's floating coordinates may be off, relative
+## to their size: the expansions' estimates are within an ulp or two and
+## the division one more; this keeps a wide margin.
+let near_slack: f64 = 1.0e-14
+
+## The filters' own rounding allowance, relative.
+let filter_slack: f64 = 1.0e-15
+
+## A point as exact homogeneous coordinates, W > 0, with its floating
+## approximation `near` and a bound `slack` on how far each of its
+## coordinates is from the exact ones (0 for an input point).
+pub struct HPoint:
+    let x: const f64[]
+    let y: const f64[]
+    let z: const f64[]
+    let w: const f64[]
+    let near: Vector3
+    let slack: f64
+
+    func coordinate(axis: usize) -> const f64[]:
+        return self.x if axis == 0 else (self.y if axis == 1 else self.z)
+
+    ## Whether this is an input point (its coordinates exact doubles).
+    func is_input() -> bool:
+        return self.slack == 0.0 and self.w.length == 1 and self.w[0] == 1.0 and self.x.length <= 1 and self.y.length <= 1 and self.z.length <= 1
+
+## The power of two that brings an expansion's leading component to
+## about 1 (its exponent, negated).
+func power_scale(e: const f64[]) -> i32:
+    if e.length == 0: return 0
+    let top = e[e.length - 1]
+    if top == 0.0: return 0
+    let (_, exponent) = math.frexp(top)
+    return -exponent
+
+## Every component of `values` times 2^scale (exact: no component is near
+## the ends of the doubles' range).
+func scale_all(values: f64[], scale: i32):
+    for at in 0..<values.length: values[at] = math.scalbn(values[at], scale)
+
+## An input point as an HPoint over `store` (room 4, the caller's).
+func input_point(p: Vector3, store: f64[]) -> HPoint:
+    store[0] = p.x
+    store[1] = p.y
+    store[2] = p.z
+    store[3] = 1.0
+    return HPoint(store[0..<1], store[1..<2], store[2..<3], store[3..<4], p, 0.0)
+
+## The points of one boolean: the inputs (ids below `inputs.length`) and the
+## constructed ones after them, each stored once in `pool` when a
+## triangulation needs it.
+pub struct PointTable:
+    var inputs: const Vector3[]
+    ## Per point id: its slot, or -1.
+    var slots: Growing[i32]
+    var pool: Growing[f64]
+    ## Per slot: where its X, Y, Z and W start in `pool`, and where it ends.
+    var starts: Growing[u32]
+    var near: Growing[Vector3]
+    var errors: Growing[f64]
+
+    func init(inputs: const Vector3[]):
+        self.inputs = inputs
+        self.slots = Growing[i32]()
+        self.pool = Growing[f64]()
+        self.starts = Growing[u32]()
+        self.near = Growing[Vector3]()
+        self.errors = Growing[f64]()
+
+    func close():
+        self.slots.close()
+        self.pool.close()
+        self.starts.close()
+        self.near.close()
+        self.errors.close()
+
+    ## Room for `count` point ids, none stored yet.
+    func size(count: usize) -> !:
+        try self.slots.fill(count, -1)
+
+    func has(id: usize) -> bool:
+        return self.slots.items[id] >= 0
+
+    ## Store input point `id`, once.
+    func add_input(id: usize) -> !:
+        if self.slots.items[id] >= 0: return
+        let p = self.inputs[id]
+        let values: f64[4] = [p.x, p.y, p.z, 1.0]
+        try self.store(id, values[0..<1], values[1..<2], values[2..<3], values[3..<4], p, 0.0)
+
+    ## Store constructed point `id` from its homogeneous coordinates (any
+    ## sign of W; normalized to W > 0).
+    func add_constructed(id: usize, x: const f64[], y: const f64[], z: const f64[], w: const f64[]) -> !:
+        let flip = expansion_sign(w) < 0
+        let first = self.pool.count
+        try self.store(id, x, y, z, w, Vector3(), 0.0)
+        if flip:
+            for at in first..<self.pool.count: self.pool.items[at] = -self.pool.items[at]
+        # Scaled by a power of two (exactly) so W is about 1: points of tiny
+        # slivers have W near 1e-70, and products of three of them would
+        # sink below the doubles' range, where expansions stop being exact.
+        scale_all(self.pool.items[first..<self.pool.count], power_scale(w))
+        let slot = (usize)self.slots.items[id]
+        let point = self.point(id)
+        let weight = expansion_estimate(point.w)
+        let near = Vector3(expansion_estimate(point.x) / weight, expansion_estimate(point.y) / weight, expansion_estimate(point.z) / weight)
+        self.near.items[slot] = near
+        self.errors.items[slot] = math.max(math.abs(near.x), math.max(math.abs(near.y), math.abs(near.z))) * near_slack
+
+    func store(id: usize, x: const f64[], y: const f64[], z: const f64[], w: const f64[], near: Vector3, slack: f64) -> !:
+        let slot = self.near.count
+        try self.starts.push((u32)self.pool.count)
+        for value in x: try self.pool.push(value)
+        try self.starts.push((u32)self.pool.count)
+        for value in y: try self.pool.push(value)
+        try self.starts.push((u32)self.pool.count)
+        for value in z: try self.pool.push(value)
+        try self.starts.push((u32)self.pool.count)
+        for value in w: try self.pool.push(value)
+        try self.starts.push((u32)self.pool.count)
+        try self.near.push(near)
+        try self.errors.push(slack)
+        self.slots.items[id] = (i32)slot
+
+    ## Point `id` (stored); valid until the next store.
+    func point(id: usize) -> HPoint:
+        let slot = (usize)self.slots.items[id]
+        let at = slot * 5
+        let s = self.starts.items[at..<at + 5]
+        let pool = self.pool.items
+        return HPoint(pool[(usize)s[0]..<(usize)s[1]], pool[(usize)s[1]..<(usize)s[2]], pool[(usize)s[2]..<(usize)s[3]], pool[(usize)s[3]..<(usize)s[4]], self.near.items[slot], self.errors.items[slot])
+
+    ## The floating approximation of point `id` (stored or input).
+    func near_of(id: usize) -> Vector3:
+        if id < self.inputs.length: return self.inputs[id]
+        return self.near.items[(usize)self.slots.items[id]]
+
+## Homogeneous coordinates being built, in an arena.
+struct Homogeneous:
+    var x: f64[]
+    var y: f64[]
+    var z: f64[]
+    var w: f64[]
+
+## The point where segment pq crosses the plane through a, b, c, whose
+## sides p and q are on strictly opposite sides of, as homogeneous
+## coordinates in `arena`: (dp q - dq p, dp - dq).
+func crossing_coordinates(arena: Arena*, p: Vector3, q: Vector3, a: Vector3, b: Vector3, c: Vector3) -> Homogeneous!:
+    var dp: f64[192] = ---
+    var dq: f64[192] = ---
+    let lp = expansion_compress(dp[..<side_exact(a, b, c, p, dp[..<192])])
+    let lq = expansion_compress(dq[..<side_exact(a, b, c, q, dq[..<192])])
+    return try homogeneous(arena, dp[..<lp], dq[..<lq], p, q)
+
+## The point where segment pq crosses line rs in the plane of coordinates
+## u and v (all four coplanar), as homogeneous coordinates in `arena`.
+func meeting_coordinates(arena: Arena*, p: Vector3, q: Vector3, r: Vector3, s: Vector3, u: usize, v: usize) -> Homogeneous!:
+    var op: f64[16] = ---
+    var oq: f64[16] = ---
+    let lp = orient2d_exact(r, s, p, u, v, op[..<16])
+    let lq = orient2d_exact(r, s, q, u, v, oq[..<16])
+    return try homogeneous(arena, op[..<lp], oq[..<lq], p, q)
+
+## (dp q - dq p, dp - dq), each compressed.
+func homogeneous(arena: Arena*, dp: const f64[], dq: const f64[], p: Vector3, q: Vector3) -> Homogeneous!:
+    let x = try scaled_difference(arena, dp, q.x, dq, p.x)
+    let y = try scaled_difference(arena, dp, q.y, dq, p.y)
+    let z = try scaled_difference(arena, dp, q.z, dq, p.z)
+    let w = try arena_difference(arena, dp, dq)
+    return Homogeneous(x, y, z, w[..<expansion_compress(w)])
+
+## e a - f b, compressed.
+func scaled_difference(arena: Arena*, e: const f64[], a: f64, f: const f64[], b: f64) -> f64[]!:
+    let made = try arena_difference(arena, try arena_scale(arena, e, a), try arena_scale(arena, f, b))
+    return made[..<expansion_compress(made)]
+
+# mark: Predicates on exact points =============================================================
+
+## The orientation of p, q, r in the plane of coordinates u and v.
+func orient2d_h(arena: Arena*, p: const HPoint*, q: const HPoint*, r: const HPoint*, u: usize, v: usize) -> i64!:
+    if p.is_input() and q.is_input() and r.is_input(): return orient2d(p.near, q.near, r.near, u, v)
+    let pu = p.near.coordinate(u)
+    let pv = p.near.coordinate(v)
+    let du1 = q.near.coordinate(u) - pu
+    let dv1 = q.near.coordinate(v) - pv
+    let du2 = r.near.coordinate(u) - pu
+    let dv2 = r.near.coordinate(v) - pv
+    let e1 = p.slack + q.slack
+    let e2 = p.slack + r.slack
+    let left = du1 * dv2
+    let right = dv1 * du2
+    let determinant = left - right
+    # Each difference is off by its points' errors; each product by the
+    # differences' errors times the other factor.
+    let spread = math.abs(du1) * e2 + math.abs(dv2) * e1 + math.abs(dv1) * e2 + math.abs(du2) * e1 + 2.0 * e1 * e2
+    let bound = (spread + orient2d_bound * (math.abs(left) + math.abs(right))) * (1.0 + filter_slack) + filter_slack * math.abs(determinant)
+    if determinant > bound: return 1
+    if determinant < -bound: return -1
+    let mark = arena.mark()
+    defer arena.reset(mark)
+    let qr_v = try arena_difference(arena, try arena_product(arena, q.coordinate(v), r.w), try arena_product(arena, q.w, r.coordinate(v)))
+    let qr_u = try arena_difference(arena, try arena_product(arena, q.coordinate(u), r.w), try arena_product(arena, q.w, r.coordinate(u)))
+    let qr_w = try arena_difference(arena, try arena_product(arena, q.coordinate(u), r.coordinate(v)), try arena_product(arena, q.coordinate(v), r.coordinate(u)))
+    let first = try arena_product(arena, p.coordinate(u), qr_v)
+    let second = try arena_product(arena, p.coordinate(v), qr_u)
+    let third = try arena_product(arena, p.w, qr_w)
+    let total = try arena_sum(arena, try arena_difference(arena, first, second), third)
+    return expansion_sign(total)
+
+## The sign of p's coordinate `axis` minus q's.
+func compare_h(arena: Arena*, p: const HPoint*, q: const HPoint*, axis: usize) -> i64!:
+    let a = p.near.coordinate(axis)
+    let b = q.near.coordinate(axis)
+    let bound = (p.slack + q.slack) * (1.0 + filter_slack) + filter_slack * (math.abs(a) + math.abs(b))
+    if p.is_input() and q.is_input(): return 1 if a > b else (-1 if a < b else 0)
+    if a - b > bound: return 1
+    if b - a > bound: return -1
+    let mark = arena.mark()
+    defer arena.reset(mark)
+    let left = try arena_product(arena, p.coordinate(axis), q.w)
+    let right = try arena_product(arena, q.coordinate(axis), p.w)
+    return expansion_sign(try arena_difference(arena, left, right))
+
+## Which side of the plane through input points a, b, c point p is on
+## (as `side`).
+func side_h(arena: Arena*, a: Vector3, b: Vector3, c: Vector3, p: const HPoint*) -> i64!:
+    if p.is_input(): return plane_side(a, b, c, p.near)
+    let normal = b.subtract(a).cross(c.subtract(a))
+    let offset = p.near.subtract(a)
+    let determinant = normal.dot(offset)
+    let reach = math.abs(normal.x) + math.abs(normal.y) + math.abs(normal.z)
+    let bx = math.abs(b.x - a.x)
+    let by = math.abs(b.y - a.y)
+    let bz = math.abs(b.z - a.z)
+    let cx = math.abs(c.x - a.x)
+    let cy = math.abs(c.y - a.y)
+    let cz = math.abs(c.z - a.z)
+    let permanent = math.abs(offset.x) * (by * cz + bz * cy) + math.abs(offset.y) * (bz * cx + bx * cz) + math.abs(offset.z) * (bx * cy + by * cx)
+    let bound = (reach * p.slack * 1.01 + orient3d_bound * permanent) * (1.0 + filter_slack)
+    if determinant > bound: return 1
+    if determinant < -bound: return -1
+    let mark = arena.mark()
+    defer arena.reset(mark)
+    var normals: f64[48] = ---
+    let (lx, ly, lz) = normal_exact(a, b, c, normals[..<48])
+    # n . (X - a W, Y - a W, Z - a W)
+    var total = try arena.take(1)
+    total[0] = 0.0
+    total = total[..<1]
+    for axis in 0..<(usize)3:
+        let length = lx if axis == 0 else (ly if axis == 1 else lz)
+        let component = normals[axis * 16..<axis * 16 + length]
+        let shifted = try arena_difference(arena, p.coordinate(axis), try arena_scale(arena, p.w, a.coordinate(axis)))
+        total = try arena_sum(arena, total, try arena_product(arena, component, shifted))
+    return expansion_sign(total)
+
+## The centroid of three points, in `arena`: (X1 W2 W3 + X2 W1 W3 + X3 W1 W2,
+## 3 W1 W2 W3).
+func centroid_h(arena: Arena*, p: const HPoint*, q: const HPoint*, r: const HPoint*) -> HPoint!:
+    let qr = try arena_product(arena, q.w, r.w)
+    let pr = try arena_product(arena, p.w, r.w)
+    let pq = try arena_product(arena, p.w, q.w)
+    let x = try weighted_sum(arena, p.x, q.x, r.x, qr, pr, pq)
+    let y = try weighted_sum(arena, p.y, q.y, r.y, qr, pr, pq)
+    let z = try weighted_sum(arena, p.z, q.z, r.z, qr, pr, pq)
+    let w = try arena_scale(arena, try arena_product(arena, p.w, qr), 3.0)
+    let scale = power_scale(w)
+    scale_all(x, scale)
+    scale_all(y, scale)
+    scale_all(z, scale)
+    scale_all(w, scale)
+    let near = p.near.add(q.near).add(r.near).multiply_scalar(1.0 / 3.0)
+    let slack = (p.slack + q.slack + r.slack) / 3.0 * 1.01 + math.max(math.abs(near.x), math.max(math.abs(near.y), math.abs(near.z))) * near_slack
+    return HPoint(x, y, z, w, near, slack)
+
+## a ka + b kb + c kc.
+func weighted_sum(arena: Arena*, a: const f64[], b: const f64[], c: const f64[], ka: const f64[], kb: const f64[], kc: const f64[]) -> f64[]!:
+    let first = try arena_product(arena, a, ka)
+    let second = try arena_product(arena, b, kb)
+    let third = try arena_product(arena, c, kc)
+    return try arena_sum(arena, try arena_sum(arena, first, second), third)

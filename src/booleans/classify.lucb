@@ -1,0 +1,360 @@
+# mark: Classifying ============================================================================
+
+# After the cut, each operand's surface falls apart into patches: the
+# pieces of one cut triangle joined across sides no cut runs along, and the
+# faces the cut left whole joined across manifold edges of the mesh. No
+# surface crosses a patch inside, so on each of its sides the winding
+# numbers of A and B are the same all over it; exact rays from a point of
+# it give them (Zhou et al.'s rule for mesh arrangements). A patch is kept
+# where the result holds one side and not the other, facing out of the
+# result, so an operand that folds over itself (an earlier cut's rounding)
+# still gives a closed result. Patches end at every cut triangle's border,
+# so no join leans on points merged by place (two sheets an earlier cut's
+# rounding made touch stay apart). Faces lying one on another (coplanar
+# faces of A and B, or a piece's own faces laid together) are one place:
+# the first triangle's piece decides for the stack by the windings on its
+# two sides.
+
+## Every face and piece of the two operands after the cut. Units number the
+## faces (0..faces) and then the pieces.
+struct CutFaces:
+    ## Per piece: its cut points (three, in its face's winding), cut sides
+    ## (bits: a cut runs along), the earlier coplanar triangle covering it
+    ## (-1), its triangle.
+    var corners: Growing[u32]
+    var fixed: Growing[u8]
+    var covers: Growing[i32]
+    var triangle: Growing[u32]
+    ## Per face: its first piece and one past its last (both 0 for a face
+    ## the cut leaves whole).
+    var face_start: Growing[u32]
+    var face_end: Growing[u32]
+
+    func init():
+        self.corners = Growing[u32]()
+        self.fixed = Growing[u8]()
+        self.covers = Growing[i32]()
+        self.triangle = Growing[u32]()
+        self.face_start = Growing[u32]()
+        self.face_end = Growing[u32]()
+
+    func close():
+        self.corners.close()
+        self.fixed.close()
+        self.covers.close()
+        self.triangle.close()
+        self.face_start.close()
+        self.face_end.close()
+
+    func count() -> usize:
+        return self.triangle.count
+
+    ## Whether face `face` is cut (made of pieces).
+    func cut_face(face: usize) -> bool:
+        return self.face_end.items[face] > self.face_start.items[face]
+
+    ## The pieces of every cut face, in face order: a cut triangle's from its
+    ## triangulation, a whole triangle of a cut face as one piece.
+    func gather(operands: const Operands*, cut: const Cut*, made: const Pieces[]) -> !:
+        let faces = operands.topology.faces()
+        try self.face_start.fill(faces, 0)
+        try self.face_end.fill(faces, 0)
+        var t: usize = 0
+        while t < operands.triangle_count():
+            let face = (usize)operands.faces.items[t]
+            var end = t
+            var cut_any = false
+            while end < operands.triangle_count() and (usize)operands.faces.items[end] == face:
+                if cut.slot.items[end] >= 0 or (operands.inert(end) and not operands.collapsed(end)): cut_any = true
+                end += 1
+            if cut_any:
+                self.face_start.items[face] = (u32)self.count()
+                for at in t..<end:
+                    let slot = cut.slot.items[at]
+                    if operands.inert(at): continue
+                    if slot < 0:
+                        for k in 0..<(usize)3: try self.corners.push((u32)operands.vertex(at, k))
+                        try self.fixed.push(0)
+                        try self.covers.push(-1)
+                        try self.triangle.push((u32)at)
+                        continue
+                    let pieces = &made[(usize)slot]
+                    for piece in 0..<pieces.fixed.count:
+                        for k in 0..<(usize)3: try self.corners.push(pieces.corners.items[piece * 3 + k])
+                        try self.fixed.push(pieces.fixed.items[piece])
+                        try self.covers.push(pieces.covers.items[piece])
+                        try self.triangle.push((u32)at)
+                self.face_end.items[face] = (u32)self.count()
+            t = end
+
+## A piece's side, for joining pieces across it: its two points (lower
+## first), its triangle, whether a cut runs along it, and the piece.
+struct PieceSide:
+    let low: u32
+    let high: u32
+    let triangle: u32
+    let fixed: bool
+    let piece: u32
+
+func piece_side_less(a: PieceSide, b: PieceSide) -> bool:
+    if a.triangle != b.triangle: return a.triangle < b.triangle
+    if a.low != b.low: return a.low < b.low
+    if a.high != b.high: return a.high < b.high
+    return a.piece < b.piece
+
+## Union-find over units; the lowest unit of a set is its root.
+struct Joins:
+    var parent: Growing[u32]
+
+    func init():
+        self.parent = Growing[u32]()
+
+    func close():
+        self.parent.close()
+
+    func reset(count: usize) -> !:
+        try self.parent.reserve(count)
+        for at in 0..<count: self.parent.items[at] = (u32)at
+        self.parent.count = count
+
+    func root(member: usize) -> usize:
+        var at = member
+        while (usize)self.parent.items[at] != at:
+            let up = (usize)self.parent.items[at]
+            self.parent.items[at] = self.parent.items[up]
+            at = up
+        return at
+
+    func join(a: usize, b: usize):
+        let x = self.root(a)
+        let y = self.root(b)
+        if x == y: return
+        if x < y: self.parent.items[y] = (u32)x
+        else: self.parent.items[x] = (u32)y
+
+## What becomes of each unit: kept or dropped, and turned over when kept.
+let unit_dropped: u8 = 0
+let unit_kept: u8 = 1
+let unit_reversed: u8 = 2
+
+## Whether the result holds a place whose winding numbers about A and B
+## are `a` and `b` (inside an operand: winding above zero).
+func in_result(operation: i64, a: i64, b: i64) -> bool:
+    if operation == 0: return a > 0 or b > 0
+    if operation == 1: return a > 0 and b <= 0
+    return a > 0 and b > 0
+
+## A patch: its root unit and the unit whose triangle's centroid casts its
+## ray (a piece when it has one), and whether the result holds its front
+## and its back.
+struct Patch:
+    let root: usize
+    var caster: usize
+    var front: bool
+    var back: bool
+
+## Patches and their classification.
+struct Classes:
+    var joins: Joins
+    var sides: Growing[PieceSide]
+    ## Per unit: its fate (unit_dropped, unit_kept, unit_reversed).
+    var fate: Growing[u8]
+
+    func init():
+        self.joins = Joins()
+        self.sides = Growing[PieceSide]()
+        self.fate = Growing[u8]()
+
+    func close():
+        self.joins.close()
+        self.sides.close()
+        self.fate.close()
+
+    ## Join units into patches, classify each patch, and decide every unit.
+    func run(operands: const Operands*, table: const PointTable*, pieces: const CutFaces*, trees: const BoxTree[], operation: i64) -> !:
+        let faces = operands.topology.faces()
+        try self.joins.reset(faces + pieces.count())
+        try self.join_pieces(operands, pieces)
+        self.join_faces(operands, pieces)
+        try self.decide(operands, table, pieces, trees, operation)
+
+    ## Pieces of one triangle meeting along a side no cut runs along.
+    func join_pieces(operands: const Operands*, pieces: const CutFaces*) -> !:
+        let faces = operands.topology.faces()
+        for piece in 0..<pieces.count():
+            for k in 0..<(usize)3:
+                let x = pieces.corners.items[piece * 3 + (k + 1) % 3]
+                let y = pieces.corners.items[piece * 3 + (k + 2) % 3]
+                try self.sides.push(PieceSide(x if x < y else y, y if x < y else x, pieces.triangle.items[piece], (pieces.fixed.items[piece] >> (u8)k) & 1 != 0, (u32)piece))
+        sort.by(self.sides.items[..<self.sides.count], piece_side_less)
+        for at in 1..<self.sides.count:
+            let a = self.sides.items[at - 1]
+            let b = self.sides.items[at]
+            if a.triangle == b.triangle and a.low == b.low and a.high == b.high and not a.fixed and not b.fixed:
+                self.joins.join(faces + (usize)a.piece, faces + (usize)b.piece)
+
+    ## Whole faces of one operand across mesh edges that only the two of
+    ## them use.
+    func join_faces(operands: const Operands*, pieces: const CutFaces*):
+        let topology = &operands.topology
+        for face in 0..<topology.faces():
+            let operand = operands.face_operand.items[face]
+            if operand == outside_operands or pieces.cut_face(face): continue
+            for corner in (usize)topology.offsets[face]..<(usize)topology.offsets[face + 1]:
+                let edge = (usize)topology.corner_edges[corner]
+                let first = (usize)topology.edge_corner_offsets[edge]
+                if (usize)topology.edge_corner_offsets[edge + 1] - first != 2: continue
+                let other = (usize)topology.corner_faces[(usize)topology.edge_corners[first]]
+                let mate = (usize)topology.corner_faces[(usize)topology.edge_corners[first + 1]]
+                let neighbor = mate if other == face else other
+                if neighbor == face or operands.face_operand.items[neighbor] != operand or pieces.cut_face(neighbor): continue
+                self.joins.join(face, neighbor)
+
+    ## Classify each patch by a ray from its caster, then each unit.
+    func decide(operands: const Operands*, table: const PointTable*, pieces: const CutFaces*, trees: const BoxTree[], operation: i64) -> !:
+        let faces = operands.topology.faces()
+        let units = faces + pieces.count()
+        try self.fate.fill(units, unit_dropped)
+        var patches = Growing[Patch]()
+        defer patches.close()
+        let patch_of = try new i32[units] in memory.heap
+        defer free(patch_of) in memory.heap
+        for unit_at in 0..<units:
+            patch_of[unit_at] = -1
+            if not is_member(operands, pieces, unit_at): continue
+            let root = self.joins.root(unit_at)
+            if patch_of[root] < 0:
+                patch_of[root] = (i32)patches.count
+                try patches.push(Patch(root, unit_at, false, false))
+            # A piece casts rather than a whole face: the cut is there.
+            let patch = &patches.items[(usize)patch_of[root]]
+            if patch.caster < faces and unit_at >= faces: patch.caster = unit_at
+        let workers = parallel.workers(patches.count)
+        let arenas = try new Arena[workers] --- in memory.heap
+        for at in 0..<workers: arenas[at] = Arena()
+        defer:
+            for at in 0..<workers: arenas[at].close()
+            free(arenas) in memory.heap
+        var work = RayWork(operands, table, pieces, trees, patches.items[..<patches.count], arenas, operation)
+        try parallel.for_each(patches.count, (void*)&work, classify_patch)
+        for unit_at in 0..<units:
+            if not is_member(operands, pieces, unit_at): continue
+            let patch = patches.items[(usize)patch_of[self.joins.root(unit_at)]]
+            if patch.front == patch.back: continue
+            self.fate.items[unit_at] = unit_reversed if patch.front else unit_kept
+
+## Whether unit `unit_at` belongs to a patch: an operand face the cut left
+## whole, or a piece no earlier coplanar triangle covers (that one's piece
+## stands for the stack).
+func is_member(operands: const Operands*, pieces: const CutFaces*, unit_at: usize) -> bool:
+    let faces = operands.topology.faces()
+    if unit_at < faces: return operands.face_operand.items[unit_at] != outside_operands and not pieces.cut_face(unit_at)
+    return pieces.covers.items[unit_at - faces] < 0
+
+struct RayWork:
+    let operands: const Operands*
+    let table: const PointTable*
+    let pieces: const CutFaces*
+    ## The operands' trees: A's, then B's.
+    let trees: const BoxTree[]
+    var patches: Patch[]
+    var arenas: Arena[]
+    let operation: i64
+
+## Patch `index`'s windings on both sides: rays from the centroid of its
+## caster's triangle moved off it one way and the other give the windings
+## there, so every face lying through that point (a covering face, a
+## face's exact double) is on the right side of each.
+func classify_patch(context: void*, index: usize, worker: usize) -> !:
+    let work = (RayWork*)context
+    let arena = &work.arenas[worker]
+    let operands = work.operands
+    let pieces = work.pieces
+    let patch = &work.patches[index]
+    let faces = operands.topology.faces()
+    let mark = arena.mark()
+    defer arena.reset(mark)
+    # The caster's triangle and the point on it.
+    var t: usize = 0
+    var center: HPoint
+    var stores: f64[12] = ---
+    if patch.caster >= faces:
+        let piece = patch.caster - faces
+        t = (usize)pieces.triangle.items[piece]
+        let a = stored_or_input(work.table, (usize)pieces.corners.items[piece * 3], stores[0..<4])
+        let b = stored_or_input(work.table, (usize)pieces.corners.items[piece * 3 + 1], stores[4..<8])
+        let c = stored_or_input(work.table, (usize)pieces.corners.items[piece * 3 + 2], stores[8..<12])
+        center = try centroid_h(arena, &a, &b, &c)
+    else:
+        t = (usize)operands.face_first.items[patch.caster]
+        let a = input_point(operands.place(t, 0), stores[0..<4])
+        let b = input_point(operands.place(t, 1), stores[4..<8])
+        let c = input_point(operands.place(t, 2), stores[8..<12])
+        center = try centroid_h(arena, &a, &b, &c)
+    let ahead = in_result(work.operation, try ray_winding(operands, &work.trees[0], 0, &center, 1, arena), try ray_winding(operands, &work.trees[1], operands.split, &center, 1, arena))
+    let behind = in_result(work.operation, try ray_winding(operands, &work.trees[0], 0, &center, -1, arena), try ray_winding(operands, &work.trees[1], operands.split, &center, -1, arena))
+    let in_front = try moved_side(operands, t, &center, 1, arena) > 0
+    patch.front = ahead if in_front else behind
+    patch.back = behind if in_front else ahead
+
+## Point `id` as the table stores it, or an input point the table has not
+## stored (a corner of a cut face's uncut triangle) over `store`.
+func stored_or_input(table: const PointTable*, id: usize, store: f64[]) -> HPoint:
+    if table.has(id): return table.point(id)
+    return input_point(table.inputs[id], store)
+
+## The winding number about `tree`'s triangles (numbered from `base`) of
+## p moved by `way` (+1 or -1) times (e^3, e, e^2) for an infinitesimal e
+## (simulation of simplicity): the triangles a ray from it along +X
+## crosses, each +1 where it leaves through the triangle's front (its
+## normal's X above zero) and -1 where it enters. The move keeps the ray
+## off every edge and corner, and the point off every plane.
+func ray_winding(operands: const Operands*, tree: const BoxTree*, base: usize, p: const HPoint*, way: i64, arena: Arena*) -> i64!:
+    var found = Growing[u32]()
+    defer found.close()
+    let reach = p.slack * 2.0 + 1.0e-300
+    let near = p.near
+    try tree.overlapping(Vector3(near.x - reach, near.y - reach, near.z - reach), Vector3(1.0e308, near.y + reach, near.z + reach), base, &found)
+    var winding: i64 = 0
+    for at in 0..<found.count:
+        let t = (usize)found.items[at]
+        let a = operands.place(t, 0)
+        let b = operands.place(t, 1)
+        let c = operands.place(t, 2)
+        # Seen along X: its facing (the normal's X sign); edge-on, it is missed.
+        let facing = orient2d(a, b, c, 1, 2)
+        if facing == 0: continue
+        if try perturbed_turn(a, b, p, way, arena) != facing: continue
+        if try perturbed_turn(b, c, p, way, arena) != facing: continue
+        if try perturbed_turn(c, a, p, way, arena) != facing: continue
+        # The plane is ahead along +X when the moved point is behind it as
+        # its normal's X component faces.
+        if (try moved_side(operands, t, p, way, arena)) * facing < 0: winding += facing
+    return winding
+
+## The side of triangle `t`'s plane p moved by `way` times (e^3, e, e^2)
+## is on: p's own side, or on the plane, the normal's Y, then Z, then X
+## sign (times `way`).
+func moved_side(operands: const Operands*, t: usize, p: const HPoint*, way: i64, arena: Arena*) -> i64!:
+    let a = operands.place(t, 0)
+    let b = operands.place(t, 1)
+    let c = operands.place(t, 2)
+    let height = try side_h(arena, a, b, c, p)
+    if height != 0: return height
+    let ny = orient2d(a, b, c, 2, 0)
+    if ny != 0: return ny * way
+    let nz = orient2d(a, b, c, 0, 1)
+    if nz != 0: return nz * way
+    return orient2d(a, b, c, 1, 2) * way
+
+## The turn of (a, b, p + way (e^3, e, e^2)) seen along X (coordinates
+## Y, Z).
+func perturbed_turn(a: Vector3, b: Vector3, p: const HPoint*, way: i64, arena: Arena*) -> i64!:
+    var store_a: f64[4] = ---
+    var store_b: f64[4] = ---
+    let pa = input_point(a, store_a[..<4])
+    let pb = input_point(b, store_b[..<4])
+    let turn = try orient2d_h(arena, &pa, &pb, p, 1, 2)
+    if turn != 0: return turn
+    if a.z != b.z: return way if a.z > b.z else -way
+    return way if b.y > a.y else (-way if b.y < a.y else 0)

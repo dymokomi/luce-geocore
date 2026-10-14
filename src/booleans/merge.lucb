@@ -1,0 +1,277 @@
+# mark: The cut ================================================================================
+
+## A constructed point's name and how it is built.
+struct Named:
+    let key: PointKey
+    let recipe: Recipe
+
+## A point on a triangle, by number.
+struct OnTriangle:
+    let triangle: u32
+    let point: u32
+
+## A segment on a triangle, by point numbers (the lower first), with its
+## source (see SegmentRecord).
+struct CutSegment:
+    let triangle: u32
+    let first: u32
+    let second: u32
+    let source: i32
+    let opposite: i32
+
+    ## The coplanar triangle whose edge this is, or -1.
+    func cover() -> i32:
+        return self.source if self.opposite >= 0 else -1
+
+## The cut gathered from every pair: each cut point numbered once (input
+## points keep their numbers, constructed ones follow in name order), and
+## per cut triangle its points, segments and coplanar neighbors.
+struct Cut:
+    var named: Growing[Named]
+    ## The cut triangles in order, and where each one's lists start (one
+    ## more entry than triangles).
+    var triangles: Growing[u32]
+    var point_starts: Growing[u32]
+    var points: Growing[u32]
+    var segment_starts: Growing[u32]
+    var segments: Growing[CutSegment]
+    var cover_starts: Growing[u32]
+    var covers: Growing[u32]
+    ## Per operand triangle: its place in `triangles`, or -1.
+    var slot: Growing[i32]
+    ## The records the lists were made from, sorted.
+    var on_records: Growing[OnTriangle]
+    var segment_records: Growing[CutSegment]
+    var cover_records: Growing[OnTriangle]
+
+    func init():
+        self.named = Growing[Named]()
+        self.triangles = Growing[u32]()
+        self.point_starts = Growing[u32]()
+        self.points = Growing[u32]()
+        self.segment_starts = Growing[u32]()
+        self.segments = Growing[CutSegment]()
+        self.cover_starts = Growing[u32]()
+        self.covers = Growing[u32]()
+        self.slot = Growing[i32]()
+        self.on_records = Growing[OnTriangle]()
+        self.segment_records = Growing[CutSegment]()
+        self.cover_records = Growing[OnTriangle]()
+
+    func close():
+        self.named.close()
+        self.triangles.close()
+        self.point_starts.close()
+        self.points.close()
+        self.segment_starts.close()
+        self.segments.close()
+        self.cover_starts.close()
+        self.covers.close()
+        self.slot.close()
+        self.on_records.close()
+        self.segment_records.close()
+        self.cover_records.close()
+
+    ## How many points there are, input and constructed.
+    func point_total(inputs: usize) -> usize:
+        return inputs + self.named.count
+
+    ## The number of the point named `key`.
+    func id_of(key: PointKey, inputs: usize) -> u32:
+        if key.kind == input_key: return (u32)key.v[0]
+        var low: usize = 0
+        var high = self.named.count
+        while low < high:
+            let middle = (low + high) // 2
+            if self.named.items[middle].key.less(key): low = middle + 1
+            else: high = middle
+        return (u32)(inputs + low)
+
+    ## Gather the pairs' records.
+    func gather(operands: const Operands*, records: const PairOut*) -> !:
+        let inputs = operands.points.count
+        # Constructed points: one per name, built by the least recipe.
+        for record in records.points.view():
+            if record.key.kind != input_key: try self.named.push(Named(record.key, record.recipe))
+        sort.by(self.named.items[..<self.named.count], named_less)
+        var kept: usize = 0
+        for at in 0..<self.named.count:
+            if kept > 0 and self.named.items[kept - 1].key.same(self.named.items[at].key): continue
+            self.named.items[kept] = self.named.items[at]
+            kept += 1
+        self.named.count = kept
+        # Each triangle's points, segments and coplanar neighbors, sorted.
+        for record in records.points.view():
+            try self.on_records.push(OnTriangle((u32)record.triangle, self.id_of(record.key, inputs)))
+        for record in records.segments.view():
+            let first = self.id_of(record.first, inputs)
+            let second = self.id_of(record.second, inputs)
+            try self.segment_records.push(CutSegment((u32)record.triangle, first if first < second else second, second if first < second else first, record.source, record.opposite))
+        for record in records.covers.view(): try self.cover_records.push(OnTriangle((u32)record.triangle, (u32)record.other))
+        sort.by(self.on_records.items[..<self.on_records.count], on_less)
+        sort.by(self.segment_records.items[..<self.segment_records.count], segment_less)
+        sort.by(self.cover_records.items[..<self.cover_records.count], on_less)
+        try self.slot.fill(operands.triangle_count(), -1)
+        for record in self.on_records.view(): self.slot.items[(usize)record.triangle] = 0
+        for record in self.segment_records.view(): self.slot.items[(usize)record.triangle] = 0
+        for record in self.cover_records.view(): self.slot.items[(usize)record.triangle] = 0
+        for t in 0..<operands.triangle_count():
+            if self.slot.items[t] < 0: continue
+            self.slot.items[t] = (i32)self.triangles.count
+            try self.triangles.push((u32)t)
+        try self.fill_lists()
+
+    ## Each cut triangle's ranges of points, segments and covers, without
+    ## repeats.
+    func fill_lists() -> !:
+        let on = self.on_records.view()
+        let segments = self.segment_records.view()
+        let covers = self.cover_records.view()
+        self.point_starts.clear()
+        self.points.clear()
+        self.segment_starts.clear()
+        self.segments.clear()
+        self.cover_starts.clear()
+        self.covers.clear()
+        var p: usize = 0
+        var s: usize = 0
+        var c: usize = 0
+        for slot in 0..<self.triangles.count:
+            let t = self.triangles.items[slot]
+            try self.point_starts.push((u32)self.points.count)
+            while p < on.length and on[p].triangle == t:
+                if self.points.count == (usize)self.point_starts.items[slot] or self.points.items[self.points.count - 1] != on[p].point: try self.points.push(on[p].point)
+                p += 1
+            try self.segment_starts.push((u32)self.segments.count)
+            while s < segments.length and segments[s].triangle == t:
+                if self.segments.count == (usize)self.segment_starts.items[slot] or not same_segment(self.segments.items[self.segments.count - 1], segments[s]): try self.segments.push(segments[s])
+                s += 1
+            try self.cover_starts.push((u32)self.covers.count)
+            while c < covers.length and covers[c].triangle == t:
+                if self.covers.count == (usize)self.cover_starts.items[slot] or self.covers.items[self.covers.count - 1] != covers[c].point: try self.covers.push(covers[c].point)
+                c += 1
+        try self.point_starts.push((u32)self.points.count)
+        try self.segment_starts.push((u32)self.segments.count)
+        try self.cover_starts.push((u32)self.covers.count)
+
+    ## Store every point the triangulations read: the cut triangles' corners,
+    ## their points, and the constructed points built from their recipes.
+    func store_points(operands: const Operands*, table: PointTable*, arena: Arena*) -> !:
+        let inputs = operands.points.count
+        try table.size(self.point_total(inputs))
+        for t in self.triangles.view():
+            for k in 0..<(usize)3: try table.add_input(operands.vertex((usize)t, k))
+        for id in self.points.view():
+            if (usize)id < inputs: try table.add_input((usize)id)
+        let points = operands.points.view()
+        for at in 0..<self.named.count:
+            let recipe = self.named.items[at].recipe
+            let mark = arena.mark()
+            defer arena.reset(mark)
+            var made: Homogeneous
+            if recipe.kind == three_planes_recipe:
+                made = try three_planes_coordinates(arena, operands, (usize)recipe.p, (usize)recipe.q, (usize)recipe.a)
+            elif recipe.kind == crossing_recipe:
+                made = try crossing_coordinates(arena, points[(usize)recipe.p], points[(usize)recipe.q], points[(usize)recipe.a], points[(usize)recipe.b], points[(usize)recipe.c])
+            else:
+                let along = Projection.along((usize)recipe.c)
+                made = try meeting_coordinates(arena, points[(usize)recipe.p], points[(usize)recipe.q], points[(usize)recipe.a], points[(usize)recipe.b], along.u, along.v)
+            try table.add_constructed(inputs + at, made.x, made.y, made.z, made.w)
+
+## Points of the cut at one place under different names (a degenerate
+## meeting named one way in one triangle and another way in the next, as
+## three planes meeting on an edge) become one: the lowest number. Found
+## by sorting along X within the points' error bounds and comparing the
+## exact coordinates. The lists are made again when any merge.
+extend Cut:
+    func merge_coincident(operands: const Operands*, table: const PointTable*, arena: Arena*) -> !:
+        let total = self.point_total(operands.points.count)
+        var ids = Growing[u32]()
+        defer ids.close()
+        for record in self.on_records.view(): try ids.push(record.point)
+        sort.sort(ids.items[..<ids.count])
+        var kept: usize = 0
+        for at in 0..<ids.count:
+            if kept > 0 and ids.items[kept - 1] == ids.items[at]: continue
+            ids.items[kept] = ids.items[at]
+            kept += 1
+        ids.count = kept
+        var order = Growing[PlacedId]()
+        defer order.close()
+        for id in ids.view(): try order.push(PlacedId(table.near_of((usize)id).x, id))
+        sort.by(order.items[..<order.count], placed_less)
+        var canonical = Growing[u32]()
+        defer canonical.close()
+        try canonical.reserve(total)
+        for at in 0..<total: canonical.items[at] = (u32)at
+        canonical.count = total
+        var merged = false
+        var stores: f64[8] = ---
+        for at in 0..<order.count:
+            let one = (usize)order.items[at].id
+            let p = stored_or_input(table, one, stores[0..<4])
+            for next in at + 1..<order.count:
+                let two = (usize)order.items[next].id
+                let q = stored_or_input(table, two, stores[4..<8])
+                let reach = (p.slack + q.slack) * 2.0
+                if q.near.x - p.near.x > reach: break
+                if math.abs(q.near.y - p.near.y) > reach or math.abs(q.near.z - p.near.z) > reach: continue
+                let mark = arena.mark()
+                defer arena.reset(mark)
+                if try compare_h(arena, &p, &q, 0) != 0 or try compare_h(arena, &p, &q, 1) != 0 or try compare_h(arena, &p, &q, 2) != 0: continue
+                # One place: the higher number follows the lower.
+                let x = root_of(canonical.items[..<total], one)
+                let y = root_of(canonical.items[..<total], two)
+                if x < y: canonical.items[y] = (u32)x
+                elif y < x: canonical.items[x] = (u32)y
+                merged = true
+        if not merged: return
+        let map = canonical.items[..<total]
+        for at in 0..<self.on_records.count:
+            let record = self.on_records.items[at]
+            self.on_records.items[at] = OnTriangle(record.triangle, (u32)root_of(map, (usize)record.point))
+        var segments: usize = 0
+        for at in 0..<self.segment_records.count:
+            let record = self.segment_records.items[at]
+            let first = (u32)root_of(map, (usize)record.first)
+            let second = (u32)root_of(map, (usize)record.second)
+            if first == second: continue
+            self.segment_records.items[segments] = CutSegment(record.triangle, first if first < second else second, second if first < second else first, record.source, record.opposite)
+            segments += 1
+        self.segment_records.count = segments
+        sort.by(self.on_records.items[..<self.on_records.count], on_less)
+        sort.by(self.segment_records.items[..<self.segment_records.count], segment_less)
+        try self.fill_lists()
+
+## A point number with its X, for the sweep.
+struct PlacedId:
+    let x: f64
+    let id: u32
+
+func placed_less(a: PlacedId, b: PlacedId) -> bool:
+    if a.x != b.x: return a.x < b.x
+    return a.id < b.id
+
+## The lowest number of the points merged with `at`.
+func root_of(map: u32[], at: usize) -> usize:
+    var x = at
+    while (usize)map[x] != x: x = (usize)map[x]
+    return x
+
+func same_segment(a: CutSegment, b: CutSegment) -> bool:
+    return a.triangle == b.triangle and a.first == b.first and a.second == b.second and a.source == b.source and a.opposite == b.opposite
+
+func named_less(a: Named, b: Named) -> bool:
+    if not a.key.same(b.key): return a.key.less(b.key)
+    return a.recipe.less(b.recipe)
+
+func on_less(a: OnTriangle, b: OnTriangle) -> bool:
+    if a.triangle != b.triangle: return a.triangle < b.triangle
+    return a.point < b.point
+
+func segment_less(a: CutSegment, b: CutSegment) -> bool:
+    if a.triangle != b.triangle: return a.triangle < b.triangle
+    if a.first != b.first: return a.first < b.first
+    if a.second != b.second: return a.second < b.second
+    if a.source != b.source: return a.source < b.source
+    return a.opposite < b.opposite

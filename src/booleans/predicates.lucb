@@ -1,0 +1,157 @@
+# mark: Predicates on input points =============================================================
+
+# Orientation signs of input points (f64 coordinates taken as exact). A
+# floating evaluation decides when its value clears Shewchuk's error bound
+# for that evaluation order; otherwise the determinant is expanded exactly
+# on the stack. Constructions need the exact value itself (`*_exact`).
+
+## Shewchuk's static error bounds: (3 + 16e)e and (7 + 56e)e, e = 2^-53.
+let orient2d_bound: f64 = 3.3306690738754716e-16
+let orient3d_bound: f64 = 7.771561172376103e-16
+
+## An exact difference of two coordinates: one or two components.
+struct Tail:
+    var parts: f64[2]
+    var count: usize
+
+    static func of(a: f64, b: f64) -> Tail:
+        var made = Tail([0.0, 0.0], 0)
+        made.count = difference_into(a, b, made.parts[..<2])
+        return made
+
+## a * b - c * d exactly, each factor an exact difference, into h (room 16).
+func minor_exact(a: const Tail*, b: const Tail*, c: const Tail*, d: const Tail*, h: f64[]) -> usize:
+    var scratch: f64[8] = ---
+    var left: f64[8] = ---
+    var right: f64[8] = ---
+    let l = expansion_times_short(a.parts[..<a.count], b.parts[..<b.count], left[..<8], scratch[..<8])
+    let r = expansion_times_short(c.parts[..<c.count], d.parts[..<d.count], right[..<8], scratch[..<8])
+    expansion_negate(right[..<r])
+    return expansion_sum(left[..<l], right[..<r], h)
+
+## The orientation of (a, b, c) in the plane of coordinates `u` and `v`:
+## positive counterclockwise, 0 collinear.
+func orient2d(a: Vector3, b: Vector3, c: Vector3, u: usize, v: usize) -> i64:
+    let left = (b.coordinate(u) - a.coordinate(u)) * (c.coordinate(v) - a.coordinate(v))
+    let right = (b.coordinate(v) - a.coordinate(v)) * (c.coordinate(u) - a.coordinate(u))
+    let determinant = left - right
+    let bound = orient2d_bound * (math.abs(left) + math.abs(right))
+    if determinant > bound: return 1
+    if determinant < -bound: return -1
+    var exact: f64[16] = ---
+    return expansion_sign(exact[..<orient2d_exact(a, b, c, u, v, exact[..<16])])
+
+## orient2d's determinant exactly, into h (room 16).
+func orient2d_exact(a: Vector3, b: Vector3, c: Vector3, u: usize, v: usize, h: f64[]) -> usize:
+    var bu = Tail.of(b.coordinate(u), a.coordinate(u))
+    var bv = Tail.of(b.coordinate(v), a.coordinate(v))
+    var cu = Tail.of(c.coordinate(u), a.coordinate(u))
+    var cv = Tail.of(c.coordinate(v), a.coordinate(v))
+    return minor_exact(&bu, &cv, &bv, &cu, h)
+
+## Which side of the plane through a, b, c point d is on: positive on the
+## side the normal (b - a) x (c - a) points to, 0 on the plane.
+func plane_side(a: Vector3, b: Vector3, c: Vector3, d: Vector3) -> i64:
+    let bx = b.x - a.x
+    let by = b.y - a.y
+    let bz = b.z - a.z
+    let cx = c.x - a.x
+    let cy = c.y - a.y
+    let cz = c.z - a.z
+    let dx = d.x - a.x
+    let dy = d.y - a.y
+    let dz = d.z - a.z
+    let cydz = cy * dz
+    let czdy = cz * dy
+    let czdx = cz * dx
+    let cxdz = cx * dz
+    let cxdy = cx * dy
+    let cydx = cy * dx
+    let determinant = bx * (cydz - czdy) + by * (czdx - cxdz) + bz * (cxdy - cydx)
+    let permanent = math.abs(bx) * (math.abs(cydz) + math.abs(czdy)) + math.abs(by) * (math.abs(czdx) + math.abs(cxdz)) + math.abs(bz) * (math.abs(cxdy) + math.abs(cydx))
+    let bound = orient3d_bound * permanent
+    if determinant > bound: return 1
+    if determinant < -bound: return -1
+    var exact: f64[192] = ---
+    return expansion_sign(exact[..<side_exact(a, b, c, d, exact[..<192])])
+
+## side's determinant exactly, into h (room 192).
+func side_exact(a: Vector3, b: Vector3, c: Vector3, d: Vector3, h: f64[]) -> usize:
+    var bx = Tail.of(b.x, a.x)
+    var by = Tail.of(b.y, a.y)
+    var bz = Tail.of(b.z, a.z)
+    var cx = Tail.of(c.x, a.x)
+    var cy = Tail.of(c.y, a.y)
+    var cz = Tail.of(c.z, a.z)
+    var dx = Tail.of(d.x, a.x)
+    var dy = Tail.of(d.y, a.y)
+    var dz = Tail.of(d.z, a.z)
+    var minor: f64[16] = ---
+    var scratch: f64[64] = ---
+    var first: f64[64] = ---
+    var second: f64[64] = ---
+    var both: f64[128] = ---
+    var count = minor_exact(&cy, &dz, &cz, &dy, minor[..<16])
+    let one = expansion_times_short(minor[..<count], bx.parts[..<bx.count], first[..<64], scratch[..<64])
+    count = minor_exact(&cz, &dx, &cx, &dz, minor[..<16])
+    let two = expansion_times_short(minor[..<count], by.parts[..<by.count], second[..<64], scratch[..<64])
+    let pair = expansion_sum(first[..<one], second[..<two], both[..<128])
+    count = minor_exact(&cx, &dy, &cy, &dx, minor[..<16])
+    let three = expansion_times_short(minor[..<count], bz.parts[..<bz.count], first[..<64], scratch[..<64])
+    return expansion_sum(both[..<pair], first[..<three], h)
+
+## The normal (b - a) x (c - a) of a triangle exactly: three expansions of
+## room 16 each in h (room 48), and their lengths.
+func normal_exact(a: Vector3, b: Vector3, c: Vector3, h: f64[]) -> (usize, usize, usize):
+    var bx = Tail.of(b.x, a.x)
+    var by = Tail.of(b.y, a.y)
+    var bz = Tail.of(b.z, a.z)
+    var cx = Tail.of(c.x, a.x)
+    var cy = Tail.of(c.y, a.y)
+    var cz = Tail.of(c.z, a.z)
+    let x = minor_exact(&by, &cz, &bz, &cy, h[..<16])
+    let y = minor_exact(&bz, &cx, &bx, &cz, h[16..<32])
+    let z = minor_exact(&bx, &cy, &by, &cx, h[32..<48])
+    return (x, y, z)
+
+## Whether `p`, on the line through a and b, lies strictly between them.
+func strictly_between(a: Vector3, b: Vector3, p: Vector3) -> bool:
+    for axis in 0..<(usize)3:
+        let x = a.coordinate(axis)
+        let y = b.coordinate(axis)
+        if x == y: continue
+        let z = p.coordinate(axis)
+        return (x < z and z < y) or (y < z and z < x)
+    return false
+
+## The plane a triangle is projected to: the coordinates `u` and `v`
+## (dropping `axis`, in cyclic order so the projection keeps the normal's
+## sense along +axis) and the projected orientation `sense` (+1 or -1;
+## 0: the triangle has no area).
+pub struct Projection:
+    pub let axis: usize
+    pub let u: usize
+    pub let v: usize
+    pub let sense: i64
+
+    ## The projection along `axis`, sense unset.
+    static func along(axis: usize) -> Projection:
+        return Projection(axis, (axis + 1) % 3, (axis + 2) % 3, 0)
+
+## The projection of triangle (a, b, c) that keeps the most area: along its
+## normal's largest component, whose exact sign is the sense. A triangle
+## with no area in any projection has sense 0.
+func projection_of(a: Vector3, b: Vector3, c: Vector3) -> Projection:
+    let normal = b.subtract(a).cross(c.subtract(a))
+    let nx = math.abs(normal.x)
+    let ny = math.abs(normal.y)
+    let nz = math.abs(normal.z)
+    let first: usize = 0 if nx >= ny and nx >= nz else (1 if ny >= nz else 2)
+    # The largest approximate component is almost always exactly nonzero;
+    # the others are tried for a sliver whose estimate misleads.
+    for step in 0..<(usize)3:
+        let axis = (first + step) % 3
+        let along = Projection.along(axis)
+        let sense = orient2d(a, b, c, along.u, along.v)
+        if sense != 0: return Projection(axis, along.u, along.v, sense)
+    return Projection.along(first)

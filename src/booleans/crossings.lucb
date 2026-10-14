@@ -1,0 +1,185 @@
+# mark: Cuts crossing inside a face ============================================================
+
+# In a solid's face the cuts never cross: two of them would mean the other
+# solid cuts itself. Rounded points of an earlier cut can make that happen
+# by a hair, so crossings are found here, exactly, before triangulating,
+# and named by what meets there: three triangles' planes (Cramer's rule on
+# their exact normals), or a covering triangle's edge through a triangle.
+# Each of the triangles involved finds the same crossing in its own
+# triangulation, by the same name, so the cut stays closed.
+
+let three_planes_key: u8 = 3
+let three_planes_recipe: u8 = 3
+
+## The point where triangles a, b and c's planes meet, named by their
+## points the same whichever of them (or their exact doubles) it is found
+## in, and built from the triangles a, b, c.
+func three_planes(operands: const Operands*, a: usize, b: usize, c: usize) -> (PointKey, Recipe):
+    var triples: usize[3][3] = ---
+    let triangles: usize[3] = [a, b, c]
+    for k in 0..<(usize)3:
+        let corners: usize[3] = [operands.vertex(triangles[k], 0), operands.vertex(triangles[k], 1), operands.vertex(triangles[k], 2)]
+        triples[k] = sorted_three(corners)
+    # The triples in order.
+    for i in 0..<(usize)2:
+        for j in 0..<(usize)(2 - i):
+            if triple_less(triples[j + 1], triples[j]):
+                let swap = triples[j]
+                triples[j] = triples[j + 1]
+                triples[j + 1] = swap
+    var v: i32[9] = ---
+    for k in 0..<(usize)9: v[k] = (i32)triples[k // 3][k % 3]
+    return (PointKey(three_planes_key, v), Recipe(three_planes_recipe, (i32)a, (i32)b, (i32)c, 0, 0))
+
+func triple_less(x: usize[3], y: usize[3]) -> bool:
+    for k in 0..<(usize)3:
+        if x[k] != y[k]: return x[k] < y[k]
+    return false
+
+struct CrossingWork:
+    let operands: const Operands*
+    let cut: const Cut*
+    let table: const PointTable*
+    var arenas: Arena[]
+    var outs: Growing[PointRecord][]
+
+func crossing_slot(context: void*, slot: usize, worker: usize) -> !:
+    let work = (CrossingWork*)context
+    let arena = &work.arenas[worker]
+    let cut = work.cut
+    let operands = work.operands
+    let host = (usize)cut.triangles.items[slot]
+    let projection = operands.projections.items[host]
+    let first = (usize)cut.segment_starts.items[slot]
+    let end = (usize)cut.segment_starts.items[slot + 1]
+    for i in first..<end:
+        let one = cut.segments.items[i]
+        let p = work.table.point((usize)one.first)
+        let q = work.table.point((usize)one.second)
+        for j in i + 1..<end:
+            let other = cut.segments.items[j]
+            if other.first == one.first or other.first == one.second or other.second == one.first or other.second == one.second: continue
+            let r = work.table.point((usize)other.first)
+            let s = work.table.point((usize)other.second)
+            if apart_boxes(&p, &q, &r, &s): continue
+            let mark = arena.mark()
+            defer arena.reset(mark)
+            if (try orient2d_h(arena, &p, &q, &r, projection.u, projection.v)) * (try orient2d_h(arena, &p, &q, &s, projection.u, projection.v)) >= 0: continue
+            if (try orient2d_h(arena, &r, &s, &p, projection.u, projection.v)) * (try orient2d_h(arena, &r, &s, &q, projection.u, projection.v)) >= 0: continue
+            try work.outs[slot].push(try crossing_point(operands, host, one, other))
+
+## Whether the boxes of segments pq and rs miss each other.
+func apart_boxes(p: const HPoint*, q: const HPoint*, r: const HPoint*, s: const HPoint*) -> bool:
+    for axis in 0..<(usize)3:
+        let a = p.near.coordinate(axis)
+        let b = q.near.coordinate(axis)
+        let c = r.near.coordinate(axis)
+        let d = s.near.coordinate(axis)
+        let slack = p.slack + q.slack + r.slack + s.slack
+        if math.max(a, b) + slack < math.min(c, d) or math.max(c, d) + slack < math.min(a, b): return true
+    return false
+
+## The point where segments `one` and `other` cross inside triangle `host`.
+func crossing_point(operands: const Operands*, host: usize, one: CutSegment, other: CutSegment) -> PointRecord!:
+    if one.opposite < 0 and other.opposite < 0:
+        let (key, recipe) = three_planes(operands, host, (usize)one.source, (usize)other.source)
+        return PointRecord((i32)host, key, recipe)
+    if one.opposite >= 0 and other.opposite >= 0:
+        # Two coplanar triangles' edges crossing in this plane.
+        let e = edge_off(operands, (usize)one.source, one.opposite)
+        let f = edge_off(operands, (usize)other.source, other.opposite)
+        let along = operands.projections.items[host]
+        return PointRecord((i32)host, edge_edge(e[0], e[1], f[0], f[1]), Recipe(meeting_recipe, (i32)e[0], (i32)e[1], (i32)f[0], (i32)f[1], (i32)along.axis))
+    let cover = one if one.opposite >= 0 else other
+    let crossing = other if one.opposite >= 0 else one
+    # The covering triangle's edge (its points but the far one) through the
+    # crossing segment's source triangle.
+    let ends = edge_off(operands, (usize)cover.source, cover.opposite)
+    let s = (usize)crossing.source
+    let h = Corners.of(operands, s)
+    let u = operands.points.items[ends[0]]
+    let w = operands.points.items[ends[1]]
+    let su = plane_side(h.at[0], h.at[1], h.at[2], u)
+    let sw = plane_side(h.at[0], h.at[1], h.at[2], w)
+    if su * sw >= 0: error(errors.invalid, "Boolean: inconsistent cut (a crossing off its plane)")
+    var found = Found()
+    try edge_through(&h, s, ends[0], ends[1], u, w, &found)
+    if found.count != 1: error(errors.invalid, "Boolean: inconsistent cut (a crossing outside its face)")
+    return PointRecord((i32)host, found.keys[0], found.recipes[0])
+
+## The points of triangle `t` but `opposite`: the edge facing it.
+func edge_off(operands: const Operands*, t: usize, opposite: i32) -> usize[2]:
+    var ends: usize[2] = [0, 0]
+    var count: usize = 0
+    for k in 0..<(usize)3:
+        let point = operands.vertex(t, k)
+        if (i32)point != opposite and count < 2:
+            ends[count] = point
+            count += 1
+    return ends
+
+## Find where cut segments cross inside their triangles; their points are
+## added to `records` (in triangle order). Whether there were any.
+func find_crossings(operands: const Operands*, cut: const Cut*, table: const PointTable*, records: PairOut*) -> bool!:
+    let slots = cut.triangles.count
+    if slots == 0: return false
+    let workers = parallel.workers(slots)
+    let arenas = try new Arena[workers] --- in memory.heap
+    for at in 0..<workers: arenas[at] = Arena()
+    defer:
+        for at in 0..<workers: arenas[at].close()
+        free(arenas) in memory.heap
+    let outs = try new Growing[PointRecord][slots] --- in memory.heap
+    for at in 0..<slots: outs[at] = Growing[PointRecord]()
+    defer:
+        for at in 0..<slots: outs[at].close()
+        free(outs) in memory.heap
+    var work = CrossingWork(operands, cut, table, arenas, outs)
+    try parallel.for_each(slots, (void*)&work, crossing_slot)
+    var any = false
+    for at in 0..<slots:
+        for record in outs[at].view():
+            try records.points.push(record)
+            any = true
+    return any
+
+## The point where triangles a, b and c's planes meet, as homogeneous
+## coordinates by Cramer's rule: each plane n . x = n . (a corner).
+func three_planes_coordinates(arena: Arena*, operands: const Operands*, a: usize, b: usize, c: usize) -> Homogeneous!:
+    var rows: Plane[3] = ---
+    let triangles: usize[3] = [a, b, c]
+    for k in 0..<(usize)3: rows[k] = try plane_of(arena, operands, triangles[k])
+    let w = try determinant3(arena, rows[0].x, rows[0].y, rows[0].z, rows[1].x, rows[1].y, rows[1].z, rows[2].x, rows[2].y, rows[2].z)
+    let x = try determinant3(arena, rows[0].d, rows[0].y, rows[0].z, rows[1].d, rows[1].y, rows[1].z, rows[2].d, rows[2].y, rows[2].z)
+    let y = try determinant3(arena, rows[0].x, rows[0].d, rows[0].z, rows[1].x, rows[1].d, rows[1].z, rows[2].x, rows[2].d, rows[2].z)
+    let z = try determinant3(arena, rows[0].x, rows[0].y, rows[0].d, rows[1].x, rows[1].y, rows[1].d, rows[2].x, rows[2].y, rows[2].d)
+    if expansion_sign(w) == 0: error(errors.invalid, "Boolean: inconsistent cut (three crossing planes with no one point)")
+    return Homogeneous(x, y, z, w)
+
+## A triangle's plane n . x = d, exactly.
+struct Plane:
+    var x: f64[]
+    var y: f64[]
+    var z: f64[]
+    var d: f64[]
+
+func plane_of(arena: Arena*, operands: const Operands*, t: usize) -> Plane!:
+    var normals: f64[48] = ---
+    let p = operands.place(t, 0)
+    let (lx, ly, lz) = normal_exact(p, operands.place(t, 1), operands.place(t, 2), normals[..<48])
+    let x = try arena.take(lx)
+    let y = try arena.take(ly)
+    let z = try arena.take(lz)
+    for at in 0..<lx: x[at] = normals[at]
+    for at in 0..<ly: y[at] = normals[16 + at]
+    for at in 0..<lz: z[at] = normals[32 + at]
+    let d = try arena_sum(arena, try arena_sum(arena, try arena_scale(arena, x, p.x), try arena_scale(arena, y, p.y)), try arena_scale(arena, z, p.z))
+    return Plane(x, y, z, d)
+
+## The determinant of a 3 by 3 matrix of expansions, by rows.
+func determinant3(arena: Arena*, a: const f64[], b: const f64[], c: const f64[], d: const f64[], e: const f64[], f: const f64[], g: const f64[], h: const f64[], i: const f64[]) -> f64[]!:
+    let ei_fh = try arena_difference(arena, try arena_product(arena, e, i), try arena_product(arena, f, h))
+    let di_fg = try arena_difference(arena, try arena_product(arena, d, i), try arena_product(arena, f, g))
+    let dh_eg = try arena_difference(arena, try arena_product(arena, d, h), try arena_product(arena, e, g))
+    let total = try arena_sum(arena, try arena_difference(arena, try arena_product(arena, a, ei_fh), try arena_product(arena, b, di_fg)), try arena_product(arena, c, dh_eg))
+    return total[..<expansion_compress(total)]

@@ -1,0 +1,183 @@
+# mark: Box tree ===============================================================================
+
+## Leaves hold at most this many triangles.
+let box_leaf: usize = 8
+
+struct BoxNode:
+    var lo: Vector3
+    var hi: Vector3
+    ## Leaf: its first entry in `order`. Inner: the right child (the left
+    ## follows its parent).
+    var first: u32
+    ## Leaf: how many triangles. Inner: 0.
+    var count: u32
+
+## A bounding-volume tree over one operand's triangles, in f64 so every box
+## holds its triangle's exact points: two boxes that miss each other prove
+## the triangles do. Built as a linear BVH (Lauterbach et al. 2009): the
+## triangles sorted along a Morton curve through their box centers, then
+## halved by count, so building costs a sort and one pass.
+pub struct BoxTree:
+    var nodes: Growing[BoxNode]
+    var order: Growing[u32]
+    var lo: Growing[Vector3]
+    var hi: Growing[Vector3]
+
+    func init():
+        self.nodes = Growing[BoxNode]()
+        self.order = Growing[u32]()
+        self.lo = Growing[Vector3]()
+        self.hi = Growing[Vector3]()
+
+    func close():
+        self.nodes.close()
+        self.order.close()
+        self.lo.close()
+        self.hi.close()
+
+    ## Build over triangles first..<end of `operands`.
+    func build(operands: const Operands*, first: usize, end: usize) -> !:
+        let count = end - first
+        try self.order.reserve(count)
+        try self.lo.reserve(count)
+        try self.hi.reserve(count)
+        self.order.count = count
+        self.lo.count = count
+        self.hi.count = count
+        if count == 0: return
+        var boxes = BoxWork(operands, first, self.lo.items, self.hi.items)
+        try parallel.for_each_range(count, 16384, (void*)&boxes, box_range)
+        # Morton codes of the box centers in the whole box, with the
+        # triangle in the low half of each key so the order is total.
+        var lo = self.lo.items[0]
+        var hi = self.hi.items[0]
+        for at in 1..<count:
+            lo = lower(lo, self.lo.items[at])
+            hi = upper(hi, self.hi.items[at])
+        let keys = try new u64[count * 2] --- in memory.heap
+        defer free(keys) in memory.heap
+        var coding = CodeWork(self.lo.items, self.hi.items, lo, hi, keys[..<count])
+        try parallel.for_each_range(count, 16384, (void*)&coding, code_range)
+        radix_sort(keys[..<count], keys[count..<count * 2])
+        for at in 0..<count: self.order.items[at] = (u32)(keys[at] & 0xFFFFFFFF)
+        try self.nodes.reserve(2 * (count // box_leaf + 1))
+        _ = try self.make(0, count)
+
+    ## The subtree over order[first..<end], halved by count; its index.
+    func make(first: usize, end: usize) -> usize!:
+        let id = self.nodes.count
+        if end - first <= box_leaf:
+            var lo = self.lo.items[(usize)self.order.items[first]]
+            var hi = self.hi.items[(usize)self.order.items[first]]
+            for at in first + 1..<end:
+                let t = (usize)self.order.items[at]
+                lo = lower(lo, self.lo.items[t])
+                hi = upper(hi, self.hi.items[t])
+            try self.nodes.push(BoxNode(lo, hi, (u32)first, (u32)(end - first)))
+            return id
+        try self.nodes.push(BoxNode(Vector3(), Vector3(), 0, 0))
+        let middle = first + (end - first) // 2
+        let left = try self.make(first, middle)
+        let right = try self.make(middle, end)
+        let a = self.nodes.items[left]
+        let b = self.nodes.items[right]
+        self.nodes.items[id] = BoxNode(lower(a.lo, b.lo), upper(a.hi, b.hi), (u32)right, 0)
+        return id
+
+    ## The triangles (operand numbering) whose boxes meet [lo, hi], appended
+    ## to `found` in tree order.
+    func overlapping(lo: Vector3, hi: Vector3, base: usize, found: Growing[u32]*) -> !:
+        if self.nodes.count == 0: return
+        var stack: u32[64] = ---
+        var count: usize = 1
+        stack[0] = 0
+        while count > 0:
+            count -= 1
+            let id = (usize)stack[count]
+            let node = self.nodes.items[id]
+            if node.lo.x > hi.x or node.hi.x < lo.x or node.lo.y > hi.y or node.hi.y < lo.y or node.lo.z > hi.z or node.hi.z < lo.z: continue
+            if node.count == 0:
+                stack[count] = node.first
+                stack[count + 1] = (u32)(id + 1)
+                count += 2
+                continue
+            for at in (usize)node.first..<(usize)(node.first + node.count):
+                let t = (usize)self.order.items[at]
+                let a = self.lo.items[t]
+                let b = self.hi.items[t]
+                if a.x > hi.x or b.x < lo.x or a.y > hi.y or b.y < lo.y or a.z > hi.z or b.z < lo.z: continue
+                try found.push((u32)(base + t))
+
+## Sort 64-bit keys by their high 32 bits (the low half is unique, so the
+## order is total), least significant byte first, through `scratch`.
+func radix_sort(keys: u64[], scratch: u64[]):
+    var source = keys
+    var target = scratch
+    for pass in 0..<(u64)4:
+        let shift = 32 + pass * 8
+        var counts: usize[257] = ---
+        for at in 0..<(usize)257: counts[at] = 0
+        for key in source: counts[(usize)((key >> shift) & 0xFF) + 1] += 1
+        for at in 1..<(usize)257: counts[at] += counts[at - 1]
+        for key in source:
+            let digit = (usize)((key >> shift) & 0xFF)
+            target[counts[digit]] = key
+            counts[digit] += 1
+        let swap = source
+        source = target
+        target = swap
+    # Four passes: the sorted keys are back in `keys`.
+
+## Spread the low 10 bits of `x` to every third bit.
+func morton_spread(x: u64) -> u64:
+    var v = x & 0x3FF
+    v = (v | (v << 16)) & 0x30000FF
+    v = (v | (v << 8)) & 0x300F00F
+    v = (v | (v << 4)) & 0x30C30C3
+    v = (v | (v << 2)) & 0x9249249
+    return v
+
+struct CodeWork:
+    let lo: const Vector3[]
+    let hi: const Vector3[]
+    let low: Vector3
+    let high: Vector3
+    var keys: u64[]
+
+## Each triangle's key: the Morton code of its box center on a 1024-cell
+## grid over all boxes, then its number.
+func code_range(context: void*, first: usize, end: usize, worker: usize):
+    let work = (CodeWork*)context
+    let size = work.high.subtract(work.low)
+    let sx = 1023.0 / size.x if size.x > 0.0 else 0.0
+    let sy = 1023.0 / size.y if size.y > 0.0 else 0.0
+    let sz = 1023.0 / size.z if size.z > 0.0 else 0.0
+    for at in first..<end:
+        let center = work.lo[at].add(work.hi[at]).multiply_scalar(0.5).subtract(work.low)
+        let x = (u64)math.min(1023.0, math.max(0.0, center.x * sx))
+        let y = (u64)math.min(1023.0, math.max(0.0, center.y * sy))
+        let z = (u64)math.min(1023.0, math.max(0.0, center.z * sz))
+        let code = (morton_spread(x) << 2) | (morton_spread(y) << 1) | morton_spread(z)
+        work.keys[at] = (code << 32) | (u64)at
+
+struct BoxWork:
+    let operands: const Operands*
+    let first: usize
+    let lo: Vector3[]
+    let hi: Vector3[]
+
+func box_range(context: void*, first: usize, end: usize, worker: usize):
+    let work = (BoxWork*)context
+    for at in first..<end:
+        let t = work.first + at
+        let a = work.operands.place(t, 0)
+        let b = work.operands.place(t, 1)
+        let c = work.operands.place(t, 2)
+        work.lo[at] = lower(a, lower(b, c))
+        work.hi[at] = upper(a, upper(b, c))
+
+func lower(a: Vector3, b: Vector3) -> Vector3:
+    return Vector3(math.min(a.x, b.x), math.min(a.y, b.y), math.min(a.z, b.z))
+
+func upper(a: Vector3, b: Vector3) -> Vector3:
+    return Vector3(math.max(a.x, b.x), math.max(a.y, b.y), math.max(a.z, b.z))

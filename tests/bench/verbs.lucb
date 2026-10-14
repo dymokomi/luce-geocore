@@ -8,7 +8,7 @@ from luce_std import math
 import interop
 import memory
 from luce_geocore import geocore
-from luce_geocore.geocore import Mesh, Vector3, Verbs, Subdivision, AttributeKernels
+from luce_geocore.geocore import Mesh, MeshPrimitives, Vector3, Verbs, Subdivision, AttributeKernels
 from luce_geocore.core.growing import Growing
 from luce_geocore.kernel import clear_stroke_cache
 from luce_std import parallel as std_parallel
@@ -226,6 +226,7 @@ pub func main(arguments: str[]) -> i32!:
     try subdivision_rows(grid)
     try shading_rows(stage7[1])
     try stage8_rows(stage7[0], stage7[1])
+    try boolean_rows()
     return 0
 
 ## Stage 7's meshes (see stage7_case).
@@ -285,6 +286,30 @@ func shading_rows(sphere: interop.Reference[Mesh]) -> !:
     start = time.now()
     _ = try marked.value().smooth_normal_span()
     print(f"Shading normals, the 1M-face sphere, by its edge marks (every edge marked)\t{(f64)time.since(start) / 1000000.0}\t{marked.value().face_count()}\t")
+
+## Mesh Boolean on two UV spheres of radius 1, the second 0.7, 0.3, 0.2
+## off: of about 100k faces each (448 × 224) and of about 1M (1414 × 707).
+func boolean_rows() -> !:
+    let sizes: i64[2] = [448, 1414]
+    let names: str[3] = ["Union", "Subtract", "Intersect"]
+    for size in sizes:
+        let ball = try MeshPrimitives.sphere(1.0, size)
+        defer ball.release()
+        let moved = try ball.value().transformed(Vector3(0.7, 0.3, 0.2), Vector3(), Vector3(1.0, 1.0, 1.0))
+        defer moved.release()
+        let both = try ball.value().merged(moved)
+        defer both.release()
+        let warm = try Verbs.run("Dissolve", both, "0", 3, no_numbers[..<0])
+        warm.release()
+        for operation in 0..<(usize)3:
+            let numbers: f64[1] = [(f64)operation]
+            let start = time.now()
+            let result = try Verbs.run("Mesh Boolean", both, "*", 3, numbers[..<1])
+            let spent = (f64)time.since(start) / 1000000.0
+            let mesh = try result.value().mesh()
+            print(f"Boolean {names[operation]}, two {ball.value().face_count()}-face spheres\t{spent}\t{mesh.value().face_count()}\t{result.value().warning()}")
+            mesh.release()
+            result.release()
 
 ## The display subdivision of the grid: the first display builds the plan
 ## (level topology, carried attributes, sharpness) and evaluates; after a

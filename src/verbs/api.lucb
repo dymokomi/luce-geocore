@@ -5,7 +5,7 @@
 ## Every modeling verb's constructor, in menu order: the array's length is
 ## the registry's size, so a verb added here is counted. The select rules
 ## (selecting/registry.lucb) follow them as the Select verbs.
-let makers: (func() -> Verb)[80] = [
+let makers: (func() -> Verb)[81] = [
     transform_verb,
     smooth_verb,
     relax_verb,
@@ -36,6 +36,7 @@ let makers: (func() -> Verb)[80] = [
     duplicate_verb,
     split_verb,
     separate_verb,
+    boolean_verb,
     subdivide_verb,
     fuse_verb,
     clean_verb,
