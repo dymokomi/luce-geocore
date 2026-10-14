@@ -63,10 +63,9 @@ struct Stroke:
     var positions: Column[Float3]
     ## The points the brush may move (the group).
     var allowed: BitsBuilder
-    ## The hash of the points where they were at its last build, and how far
-    ## any point may have moved since: queries reach that much further.
+    ## The hash of the allowed points where they are: a moved point moves to
+    ## its new cell, so no dab rebuilds it.
     var hash: PointHash
-    var slack: f64
     ## Which dab last reached each point (each reached once per dab).
     var stamps: Growing[u32]
     var dab: u32
@@ -92,7 +91,6 @@ struct Stroke:
         self.positions = Column[Float3]()
         self.allowed = BitsBuilder(Column[u64](), 0)
         self.hash = hash
-        self.slack = 0.0
         self.stamps = Growing[u32]()
         self.dab = 0
         self.moved = BitsBuilder(Column[u64](), 0)
@@ -132,7 +130,7 @@ func begin_stroke(mesh: const Mesh*, settings: BrushSettings, allowed: Bits) -> 
     stroke.moved = try BitsBuilder.zeros(count)
     stroke.fresh = try BitsBuilder.zeros(count)
     try stroke.stamps.fill(count, 0)
-    try rebuild_hash(&stroke)
+    try build_hash(&stroke)
     return stroke
 
 ## The points moved since the last call, ascending, into `out`.
@@ -146,8 +144,8 @@ func take_fresh(stroke: Stroke*, out: Growing[u32]*) -> !:
             pending = pending & (pending - 1)
         words[word] = 0
 
-## The hash over the points where they are now: cells a radius wide.
-func rebuild_hash(stroke: Stroke*) -> !:
+## The hash over the allowed points where they are: cells a radius wide.
+func build_hash(stroke: Stroke*) -> !:
     let positions = stroke.positions.view()
     var made = try PointHash.empty(positions.length, stroke.settings.radius)
     let allowed = stroke.allowed.view()
@@ -155,7 +153,6 @@ func rebuild_hash(stroke: Stroke*) -> !:
         if allowed.get(point): made.insert(point, positions[point].vector())
     stroke.hash.close()
     stroke.hash = made
-    stroke.slack = 0.0
 
 ## Apply dab `values` (center and direction, world, and pressure) and,
 ## under symmetry, its mirror. Grab's dabs carry the points by its move:
@@ -184,9 +181,6 @@ func apply_dab(stroke: Stroke*, values: const f64[]) -> !:
 ## One dab at `center` (relative to the origin).
 func one_dab(stroke: Stroke*, center: Vector3, direction: Vector3, pressure: f64) -> !:
     let settings = stroke.settings
-    # Points move a little each dab: past half a radius in all, the hash is
-    # built again where they are.
-    if stroke.slack > settings.radius * 0.5: try rebuild_hash(stroke)
     try dab_reach(stroke, center, settings.radius, pressure)
     let count = stroke.reached.count
     if count == 0: return
@@ -208,19 +202,17 @@ func one_dab(stroke: Stroke*, center: Vector3, direction: Vector3, pressure: f64
     var work = DabWork(stroke.positions.view(), stroke.reached.view(), stroke.weights.view(), stroke.next.items[..<count], settings.brush, center, facing, settings.radius, sign, middle,
                        stroke.mesh.offset_span(), stroke.mesh.corner_span(), faces.0, faces.1, try stroke.mesh.edge_span(), edges.0, edges.1)
     try parallel.for_each_range(count, 2048, (void*)&work, dab_points)
-    # The new places written, and the slack grown by the farthest step.
+    # The new places written, each point moved to its new cell.
     let positions = stroke.positions.span()
-    var farthest = 0.0
     for at in 0..<count:
         let point = (usize)stroke.reached.items[at]
         let next = stroke.next.items[at]
-        let step = next.vector().subtract(positions[point].vector()).length()
-        if step == 0.0: continue
-        farthest = math.max(farthest, step)
+        let was = positions[point]
+        if next.x == was.x and next.y == was.y and next.z == was.z: continue
+        stroke.hash.relocate(point, was.vector(), next.vector())
         positions[point] = next
         stroke.moved.set(point)
         stroke.fresh.set(point)
-    stroke.slack += farthest
 
 ## The allowed points within `radius` of `center` and their weights.
 func dab_reach(stroke: Stroke*, center: Vector3, radius: f64, pressure: f64 = 1.0) -> !:
@@ -228,7 +220,7 @@ func dab_reach(stroke: Stroke*, center: Vector3, radius: f64, pressure: f64 = 1.
     stroke.weights.clear()
     stroke.dab += 1
     let positions = stroke.positions.view()
-    let span = radius + stroke.slack
+    let span = radius
     let lo = stroke.hash.cell_of(center.subtract(Vector3(span, span, span)))
     let hi = stroke.hash.cell_of(center.add(Vector3(span, span, span)))
     let strength = stroke.settings.strength * pressure
@@ -260,16 +252,15 @@ func take_grab(stroke: Stroke*, center: Vector3, points: Growing[u32]*, weights:
 ## The grabbed points moved by `delta`, each by its weight.
 func move_grabbed(stroke: Stroke*, points: const Growing[u32]*, weights: const Growing[f32]*, delta: Vector3) -> !:
     let positions = stroke.positions.span()
-    var farthest = 0.0
     for at in 0..<points.count:
         let point = (usize)points.items[at]
         let step = delta.multiply_scalar((f64)weights.items[at])
         if step.x == 0.0 and step.y == 0.0 and step.z == 0.0: continue
-        positions[point] = Float3.of(positions[point].vector().add(step))
-        farthest = math.max(farthest, step.length())
+        let was = positions[point]
+        positions[point] = Float3.of(was.vector().add(step))
+        stroke.hash.relocate(point, was.vector(), positions[point].vector())
         stroke.moved.set(point)
         stroke.fresh.set(point)
-    stroke.slack += farthest
 
 ## What a dab's points read.
 struct DabWork:

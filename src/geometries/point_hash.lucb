@@ -44,6 +44,24 @@ pub struct PointHash:
         self.next.items[index] = self.heads.items[bucket]
         self.heads.items[bucket] = (i32)index
 
+    ## Point `index`, in the hash at `was`, now at `now`: moved to its new
+    ## cell's bucket when that is another bucket (its old bucket's list walked
+    ## to unlink it).
+    pub func relocate(index: usize, was: Vector3, now: Vector3):
+        let left = self.bucket(self.cell_of(was))
+        let entered = self.bucket(self.cell_of(now))
+        if left == entered: return
+        var at = self.heads.items[left]
+        var before: i32 = -1
+        while at >= 0 and (usize)at != index:
+            before = at
+            at = self.next.items[(usize)at]
+        if at < 0: return
+        if before < 0: self.heads.items[left] = self.next.items[index]
+        else: self.next.items[(usize)before] = self.next.items[index]
+        self.next.items[index] = self.heads.items[entered]
+        self.heads.items[entered] = (i32)index
+
     pub func cell_of(point: Vector3) -> Cell:
         return Cell((i64)math.floor(point.x / self.size), (i64)math.floor(point.y / self.size), (i64)math.floor(point.z / self.size))
 

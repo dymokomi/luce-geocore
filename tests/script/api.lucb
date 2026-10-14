@@ -189,6 +189,9 @@ pub func families() -> !:
     defer scene.close()
     for i in 0..<3: try scene.add_instance(&box, [(f32)i * 2.0, 0.0, 0.0, 0.0], [0.0, 45.0, 0.0, 0.0])
     assert(scene.instance_count() == 3)
+    # Many more, each appended in place: the last one placed where it was put.
+    for i in 0..<2000: try scene.add_instance(&box, [0.0, (f32)i, 0.0, 0.0])
+    assert(scene.instance_count() == 2003 and (try scene.bounds()).maximum.y == (try box.bounds()).maximum.y + 1999.0)
     var merged = try Geometry.grid(2.0, 2)
     defer merged.close()
     try merged.merge(&box)

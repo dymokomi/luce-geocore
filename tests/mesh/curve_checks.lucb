@@ -10,7 +10,7 @@ import memory
 import strings
 from io import path as io_path
 from luce_geocore.geocore import Vector3, Matrix4, Mesh, MeshPrimitives, GeometrySet
-from luce_geocore.kernel import Curves, CurvesBuilder, CurveType, KnotMode, BitsBuilder, Bits, Attribute, Domain, DataType, GroupReport, SetVerbOutput
+from luce_geocore.kernel import curves_with_store, Curves, CurvesBuilder, CurveType, KnotMode, BitsBuilder, Bits, Attribute, Domain, DataType, GroupReport, SetVerbOutput
 from luce_geocore.kernel import save_geometry, load_geometry, evaluated_offsets, evaluated_positions, evaluated_frames, evaluated_id, curves_dispose, curves_share, curves_subset, curve_group_bits, set_curves, curves_type, empty_set, dispose_set, adopt_set, run_set_verb, find_set_verb, arc_curves, line_curves, spiral_curves, clear_group_cache
 
 func near(a: f64, b: f64, tolerance: f64 = 0.0001) -> bool:
@@ -131,6 +131,19 @@ pub func frames_and_cache() -> !:
     let shared = try curves_share(spiral)
     defer curves_dispose(shared)
     assert((try evaluated_id(shared)) == id and (try evaluated_id(spiral)) == id)
+    # Another attribute (a detail value) evaluates nothing: the points and frames stand.
+    let tint = try Attribute.from_numbers("tint", Domain.detail, 1, [0.5], false)
+    var store = spiral.store().shared() catch failure:
+        var lost = tint
+        lost.release()
+        error(failure.code, failure.message)
+    store.put(tint) catch failure:
+        store.close()
+        error(failure.code, failure.message)
+    let colored = try curves_with_store(spiral, store)
+    defer curves_dispose(colored)
+    assert((try evaluated_id(colored)) == id, "an attribute change keeps the evaluated points")
+    assert((try evaluated_frames(colored)).tangents.data == frames.tangents.data, "and the frames")
 
 pub func sets() -> !:
     let set = try set_of(try sample_curves())

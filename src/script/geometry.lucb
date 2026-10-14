@@ -39,7 +39,7 @@ import math.vector
 from math.matrix import Matrix4
 from geometries.polygon import Mesh, assembled, mesh_share, mesh_dispose, moved_storage, put_attribute, remove_attribute, transfer_attributes
 from primitives import MeshPrimitives
-from geometry_set import GeometrySet, Placement, set_bounds, set_mesh, mesh_component, empty_storage, dispose_set, adopt_set, set_joined, set_placed, set_detail, set_put_detail, cloud_of_mesh, set_cloud, cloud_positions, cloud_origin, cloud_store, points_component
+from geometry_set import GeometrySet, Placement, set_bounds, set_mesh, mesh_component, empty_storage, dispose_set, adopt_set, set_joined, set_placed, set_detail, set_put_detail, cloud_of_mesh, set_cloud, cloud_positions, cloud_origin, cloud_store, points_component, instances_component, Instances, new_instances
 from curves import Curves, CurveType, CurvesBuilder, set_curves, curves_type
 from geometry_files import GeometryFile
 from fields import Volume, SparseGrid, GridClass, VolumeLook, restyled, box_grid, new_grid, share_grid, release_grid, new_volume, add_grid, release_volume, volume_type, set_volume, key_leaf, leaf_key, leaf_of, local_index, leaf_voxels, mask_words
@@ -139,6 +139,11 @@ pub struct Geometry:
 
     ## The positions of every point, relative to `origin()`, to read (inputs too).
     pub func positions_view() -> const Float3[]!:
+        # An input never changes: its mesh's own positions, with no edit form
+        # (a copy of the whole mesh) opened just to read them.
+        if self.locked and self.edit == none:
+            let mesh = set_mesh(self.set()) else return no_positions()
+            return mesh.point_span()
         let edit = try self.readable()
         return edit.positions.view()
 
@@ -342,3 +347,7 @@ func vec3(value: f32[4]) -> Vector3:
 func point_of(points: const (f32[4])[], at: usize) -> f32[4]:
     let p = points[at]
     return [p[0], p[1], p[2], 0.0]
+
+func no_positions() -> const Float3[]:
+    var none_held: const Float3[]
+    return none_held

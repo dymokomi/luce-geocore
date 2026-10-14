@@ -6,6 +6,7 @@
 ## only the normals around the moved points.
 import memory
 import sync
+from luce_std import sort
 from core.float3 import Float3
 from core.shared import Column
 from geometries.shading.smooth_normals import Surface, point_normals, corner_normals, affected_points, refresh_points, refresh_corners
@@ -27,17 +28,28 @@ pub struct ShadingCache:
     var curvature: Column[f32]
 
     ## A cache for a mesh whose points `moved` over `previous`'s geometry.
-    ## Only a built `previous` is kept; otherwise this one computes afresh.
+    ## A built `previous` is its source. An unbuilt one passes on its own
+    ## source with both moves (frames no one drew shade from the last built
+    ## normals, not from scratch); without one this computes afresh.
     pub static func after(previous: ShadingCache*, moved: const u32[]) -> ShadingCache*!:
         let cache = try new ShadingCache() in memory.heap
-        if previous.ready.load(.acquire) == 0 or moved.length == 0:
-            return cache
-        let copy = new u32[moved.length] --- in memory.heap catch failure:
+        if moved.length == 0: return cache
+        previous.lock.lock()
+        var base = previous
+        var earlier: const u32[] = moved[..<0]
+        if previous.ready.load(.acquire) == 0:
+            if previous.source == none:
+                previous.lock.unlock()
+                return cache
+            base = previous.source else trap("a shading source vanished under its lock")
+            earlier = previous.moved
+        let copy = joined_points(earlier, moved) catch failure:
+            previous.lock.unlock()
             free(cache) in memory.heap
             error(failure.code, failure.message)
-        memory.copy(copy, moved, moved.length)
-        _ = previous.owners.add(1, .relaxed)
-        cache.source = previous
+        _ = base.owners.add(1, .relaxed)
+        previous.lock.unlock()
+        cache.source = base
         cache.moved = copy
         return cache
 
@@ -181,6 +193,26 @@ pub struct ShadingCache:
         self.smooth.release()
         self.curvature.release()
         self.drop_source()
+
+## The points of `a` and `b`, ascending, each once (a new heap list).
+func joined_points(a: const u32[], b: const u32[]) -> u32[]!:
+    let all = try new u32[a.length + b.length] --- in memory.heap
+    errdefer free(all) in memory.heap
+    memory.copy(all[..<a.length], a, a.length)
+    memory.copy(all[a.length..], b, b.length)
+    sort.stable(all, ascending)
+    var kept: usize = 0
+    for at in 0..<all.length:
+        if at > 0 and all[at] == all[kept - 1]: continue
+        all[kept] = all[at]
+        kept += 1
+    let unique = try new u32[kept] --- in memory.heap
+    memory.copy(unique, all[..<kept], kept)
+    free(all) in memory.heap
+    return unique
+
+func ascending(a: u32, b: u32) -> bool:
+    return a < b
 
 ## Give up one owner of `cache`; the last frees it.
 pub func release_shading(cache: ShadingCache*):

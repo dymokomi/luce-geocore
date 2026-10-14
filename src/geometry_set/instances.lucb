@@ -204,13 +204,26 @@ func instances_bytes(data: const void*, ids: IdSet*) -> usize!:
     for set in instances.prototypes.view(): total += try set_bytes(set, ids)
     return total
 
+## Each prototype's own box is found once and placed per row (a prototype
+## instanced many times is not measured again for each).
 func instances_bounds(data: const void*, matrix: Matrix4, out: Bounds*) -> bool!:
     let instances = (const Instances*)data
+    let count = instances.prototype_count()
+    if count == 0: return false
+    let boxes = try new Bounds[count] --- in memory.heap
+    defer free(boxes) in memory.heap
+    let known = try new u8[count] in memory.heap
+    defer free(known) in memory.heap
     var found = false
     for at in 0..<instances.count():
-        let item = instances.item(at)
-        var box = Bounds(Vector3(), Vector3())
-        if not (try set_bounds(item.set, matrix.multiply(item.matrix()), &box)): continue
+        let row = instances.row(at)
+        let prototype = (usize)row.prototype
+        if known[prototype] == 0:
+            var own = Bounds(Vector3(), Vector3())
+            known[prototype] = 1 if (try set_bounds(instances.prototype(prototype), Matrix4(), &own)) else 2
+            boxes[prototype] = own
+        if known[prototype] != 1: continue
+        let box = placed_box(boxes[prototype], matrix.multiply(Matrix4.compose(row.translation, row.rotation, row.scale)))
         *out = union_box(*out, box) if found else box
         found = true
     return found

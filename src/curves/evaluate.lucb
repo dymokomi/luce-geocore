@@ -6,8 +6,10 @@
 ##
 ## The shape (evaluated offsets and the NURBS basis) depends on topology,
 ## types and knots only; positions, handles and weights change the points.
-## A curves value made by moving points starts with its source's shape, so a
-## Move re-evaluates positions without rebuilding the basis.
+## A curves value made from another starts with its shape, evaluated points
+## and frames, each standing while the columns it read are the same: a Move
+## re-evaluates positions without rebuilding the basis, and a change of other
+## attributes evaluates nothing.
 ##
 ## Bezier segments run from a point through its right handle and the next
 ## point's left handle; missing handles are automatic, one sixth of the
@@ -59,6 +61,19 @@ func new_cache(seed: const CurveCache*?) -> CurveCache*!:
             cache.basis_starts = source.basis_starts.share()
             cache.basis_weights = source.basis_weights.share()
             cache.shape_ready.store(1, .release)
+            # The evaluated points and frames come along too: they stand while
+            # their key (shape, positions, handles, weights) matches, so a
+            # change of another attribute (Cd, a group) evaluates nothing.
+            if source.points_ready.load(.acquire) != 0:
+                cache.points_key = source.points_key
+                cache.evaluated = source.evaluated.share()
+                cache.points_ready.store(1, .release)
+                if source.frames_ready.load(.acquire) != 0:
+                    cache.tangents = source.tangents.share()
+                    cache.normals = source.normals.share()
+                    cache.lengths = source.lengths.share()
+                    cache.totals = source.totals.share()
+                    cache.frames_ready.store(1, .release)
     return cache
 
 ## Give up one owner of `cache`; the last frees it.

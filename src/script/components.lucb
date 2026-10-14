@@ -95,14 +95,24 @@ extend Geometry:
     ## degrees) and scaled. Many instances share one child's data.
     pub func add_instance(child: Geometry*, translate: f32[4], rotate: f32[4] = [0.0, 0.0, 0.0, 0.0], scale: f32[4] = [1.0, 1.0, 1.0, 0.0]) -> !:
         if self.locked: error(errors.invalid, "an input is read-only: copy() it to change it")
-        let mine = try self.adopted()
-        defer mine.release()
-        let theirs = try child.adopted()
-        defer theirs.release()
-        let turn = radians(rotate)
-        let placed = try (try mine.get()).with_instance(theirs, vec3(translate), turn, vec3(scale))
-        defer placed.release()
-        self.replace(try (try placed.get()).storage())
+        # Appended to this geometry's own instances in place (its set owns them
+        # alone): a loop of adds costs each add, not a copy of every instance so far.
+        let copy = try (try child.finished()).storage()
+        let placement = Placement.compose(vec3(translate), radians(rotate), vec3(scale))
+        let set = self.set()
+        if let found = set.find(&instances_component):
+            try ((Instances*)found).add(copy, &placement, true)
+            return
+        let made = new_instances() catch failure:
+            dispose_set(copy)
+            error(failure.code, failure.message)
+        let close = instances_component.close
+        made.add(copy, &placement, true) catch failure:
+            close((void*)made)
+            error(failure.code, failure.message)
+        set.put(&instances_component, (void*)made) catch failure:
+            close((void*)made)
+            error(failure.code, failure.message)
 
     ## How many instances the set holds.
     pub func instance_count() -> i64:
