@@ -5,7 +5,7 @@ import c
 import strings
 import time
 from io import path
-from luce_std import collections, files, process
+from luce_std import collections, files, process, wake
 from luce_geocore.geocore import ScriptHelp, ScriptCheckJob, CodeCompletion
 import interop
 import thread
@@ -45,13 +45,15 @@ pub func run_all() -> !:
     # The first check, which reads the packages, on a thread of its own (as luced-3d runs
     # it); a check here meanwhile waits for it, since checks run one at a time.
     let started = time.now()
-    let job = try ScriptCheckJob.start(file, script)
+    # The job wakes a waker when it is done (as a notifier's wakes luced-3d's loop);
+    # nothing polls.
+    var woken = Woken()
+    let waker = try wake.waker(woke, (void*)&woken, let_go)
+    defer waker.release()
+    let job = try ScriptCheckJob.start(file, script, waker)
     defer job.release()
     let beside = try ScriptHelp.check(file, script)
     expect((try beside.get()).ok(), "a check beside a running job")
-    # The job says when it is done (as a notifier wakes luced-3d's loop); nothing polls.
-    var woken = Woken()
-    (try job.get()).wake_when_done(woke, let_go, (void*)&woken)
     woken.lock.lock()
     while not woken.done: woken.signal.wait(&woken.lock)
     woken.lock.unlock()
