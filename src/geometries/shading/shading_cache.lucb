@@ -16,9 +16,19 @@ pub struct ShadingCache:
     pub var owners: @usize = 1
     var lock: sync.Mutex
     var ready: @u32
+    ## The smooth normals: all of them; or, while `patch` holds any, the
+    ## normals of an earlier frame, shared, that `patch` overrides from
+    ## element `patch_first` on (a drag's frames: the moved points'
+    ## neighbourhood, not a copy of the whole column each move).
     var smooth: Column[Float3]
+    var patch: Column[Float3]
+    var patch_first: usize
     ## Whether `smooth` holds a normal per corner (true) or per point.
     var per_corner: bool
+    ## A patched cache's identity: its column's parent and the elements that
+    ## differ from it (a whole column says these itself).
+    var patch_parent: u64
+    var patch_changed: (usize, usize)
     ## Before this cache is built: the previous geometry's cache and the
     ## points that moved since.
     var source: ShadingCache*? = none
@@ -53,20 +63,60 @@ pub struct ShadingCache:
         cache.moved = copy
         return cache
 
-    ## The smooth normals, per point or per corner (`corner_domain`).
-    ## Published once, immutable after.
+    ## The smooth normals as one array, per point or per corner
+    ## (`corner_domain`): a patched cache joins its patch into a column of
+    ## its own first (once). Published once, immutable after.
     pub func get(shape: const Surface*) -> const Float3[]!:
-        if self.ready.load(.acquire) == 0:
-            self.lock.lock()
-            defer self.lock.unlock()
-            if self.ready.load(.acquire) == 0:
-                if let source = self.source:
-                    try self.update_from(source, shape)
-                else:
-                    try self.compute(shape)
-                self.ready.store(1, .release)
-                self.drop_source()
+        try self.prepare(shape)
+        if self.patch.is_empty(): return self.smooth.view()
+        self.lock.lock()
+        defer self.lock.unlock()
+        if not self.patch.is_empty():
+            # The joined column stands for this cache's normals: its parent
+            # is the patched identity, unchanged, so GPU copies keep theirs.
+            var whole = try Column[Float3].allocate(self.smooth.count())
+            self.copy_range(0, whole.count(), whole.span())
+            whole.set_parent(self.patch.id())
+            whole.set_changed(0, 0)
+            self.smooth.release()
+            self.patch.release()
+            self.smooth = whole
         return self.smooth.view()
+
+    ## Build the normals (whole, or as a patch over a source's), without
+    ## joining a patch: what ids, the domain and range reads need.
+    pub func prepare(shape: const Surface*) -> !:
+        if self.ready.load(.acquire) != 0: return
+        self.lock.lock()
+        defer self.lock.unlock()
+        if self.ready.load(.acquire) != 0: return
+        if let source = self.source:
+            try self.update_from(source, shape)
+        else:
+            try self.compute(shape)
+        self.ready.store(1, .release)
+        self.drop_source()
+
+    ## Normals `first..<end` into `output` (one each), from the column or
+    ## through the patch; once prepared.
+    pub func read(first: usize, end: usize, output: Float3[]):
+        self.lock.lock()
+        defer self.lock.unlock()
+        self.copy_range(first, end, output)
+
+    func copy_range(first: usize, end: usize, output: Float3[]):
+        let all = self.smooth.view()
+        memory.copy(output, all[first..<end], end - first)
+        if self.patch.is_empty(): return
+        let patch = self.patch.view()
+        let low = first if first > self.patch_first else self.patch_first
+        let patch_end = self.patch_first + patch.length
+        let high = end if end < patch_end else patch_end
+        if low < high: memory.copy(output[low - first..<high - first], patch[low - self.patch_first..<high - self.patch_first], high - low)
+
+    ## How many normals there are.
+    pub func count() -> usize:
+        return self.smooth.count()
 
     pub func is_ready() -> bool:
         return self.ready.load(.acquire) != 0
@@ -75,15 +125,19 @@ pub struct ShadingCache:
     pub func corner_domain() -> bool:
         return self.per_corner
 
-    ## The smooth column's id and the column it was updated from (0: none);
-    ## meaningful once built.
+    ## The normals' identity (equal ids: equal normals) and the identity they
+    ## were updated from (0: none), and what differs from that; meaningful
+    ## once prepared.
     pub func id() -> u64:
+        if not self.patch.is_empty(): return self.patch.id()
         return self.smooth.id()
 
     pub func parent() -> u64:
+        if not self.patch.is_empty(): return self.patch_parent
         return self.smooth.parent()
 
     pub func changed() -> (usize, usize):
+        if not self.patch.is_empty(): return self.patch_changed
         return self.smooth.changed()
 
     ## Every normal from scratch: per point, or per corner where a cusp splits
@@ -104,46 +158,57 @@ pub struct ShadingCache:
         self.smooth = corner_column
         self.per_corner = true
 
-    ## Copy `source`'s normals and redo those around the moved points. Per
-    ## point, a point that gained a cusp turns the storage per corner: the
-    ## other points had none, so their corners copy their point's normal.
-    ## Under the lock.
+    ## `source`'s normals with those around the moved points redone, as a
+    ## patch over the column `source` shares: the patch covers the moved
+    ## points' elements and what `source`'s own patch covered, so a drag's
+    ## frames cost their neighbourhood, not the mesh. Per point, a point that
+    ## gained a cusp turns the storage per corner (once): the other points
+    ## had none, so their corners copy their point's normal. Under the lock.
     func update_from(source: ShadingCache*, shape: const Surface*) -> !:
         let affected = try affected_points(shape, self.moved)
         defer free(affected) in memory.heap
-        # A source whose mesh is gone (a drag's last frame) gives up its
-        # column instead of a copy.
-        var column = source.surrender()
-        let taken = not column.is_empty()
-        if not taken:
-            column = try Column[Float3].allocate(source.smooth.count())
-        errdefer column.release()
-        if taken:
-            _ = try column.writable()
-        else:
-            memory.copy(column.span(), source.smooth.view(), column.count())
+        let range = changed_range(shape, affected, source.per_corner)
+        var first = range.0
+        var end = range.1
+        if not source.patch.is_empty():
+            let held_end = source.patch_first + source.patch.count()
+            if range.0 == range.1:
+                first = source.patch_first
+                end = held_end
+            else:
+                first = first if first < source.patch_first else source.patch_first
+                end = end if end > held_end else held_end
+        var patch = try Column[Float3].allocate(end - first)
+        errdefer patch.release()
+        source.read(first, end, patch.span())
         if source.per_corner:
-            refresh_corners(shape, affected, column.span())
+            refresh_corners(shape, affected, patch.span(), first)
         else:
-            let points = shape.positions.length
-            let split = try new bool[points] --- in memory.heap
+            let split = try new bool[end - first + 1] --- in memory.heap
             defer free(split) in memory.heap
-            memory.set(u8[]((u8*)split.data, points), 0)
-            if refresh_points(shape, affected, column.span(), split):
+            memory.set(u8[]((u8*)split.data, split.length), 0)
+            if refresh_points(shape, affected, patch.span(), split, first):
+                # A cusp: every point's normal, then per corner.
+                var points = try Column[Float3].allocate(source.count())
+                errdefer points.release()
+                source.read(0, points.count(), points.span())
+                memory.copy(points.span()[first..<end], patch.view(), end - first)
+                let whole = try new bool[points.count()] --- in memory.heap
+                defer free(whole) in memory.heap
+                memory.set(u8[]((u8*)whole.data, whole.length), 0)
+                memory.copy(whole[first..<end], split[..<end - first], end - first)
                 var corners = try Column[Float3].allocate(shape.corners.length)
-                corner_normals(shape, column.view(), split, corners.span())
-                column.release()
+                corner_normals(shape, points.view(), whole, corners.span())
+                points.release()
+                patch.release()
                 self.smooth = corners
                 self.per_corner = true
                 return
-        # Provenance: GPU copies of the old normals update in place, just the
-        # range around the moved points (a surrendered column took its new
-        # id with the old one as its parent).
-        if not taken:
-            column.set_parent(source.smooth.id())
-        let range = changed_range(shape, affected, source.per_corner)
-        column.set_changed(range.0, range.1)
-        self.smooth = column
+        self.smooth = source.smooth.share()
+        self.patch = patch
+        self.patch_first = first
+        self.patch_parent = source.id()
+        self.patch_changed = range
         self.per_corner = source.per_corner
 
     ## k1 and k2 of every point, computed on first use.
@@ -168,17 +233,6 @@ pub struct ShadingCache:
     pub func curvature_id() -> u64:
         return self.curvature.id()
 
-    ## This cache's column, given up, when only the one cache built over it
-    ## still holds it (its mesh is gone): it is then not built. An empty
-    ## column otherwise.
-    func surrender() -> Column[Float3]:
-        self.lock.lock()
-        defer self.lock.unlock()
-        if self.ready.load(.acquire) == 0 or self.owners.load(.acquire) != 1 or not self.smooth.unique():
-            return Column[Float3]()
-        self.ready.store(0, .release)
-        return self.smooth.take()
-
     func drop_source():
         if let source = self.source:
             self.source = none
@@ -191,6 +245,7 @@ pub struct ShadingCache:
     ## Called by the last owner, after every reader.
     func close():
         self.smooth.release()
+        self.patch.release()
         self.curvature.release()
         self.drop_source()
 

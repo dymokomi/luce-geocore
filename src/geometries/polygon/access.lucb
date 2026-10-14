@@ -283,8 +283,19 @@ extend Mesh:
         return Vector3((f64)values[(usize)point * 2], (f64)values[(usize)point * 2 + 1], 0.0)
 
     ## The smooth normals (per point, or per corner where a cusp splits a
-    ## point), computed on first use.
+    ## point) as one array, computed on first use.
     func smooth_normals() -> const Float3[]!:
+        return try self.shade(true)
+
+    ## The smooth normals built (a drag's frame: a patch over the last
+    ## frame's), without joining them into one array: what their ids, domain
+    ## and ranges need.
+    pub func smooth_prepared() -> !:
+        if self.shading.is_ready(): return
+        _ = try self.shade(false)
+
+    ## Build the smooth normals: `whole`, as one array (returned).
+    func shade(whole: bool) -> const Float3[]!:
         let incidence = try self.incidence()
         # Edge marks (`sharp`) decide the shading where the mesh has them.
         let marked = self.attributes.find("sharp", Domain.edge)
@@ -293,9 +304,15 @@ extend Mesh:
             let edge_corners = try self.topology.edge_corners(edges.1, edges.0.length // 2)
             let marks = EdgeMarks(try self.corner_faces(), edges.1, edge_corners.0, edge_corners.1, self.attributes.entry((usize)marked))
             let shape = Surface(self.positions.view(), self.offsets.view(), self.corners.view(), self.normals.view(), incidence.0, incidence.1, &marks)
-            return try self.shading.get(&shape)
+            return try self.shaded(&shape, whole)
         let shape = Surface(self.positions.view(), self.offsets.view(), self.corners.view(), self.normals.view(), incidence.0, incidence.1)
-        return try self.shading.get(&shape)
+        return try self.shaded(&shape, whole)
+
+    func shaded(shape: const Surface*, whole: bool) -> const Float3[]!:
+        if whole: return try self.shading.get(shape)
+        try self.shading.prepare(shape)
+        var none_joined: const Float3[]
+        return none_joined
 
     ## Display triangle index `offset`: a corner.
     pub func index(offset: i64) -> interop.Outcome[i64]:
@@ -421,12 +438,12 @@ extend Mesh:
 
     ## Whether the smooth normals are per corner (a cusp splits a point).
     pub func smooth_normals_corner_domain() -> bool!:
-        _ = try self.smooth_normals()
+        try self.smooth_prepared()
         return self.shading.corner_domain()
 
     ## The smooth normals' column id and the id it was updated from.
     pub func smooth_normals_ids() -> (u64, u64)!:
-        _ = try self.smooth_normals()
+        try self.smooth_prepared()
         return (self.shading.id(), self.shading.parent())
 
     ## k1 and k2 of every point (discrete principal curvatures), computed on first
@@ -445,7 +462,7 @@ extend Mesh:
 
     ## The smooth normals' changed elements (see Column.changed).
     pub func smooth_changed() -> (usize, usize)!:
-        _ = try self.smooth_normals()
+        try self.smooth_prepared()
         return self.shading.changed()
 
     ## Faces around each point (one per corner there), as offsets into a list.

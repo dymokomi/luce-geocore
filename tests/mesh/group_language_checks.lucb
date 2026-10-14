@@ -155,6 +155,15 @@ func round_trips() -> !:
     let text = try named.value().expression(mesh)
     defer text.release()
     assert(text.value == "top")
+    # A dotted group (a result's `.selection`) is that mesh's own state: an
+    # expression names the members, which another mesh reads the same.
+    let marked = try Groups.with_group(mesh, ".selection", 2, "0-2")
+    defer marked.release()
+    let dotted = try Selection.of(marked, "0-2", 2)
+    defer dotted.release()
+    let spelled = try dotted.value().expression(marked)
+    defer spelled.release()
+    assert(spelled.value == "0-2")
     let chain = try Selection.of(mesh, "loop(p5-6)", 4)
     defer chain.release()
     let chained = try chain.value().expression(mesh)

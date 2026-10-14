@@ -4,6 +4,7 @@
 ## sphere of radius r has k1 = k2 = 1/r; a plane's interior is flat and its
 ## boundary reads zero.
 from luce_std import math
+from luce_std import clock
 import memory
 from luce_geocore import geocore
 from luce_geocore.geocore import Mesh, Vector3, MeshPrimitives, MeshNormals
@@ -42,6 +43,7 @@ pub func exercise() -> !:
     for corner in 0..<m.vertex_count():
         same(try m.corner_normal(corner), try fresh.corner_normal(corner))
     try curvature()
+    try drag_frames()
 
 func curvature() -> !:
     let sphere = try MeshPrimitives.sphere(2.0, 48)
@@ -99,3 +101,67 @@ func first_corner_of(mesh: const Mesh*, point: i64) -> i64!:
     for corner in 0..<mesh.vertex_count():
         if (try mesh.corner_point(corner)) == point: return corner
     error(geocore.invalid, "point has no corner")
+
+## A drag's frames each move the last frame's points: their smooth normals
+## are a patch of the moved neighbourhood over the drag start's (each
+## frame's parent the last frame's, its changed range that neighbourhood),
+## never a copy of the whole column, and what they read is what a fresh mesh
+## computes, a cusp (a point raised past 60 degrees) turning them per corner
+## once. A frame costs its neighbourhood: four times the points cost about
+## the same.
+func drag_frames() -> !:
+    let small = try frame_cost(200, 40)
+    let large = try frame_cost(400, 40)
+    print(f"ok smooth normals over a drag: a frame {small * 1000.0:.3f} ms at 40k points, {large * 1000.0:.3f} ms at 160k")
+    assert(large < small * 2.5 + 0.0005)
+
+## The median seconds a frame takes to shade, over `frames` moves of a
+## 400-point block of a `divisions`² grid, each frame's normals checked.
+func frame_cost(divisions: i64, frames: i64) -> f64!:
+    let grid = try MeshPrimitives.grid(2.0, divisions)
+    defer grid.release()
+    _ = try grid.value().smooth_ids()
+    let first = (divisions + 1) * (divisions // 2)
+    var block: i64[400]
+    for at in 0..<(usize)400: block[at] = first + (i64)at % (divisions - 1) + 1 + (i64)at // (divisions - 1) * (divisions + 1)
+    var current = grid.clone()
+    defer current.release()
+    var times = try new f64[(usize)frames] --- in memory.heap
+    defer free(times) in memory.heap
+    for frame in 0..<frames:
+        # The first frame raises the block past the cusp: corners from then on.
+        let lift = 0.6 if frame == 0 else 0.001
+        let next = try current.value().moved_points(block[..<400], Vector3(0.0, lift, 0.0))
+        let before = try current.value().smooth_ids()
+        current.release()
+        current = next
+        let started = clock.now()
+        let ids = try current.value().smooth_ids()
+        let changed = try current.value().smooth_changed()
+        times[(usize)frame] = started.elapsed().seconds()
+        if frame > 0:
+            assert(ids.1 == before.0)
+            assert(changed.1 - changed.0 < 8 * 400 * 4)
+    # What the frames read is the fresh shape's.
+    let m = current.value()
+    let points = try new Vector3[(usize)m.point_count()] --- in memory.heap
+    defer free(points) in memory.heap
+    for at in 0..<points.length: points[at] = try m.point((i64)at)
+    let sizes = try new i64[(usize)m.face_count()] --- in memory.heap
+    defer free(sizes) in memory.heap
+    for face in 0..<sizes.length: sizes[face] = try m.face_size((i64)face)
+    let corners = try new i64[(usize)m.vertex_count()] --- in memory.heap
+    defer free(corners) in memory.heap
+    for corner in 0..<corners.length: corners[corner] = try m.corner_point((i64)corner)
+    var fresh = try Mesh(points, sizes, corners)
+    defer fresh.close()
+    for corner in 0..<m.vertex_count():
+        same(try m.corner_normal(corner), try fresh.corner_normal(corner))
+    for at in 1..<times.length:
+        var probe = at
+        while probe > 0 and times[probe - 1] > times[probe]:
+            let held = times[probe]
+            times[probe] = times[probe - 1]
+            times[probe - 1] = held
+            probe -= 1
+    return times[times.length // 2]

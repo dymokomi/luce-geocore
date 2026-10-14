@@ -36,9 +36,9 @@ extend Mesh:
 
     ## Smooth normals first..<end (of their domain) into `out`.
     pub func pack_smooth_range(first: usize, end: usize, out: f32[]) -> !:
-        let normals = try self.smooth_normal_span()
-        if end > normals.length or first > end or out.length != (end - first) * 3: error(errors.invalid, "normal range leaves the mesh")
-        memory.copy(Float3[]((Float3*)out.data, end - first), normals[first..<end], end - first)
+        try self.smooth_prepared()
+        if end > self.shading.count() or first > end or out.length != (end - first) * 3: error(errors.invalid, "normal range leaves the mesh")
+        self.shading.read(first, end, Float3[]((Float3*)out.data, end - first))
 
     ## Tuples first..<end of a width-3 float attribute as f32 triples.
     pub func pack_attribute3_range(index: i64, first: usize, end: usize, out: f32[]) -> !:
@@ -75,9 +75,10 @@ extend Mesh:
     ## Smooth normals (the shading of a mesh without N) as f32 triples, one per
     ## point or per corner (`smooth_domain`), computed on first use.
     pub func pack_smooth_normals(out: f32[]) -> !:
-        let normals = try self.smooth_normal_span()
-        if out.length != normals.length * 3: error(errors.invalid, "normal output needs three values per normal")
-        memory.copy(Float3[]((Float3*)out.data, normals.length), normals, normals.length)
+        try self.smooth_prepared()
+        let count = self.shading.count()
+        if out.length != count * 3: error(errors.invalid, "normal output needs three values per normal")
+        self.shading.read(0, count, Float3[]((Float3*)out.data, count))
 
     ## The domain of the smooth normals: 1 (corner) or 0 (point).
     pub func smooth_domain() -> i64!:

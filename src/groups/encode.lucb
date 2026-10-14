@@ -30,9 +30,11 @@ func named_group(mesh: const Mesh*, bits: Bits, domain: Domain, out: Growing[u8]
                 same = false
                 break
         if not same: continue
-        # A name must parse as a name, not a number or a function.
+        # A name must parse as a name, not a number or a function; a dotted
+        # name (`.selection`, a result's own state) is not a name another
+        # mesh has with these members, so it is never written.
         let name = entry.name()
-        if name.length == 0 or (name.bytes[0] >= 48 and name.bytes[0] <= 57): continue
+        if name.length == 0 or (name.bytes[0] >= 48 and name.bytes[0] <= 57) or name.bytes[0] == '.': continue
         try append_text(out, name)
         return true
     return false

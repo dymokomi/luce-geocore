@@ -14,6 +14,7 @@ from luce_std import math
 from core.attributes import Attribute
 import memory
 from luce_std import parallel
+from luce_std import sort
 from core.float3 import Float3
 from math.vector import Vector3
 import core.ranges
@@ -55,40 +56,50 @@ pub func corner_normals(shape: const Surface*, points: const Float3[], split: co
     var work = CornerWork(shape, points, split, output)
     ranges.each_range(shape.offsets.length - 1, 2048, (void*)&work, corners_range)
 
-## Every point of a face around a moved point; the caller frees the list.
+## Every point of a face around a moved point, ascending, each once; the
+## caller frees the list. The work is the moved points' neighbourhood's,
+## whatever the mesh's size.
 pub func affected_points(shape: const Surface*, moved: const u32[]) -> u32[]!:
-    let points = shape.positions.length
-    let marked = try new bool[points] --- in memory.heap
-    defer free(marked) in memory.heap
-    memory.set(u8[]((u8*)marked.data, points), 0)
     var count: usize = 0
     for point in moved:
         for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
             let face = (usize)shape.incident_faces[at]
-            for corner in (usize)shape.offsets[face]..<(usize)shape.offsets[face + 1]:
-                let p = (usize)shape.corners[corner]
-                if not marked[p]:
-                    marked[p] = true
-                    count += 1
-    let affected = try new u32[count] --- in memory.heap
+            count += (usize)(shape.offsets[face + 1] - shape.offsets[face])
+    let all = try new u32[count] --- in memory.heap
+    defer free(all) in memory.heap
     var written: usize = 0
-    for point in 0..<points:
-        if marked[point]:
-            affected[written] = (u32)point
-            written += 1
+    for point in moved:
+        for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
+            let face = (usize)shape.incident_faces[at]
+            for corner in (usize)shape.offsets[face]..<(usize)shape.offsets[face + 1]:
+                all[written] = (u32)shape.corners[corner]
+                written += 1
+    sort.stable(all, ascending)
+    var kept: usize = 0
+    for at in 0..<count:
+        if kept > 0 and all[kept - 1] == all[at]: continue
+        all[kept] = all[at]
+        kept += 1
+    let affected = try new u32[kept] --- in memory.heap
+    if kept > 0: memory.copy(affected, all[..<kept], kept)
     return affected
 
-## Redo the per-point normals of `points`, marking in `split` those that now
-## split at a cusp; true when any does (per-point storage no longer holds).
-pub func refresh_points(shape: const Surface*, points: const u32[], output: Float3[], split: bool[]) -> bool:
-    var work = RefreshWork(shape, points, output, split)
+func ascending(a: u32, b: u32) -> bool:
+    return a < b
+
+## Redo the per-point normals of `points` into `output` (point p at
+## p - `offset`), marking in `split` (the same way) those that now split at a
+## cusp; true when any does (per-point storage no longer holds).
+pub func refresh_points(shape: const Surface*, points: const u32[], output: Float3[], split: bool[], offset: usize = 0) -> bool:
+    var work = RefreshWork(shape, points, output, split, offset)
     ranges.each_range(points.length, 1024, (void*)&work, refresh_range)
     return work.splits.load(.acquire) != 0
 
-## Redo the per-corner normals at `points`.
-pub func refresh_corners(shape: const Surface*, points: const u32[], output: Float3[]):
+## Redo the per-corner normals at `points` into `output` (corner c at c -
+## `offset`).
+pub func refresh_corners(shape: const Surface*, points: const u32[], output: Float3[], offset: usize = 0):
     var none_split: bool[]
-    var work = RefreshWork(shape, points, output, none_split)
+    var work = RefreshWork(shape, points, output, none_split, offset)
     ranges.each_range(points.length, 1024, (void*)&work, corners_at_range)
 
 struct PointWork:
@@ -123,6 +134,7 @@ struct RefreshWork:
     let points: const u32[]
     let output: Float3[]
     let split: bool[]
+    let offset: usize
     var splits: @u32
 
 func refresh_range(context: void*, first: usize, end: usize, worker: usize):
@@ -130,8 +142,8 @@ func refresh_range(context: void*, first: usize, end: usize, worker: usize):
     for at in first..<end:
         let point = (usize)work.points[at]
         let result = point_normal(work.shape, point)
-        work.output[point] = Float3.of(result.0)
-        work.split[point] = result.1
+        work.output[point - work.offset] = Float3.of(result.0)
+        work.split[point - work.offset] = result.1
         if result.1: work.splits.store(1, .relaxed)
 
 func corners_at_range(context: void*, first: usize, end: usize, worker: usize):
@@ -143,7 +155,7 @@ func corners_at_range(context: void*, first: usize, end: usize, worker: usize):
             let face = (usize)shape.incident_faces[index]
             for corner in (usize)shape.offsets[face]..<(usize)shape.offsets[face + 1]:
                 if (u32)shape.corners[corner] == point:
-                    work.output[corner] = Float3.of(corner_normal(shape, face, corner))
+                    work.output[corner - work.offset] = Float3.of(corner_normal(shape, face, corner))
 
 ## A point's angle-weighted average over all its faces, and whether any two
 ## of them lie past the cusp of each other.
