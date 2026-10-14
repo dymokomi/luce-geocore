@@ -665,6 +665,10 @@ first build of the mesh's triangle tree (Intersecting faces reads it).
 | Bend (Squash -30%), everything | 11.6 ms | 1,048,576 |  |
 | Lattice, 5×5×5 Smooth cage, 2 points moved, everything | 34.9 ms | 1,048,576 |  |
 | Lattice, 5×5×5 Linear cage, 2 points moved, everything | 12.2 ms | 1,048,576 |  |
+| Soft Transform, 1,000 points, radius 40 | 23.6 ms | 1,048,576 |  |
+| Corrective Smooth, 5 rounds, everything (the sphere against itself) | 73.4 ms | 1,048,352 |  |
+| Edge Transport (Distance) from one point | 117.1 ms | 1,048,576 |  |
+| Edge Transport (Hops) from one point | 17.2 ms | 1,048,576 |  |
 | Sculpt, a stroke of 100 Draw dabs run whole (radius 20) | 73.0 ms | 1,048,576 |  |
 | Sculpt, the stroke grown by 3 dabs (a pointer move) | 3.0 ms | 1,048,576 |  |
 | Sculpt, a Grab stroke of 100 dabs run whole | 11.7 ms | 1,048,576 |  |
@@ -683,7 +687,10 @@ positions and its output selection (a drag's last frame), so normals,
 shading and GPU copies change only where points moved since; a shading
 cache whose mesh is gone gives its column to the next one instead of a
 copy. Transform Components of 1,000 faces of the 1024² grid: 14.1 ms
-before, 1.5 ms now.
+before, 1.5 ms now. A whole-mesh group ("*") on another domain than the
+verb's (a sculpt stroke on everything, picked at the Polygons level) is
+the cached group of that domain rather than a conversion of every face's
+points on each run: 4 ms less per pointer move of a stroke on 1M faces.
 
 Intersecting faces was 1,046 ms on the grid with one tree query per
 triangle; one query per tree leaf with its candidates' boxes and points

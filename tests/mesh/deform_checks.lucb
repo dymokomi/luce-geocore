@@ -8,11 +8,17 @@
 ## Lattice: an unmoved cage changes nothing, a cage corner moved pulls a
 ## Linear cage's center by an eighth, a Smooth cage's middle by Bernstein's
 ## weight, an affinely moved Smooth cage maps the box affinely, the cage
-## reads back, and a cage point past the cage is refused.
+## reads back, and a cage point past the cage is refused. Soft Transform
+## moves points as Transform Components with the same numbers. Corrective
+## Smooth gives an undeformed shape back exactly and a rigidly moved or
+## turned one as moved or turned; Scale 0 smooths alone; a rest shape of
+## other points is refused. Edge Transport's dist from a corner of a grid
+## is its rows plus columns (Hops) or their length (Distance), 0..1
+## normalized, -1 on a separate piece.
 import interop
 import memory
 from luce_std import math
-from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, Vector3
+from luce_geocore.geocore import Mesh, MeshPrimitives, Verbs, VerbResult, Vector3
 from luce_geocore.kernel import clear_group_cache
 from tool_fixtures import near, near_point, volume
 
@@ -23,7 +29,10 @@ pub func exercise() -> !:
     try taper_squash_checks()
     try limit_checks()
     try lattice_checks()
-    print("PASS Bend and Lattice: Twist 90° turns a column's top 90°, Bend curls it into a quarter circle, Taper doubles its top, Squash keeps its volume, Limits hold the rest rigid, the group alone moves; an unmoved cage changes nothing, moved cage points pull by trilinear and Bernstein weights, an affine cage maps affinely, the cage reads back")
+    try soft_checks()
+    try corrective_checks()
+    try transport_checks()
+    print("PASS Bend, Lattice, Soft Transform, Corrective Smooth and Edge Transport: Twist 90° turns a column's top 90°, Bend curls it into a quarter circle, Taper doubles its top, Squash keeps its volume, Limits hold the rest rigid, the group alone moves; an unmoved cage changes nothing, moved cage points pull by trilinear and Bernstein weights, an affine cage maps affinely, the cage reads back; Soft Transform moves as Transform Components with its falloff; Corrective Smooth gives an undeformed shape back and follows a rigid move or turn of the rest shape; Edge Transport counts hops and lengths from the group along the edges, normalized, a separate piece unreached")
 
 ## The column: 1 wide, 4 tall, 8 rows, standing on the origin.
 func column() -> interop.Reference[Mesh]!:
@@ -215,3 +224,110 @@ func refused(mesh: interop.Reference[Mesh], name: str, numbers: const f64[]) -> 
         return true
     result.release()
     return false
+
+## Corrective Smooth's numbers: factor, iterations, scale.
+func corrective(mesh: interop.Reference[Mesh], rest: interop.Reference[Mesh], scale: f64) -> interop.Reference[Mesh]!:
+    let numbers: f64[3] = [0.5, 10.0, scale]
+    let result = try Verbs.run("Corrective Smooth", mesh, "", 1, numbers[..<3], 0, false, "", rest)
+    defer result.release()
+    assert(result.value().warning().length == 0)
+    return try result.value().mesh()
+
+## A bumpy grid (noise of height 0.2) for detail.
+func bumpy() -> interop.Reference[Mesh]!:
+    let grid = try MeshPrimitives.grid(2.0, 16)
+    defer grid.release()
+    let numbers: f64[2] = [0.2, 3.0]
+    let result = try Verbs.run("Mountain", grid, "", 1, numbers[..<2])
+    defer result.release()
+    return try result.value().mesh()
+
+## Corrective Smooth: undeformed, every point comes back where it was; a
+## rigid move or turn of the rest shape comes back as that move or turn
+## (the detail is kept in the turning frames); Scale 0 is smoothing alone,
+## and a rest shape of other points is refused.
+func corrective_checks() -> !:
+    let rest = try bumpy()
+    defer rest.release()
+    let same = try corrective(rest, rest, 1.0)
+    defer same.release()
+    for point in 0..<rest.value().point_count():
+        near_point(try same.value().point(point), try rest.value().point(point), 1.0e-9)
+    let moved = try rest.value().transformed(Vector3(0.5, 1.0, -0.25), Vector3(0.0, 0.0, 0.0), Vector3(1.0, 1.0, 1.0))
+    defer moved.release()
+    let back = try corrective(moved, rest, 1.0)
+    defer back.release()
+    for point in 0..<rest.value().point_count():
+        near_point(try back.value().point(point), try moved.value().point(point), 1.0e-6)
+    let turned = try rest.value().transformed(Vector3(), Vector3(0.0, math.pi * 0.5, 0.0), Vector3(1.0, 1.0, 1.0))
+    defer turned.release()
+    let around = try corrective(turned, rest, 1.0)
+    defer around.release()
+    for point in 0..<rest.value().point_count():
+        near_point(try around.value().point(point), try turned.value().point(point), 1.0e-6)
+    # Scale 0: the smoothed shape, flatter than the bumps.
+    let flat = try corrective(rest, rest, 0.0)
+    defer flat.release()
+    assert(flat.value().bounds().maximum.y < rest.value().bounds().maximum.y)
+    let other = try MeshPrimitives.grid(2.0, 4)
+    defer other.release()
+    let numbers: f64[3] = [0.5, 10.0, 1.0]
+    var turned_down = false
+    let attempt: interop.Reference[VerbResult]? = Verbs.run("Corrective Smooth", rest, "", 1, numbers[..<3], 0, false, "", other) catch failure:
+        turned_down = failure.message.length > 0
+        recover none
+    if let made = attempt: made.release()
+    assert(turned_down)
+
+## Edge Transport on a 4 × 4 grid (points 5 to a row, a cell 0.5) from
+## point 0: Hops is a point's row plus its column, Distance that many cells'
+## length; Normalize runs 0..1; a separate piece is not reached (-1).
+func transport_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 4)
+    defer grid.release()
+    let apart = try grid.value().transformed(Vector3(5.0, 0.0, 0.0), Vector3(), Vector3(1.0, 1.0, 1.0))
+    defer apart.release()
+    let both = try grid.value().merged(apart)
+    defer both.release()
+    for measure in 0..<2:
+        for normalize in 0..<2:
+            let numbers: f64[2] = [(f64)measure, (f64)normalize]
+            let result = try Verbs.run("Edge Transport", both, "0", 1, numbers[..<2])
+            defer result.release()
+            let made = try result.value().mesh()
+            defer made.release()
+            let dist = made.value().find_attribute("dist", 0)
+            assert(dist >= 0)
+            let origin = try both.value().point(0)
+            for point in 0..<both.value().point_count():
+                let p = try both.value().point(point)
+                let value = try made.value().attribute_value(dist, point)
+                if point >= 25:
+                    near(value, -1.0, 0.0)
+                    continue
+                let steps = math.round(math.abs(p.x - origin.x) / 0.5) + math.round(math.abs(p.z - origin.z) / 0.5)
+                let expected = steps if measure == 1 else steps * 0.5
+                let top = 8.0 if measure == 1 else 4.0
+                near(value, expected / top if normalize == 1 else expected, 1.0e-6)
+
+## Soft Transform: Transform Components with its falloff, as a node of its
+## own: the same numbers move the same points.
+func soft_checks() -> !:
+    let grid = try MeshPrimitives.grid(2.0, 8)
+    defer grid.release()
+    let numbers: f64[15] = [0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.75, 3.0]
+    let soft = try Verbs.run("Soft Transform", grid, "40", 1, numbers[..<15])
+    defer soft.release()
+    let plain = try Verbs.run("Transform Components", grid, "40", 1, numbers[..<15])
+    defer plain.release()
+    let a = try soft.value().mesh()
+    defer a.release()
+    let b = try plain.value().mesh()
+    defer b.release()
+    var followed = 0
+    for point in 0..<grid.value().point_count():
+        near_point(try a.value().point(point), try b.value().point(point), 0.0)
+        let lift = (try a.value().point(point)).y
+        if lift > 0.0 and lift < 0.5: followed += 1
+    near((try a.value().point(40)).y, 0.5)
+    assert(followed > 4)

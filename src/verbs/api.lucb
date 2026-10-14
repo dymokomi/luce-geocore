@@ -5,13 +5,13 @@
 ## Every modeling verb's constructor, in menu order: the array's length is
 ## the registry's size, so a verb added here is counted. The select rules
 ## (selecting/registry.lucb) follow them as the Select verbs.
-let makers: (func() -> Verb)[81] = [
+let makers: (func() -> Verb)[84] = [
     transform_verb,
     smooth_verb,
     relax_verb,
     shrinkwrap_verb,
     bend_verb,
-    lattice_verb,
+    lattice_verb, soft_transform_verb, corrective_smooth_verb, edge_transport_verb,
     sculpt_verb,
     mountain_verb,
     peak_verb,

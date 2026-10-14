@@ -43,6 +43,23 @@ pub struct ComponentTransform:
 func transform_verb() -> Verb:
     return Verb("Transform Components", "Deform", "Move, rotate and scale components about a pivot", Domain.point, true, transform_parms, false, cook_transform)
 
+## Soft Transform, after Houdini's Soft Transform: Transform Components with
+## its falloff on, as a node and a tool of its own: the group moves, turns
+## and scales, and the points within Soft radius follow it, less the farther
+## they are (the Edit node's soft radius, kept with the node).
+let soft_parms: ParmSpec[7] = [
+    ParmSpec("Translate", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "Moves the group, after rotating and scaling; the points near it follow."),
+    ParmSpec("Rotate", ParmKind.vector, 0.0, -360000.0, 360000.0, 3, "", "Rotation about X, then Y, then Z, in degrees, about the pivot."),
+    ParmSpec("Scale", ParmKind.vector, 1.0, -100000.0, 100000.0, 3, "", "Scale along each axis about the pivot."),
+    ParmSpec("Pivot", ParmKind.menu, 0.0, 0.0, 2.0, 1, "Centroid|Origin|Custom", "Rotate and scale about the group's centroid, the origin or the custom point."),
+    ParmSpec("Custom pivot", ParmKind.vector, 0.0, -100000.0, 100000.0, 3, "", "The point rotation and scale happen about when Pivot is Custom.", more = true),
+    ParmSpec("Soft radius", ParmKind.number, 1.0, 0.0, 100000.0, 1, "", "Points within this distance of the group follow it, less the farther they are.", 5.0),
+    ParmSpec("Falloff", ParmKind.menu, 3.0, 0.0, 3.0, 1, "Linear|Quadratic|Cubic|Smooth", "How the soft weight falls off with distance.")]
+
+func soft_transform_verb() -> Verb:
+    return Verb("Soft Transform", "Deform", "Move, turn and scale the group, the points near it following with a falloff", Domain.point, true, soft_parms, false, cook_transform,
+                section = "Modify", family = "Deform", icon = "transform-gizmo")
+
 let mountain_parms: ParmSpec[2] = [
     ParmSpec("Height", ParmKind.number, 0.2, 0.0, 100000.0, 1, "", "Largest displacement of the noise.", 2.0),
     ParmSpec("Seed", ParmKind.integer, 0.0, 0.0, 100000.0, 1, "", "Another seed gives other noise.")]

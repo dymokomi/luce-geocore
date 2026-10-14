@@ -1,0 +1,157 @@
+## Corrective Smooth, after Blender's Corrective Smooth modifier: the
+## group's points smoothed, then given back the detail the rest shape (the
+## reference: a node's second input, an Edit Mesh's Reference; the same
+## points before a deformation) has over its own smoothing, turned with the
+## surface. A deformation's pinches and folds relax while the shape's
+## detail stays. Both shapes are smoothed alike (Iterations rounds of
+## Factor toward the neighbors' mean, the points outside the group held);
+## each point's detail is measured in the frame of the smoothed rest
+## surface (its normal and its first edge) and put back in the smoothed
+## deformed one's. Every round and the last pass write the group's points in
+## parallel. The output selection is the group.
+
+let corrective_parms: ParmSpec[3] = [
+    ParmSpec("Factor", ParmKind.number, 0.5, 0.0, 1.0, 1, "", "How far each round moves a point toward the mean of its neighbors."),
+    ParmSpec("Iterations", ParmKind.integer, 5.0, 1.0, 200.0, 1, "", "Rounds of smoothing, the same on the rest shape and on the deformed one."),
+    ParmSpec("Scale", ParmKind.number, 1.0, 0.0, 10.0, 1, "", "How much of the rest shape's detail comes back (1: all of it; 0: smoothing alone).")]
+
+let corrective_picks: PickSpec[1] = [PickSpec("Components", "objects points edges faces")]
+
+func corrective_smooth_verb() -> Verb:
+    return Verb("Corrective Smooth", "Deform", "Smooth the group and give back the rest shape's detail (its second input)", Domain.point, true, corrective_parms, false, cook_corrective_smooth,
+                section = "Modify", family = "Deform", icon = "smooth-tool", picks = corrective_picks, drag = 0, drag_mode = "amount", wheel = 1, whole = true, inputs = 2, second_required = true)
+
+## One round over the group: each point `factor` of the way to its
+## neighbors' mean, read from `from`, written to `to` (the rest copied).
+struct RoundWork:
+    let source: const Vector3[]
+    let target: Vector3[]
+    let moved: const u32[]
+    let edges: const i32[]
+    let offsets: const i32[]
+    let point_edges: const i32[]
+    let factor: f64
+
+func smooth_round(context: void*, first: usize, end: usize, worker: usize):
+    let work = (RoundWork*)context
+    for at in first..<end:
+        let point = (usize)work.moved[at]
+        let p = work.source[point]
+        var sum = Vector3()
+        var count = 0.0
+        for slot in (usize)work.offsets[point]..<(usize)work.offsets[point + 1]:
+            let edge = (usize)work.point_edges[slot]
+            let a = (usize)work.edges[edge * 2]
+            let other = (usize)work.edges[edge * 2 + 1] if a == point else a
+            sum = sum.add(work.source[other])
+            count += 1.0
+        work.target[point] = p if count == 0.0 else p.add(sum.multiply_scalar(1.0 / count).subtract(p).multiply_scalar(work.factor))
+
+## `shape` smoothed in place over the group, `rounds` rounds.
+func smoothed(shape: Vector3[], spare: Vector3[], moved: const u32[], edges: const i32[], offsets: const i32[], point_edges: const i32[], factor: f64, rounds: usize) -> !:
+    memory.copy(spare, shape, shape.length)
+    for round in 0..<rounds:
+        let source = shape if round % 2 == 0 else spare
+        let target = spare if round % 2 == 0 else shape
+        var work = RoundWork(source, target, moved, edges, offsets, point_edges, factor)
+        try parallel.for_each_range(moved.length, 4096, (void*)&work, smooth_round)
+    if rounds % 2 == 1:
+        for point in moved: shape[(usize)point] = spare[(usize)point]
+
+## Each point's normal on `shape`: its faces' (Newell's, by area), summed.
+func shape_normals(offsets: const i32[], corners: const i32[], shape: const Vector3[], normals: Vector3[]):
+    for at in 0..<normals.length: normals[at] = Vector3()
+    for face in 0..<offsets.length - 1:
+        let start = (usize)offsets[face]
+        let end = (usize)offsets[face + 1]
+        var normal = Vector3()
+        for at in start..<end:
+            let p = shape[(usize)corners[at]]
+            let q = shape[(usize)corners[start + (at + 1 - start) % (end - start)]]
+            normal = normal.add(Vector3((p.y - q.y) * (p.z + q.z), (p.z - q.z) * (p.x + q.x), (p.x - q.x) * (p.y + q.y)))
+        for at in start..<end:
+            let point = (usize)corners[at]
+            normals[point] = normals[point].add(normal)
+
+## Point `point`'s frame on a shape: its normal, the way to its first
+## neighbor along the surface, and their cross; none where either is lost
+## (a point without faces or neighbors, a folded spot).
+func detail_frame(shape: const Vector3[], normals: const Vector3[], point: usize, neighbor: usize) -> (Vector3, Vector3, Vector3)?:
+    let length = normals[point].length()
+    if not (length > 1.0e-300): return none
+    let n = normals[point].multiply_scalar(1.0 / length)
+    let along = shape[neighbor].subtract(shape[point])
+    let flat = along.subtract(n.multiply_scalar(along.dot(n)))
+    let reach = flat.length()
+    if not (reach > 1.0e-300): return none
+    let t = flat.multiply_scalar(1.0 / reach)
+    return (t, n.cross(t), n)
+
+## The last pass: each point's detail over its smoothed rest place, in the
+## rest frame, put back on its smoothed deformed place in that frame.
+struct DetailWork:
+    let rest: const Vector3[]
+    let rest_smooth: const Vector3[]
+    let rest_normals: const Vector3[]
+    let deformed_smooth: const Vector3[]
+    let deformed_normals: const Vector3[]
+    let moved: const u32[]
+    let edges: const i32[]
+    let offsets: const i32[]
+    let point_edges: const i32[]
+    let scale: f64
+    let positions: Float3[]
+
+func put_detail(context: void*, first: usize, end: usize, worker: usize):
+    let work = (DetailWork*)context
+    for at in first..<end:
+        let point = (usize)work.moved[at]
+        let detail = work.rest[point].subtract(work.rest_smooth[point])
+        var placed = work.deformed_smooth[point].add(detail.multiply_scalar(work.scale))
+        if work.offsets[point + 1] > work.offsets[point]:
+            let edge = (usize)work.point_edges[(usize)work.offsets[point]]
+            let a = (usize)work.edges[edge * 2]
+            let neighbor = (usize)work.edges[edge * 2 + 1] if a == point else a
+            if let rest_frame = detail_frame(work.rest_smooth, work.rest_normals, point, neighbor):
+                if let frame = detail_frame(work.deformed_smooth, work.deformed_normals, point, neighbor):
+                    let local = Vector3(detail.dot(rest_frame.0), detail.dot(rest_frame.1), detail.dot(rest_frame.2))
+                    let turned = frame.0.multiply_scalar(local.x).add(frame.1.multiply_scalar(local.y)).add(frame.2.multiply_scalar(local.z))
+                    placed = work.deformed_smooth[point].add(turned.multiply_scalar(work.scale))
+        work.positions[point] = Float3.of(placed)
+
+func cook_corrective_smooth(input: const VerbInput*, output: VerbOutput*) -> !:
+    let factor = input.parms.at(0)
+    let rounds = (usize)math.max(1.0, math.min(200.0, input.parms.at(1)))
+    let scale = input.parms.at(2)
+    if not (factor >= 0.0 and factor <= 1.0): error(errors.invalid, "Corrective Smooth's factor must be in 0..1")
+    if not (scale >= 0.0 and scale <= 10.0): error(errors.invalid, "Corrective Smooth's scale must be in 0..10")
+    let rest = input.reference else error(errors.invalid, "Corrective Smooth needs the rest shape: connect it to its second input")
+    let mesh = input.mesh
+    let points = (usize)mesh.point_count()
+    if (usize)rest.point_count() != points: error(errors.invalid, "Corrective Smooth's rest shape needs the input's points (the same mesh before its deformation)")
+    let moved = try begin_points(input, output)
+    if moved.length == 0: return
+    let edges = try mesh.edge_span()
+    let around = try mesh.point_edge_span()
+    # Both shapes in this mesh's frame (positions are kept from its origin).
+    let shift = rest.position_origin().subtract(mesh.position_origin())
+    let rest_points = rest.point_span()
+    let deformed_points = output.positions.view()
+    let arrays = try new Vector3[points * 6] --- in memory.heap
+    defer free(arrays) in memory.heap
+    let rest_shape = arrays[..<points]
+    let rest_smooth = arrays[points..<points * 2]
+    let deformed_smooth = arrays[points * 2..<points * 3]
+    let rest_normals = arrays[points * 3..<points * 4]
+    let deformed_normals = arrays[points * 4..<points * 5]
+    let spare = arrays[points * 5..<points * 6]
+    for at in 0..<points:
+        rest_shape[at] = rest_points[at].vector().add(shift)
+        rest_smooth[at] = rest_shape[at]
+        deformed_smooth[at] = deformed_points[at].vector()
+    try smoothed(rest_smooth, spare, moved, edges, around.0, around.1, factor, rounds)
+    try smoothed(deformed_smooth, spare, moved, edges, around.0, around.1, factor, rounds)
+    shape_normals(mesh.offset_span(), mesh.corner_span(), rest_smooth, rest_normals)
+    shape_normals(mesh.offset_span(), mesh.corner_span(), deformed_smooth, deformed_normals)
+    var work = DetailWork(rest_shape, rest_smooth, rest_normals, deformed_smooth, deformed_normals, moved, edges, around.0, around.1, scale, output.positions.span())
+    try parallel.for_each_range(moved.length, 4096, (void*)&work, put_detail)

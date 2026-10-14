@@ -398,6 +398,18 @@ func stage8_rows(grid: interop.Reference[Mesh], sphere: interop.Reference[Mesh])
     var linear = cage
     linear[3] = 1.0
     try timed("Lattice, 5×5×5 Linear cage, 2 points moved, everything", "Lattice", grid, linear[..<14])
+    # Soft Transform of a 1,000-point band, radius 40 (about 40,000 points
+    # follow); Corrective Smooth of the sphere against itself (5 rounds);
+    # Edge Transport from one point over the whole grid.
+    let soft: f64[15] = [0.0, 5.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 40.0, 3.0]
+    try timed_on("Soft Transform, 1,000 points, radius 40", "Soft Transform", grid, "524000-524999", soft[..<15], none)
+    let correcting: f64[3] = [0.5, 5.0, 1.0]
+    try timed_on("Corrective Smooth, 5 rounds, everything (the sphere against itself)", "Corrective Smooth", sphere, "", correcting[..<3], sphere)
+    let measures: f64[2] = [0.0, 0.0]
+    try timed_on("Edge Transport (Distance) from one point", "Edge Transport", grid, "0", measures[..<2], none)
+    var hops = measures
+    hops[0] = 1.0
+    try timed_on("Edge Transport (Hops) from one point", "Edge Transport", grid, "0", hops[..<2], none)
     # A stroke of 100 dabs across the grid's middle, radius 20 (about 1,250
     # points under each dab).
     var numbers = Growing[f64]()
@@ -406,14 +418,14 @@ func stage8_rows(grid: interop.Reference[Mesh], sphere: interop.Reference[Mesh])
     for value in head: try numbers.push(value)
     try numbers.push(100.0)
     for dab in 0..<(usize)100:
-        let dab_values: f64[6] = [-250.0 + 5.0 * (f64)dab, 0.0, 0.0, 0.0, 1.0, 0.0]
+        let dab_values: f64[7] = [-250.0 + 5.0 * (f64)dab, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0]
         for value in dab_values: try numbers.push(value)
     clear_stroke_cache()
     try timed("Sculpt, a stroke of 100 Draw dabs run whole (radius 20)", "Sculpt", grid, numbers.view())
     # Grown: 97 dabs remembered, then the 100.
     clear_stroke_cache()
     numbers.items[5] = 97.0
-    let early = try Verbs.run("Sculpt", grid, "", 1, numbers.view()[..<6 + 97 * 6])
+    let early = try Verbs.run("Sculpt", grid, "", 1, numbers.view()[..<6 + 97 * 7])
     early.release()
     numbers.items[5] = 100.0
     try timed("Sculpt, the stroke grown by 3 dabs (a pointer move)", "Sculpt", grid, numbers.view())
@@ -437,6 +449,16 @@ func stage8_rows(grid: interop.Reference[Mesh], sphere: interop.Reference[Mesh])
     try timed("Select Intersecting, the sphere", "Select Intersecting", sphere, nothing[..<0])
 
 ## One timed run of verb `verb` on `mesh`, as the case rows print.
+## `verb` on `group` of `mesh` (points), with a reference surface given one.
+func timed_on(name: str, verb: str, mesh: interop.Reference[Mesh], group: str, numbers: const f64[], reference: interop.Reference[Mesh]?) -> !:
+    let start = time.now()
+    let result = try Verbs.run(verb, mesh, group, 1, numbers, 0, false, "", reference)
+    let spent = (f64)time.since(start) / 1000000.0
+    let made = try result.value().mesh()
+    print(f"{name}\t{spent}\t{made.value().face_count()}\t{result.value().warning()}")
+    made.release()
+    result.release()
+
 func timed(name: str, verb: str, mesh: interop.Reference[Mesh], numbers: const f64[]) -> !:
     let start = time.now()
     let result = try Verbs.run(verb, mesh, "", 1 if verb != "Select Intersecting" else 3, numbers)

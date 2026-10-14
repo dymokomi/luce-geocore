@@ -1,0 +1,135 @@
+## Edge Transport, after Houdini's Edge Transport (its distance along the
+## edges): each point's distance from the group over the mesh's edges, the
+## shortest path by edge lengths (Distance, Dijkstra's) or by edge counts
+## (Hops, breadth first), written to the float point attribute `dist`;
+## points the group cannot reach get -1. Normalize divides by the farthest
+## reached, so a ramp or a falloff can read 0..1. The output selection is
+## the points reached.
+
+let transport_parms: ParmSpec[2] = [
+    ParmSpec("Measure", ParmKind.menu, 0.0, 0.0, 1.0, 1, "Distance|Hops", "Distance: the shortest path along the edges' lengths. Hops: the fewest edges."),
+    ParmSpec("Normalize", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Divide by the farthest point reached, so `dist` runs 0..1.")]
+
+let transport_picks: PickSpec[1] = [PickSpec("Start", "points edges faces")]
+
+func edge_transport_verb() -> Verb:
+    return Verb("Edge Transport", "Attributes", "Each point's distance from the group along the edges, as the point attribute dist", Domain.point, true, transport_parms, false, cook_edge_transport,
+                section = "Modify", family = "Shape", icon = "edge-select", picks = transport_picks)
+
+## A binary heap of (distance, point), nearest first.
+struct Frontier:
+    var items: Growing[(f64, u32)]
+
+    func init():
+        self.items = Growing[(f64, u32)]()
+
+    func close():
+        self.items.close()
+
+    func push(distance: f64, point: u32) -> !:
+        try self.items.push((distance, point))
+        var at = self.items.count - 1
+        while at > 0:
+            let up = (at - 1) // 2
+            if self.items.items[up].0 <= self.items.items[at].0: break
+            let held = self.items.items[up]
+            self.items.items[up] = self.items.items[at]
+            self.items.items[at] = held
+            at = up
+
+    func pop() -> (f64, u32):
+        let top = self.items.items[0]
+        self.items.count -= 1
+        if self.items.count > 0:
+            self.items.items[0] = self.items.items[self.items.count]
+            var at: usize = 0
+            while true:
+                let left = at * 2 + 1
+                if left >= self.items.count: break
+                let right = left + 1
+                let least = right if right < self.items.count and self.items.items[right].0 < self.items.items[left].0 else left
+                if self.items.items[at].0 <= self.items.items[least].0: break
+                let held = self.items.items[least]
+                self.items.items[least] = self.items.items[at]
+                self.items.items[at] = held
+                at = least
+        return top
+
+func cook_edge_transport(input: const VerbInput*, output: VerbOutput*) -> !:
+    let hops = input.parms.at(0) == 1.0
+    let normalize = input.parms.at(1) != 0.0
+    let mesh = input.mesh
+    let points = (usize)mesh.point_count()
+    let edges = try mesh.edge_span()
+    let around = try mesh.point_edge_span()
+    let positions = mesh.point_span()
+    let distance = try new f64[points] --- in memory.heap
+    defer free(distance) in memory.heap
+    for at in 0..<points: distance[at] = -1.0
+    var frontier = Frontier()
+    defer frontier.close()
+    for word in 0..<input.group.words.length:
+        var pending = input.group.words[word]
+        while pending != 0:
+            let point = word * 64 + (usize)trailing_zeros(pending)
+            pending = pending & (pending - 1)
+            if point >= points: continue
+            distance[point] = 0.0
+            try frontier.push(0.0, (u32)point)
+    if hops:
+        # Breadth first: the points in the order they are reached.
+        var queue = Growing[u32]()
+        defer queue.close()
+        for item in frontier.items.view(): try queue.push(item.1)
+        frontier.items.clear()
+        var head: usize = 0
+        while head < queue.count:
+            let point = (usize)queue.items[head]
+            head += 1
+            for slot in (usize)around.0[point]..<(usize)around.0[point + 1]:
+                let edge = (usize)around.1[slot]
+                let a = (usize)edges[edge * 2]
+                let other = (usize)edges[edge * 2 + 1] if a == point else a
+                if distance[other] >= 0.0: continue
+                distance[other] = distance[point] + 1.0
+                try queue.push((u32)other)
+    # Dijkstra's: settled points are those popped at their own distance; a
+    # longer entry for one already settled is passed over.
+    while frontier.items.count > 0:
+        let (reach, at) = frontier.pop()
+        let point = (usize)at
+        if reach > distance[point]: continue
+        for slot in (usize)around.0[point]..<(usize)around.0[point + 1]:
+            let edge = (usize)around.1[slot]
+            let a = (usize)edges[edge * 2]
+            let other = (usize)edges[edge * 2 + 1] if a == point else a
+            let step = positions[other].vector().subtract(positions[point].vector()).length()
+            let through = reach + step
+            if distance[other] < 0.0 or through < distance[other]:
+                distance[other] = through
+                try frontier.push(through, (u32)other)
+    var farthest = 0.0
+    for at in 0..<points:
+        if distance[at] > farthest: farthest = distance[at]
+    let values = try new f64[points] --- in memory.heap
+    defer free(values) in memory.heap
+    var reached = try BitsBuilder.zeros(points)
+    errdefer reached.close()
+    for at in 0..<points:
+        if distance[at] < 0.0:
+            values[at] = -1.0
+            continue
+        values[at] = distance[at] / farthest if normalize and farthest > 0.0 else distance[at]
+        reached.set(at)
+    var attribute = try Attribute.from_numbers("dist", Domain.point, 1, values, false, float32 = true)
+    let made = mesh_share(mesh) catch failure:
+        attribute.release()
+        error(failure.code, failure.message)
+    put_attribute(made, attribute) catch failure:
+        mesh_dispose(made)
+        error(failure.code, failure.message)
+    if let previous = output.mesh: mesh_dispose(previous)
+    output.mesh = made
+    output.selection.close()
+    output.selection = reached
+    output.selection_domain = Domain.point

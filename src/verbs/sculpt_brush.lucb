@@ -157,12 +157,15 @@ func rebuild_hash(stroke: Stroke*) -> !:
     stroke.hash = made
     stroke.slack = 0.0
 
-## Apply dab `values` (center and direction, world) and, under symmetry,
-## its mirror.
+## Apply dab `values` (center and direction, world, and pressure) and,
+## under symmetry, its mirror. Grab's dabs carry the points by its move:
+## pressure does not weigh them.
 func apply_dab(stroke: Stroke*, values: const f64[]) -> !:
     let center = Vector3(values[0], values[1], values[2]).subtract(stroke.origin)
     let direction = Vector3(values[3], values[4], values[5])
+    let pressure = values[6]
     if not center.is_finite() or not direction.is_finite(): error(errors.invalid, "a sculpt dab must be finite")
+    if not (pressure >= 0.0 and pressure <= 1.0): error(errors.invalid, "a sculpt dab's pressure is 0..1")
     let axis = stroke.settings.symmetry
     let index = (usize)(axis - 1) if axis > 0 else 0
     # The mirror's center: the world point reflected, back in the frame.
@@ -175,16 +178,16 @@ func apply_dab(stroke: Stroke*, values: const f64[]) -> !:
         try move_grabbed(stroke, &stroke.grabbed, &stroke.grab_weights, direction)
         if axis > 0: try move_grabbed(stroke, &stroke.mirrored, &stroke.mirror_weights, direction.reflected(index))
         return
-    try one_dab(stroke, center, direction)
-    if axis > 0: try one_dab(stroke, mirror_center, direction.reflected(index))
+    try one_dab(stroke, center, direction, pressure)
+    if axis > 0: try one_dab(stroke, mirror_center, direction.reflected(index), pressure)
 
 ## One dab at `center` (relative to the origin).
-func one_dab(stroke: Stroke*, center: Vector3, direction: Vector3) -> !:
+func one_dab(stroke: Stroke*, center: Vector3, direction: Vector3, pressure: f64) -> !:
     let settings = stroke.settings
     # Points move a little each dab: past half a radius in all, the hash is
     # built again where they are.
     if stroke.slack > settings.radius * 0.5: try rebuild_hash(stroke)
-    try dab_reach(stroke, center, settings.radius)
+    try dab_reach(stroke, center, settings.radius, pressure)
     let count = stroke.reached.count
     if count == 0: return
     let facing = direction.normalized() catch failure: recover Vector3()
@@ -220,7 +223,7 @@ func one_dab(stroke: Stroke*, center: Vector3, direction: Vector3) -> !:
     stroke.slack += farthest
 
 ## The allowed points within `radius` of `center` and their weights.
-func dab_reach(stroke: Stroke*, center: Vector3, radius: f64) -> !:
+func dab_reach(stroke: Stroke*, center: Vector3, radius: f64, pressure: f64 = 1.0) -> !:
     stroke.reached.clear()
     stroke.weights.clear()
     stroke.dab += 1
@@ -228,7 +231,7 @@ func dab_reach(stroke: Stroke*, center: Vector3, radius: f64) -> !:
     let span = radius + stroke.slack
     let lo = stroke.hash.cell_of(center.subtract(Vector3(span, span, span)))
     let hi = stroke.hash.cell_of(center.add(Vector3(span, span, span)))
-    let strength = stroke.settings.strength
+    let strength = stroke.settings.strength * pressure
     for x in lo.x..<hi.x + 1:
         for y in lo.y..<hi.y + 1:
             for z in lo.z..<hi.z + 1:

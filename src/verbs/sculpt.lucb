@@ -4,8 +4,9 @@
 ## and Invert (verbs/sculpt_brush.lucb does the dabs). The stroke's dabs
 ## follow the parameters as numbers (their count, then each dab's center
 ## and direction in world space: the surface's normal under the pointer, or
-## Grab's move since the last dab), so a stroke is one Edit Mesh step, one
-## undo, and a node replays it. Only the group's points move (all of them
+## Grab's move since the last dab; and its pressure, 0..1, a pen's under
+## the dab, 1 from a mouse, which scales its strength), so a stroke is one
+## Edit Mesh step, one undo, and a node replays it. Only the group's points move (all of them
 ## with nothing selected); under the Edit node's symmetry each dab is
 ## mirrored.
 ##
@@ -25,7 +26,7 @@ let sculpt_parms: ParmSpec[5] = [
     ParmSpec("Invert", ParmKind.toggle, 0.0, 0.0, 1.0, 1, "", "Draw digs, Inflate deflates, Pinch spreads and Flatten pushes away from the plane (Ctrl held while stroking).")]
 
 ## Numbers per dab: its center, then its direction.
-let dab_numbers: usize = 6
+let dab_numbers: usize = 7
 
 ## Numbers before the dabs: the parameters'.
 let sculpt_head: usize = 5
@@ -55,12 +56,12 @@ func settings_of(numbers: const f64[], symmetry: i64) -> BrushSettings!:
     if not (strength >= 0.0 and strength <= 1.0): error(errors.invalid, "Sculpt's strength is 0..1")
     return BrushSettings((i64)brush, radius, strength, (i64)falloff, numbers[4] != 0.0, symmetry)
 
-## The dabs after the parameters: a count, then six numbers each (numbers
+## The dabs after the parameters: a count, then seven numbers each (numbers
 ## past them are a node's unused value slots).
 func dabs_of(numbers: const f64[]) -> const f64[]!:
     if numbers.length == sculpt_head: return numbers[sculpt_head..<sculpt_head]
     let count = numbers[sculpt_head]
-    if not (count >= 0.0 and count == math.floor(count) and count < 1.0e9) or numbers.length < sculpt_head + 1 + (usize)count * dab_numbers: error(errors.invalid, "a stroke's dabs are a count, then a center and a direction each")
+    if not (count >= 0.0 and count == math.floor(count) and count < 1.0e9) or numbers.length < sculpt_head + 1 + (usize)count * dab_numbers: error(errors.invalid, "a stroke's dabs are a count, then a center, a direction and a pressure each")
     return numbers[sculpt_head + 1..<sculpt_head + 1 + (usize)count * dab_numbers]
 
 ## The last stroke cooked: what it was run on and with, where its points
