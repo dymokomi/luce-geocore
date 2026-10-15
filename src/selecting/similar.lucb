@@ -14,7 +14,14 @@ let similar_parms: ParmSpec[3] = [
 
 func similar_rule() -> SelectRule:
     return SelectRule("Select Similar", "Similar", "similar", "Every element like a selected one by normal, area, perimeter, sides, plane, material, group, length, direction, face angle, crease, seam, sharpness or valence", "Similar", "select-similar",
-                      "points edges faces", any_picks, similar_parms, select_similar)
+                      "points edges faces", any_picks, similar_parms, select_similar, fit = similar_fit)
+
+## By as it starts on `domain`: kept when it is one of the domain's
+## measures, else the domain's first (Normal for points and faces, Length
+## for edges), as Blender's Select Similar offers each mode its own.
+func similar_fit(domain: Domain, slot: usize, value: f64) -> f64:
+    if slot != 0 or measure_fits((usize)value, domain): return value
+    return 7.0 if domain == Domain.edge else 0.0
 
 ## Which measures each domain has (Select Similar's By).
 func measure_fits(measure: usize, domain: Domain) -> bool:

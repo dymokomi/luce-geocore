@@ -7,6 +7,7 @@
 ## the rules as group functions and as Select verbs.
 ## The 4 by 4 grid over -1..1 in XZ: point z*5+x, face z*4+x.
 import interop
+import strings
 import memory
 from luce_geocore import geocore
 from luce_geocore.geocore import Mesh, MeshPrimitives, Selection, Groups, Verbs, Vector3, MaterialAssignment
@@ -164,6 +165,13 @@ func paths(grid: interop.Reference[Mesh]) -> !:
     # Faces corner to corner: seven; edges along the bottom row: four.
     try expect(grid, "0 15", 2, "Select Shortest Path", plain, 7)
     try expect(grid, "p0-1 p3-4", 4, "Select Shortest Path", plain, 4)
+    # One element has no path: it says so, rather than leaving it as it was.
+    let lone = try Selection.of(grid, "12", 0)
+    defer lone.release()
+    _ = lone.value().ruled(grid, "Select Shortest Path", plain) catch failure:
+        assert(strings.contains(failure.message, "at least two"))
+        return
+    trap("Shortest Path of one point made a selection")
 
 func similar(grid: interop.Reference[Mesh]) -> !:
     let cube = try Mesh.cube(2.0)
@@ -200,6 +208,15 @@ func similar(grid: interop.Reference[Mesh]) -> !:
     # Edges at points: the grid's four corners have two.
     let valence: f64[3] = [13.0, 0.0, 0.0]
     try expect(grid, "0", 0, "Select Similar", valence[..<3], 4)
+    # An editor starts By on one the level has: Normal is no measure of
+    # edges (Length is their first), Area none of points (Normal); one
+    # that applies stays, and the other rows keep their values.
+    assert((try Selection.rule_value("Select Similar", 4, 0, 0.0)) == 7.0)
+    assert((try Selection.rule_value("Select Similar", 4, 0, 9.0)) == 9.0)
+    assert((try Selection.rule_value("Select Similar", 0, 0, 1.0)) == 0.0)
+    assert((try Selection.rule_value("Select Similar", 2, 0, 1.0)) == 1.0)
+    assert((try Selection.rule_value("Select Similar", 4, 2, 0.5)) == 0.5)
+    assert((try Selection.rule_value("Select Loop", 4, 0, 3.0)) == 3.0)
     # A measure of another component type is an error.
     let seed = try Selection.of(grid, "0", 0)
     defer seed.release()

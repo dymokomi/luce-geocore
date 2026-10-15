@@ -91,6 +91,10 @@ func move_chains(input: const VerbInput*, output: VerbOutput*, straighten: bool,
     if skipped > 0:
         output.warning = "Loops have no ends to straighten between; they stay"
         output.skipped = skipped
+    elif output.moved.count == 0:
+        # Every run a single edge (the selection branches at each point, or
+        # is one edge): no point lies between two ends.
+        output.warning = "No run of edges has points between its ends (runs stop where the selection branches): nothing moves"
 
 func chain_range(context: void*, first: usize, end: usize, worker: usize):
     let work = (ChainWork*)context

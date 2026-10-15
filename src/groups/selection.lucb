@@ -170,6 +170,18 @@ pub struct Selection:
         let count = made.bits.count
         return try adopt_selection(made.bits.finish(), count, made.domain, self.topology, GroupReport(), self.active_element)
 
+    ## Select rule `name`'s parameter `slot` as it should start on
+    ## `domain` (0 points, 2 faces, 4 edges, as `domain_of` reads it), given
+    ## `value` (SelectRule.fit): an editor running a rule on a level asks
+    ## this for each starting value, so its tool bar shows what applies.
+    pub static func rule_value(name: str, domain: i64, slot: i64, value: f64) -> f64!:
+        let index = rule_named(name)
+        if index < 0: error(errors.invalid, "no such select rule")
+        if slot < 0: return value
+        let rule = rule_at((usize)index)
+        let fit = rule.fit
+        return fit(try domain_of(domain), (usize)slot, value)
+
     ## The same components on another domain (see `converted` in convert:
     ## `all` needs every related element, else any).
     pub func on_domain(mesh: interop.Reference[Mesh], domain: i64, all: bool) -> interop.Reference[Selection]!:

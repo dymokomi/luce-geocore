@@ -82,6 +82,7 @@ func select_path(input: const RuleInput*) -> RuleOutput!:
     var previous = first_member(input.group, 0)
     if previous < 0: return same_domain(input, out)
     var next = first_member(input.group, (usize)previous + 1)
+    if next < 0: error(errors.invalid, "Shortest Path runs between picked elements: pick at least two")
     while next >= 0:
         if input.parms.at(1) != 0.0: try fill_region(&graph, (usize)previous, (usize)next, &out)
         else: try shortest(&graph, (usize)previous, (usize)next, input.parms.at(0) != 0.0, &out)

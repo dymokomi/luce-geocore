@@ -377,6 +377,9 @@ func circularize_chains(topology: const Topology*, group: Bits, settings: const 
     defer chains.close()
     try edge_chains(topology, group, &chains)
     let count = chains.count()
+    if count == 0:
+        output.warning = "The selection holds no loop or run of edges (a path without branches): nothing moves"
+        return
     let targets = try new Vector3[chains.points.count] --- in memory.heap
     defer free(targets) in memory.heap
     let placed = try new bool[count] --- in memory.heap

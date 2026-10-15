@@ -62,6 +62,11 @@ pub struct SelectRule:
     ## Whether, with nothing selected, it looks at everything (Sharp
     ## Edges, Non-manifold).
     pub let whole: bool = false
+    ## Parameter `slot`'s value as it should start on `domain`, given the
+    ## value it has: a rule whose rows mean different things per domain
+    ## (Select Similar's By) moves a value that does not apply to one that
+    ## does; the others keep it.
+    pub let fit: func(Domain, usize, f64) -> f64 = kept_value
 
     ## Whether it works on `domain` as it is.
     pub func takes(domain: Domain) -> bool:
@@ -79,6 +84,11 @@ pub struct SelectRule:
                 best = (usize)place
                 found = domains[at]
         return found
+
+## The value as it is (SelectRule.fit for a rule whose rows apply alike
+## to every domain).
+func kept_value(domain: Domain, slot: usize, value: f64) -> f64:
+    return value
 
 ## Run `rule` on `group` (bits of `domain`) with `numbers` in parameter
 ## order (missing ones take their initial values).

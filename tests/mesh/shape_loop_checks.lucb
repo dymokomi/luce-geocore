@@ -173,6 +173,17 @@ func straighten_checks() -> !:
     let halfway = try made(raised, "Straighten", "p0-1-2-3-4", 2, half[..<2], 4)
     defer halfway.release()
     near((try halfway.value().point(2)).y, 0.15)
+    # A cube's every edge picked: the runs stop at every corner (three
+    # edges meet there), so none has a point between its ends; it says so
+    # rather than doing nothing silently.
+    let cube = try Mesh.cube(2.0)
+    defer cube.release()
+    let all = try Verbs.run("Straighten", cube, "*", 2, even[..<2])
+    defer all.release()
+    assert(strings.contains(all.value().warning(), "nothing moves"))
+    let spaced = try Verbs.run("Space Evenly", cube, "*", 2, even[..<2])
+    defer spaced.release()
+    assert(strings.contains(spaced.value().warning(), "nothing moves"))
 
 func space_checks() -> !:
     let grid = try MeshPrimitives.grid(2.0, 4)
