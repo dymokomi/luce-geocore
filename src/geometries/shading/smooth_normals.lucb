@@ -14,10 +14,10 @@ from luce_std import math
 from core.attributes import Attribute
 import memory
 from luce_std import parallel
-from luce_std import sort
 from core.float3 import Float3
 from math.vector import Vector3
 import core.ranges
+from core.bits import trailing_zeros
 
 ## cos(60 degrees): faces meeting at a sharper angle keep separate normals.
 let cusp_cosine: f64 = 0.5
@@ -60,32 +60,43 @@ pub func corner_normals(shape: const Surface*, points: const Float3[], split: co
 ## caller frees the list. The work is the moved points' neighbourhood's,
 ## whatever the mesh's size.
 pub func affected_points(shape: const Surface*, moved: const u32[]) -> u32[]!:
-    var count: usize = 0
-    for point in moved:
-        for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
-            let face = (usize)shape.incident_faces[at]
-            count += (usize)(shape.offsets[face + 1] - shape.offsets[face])
-    let all = try new u32[count] --- in memory.heap
-    defer free(all) in memory.heap
-    var written: usize = 0
+    # The points of the faces round each moved point, each once, in
+    # ascending order: marked in a bit per point over the span they reach,
+    # then read off in order (a sort of every corner took most of a sculpt
+    # stroke's frame on a 1M-face mesh).
+    var low = shape.incident_offsets.length
+    var high: usize = 0
     for point in moved:
         for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
             let face = (usize)shape.incident_faces[at]
             for corner in (usize)shape.offsets[face]..<(usize)shape.offsets[face + 1]:
-                all[written] = (u32)shape.corners[corner]
-                written += 1
-    sort.stable(all, ascending)
+                let reached = (usize)shape.corners[corner]
+                low = reached if reached < low else low
+                high = reached if reached > high else high
+    if low > high: return try new u32[0] --- in memory.heap
+    let words = (high - low) // 64 + 1
+    let marks = try new u64[words] --- in memory.heap
+    defer free(marks) in memory.heap
+    memory.set(u8[]((u8*)marks.data, words * 8), 0)
+    var count: usize = 0
+    for point in moved:
+        for at in (usize)shape.incident_offsets[(usize)point]..<(usize)shape.incident_offsets[(usize)point + 1]:
+            let face = (usize)shape.incident_faces[at]
+            for corner in (usize)shape.offsets[face]..<(usize)shape.offsets[face + 1]:
+                let bit = (usize)shape.corners[corner] - low
+                let mask = (u64)1 << (u64)(bit % 64)
+                if marks[bit // 64] & mask == 0:
+                    marks[bit // 64] = marks[bit // 64] | mask
+                    count += 1
+    let affected = try new u32[count] --- in memory.heap
     var kept: usize = 0
-    for at in 0..<count:
-        if kept > 0 and all[kept - 1] == all[at]: continue
-        all[kept] = all[at]
-        kept += 1
-    let affected = try new u32[kept] --- in memory.heap
-    if kept > 0: memory.copy(affected, all[..<kept], kept)
+    for word in 0..<words:
+        var bits = marks[word]
+        while bits != 0:
+            affected[kept] = (u32)(low + word * 64 + (usize)trailing_zeros(bits))
+            kept += 1
+            bits = bits & (bits - 1)
     return affected
-
-func ascending(a: u32, b: u32) -> bool:
-    return a < b
 
 ## Redo the per-point normals of `points` into `output` (point p at
 ## p - `offset`), marking in `split` (the same way) those that now split at a
